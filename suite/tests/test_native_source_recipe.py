@@ -22,8 +22,11 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder'],
-          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'winAccFocusOrder']}
+          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'winAccFocusOrder']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
+GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
+GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
+GPG_FIXTURE = ROOT / 'suite/tests/fixtures/native-gpg-build-compiler/com_MSC_defs.mk'
 
 
 def load(name):
@@ -92,7 +95,7 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual(11, len(plan['armGuardedSources']))
         self.assertNotIn('external/zstd/UnpackedTarball_zstd.mk',
                          [row['path'] for row in plan['armGuardedSources']])
-        self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'winAccFocusOrder'],
+        self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'winAccFocusOrder'],
                          plan['recipe']['hooks'])
         arm = module._select_plan(lock, raw, 'arm64')
         self.assertEqual(13, len(arm['armGuardedSources']))
@@ -140,7 +143,7 @@ class RecipePolicyTests(unittest.TestCase):
             self.assertEqual(ORDERS[architecture], plan['recipe']['hooks'])
             self.assertEqual(RECIPES[architecture], plan['recipeId'])
             self.assertEqual(13 if architecture == 'arm64' else 11, len(plan['armGuardedSources']))
-            self.assertEqual(17, len(plan['sources']))
+            self.assertEqual(17 if architecture == 'arm64' else 18, len(plan['sources']))
             self.assertIn('sourceDependencies', plan)
             self.assertEqual(1 if architecture == 'arm64' else 0, len(plan['sourceDependencies']))
 
@@ -193,6 +196,44 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual([], result.errors + result.failures)
         if os.name != 'nt': self.assertEqual([], result.skipped)
 
+    def test_gpg_descriptor_is_exact_x64_input_without_changing_arm_plan_or_policy(self):
+        module=load('apply_native_source');lock=manifest()
+        self.assertIn('windowsGpgBuildCompilerPath',lock,'missing GPG source descriptor')
+        pin=lock['windowsGpgBuildCompilerPath']
+        self.assertEqual(dict(path=GPG_PATH,condition=GPG_CONDITION,size=10340,
+            sha256='c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14',afterSize=10480,
+            afterSha256='f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b'),pin)
+        policy=(ENGINE/'native-targets.json').read_bytes()
+        self.assertEqual('ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc',hashlib.sha256(policy).hexdigest())
+        arm=module._select_plan(lock,policy,'arm64');x64=module._select_plan(lock,policy,'x64')
+        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+            hashlib.sha256(json.dumps(arm,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest())
+        self.assertEqual((17,13),(len(arm['sources']),len(arm['armGuardedSources'])))
+        self.assertEqual((18,11),(len(x64['sources']),len(x64['armGuardedSources'])))
+        self.assertEqual(GPG_PATH,x64['sources'][6]['path'])
+        self.assertNotIn(GPG_PATH,[row['path'] for row in arm['sources']])
+        for field,value in [('path','../escape'),('condition','WNT_AARCH64'),('size',True),
+                            ('afterSize',1.5),('sha256','invalid'),('afterSha256','invalid'),('extra',False)]:
+            changed=copy.deepcopy(lock);changed['windowsGpgBuildCompilerPath'][field]=value
+            with self.subTest(field=field),self.assertRaises(ValueError):
+                module._select_plan(changed,policy,'x64')
+
+    def test_gpg_transform_requires_single_pinned_preimage_and_rejects_repeat(self):
+        module=load('apply_native_source');transform=getattr(module,'_gpg_build_compiler_bytes',None)
+        self.assertTrue(callable(transform),'missing GPG source transform')
+        raw=GPG_FIXTURE.read_bytes();pin=manifest()['windowsGpgBuildCompilerPath']
+        effective=transform(raw,pin)
+        self.assertEqual((10480,'f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b'),
+            (len(effective),hashlib.sha256(effective).hexdigest()))
+        for field,value in [('path','../escape'),('condition','WNT_AARCH64'),('size',True),
+                            ('afterSize',1.5),('sha256','0'*64),('afterSha256','0'*64),('extra',False)]:
+            with self.subTest(field=field),self.assertRaises(ValueError):transform(raw,dict(pin,**{field:value}))
+        for changed in (raw+b'\n',effective):
+            with self.subTest(repeated=changed==effective),self.assertRaises(ValueError):transform(changed,pin)
+        old=b'REAL_BUILD_CC="$(filter-out -%,$(CC_FOR_BUILD))"'
+        duplicate=raw+old;forged=dict(pin,size=len(duplicate),sha256=hashlib.sha256(duplicate).hexdigest())
+        with self.assertRaises(ValueError):transform(duplicate,forged)
+
 
 class ActualSourceRecipeTests(unittest.TestCase):
     @classmethod
@@ -220,7 +261,92 @@ class ActualSourceRecipeTests(unittest.TestCase):
             target = self.source / name; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(raw)
 
     def install(self, architecture):
+        if architecture == 'x64':self.gpg_input()
         return self.module.apply_native_source(self.source, self.evidence, architecture=architecture)
+
+    def gpg_input(self):
+        target=self.source/GPG_PATH
+        if not target.exists():
+            target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(GPG_FIXTURE.read_bytes())
+        return target
+
+    @unittest.skipUnless(os.name != 'nt' and shutil.which('make') and shutil.which('bash'),
+                         'GNU make replay is portable; native CreateProcess remains a Windows gate')
+    def test_gpg_make_exports_convert_only_x64_cygwin_compiler_and_preserve_flags(self):
+        original=self.gpg_input().read_bytes();self.install('x64');effective=(self.source/GPG_PATH).read_bytes()
+        fakebin=self.folder/'fake-bin';fakebin.mkdir();calls=self.folder/'cygpath-calls'
+        converter=fakebin/'cygpath'
+        converter.write_text('#!'+sys.executable+'\nimport sys\nfrom pathlib import Path\n'
+            +'Path('+repr(str(calls))+').open("a").write("1\\n")\n'
+            +'assert sys.argv[1:]==["-w","/cygdrive/c/SyntheticTools/cl.exe"]\n'
+            +'print("C:\\\\SyntheticTools\\\\cl.exe")\n')
+        converter.chmod(0o700)
+        observer=self.folder/'gpg-observe.py';observer.write_text(
+            'import json,os\nprint(json.dumps({key:os.environ[key] for key in '
+            '["REAL_BUILD_CC","REAL_BUILD_CC_FLAGS","CC_FOR_BUILD","RC"]}))\n')
+        def replay(raw,cpu,build,os_name='WNT'):
+            lines=raw.decode().splitlines(True);first=next(i for i,line in enumerate(lines)
+                if line.startswith('gb_WIN_GPG_cross_setup_exports ='))
+            last=first
+            while lines[last].rstrip().endswith('\\'):last+=1
+            definition=''.join(lines[first:last+1])
+            makefile=self.folder/'gpg.mk';makefile.write_text(
+                'OS := '+os_name+'\nCPUNAME := '+cpu+'\nBUILD_PLATFORM := '+build+'\n'
+                +'CC_FOR_BUILD := /cygdrive/c/SyntheticTools/cl.exe -FS -Z7\n'
+                +'SOLARINC := -IC:/SyntheticInclude\nILIB_FOR_BUILD := C:/SyntheticLib\n'
+                +'gb_WIN_GPG_WINDRES_target := pe-x86-64\n'
+                +'gb_Executable_get_target_for_build = /synthetic/$(1)\n'+definition
+                +'\n.PHONY: all\nall:\n\t@$(gb_WIN_GPG_cross_setup_exports) && '
+                +shlex.quote(sys.executable)+' '+shlex.quote(str(observer))+'\n')
+            calls.unlink(missing_ok=True)
+            env={'PATH':str(fakebin)+':/workspace/toolcache/opengeul-validation/powershell:/usr/bin:/bin',
+                 'XDG_CACHE_HOME':'/workspace/toolcache/opengeul-validation/cache',
+                 'XDG_CONFIG_HOME':'/workspace/toolcache/opengeul-validation/config',
+                 'XDG_DATA_HOME':'/workspace/toolcache/opengeul-validation/data','PYTHONUTF8':'1'}
+            result=subprocess.run(['make','--no-print-directory','-f',str(makefile),'SHELL=/bin/bash'],
+                capture_output=True,text=True,timeout=10,env=env)
+            self.assertEqual(0,result.returncode,'synthetic make evaluation failed')
+            return json.loads(result.stdout),len(calls.read_text().splitlines()) if calls.exists() else 0
+        baseline,count=replay(original,'X86_64','x86_64-pc-cygwin')
+        self.assertEqual('/cygdrive/c/SyntheticTools/cl.exe',baseline['REAL_BUILD_CC']);self.assertEqual(0,count)
+        actual,count=replay(effective,'X86_64','x86_64-pc-cygwin')
+        self.assertEqual('C:\\SyntheticTools\\cl.exe',actual['REAL_BUILD_CC'],'GPG native compiler path was not converted')
+        self.assertEqual(1,count);self.assertEqual('-FS -Z7',actual['REAL_BUILD_CC_FLAGS'])
+        self.assertEqual({key:value for key,value in baseline.items() if key!='REAL_BUILD_CC'},
+                         {key:value for key,value in actual.items() if key!='REAL_BUILD_CC'})
+        for os_name,cpu,build in [('WNT','AARCH64','aarch64-pc-cygwin'),
+                                  ('WNT','X86_64','x86_64-pc-windows-msvc'),('LINUX','X86_64','x86_64-pc-cygwin')]:
+            with self.subTest(os=os_name,cpu=cpu,build=build):
+                self.assertEqual((baseline,0),replay(effective,cpu,build,os_name))
+
+    def test_gpg_hook_retains_exact_source_evidence_and_false_qualification(self):
+        result=self.install('x64');self.assertIn('gpgBuildCompilerPath',result['sourceHooks'],'missing GPG source hook')
+        proof=result['sourceHooks']['gpgBuildCompilerPath'];pin=self.lock['windowsGpgBuildCompilerPath']
+        self.assertEqual({'schemaVersion','kind','path','condition','beforeBytes','afterBytes','beforeSha256','afterSha256',
+            'evidence','nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'},set(proof))
+        self.assertEqual('windows-gpg-build-compiler-path-source-hook',proof['kind'])
+        self.assertEqual(GPG_CONDITION,proof['condition'])
+        for field,key in [('beforeBytes','size'),('afterBytes','afterSize'),('beforeSha256','sha256'),('afterSha256','afterSha256')]:
+            self.assertEqual(pin[key],proof[field])
+        self.assertEqual(GPG_FIXTURE.read_bytes(),Path(proof['evidence']['original']).read_bytes())
+        self.assertEqual((self.source/GPG_PATH).read_bytes(),Path(proof['evidence']['effective']).read_bytes())
+        for field in ['nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified']:
+            self.assertIs(proof[field],False)
+        before={p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()}
+        with self.assertRaises(ValueError):self.install('x64')
+        self.assertEqual(before,{p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
+
+    def test_gpg_input_drift_is_rejected_before_any_source_or_evidence_write(self):
+        target=self.gpg_input();target.write_bytes(target.read_bytes()+b'\n')
+        before={p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()}
+        with self.assertRaises(ValueError):self.install('x64')
+        self.assertEqual([],list(self.evidence.iterdir()))
+        self.assertEqual(before,{p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
+
+    def test_arm_still_has_exactly_twenty_one_outputs(self):
+        self.install('arm64')
+        self.assertEqual(21,sum(p.is_file() for p in self.source.rglob('*')))
+        self.assertFalse((self.source/GPG_PATH).exists())
 
     @unittest.skipUnless(os.name != 'nt' and shutil.which('make'),
                          'GNU make target-policy replay is portable; Windows unpack remains a separate gate')
@@ -377,23 +503,26 @@ class ActualSourceRecipeTests(unittest.TestCase):
         self.assertEqual({p.relative_to(direct).as_posix(): p.read_bytes() for p in direct.rglob('*') if p.is_file()},
                          {p.relative_to(self.source).as_posix(): p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
-    def test_x64_recipe_applies_exactly_bootstrap_loader_zstd_then_winacc(self):
+    def test_x64_recipe_applies_exactly_bootstrap_loader_zstd_gpg_then_winacc(self):
         events = []; bootstrap = self.module.ARM.install_module_bootstrap; winacc = self.module.WINACC.install
         loader = self.module._install_firebird_loader_path
         zstd = self.module._install_zstd_source_links
+        gpg = self.module._install_gpg_build_compiler_path
         def common(*args): events.append('moduleBootstrap'); return bootstrap(*args)
         def loader_path(*args): events.append('firebirdLoaderPath'); return loader(*args)
         def zstd_links(*args): events.append('zstdSourceLinks'); return zstd(*args)
+        def gpg_path(*args): events.append('gpgBuildCompilerPath'); return gpg(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         with patch.object(self.module.ARM, 'install', side_effect=AssertionError('x64 selected full ARM installer')), \
                 patch.object(self.module.ARM, 'install_module_bootstrap', side_effect=common), \
                 patch.object(self.module, '_install_firebird_loader_path', side_effect=loader_path), \
                 patch.object(self.module, '_install_zstd_source_links', side_effect=zstd_links), \
+                patch.object(self.module, '_install_gpg_build_compiler_path', side_effect=gpg_path), \
                 patch.object(self.module.WINACC, 'install', side_effect=focus):
             result = self.install('x64')
         self.proof(result, 'x64'); self.assertEqual(ORDERS['x64'], events)
         hooks = result['sourceHooks']
-        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks',
+        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath',
                           'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
         self.assertEqual('native-windows-common-source-hooks', hooks['kind']); self.assertEqual('x64', hooks['architecture'])
         self.assertIs(hooks['nativeBuildVerified'], False); self.assertIs(hooks['basePersistenceVerified'], False)
@@ -416,10 +545,11 @@ class ActualSourceRecipeTests(unittest.TestCase):
     def test_x64_leaves_all_11_arm_only_targets_unchanged(self):
         result = self.install('x64'); self.proof(result, 'x64')
         changed = {name for name, raw in self.inputs.items() if (self.source / name).read_bytes() != raw}
+        if (self.source/GPG_PATH).read_bytes()!=GPG_FIXTURE.read_bytes():changed.add(GPG_PATH)
         self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path'],
                           self.lock['windowsFirebirdLoaderPath']['path'],
-                          self.lock['windowsZstdSourceLinks']['path']}, changed)
-        self.assertEqual(set(self.inputs), {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
+                          self.lock['windowsZstdSourceLinks']['path'],GPG_PATH}, changed)
+        self.assertEqual(set(self.inputs)|{GPG_PATH}, {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
 
     def test_every_input_drift_rejects_before_any_recipe_write(self):
         for name, raw in self.inputs.items():
@@ -479,6 +609,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             self.assertEqual(1, loader.call_count)
 
     def test_cli_and_repeat_application_fail_closed(self):
+        self.gpg_input()
         command = [sys.executable, str(ENGINE / 'apply_native_source.py'), '--libreoffice-source', str(self.source),
                    '--evidence-directory', str(self.evidence), '--architecture', 'x64']
         result = subprocess.run(command, capture_output=True, timeout=20)

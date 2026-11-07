@@ -497,6 +497,7 @@
         "moduleBootstrap",
         "firebirdLoaderPath",
         "zstdSourceLinks",
+        "gpgBuildCompilerPath",
         "winAccFocusOrder"
       ]
     }
@@ -516,5 +517,13 @@
     "afterSize": 1078,
     "afterSha256": "5edd0fe8a6048b6a0183557aa423ba44b047e7655f2235ac84c99791267101fc",
     "condition": "WNT_X86_64"
+  },
+  "windowsGpgBuildCompilerPath": {
+    "path": "solenv/gbuild/platform/com_MSC_defs.mk",
+    "size": 10340,
+    "sha256": "c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14",
+    "afterSize": 10480,
+    "afterSha256": "f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b",
+    "condition": "WNT_X86_64 && BUILD_PLATFORM=%cygwin"
   }
 }

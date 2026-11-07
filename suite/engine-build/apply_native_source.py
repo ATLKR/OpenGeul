@@ -18,9 +18,11 @@ HERE = Path(__file__).resolve().parent
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'winAccFocusOrder'])}
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'winAccFocusOrder'])}
 LOADER_PATH = 'external/firebird/ExternalProject_firebird.mk'
 ZSTD_PATH = 'external/zstd/UnpackedTarball_zstd.mk'
+GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
+GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
 ARM_PATHS = ('configure.ac', 'external/firebird/UnpackedTarball_firebird.mk',
              'external/firebird/ExternalProject_firebird.mk', 'external/zstd/UnpackedTarball_zstd.mk',
              'external/mdds/UnpackedTarball_mdds.mk', 'external/python3/ExternalProject_python3.mk',
@@ -150,6 +152,11 @@ def _select_plan(lock, policy_raw, architecture):
                     or zstd['sha256'] != lock['zstdSourceLinks']['sha256']):
                 raise ValueError('source-recipe-input')
             common.append(_pin(zstd, ZSTD_PATH))
+            gpg = lock['windowsGpgBuildCompilerPath']
+            if (set(gpg) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+                    or gpg['condition'] != GPG_CONDITION):
+                raise ValueError('source-recipe-input')
+            common.append(_pin(gpg, GPG_PATH))
             guarded = [row for row in guarded if row['path'] not in (LOADER_PATH, ZSTD_PATH)]
         payloads = [('winacc-focus-order.patch', winacc['patch'])]
         dependencies = []
@@ -250,6 +257,44 @@ def _install_zstd_source_links(source, evidence, pin):
             'acceptanceEligible': False, 'guiVerified': False}
 
 
+def _gpg_build_compiler_bytes(original, pin):
+    old = b'REAL_BUILD_CC="$(filter-out -%,$(CC_FOR_BUILD))"'
+    new = (b'REAL_BUILD_CC="$(if $(and $(filter WNT_X86_64,$(OS)_$(CPUNAME)),'
+           b'$(filter %cygwin,$(BUILD_PLATFORM))),'
+           b'$(shell cygpath -w $(filter-out -%,$(CC_FOR_BUILD))),'
+           b'$(filter-out -%,$(CC_FOR_BUILD)))"')
+    if (set(pin) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+            or pin['path'] != GPG_PATH or pin['condition'] != GPG_CONDITION
+            or type(pin['size']) is not int or type(pin['afterSize']) is not int
+            or len(original) != pin['size'] or _sha(original) != pin['sha256'] or original.count(old) != 1):
+        raise ValueError('source-recipe-input')
+    changed = original.replace(old, new, 1)
+    if len(changed) != pin['afterSize'] or _sha(changed) != pin['afterSha256']:
+        raise ValueError('source-recipe-input')
+    return changed
+
+
+def _install_gpg_build_compiler_path(source, evidence, pin):
+    target = source / GPG_PATH; original = _regular(target)
+    changed = _gpg_build_compiler_bytes(original, pin)
+    retained = {'original': evidence / 'original-x64-com_MSC_defs.mk',
+                'effective': evidence / 'effective-x64-com_MSC_defs.mk'}
+    if any(path.exists() or path.is_symlink() for path in retained.values()):
+        raise ValueError('source-recipe-input')
+    for name, raw in [('original', original), ('effective', changed)]:
+        with retained[name].open('xb') as stream: stream.write(raw)
+        if _regular(retained[name]) != raw: raise ValueError('source-recipe-output')
+    target.write_bytes(changed)
+    if _regular(target) != changed: raise ValueError('source-recipe-output')
+    return {'schemaVersion': 1, 'kind': 'windows-gpg-build-compiler-path-source-hook',
+            'path': GPG_PATH, 'condition': GPG_CONDITION,
+            'beforeBytes': len(original), 'afterBytes': len(changed),
+            'beforeSha256': _sha(original), 'afterSha256': _sha(changed),
+            'evidence': {name: str(path) for name, path in retained.items()},
+            'nativeBuildVerified': False, 'fullEngineQualified': False,
+            'acceptanceEligible': False, 'guiVerified': False}
+
+
 def _validate_common(inputs, lock, payloads, architecture):
     bootstrap = lock['moduleBootstrap']
     original = inputs[COMMON_PATHS[0]]
@@ -268,6 +313,7 @@ def _validate_common(inputs, lock, payloads, architecture):
     if architecture == 'x64':
         _loader_bytes(inputs[LOADER_PATH], lock['windowsFirebirdLoaderPath'])
         _zstd_bytes(inputs[ZSTD_PATH], lock['windowsZstdSourceLinks'])
+        _gpg_build_compiler_bytes(inputs[GPG_PATH], lock['windowsGpgBuildCompilerPath'])
 
 
 def apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict:
@@ -308,6 +354,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
                  'moduleBootstrap': ARM.install_module_bootstrap(source, evidence),
                  'firebirdLoaderPath': _install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath']),
                  'zstdSourceLinks': _install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks']),
+                 'gpgBuildCompilerPath': _install_gpg_build_compiler_path(source, evidence, lock['windowsGpgBuildCompilerPath']),
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
     if architecture == 'arm64':

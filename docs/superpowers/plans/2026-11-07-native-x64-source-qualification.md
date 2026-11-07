@@ -21,6 +21,34 @@
 - Never cancel/duplicate recorded runs `42304325191` and `42309580135`; check their actual state before any later submission. No new runner, permission, credential, SDK fallback, install, release or main merge.
 - Preserve ARM `6714099caea00c800c900272574ae1c6b6144225` / `42203789086` input. Never copy the producer checkout's stale ARM lock to the main checkout; no fabricated successful x64 lock.
 - Use synthetic environments and allowlisted non-secret observations only; never dump environment/process arguments or expose signed artifact URLs.
+- GPG follow-up source tests use the selected Python 3.12.14 environment. Keep compiler/environment evidence to fixed numeric or shape projections; reproduce only synthetic path examples in documentation.
+
+## Observed GPG source follow-up
+
+Normal x64 Full run `42342317294` at producer
+`7687751a573da20c4d4e3454e7b781aa253e0383` failed in libgpg-error's `mkheader`
+compiler launch with native `CreateProcess` error 2. The compiler token has the
+same Cygwin `/cygdrive` shape as configured `CC_FOR_BUILD`; native compiler
+preflight and configured toolchain identity had passed. Do not retain raw
+environment values, actual paths or command lines in this plan.
+
+The approved follow-up is one x64-only `REAL_BUILD_CC` expression conversion in
+the pinned GPG setup, under `WNT_X86_64 && BUILD_PLATFORM=%cygwin`, using
+`cygpath -w`. Flags, wrapper prefix, replacement `CC_FOR_BUILD` and `RC` stay
+unchanged. The five-hook order is `moduleBootstrap`, `firebirdLoaderPath`,
+`zstdSourceLinks`, `gpgBuildCompilerPath`, then `winAccFocusOrder`: seven common
+rows, eleven unchanged ARM-guard rows, eighteen authenticated source inputs.
+ARM's twenty-one outputs, thirteen guards, recipe and target policy stay exact.
+
+The source descriptor pins `com_MSC_defs.mk` from 10,340 bytes / SHA256
+`c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14` to
+10,480 bytes / SHA256
+`f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b`.
+This is a source-only correction: all hook qualification flags remain false.
+Actual Windows execution, normal source Full and Suite GUI qualification remain
+pending. Coordinate the strict driver-binding change sequentially after the
+concurrent NASM driver work is frozen and reviewed; the source-hook worker does
+not edit that driver or its tests.
 
 ## Review Focus
 
@@ -56,14 +84,14 @@ do not bulk-copy between checkouts. Dependencies are 1 → 2 → 3; Task 4 may r
 
 ### Task 2: Make the complete source recipe explicit and fail closed
 
-**Files:** create `suite/engine-build/apply_native_source.py` and `suite/tests/test_native_source_recipe.py`; modify `suite/engine-build/source-build.json`; narrowly reuse `enable_firebird_arm64.py` and `apply_winacc_focus_order.py` without changing established ARM outputs. Extend relevant existing `test_native_source_module_links.py`, `test_firebird_arm64_port.py` / `test_winacc_focus_order.py` fixtures when an extraction is necessary.
+**Files:** create `suite/engine-build/apply_native_source.py` and `suite/tests/test_native_source_recipe.py`; modify `suite/engine-build/source-build.json`; narrowly reuse `enable_firebird_arm64.py` and `apply_winacc_focus_order.py` without changing established ARM outputs. Extend relevant existing `test_native_source_module_links.py`, `test_firebird_arm64_port.py` / `test_winacc_focus_order.py` fixtures when an extraction is necessary. The GPG follow-up adds only the pinned `suite/tests/fixtures/native-gpg-build-compiler/com_MSC_defs.mk` fixture to these source-hook files; driver edits remain separately owned.
 
 **Interfaces:** `apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict` consumes Task 1's fixed recipe key and authenticated manifest. It returns exact applied-hook receipts; production callers cannot supply recipe contents or manifest paths.
 
-- [ ] Consume the completed, source-policy-reviewed inventory: x64 selects exactly `moduleBootstrap`, `firebirdLoaderPath`, `zstdSourceLinks`, then `winAccFocusOrder`, with authenticated before/after bytes. Reclassify only the Windows Firebird loader expression and exact zstd unpack recipe, yielding six common rows and eleven unchanged ARM-only targets among seventeen inputs. Preserve the ARM full-installer (bootstrap included), twenty-one output files, thirteen guards and recipe hash, then WinAcc. This approval is source-only; actual x64 execution remains a separate gate. Future unknown hooks or membership drift prevent recipe success and any long build.
-- [ ] **RED:** preserve `test_arm_recipe_outputs_match_frozen_manifest`, `test_arm_full_installer_then_winacc_without_duplicate_bootstrap`, `test_windows_loader_paths_survive_both_make_levels_for_each_owned_recipe`, and unknown/missing/duplicate/reordered hook rejection. Cover the exact four-hook x64 order and eleven unchanged guards. Reproduce the old x64 strict zstd target policy, then require only the exact `ZSTD_TARBALL` unpack target under `WNT_X86_64` to select `winsymlinks:sys`; other targets, Linux and ARM behavior remain unchanged. Reject wrong condition, hash, size, extra/missing evidence or non-false qualification flags in Python and PowerShell. Use pinned source fixtures and exact WinAcc original/candidate behavioral witnesses.
+- [ ] Consume the completed, source-policy-reviewed inventory and observed GPG follow-up: x64 selects exactly `moduleBootstrap`, `firebirdLoaderPath`, `zstdSourceLinks`, `gpgBuildCompilerPath`, then `winAccFocusOrder`, with authenticated before/after bytes. The exact Windows loader expression, zstd unpack recipe and GPG build-compiler expression yield seven common rows and eleven unchanged ARM-only targets among eighteen inputs. Preserve the ARM full-installer (bootstrap included), twenty-one output files, thirteen guards and recipe hash, then WinAcc. Keep `windows-x64-common-v2` and target policy bytes unchanged. This approval is source-only; actual x64 execution remains a separate gate. Future unknown hooks or membership drift prevent recipe success and any long build.
+- [ ] **RED:** preserve `test_arm_recipe_outputs_match_frozen_manifest`, `test_arm_full_installer_then_winacc_without_duplicate_bootstrap`, `test_windows_loader_paths_survive_both_make_levels_for_each_owned_recipe`, and unknown/missing/duplicate/reordered hook rejection. Cover the exact five-hook x64 order and eleven unchanged guards. Reproduce the old x64 strict zstd target policy, then require only the exact `ZSTD_TARBALL` unpack target under `WNT_X86_64` to select `winsymlinks:sys`; other targets, Linux and ARM behavior remain unchanged. For GPG, require the exact single preimage and before/after bytes/hashes, convert only `REAL_BUILD_CC` under `WNT_X86_64 && BUILD_PLATFORM=%cygwin`, preserve flags/prefix/`CC_FOR_BUILD`/`RC`, and prove all other branches unchanged with synthetic observations. Reject wrong condition, hash, size, extra/missing evidence or non-false qualification flags in Python and, after the NASM freeze, the strict PowerShell binding. Use pinned source fixtures and exact WinAcc original/candidate behavioral witnesses.
 - [ ] Run `python -m unittest discover -s suite/tests -p 'test_native_source_recipe.py' -v`; expected failures before the dispatcher exists.
-- [ ] **GREEN:** implement the exact finite recipe dispatcher: x64 bootstrap, exact Windows loader-path hook, exact zstd source-link hook, then WinAcc; ARM full existing installer then WinAcc, without a separate bootstrap call. Pin `windowsZstdSourceLinks` and retain raw original/effective recipe bytes with hashes and typed false source-only qualification flags; validate them again in the producer. Preserve global `winsymlinks:nativestrict`, target policy and workflows. Reuse narrowly tested existing hook patterns; never route x64 through ARM install-all or broaden ARM guards. The observed tar symlink failure does not prove missing tooling, archive member order or the full link chain; actual native unpack/Full/Base/GUI results remain unverified until executed.
+- [ ] **GREEN:** implement the exact finite recipe dispatcher: x64 bootstrap, exact Windows loader-path hook, exact zstd source-link hook, exact GPG build-compiler path hook, then WinAcc; ARM full existing installer then WinAcc, without a separate bootstrap call. Pin `windowsZstdSourceLinks` and `windowsGpgBuildCompilerPath`; retain independent original/effective recipe bytes with hashes and typed false source-only qualification flags. The GPG schema-1 receipt kind is `windows-gpg-build-compiler-path-source-hook` and retains `original-x64-com_MSC_defs.mk` / `effective-x64-com_MSC_defs.mk`. Validate exact receipt keys, path/condition, byte counts, hashes, evidence and false flags again in the producer after the separately reviewed NASM freeze. Preserve global `winsymlinks:nativestrict`, target policy and workflows. Reuse narrowly tested existing hook patterns; never route x64 through ARM install-all or broaden ARM guards. The observed tar symlink failure does not prove missing tooling, archive member order or the full link chain; actual native unpack/Full/Base/GUI results remain unverified until executed.
 - [ ] Run recipe tests, `python -m unittest discover -s suite/tests -p 'test_native_source_module_links.py' -v`, `python -m unittest discover -s suite/tests -p 'test_firebird_arm64_port.py' -v`, and `python -m unittest discover -s suite/tests -p 'test_winacc_focus_order.py' -v`; expected exact recipe/behavior passes. Review complete recipe and commit `feat: authenticate native engine source recipes`.
 
 ### Task 3: Complete the shared producer and independent fixed x64 workflow
@@ -76,6 +104,7 @@ do not bulk-copy between checkouts. Dependencies are 1 → 2 → 3; Task 4 may r
 - [ ] **RED:** add `test_fixed_x64_workflow_branch_runner_job_and_artifact`, `test_architecture_runs_do_not_cancel_or_trigger_each_other`, `test_shared_dependencies_are_in_validation_inventory`, and `test_whole_run_success_is_not_replaced_by_matrix_row_success`. Verify fixed permissions, owner gate without symbols, 330/360 budget and exact two archive members.
 - [ ] Run `python -m unittest discover -s suite/tests -p 'test_native_source_workflows.py' -v` plus the changed producer test modules; expected new-contract failures.
 - [ ] **GREEN:** thread finite architecture through the existing lifecycle, preserving script scope and ARM output semantics. Bind all actual x64 compiler/source/config/PE/CRT/WinAcc/Base/run facts in v2; qualification flags are computed only at final success. Add fixed x64 workflow with existing runner/tools and first-step deadline. Do not launch it yet.
+- [ ] For the observed GPG follow-up, accept the scratch source-hook/driver interface only after the concurrent NASM driver work is frozen. Apply and review strict driver receipt binding and its focused negative tests sequentially; no overlapping driver edits or source-only receipt admission without exact replay.
 - [ ] Run all four changed existing producer test modules, new workflow tests, then `python -m unittest discover -s suite/tests -v`. Review negative proof cases, source binding, trigger/concurrency inventory and ARM compatibility; commit `feat: add fixed native x64 source producer`.
 
 ### Task 4: Consume x64 v2 without weakening ARM v1 or changing input locks
@@ -95,7 +124,7 @@ do not bulk-copy between checkouts. Dependencies are 1 → 2 → 3; Task 4 may r
 
 **Interfaces:** each actual run consumes a reviewed committed producer head and fixed workflow/ref. Adoption consumes authenticated complete successful-run metadata, exact outer/inner ZIP and receipt hashes, actual v2 proof and native runtime replay. Source proof always records `guiVerified=false`; separately retained Suite evidence owns GUI qualification.
 
-- [ ] **RED/pre-submit:** check existing runs and exact heads once; attach any newly observed defect to a failing focused contract test before correcting it. Confirm completed recipe inventory, native-preflight-before-download order, no active duplicate and no secret-bearing new diff/artifacts.
+- [ ] **RED/pre-submit:** check existing runs and exact heads once; attach any newly observed defect to a failing focused contract test before correcting it. For failed Full `42342317294`, finish the GPG source-hook and sequential strict driver binding before a reviewed follow-up submission; do not relabel the failed run or source tests as qualification. Confirm completed recipe inventory, native-preflight-before-download order, no active duplicate and no secret-bearing new diff/artifacts.
 - [ ] After Task 3 review, while Task 4 consumer work proceeds independently, review/push the producer-only implementation on `work/opengeul-office-native-engine-x64`; use only its fixed existing standard `windows-2022` workflow. Capture native preflight and, if successful, the same-budget x64 Full/native Base/retirement result. Missing tools or time exhaustion is a failed/unqualified run, not authority to install, extend time or weaken proof.
 - [ ] Verify completed/success whole-run metadata and all bytes/provenance independently; only then review the real x64 lock change. Run exact fixture/replay tests from Task 4 before committing that pin. Keep old ARM input unchanged.
 - [ ] Run the standard actual x64 Suite on that exact input/head: native menu actions and Escape/outside-click, repeats/transitions, preview/fullscreen return, save/cancel/close/focus, accessibility, Korean input/save/reopen, lifetime and applicable package/install/update/repair gates. Preserve raw evidence/screenshots/process retirement and separate every skipped/failed gate. Fix failures through focused RED/GREEN regressions and evidence-based reruns; no RC claim until required gates pass.
@@ -108,6 +137,9 @@ authenticated recipe (2), one timed native lifecycle and independent workflow
 (3), strict per-architecture consumption and payload replay (4), actual builds,
 independent adoption and GUI acceptance (5). The reviewed x64 recipe is exactly
 bootstrap, exact x64 loader-path correction, exact zstd unpack-target exception,
-then WinAcc; actual native recipe execution and toolchain/time
+exact x64 GPG build-compiler path conversion, then WinAcc; actual native recipe
+execution and toolchain/time
 feasibility remain qualification gates, not assertions of success. No
-implementation, test, CI or lock change occurred in this design pass.
+new CI or lock change occurs as part of this documentation/source-hook slice.
+The observed failed Full is retained as failure evidence; neither this plan nor
+the source-only hook supplies a successful native or GUI qualification.

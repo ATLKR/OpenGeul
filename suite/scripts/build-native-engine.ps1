@@ -1865,7 +1865,7 @@ function Assert-NativeConfiguredToolchain([string]$CompilerRoot,[Collections.IDi
 
 function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','winAccFocusOrder')}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder')}
     $guardCount=if($Architecture -ceq 'arm64'){13}else{11}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
@@ -1933,6 +1933,31 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
             else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
         }
         if([IO.Path]::GetDirectoryName($zstd.evidence.original) -cne [IO.Path]::GetDirectoryName($zstd.evidence.effective)) {throw 'Source zstd evidence directories differ.'}
+        $pin=$manifest.windowsGpgBuildCompilerPath;$gpg=$Receipt.sourceHooks.gpgBuildCompilerPath
+        if((Compare-Object -CaseSensitive @($gpg.PSObject.Properties.Name) $fields) -or
+           ($gpg.schemaVersion -isnot [int] -and $gpg.schemaVersion -isnot [long]) -or
+           $gpg.schemaVersion -ne 1 -or $gpg.kind -cne 'windows-gpg-build-compiler-path-source-hook' -or
+           $gpg.path -cne 'solenv/gbuild/platform/com_MSC_defs.mk' -or $gpg.path -cne $pin.path -or
+           $gpg.condition -cne 'WNT_X86_64 && BUILD_PLATFORM=%cygwin' -or $gpg.condition -cne $pin.condition -or
+           ($gpg.beforeBytes -isnot [int] -and $gpg.beforeBytes -isnot [long]) -or
+           ($gpg.afterBytes -isnot [int] -and $gpg.afterBytes -isnot [long]) -or
+           $gpg.beforeBytes -ne $pin.size -or $gpg.afterBytes -ne $pin.afterSize -or
+           $gpg.beforeSha256 -cne $pin.sha256 -or $gpg.afterSha256 -cne $pin.afterSha256) {throw 'x64 GPG build compiler source proof differs.'}
+        foreach($name in @('kind','path','condition','beforeSha256','afterSha256')) {
+            if($gpg.$name -isnot [string]) {throw 'Source GPG identity requires scalar strings.'}
+        }
+        foreach($name in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+            if($gpg.$name -isnot [bool] -or $gpg.$name) {throw 'Source GPG hook cannot qualify a native engine.'}
+        }
+        if((Compare-Object -CaseSensitive @($gpg.evidence.PSObject.Properties.Name) @('original','effective'))) {throw 'Source GPG evidence is incomplete.'}
+        foreach($phase in @('original','effective')) {
+            $path=$gpg.evidence.$phase
+            if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or
+               [IO.Path]::GetFileName($path) -cne ($phase+'-x64-com_MSC_defs.mk')) {throw 'Source GPG evidence path differs.'}
+            if($phase -ceq 'original') {Confirm-FileIdentity $path $pin.size SHA256 $pin.sha256|Out-Null}
+            else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
+        }
+        if([IO.Path]::GetDirectoryName($gpg.evidence.original) -cne [IO.Path]::GetDirectoryName($gpg.evidence.effective)) {throw 'Source GPG evidence directories differ.'}
     }
 }
 
@@ -2240,6 +2265,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 Write-BuildJson (Join-Path $evidence 'native-pe-inventory.json') $inventory
                 Confirm-FileIdentity (Join-Path $source $manifest.winAccFocusOrder.path) $manifest.winAccFocusOrder.afterBytes SHA256 $manifest.winAccFocusOrder.afterSha256|Out-Null
                 Confirm-FileIdentity (Join-Path $source $manifest.windowsZstdSourceLinks.path) $manifest.windowsZstdSourceLinks.afterSize SHA256 $manifest.windowsZstdSourceLinks.afterSha256|Out-Null
+                Confirm-FileIdentity (Join-Path $source $manifest.windowsGpgBuildCompilerPath.path) $manifest.windowsGpgBuildCompilerPath.afterSize SHA256 $manifest.windowsGpgBuildCompilerPath.afterSha256|Out-Null
             }
             $receipt.stage='actual-native-uno-base-persistence';Assert-NativeBuildTimeRemaining
             $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe $Architecture

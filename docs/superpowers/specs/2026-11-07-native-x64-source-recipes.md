@@ -1,18 +1,27 @@
 # Source recipe inventory for native x64 qualification
 
-This is a read-only source-policy inventory of `ATLKR/OpenGeul` at
+The initial read-only source-policy inventory below captured `ATLKR/OpenGeul` at
 `2921b110a3b9059c6a7c7a0ed222d750dfd59286`, branch
 `work/opengeul-office-native-engine`. The checkout was clean before and after the
 reads. Every upstream source reference is pinned to LibreOffice core
 `bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1`. No engine, CI, lock, checkout,
-credential or network setting was changed. No tests or builds were run.
+credential or network setting was changed by that inventory. No tests or builds
+were run in that read-only slice. The later x64 implementation contract and the
+observed GPG failure follow-up are recorded separately below.
 
-The smallest justified x64 source policy is **the existing module bootstrap
-correction plus the existing common Windows WinAcc correction**. The present
+At the initial inventory snapshot, the smallest justified x64 source policy was
+**the existing module bootstrap correction plus the existing common Windows
+WinAcc correction**. The then-current
 ARM64 installer additionally rewrites 13 recipe/source targets behind explicit
 ARM conditions. Their need or safety when enabled for x64 is **unknown**; their
 names or architecture-neutral underlying symptoms do not establish common scope.
 A common source correction is not a native x64 compiler/runtime or GUI proof.
+
+The current finite x64 recipe contract is `moduleBootstrap`, `firebirdLoaderPath`,
+`zstdSourceLinks`, `gpgBuildCompilerPath`, then `winAccFocusOrder`. It has seven
+common source rows and eleven unchanged ARM-guard rows among eighteen authenticated
+inputs. The GPG addition below changes neither the ARM recipe/policy nor native
+target policy. ARM retains twenty-one installed output files and thirteen guards.
 
 ## Actual caller and receipt path
 
@@ -94,6 +103,55 @@ The in-memory transformation and exact unified patch bytes matched their locks.
 Existing `test_winacc_focus_order.py` covers source/patch drift, hardlinks/reparse
 paths, evidence collisions, repeat/wrong-core rejection and exact-method source
 regression. No synthetic results from another commit are claimed for a new build.
+
+### GPG build-compiler path: x64 source-only follow-up
+
+Normal x64 Full run `42342317294`, producer
+`7687751a573da20c4d4e3454e7b781aa253e0383`, failed while libgpg-error's
+`mkheader` build helper launched its compiler. The retained sanitized evidence
+joins the native `CreateProcess` compiler token to the configured `CC_FOR_BUILD`:
+both have the Cygwin `/cygdrive` path shape, and the native launch returned error
+2. Native compiler preflight and configured toolchain identity checks had passed.
+No actual compiler path, environment value or command is reproduced here.
+
+Pinned `external/libgpg-error/ExternalProject_libgpg-error.mk:18–34` selects the
+common GPG setup for `COM=MSC`. In
+`solenv/gbuild/platform/com_MSC_defs.mk:341–342`, that setup first captures the
+build compiler and its flags, then replaces `CC_FOR_BUILD` with `gcc-wrapper`
+using `--wrapper-env-prefix=REAL_BUILD_`. The correction is confined to that
+native build-compiler path boundary; it does not change compiler selection or
+reinterpret quoting. A synthetic conversion shape is
+`/cygdrive/c/SyntheticTools/compiler.exe` to `C:\SyntheticTools\compiler.exe`.
+
+The new `gpgBuildCompilerPath` hook and `windowsGpgBuildCompilerPath` descriptor
+authenticate exactly one expression change in
+`solenv/gbuild/platform/com_MSC_defs.mk`: convert the `REAL_BUILD_CC` expression
+with `cygpath -w` only for `WNT_X86_64 && BUILD_PLATFORM=%cygwin`. Other branches
+retain their original expression. `REAL_BUILD_CC_FLAGS`, the wrapper environment
+prefix, the replacement `CC_FOR_BUILD`, `RC` and all other source bytes remain
+unchanged. This is not a global environment override or an extension of ARM
+guards.
+
+| State | Bytes | SHA256 |
+| --- | --- | --- |
+| Pinned original | 10,340 | `c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14` |
+| Effective x64 recipe | 10,480 | `f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b` |
+
+The installer must require the exact single preimage and retain independent
+`original-x64-com_MSC_defs.mk` and `effective-x64-com_MSC_defs.mk` evidence.
+Its schema-1 receipt kind is
+`windows-gpg-build-compiler-path-source-hook`, with the exact path/condition,
+before/after byte counts and hashes, and evidence identities. All four flags
+`nativeBuildVerified`, `fullEngineQualified`, `acceptanceEligible` and
+`guiVerified` remain false. Unknown, missing, reordered or altered hooks, source
+drift and mismatched evidence must prevent source-recipe success.
+
+Focused RED/GREEN source tests use the pinned fixture and synthetic observations;
+they do not establish Windows success. Strict producer receipt binding is a
+separate sequential change, prepared through the scratch driver interface only
+after the concurrent NASM driver work is frozen and reviewed. Until that binding
+and a new real normal Full run succeed, native Windows/source Full qualification
+for this correction is pending. Actual Suite GUI qualification remains separate.
 
 ## ARM-only installed recipe policy
 
@@ -195,23 +253,25 @@ The script-scoped deadline owner is unchanged by this inventory.
 Preserve the existing ARM call sequence exactly: the full ARM installer already
 includes bootstrap, followed by the separate WinAcc installer. **Do not call
 bootstrap first and then the existing full installer**, which would double apply
-and fail its pristine-source hash. For x64, expose or import only the authenticated
-bootstrap operation, then run the existing common WinAcc operation with the same
-pinned source/evidence guards. Do not relabel the full installer's ARM receipt.
-There is no evidence here to enable the other hooks for x64.
+and fail its pristine-source hash. For x64, select only the finite five-hook order
+listed above, with each source/evidence guard authenticated. Keep the eleven
+remaining ARM-only targets unchanged and do not relabel the full installer's ARM
+receipt. The GPG follow-up does not authorize any further hook or ARM guard change.
 
-The narrow affected source-policy files are
-`enable_firebird_arm64.py` (only if a stable common-only CLI is chosen),
-`build-native-engine.ps1` (explicit target dispatch, no duplicate bootstrap),
-and the architecture policy/manifest binding selected by the parent design.
+The GPG follow-up affects `apply_native_source.py`, `source-build.json`,
+`test_native_source_recipe.py` and one pinned
+`native-gpg-build-compiler/com_MSC_defs.mk` fixture. The strict
+`build-native-engine.ps1` receipt binding and its tests follow the NASM freeze;
+they are not changed concurrently with this source-hook slice. The recipe ID
+`windows-x64-common-v2` and target policy bytes remain unchanged.
 `apply_winacc_focus_order.py` and the existing hashes need no content change
 merely to execute on x64. Architecture-specific workflow/ref, native compiler,
 PE/CRT/Base proof and consumer admission are separate necessary implementation
 boundaries covered by the two design packages; this inventory does not waive
 those gates or alter current locks.
 
-The smallest new regression must prove x64 source dispatch selects exactly
-bootstrap+WinAcc, never calls full ARM/diagnostic install or ARM librarian,
+The smallest new regression must prove x64 source dispatch selects exactly the
+five-hook order, never calls full ARM/diagnostic install or ARM librarian,
 preserves the existing ARM sequence/receipt, rejects wrong core/source/policy,
 and does not mutate non-selected recipes. Existing bootstrap and WinAcc drift,
 repeat/evidence and exact-source tests remain applicable. ARM recipe tests must
@@ -221,7 +281,7 @@ from these read-only checks.
 
 ## Evidence scope
 
-`source-recipe-inventory.json` contains 14 matching existing source-fixture
+The initial `source-recipe-inventory.json` contains 14 matching existing source-fixture
 hashes, 5 matching local payload/patch hashes, 2 common in-memory before/after
 recomputations, the 13 ARM source targets and all 25 inherited upstream Windows
 patch pins. Only the two necessary pinned upstream files were fetched. No
@@ -230,4 +290,5 @@ qualification receipt was produced. This private inventory is not a native build
 receipt. Unknowns are x64 toolchain/build/runtime behavior, x64 need for any
 currently ARM-only fix, and whole-file nested Firebird states not independently
 pinned in the current manifest. There is no denied or pending operation in this
-read-only slice.
+read-only slice. The later failed Full and GPG source-hook contract above do not
+turn that inventory into a successful native build receipt.
