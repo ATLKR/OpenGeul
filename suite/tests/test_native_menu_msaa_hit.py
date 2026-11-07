@@ -146,7 +146,8 @@ def sdk_fixture():
     Accessible._methods_[17]=method('accHitTest',(C.c_int32,C.c_int32,C.POINTER(Variant)),(1,1,10))
     class Element(Unknown): pass
     Element._iid_=Guid('d22108aa-8ac5-49a5-837b-37bbb3d7591e')
-    Element._methods_=[method('GetCurrentPatternAs',(C.c_int32,C.POINTER(Guid),C.POINTER(C.c_void_p)),(1,1,10))]
+    Element._methods_=[method('GetCurrentPatternAs',(C.c_int32,C.POINTER(Guid),C.POINTER(C.c_void_p)),(1,1,10)),
+        method('_get_CurrentControlType',(C.POINTER(C.c_int32),),(10,),idl=('propget',))]
     class Legacy(Unknown): pass
     Legacy._iid_=Guid('828055ad-355b-4435-86d5-3b51c14a9b1b')
     accptr=pointer(Accessible);elementptr=pointer(Element)
@@ -179,6 +180,21 @@ class MetadataTests(unittest.TestCase):
     def test_iunknown_list_arguments_and_none_paramflags_are_supported(self):
         abi=self.build()
         self.assertEqual(abi.slots['release'],2)
+
+    def test_control_type_getter_requires_exact_sdk_name_type_output_depth_and_direction(self):
+        for damage in ('name','propget','signed','width','float','depth','void','direction','hresult'):
+            with self.subTest(damage=damage):
+                self.sdk=sdk_fixture();getter=self.sdk['element_interface']._methods_[1]
+                if damage=='name':getter.name='CurrentControlType'
+                elif damage=='propget':getter.idlflags=()
+                elif damage=='signed':getter.argtypes=(C.POINTER(C.c_uint32),)
+                elif damage=='width':getter.argtypes=(C.POINTER(C.c_int16),)
+                elif damage=='float':getter.argtypes=(C.POINTER(C.c_float),)
+                elif damage=='depth':getter.argtypes=(C.POINTER(C.POINTER(C.c_int32)),)
+                elif damage=='void':getter.argtypes=(C.c_void_p,)
+                elif damage=='direction':getter.paramflags=((1,'controlType'),)
+                else:getter.restype=C.c_int64
+                with self.assertRaises(ValueError):self.build()
 
     def test_accessible_iunknown_prefix_is_validated_independently_of_element(self):
         import copy
@@ -356,12 +372,21 @@ class LeaseTests(unittest.TestCase):
                 self.helper._active=None
 
     def test_inflight_shadow_keeps_same_address_acquisitions_source_sdk_and_handles_until_exit(self):
+        self.exercise_inflight_shadow('accessible_query')
+
+    def test_inflight_control_type_getter_keeps_source_sdk_and_owned_refs_until_exit(self):
+        result=self.exercise_inflight_shadow('control_type')
+        self.assertEqual(result['falseShadowOriginalControlTypeObserved'],1)
+        self.assertEqual(result['falseShadowOriginalControlType'],50011)
+        self.assertEqual(result['falseShadowRoundTripControlTypeObserved'],0)
+
+    def exercise_inflight_shadow(self,blocked_key):
         import threading
         entered=threading.Event();release=threading.Event();sdk=FakeCalls();sdk.wrong_file=True
         platform=FakePlatform();platform.clock=self.kernel.clock;original=sdk.call
         def call(key,pointer,*args):
             hr=original(key,pointer,*args)
-            if key=='accessible_query' and sdk.calls.count(key)==2:
+            if key==blocked_key and sdk.calls.count(key)==2:
                 entered.set()
                 if not release.wait(2):raise RuntimeError('Synthetic wait exhausted')
             return hr
@@ -393,6 +418,7 @@ class LeaseTests(unittest.TestCase):
         self.assertEqual(sdk.releases,[301,301,202,201,103,102,101])
         self.assertEqual(sorted(self.kernel.closed),[120,121,301])
         self.assertIsNone(lease.source);self.assertIsNone(lease.sdk)
+        return result
 
     def test_retirement_or_late_collection_downgrades_completed_shadow_status(self):
         for late in ('retire','collection','clear'):
@@ -646,7 +672,7 @@ class FakeCalls:
         self.releases=[];self.calls=[];self.fail={};self.child=0;self.variant_type=9
         self.wrong_file=False;self.wrong_target=False;self.negative_true=False
         self.release_throws=False
-        self.shadow_child=0;self.canonical=(301,301)
+        self.shadow_child=0;self.canonical=(301,301);self.control_types=(50011,50011)
     def call(self,key,pointer,*args):
         self.calls.append(key)
         pointer=pointer.value if isinstance(pointer,C.c_void_p) else pointer
@@ -658,6 +684,7 @@ class FakeCalls:
         elif key=='child_id':args[0]._obj.value=self.shadow_child if pointer==201 else self.child
         elif key=='accessible':args[0]._obj.value=202 if pointer==201 else 102
         elif key=='accessible_query':args[1]._obj.value=self.canonical[int(pointer==202)]
+        elif key=='control_type':args[0]._obj.value=self.control_types[int(pointer==103)]
         elif key=='from_accessible':args[2]._obj.value=103 if args[0]==102 else 105
         elif key=='query':args[1]._obj.value=104
         elif key=='hit_test':
@@ -873,13 +900,14 @@ class FalseShadowTests(unittest.TestCase):
         self.assertEqual((result['patternAttempted'],result['child_idAttempted'],
             result['accessibleAttempted'],result['queryAttempted']),(1,1,1,0))
 
-    def test_false_roundtrip_adds_exact_five_calls_and_keeps_failed_primary_guard(self):
+    def test_false_roundtrip_keeps_five_identity_calls_and_two_scalar_calls_separate_from_primary(self):
         self.prepare();result=self.run_worker();self.assert_primary_false(result)
         self.assertEqual(tuple(result.get(key) for key in ('falseShadowVersion',
             'falseShadowStarted','falseShadowStatus','falseShadowStep','falseShadowAttempted',
             'falseShadowCompleted','falseShadowLastHresult')),(1,1,1,5,5,5,0))
         self.assertEqual(self.sdk.calls[:10],['pattern','child_id','accessible','from_accessible',
             'compare','pattern','child_id','accessible','accessible_query','accessible_query'])
+        self.assertEqual(self.sdk.calls[10:12],['control_type','control_type'])
         self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7,7))
         self.assertEqual(self.sdk.releases,[301,301,202,201,103,102,101])
         self.assertEqual((result['falseShadowGuardBefore'],result['falseShadowGuardAfter']),(1,1))
@@ -972,9 +1000,9 @@ class FalseShadowTests(unittest.TestCase):
                 self.assertEqual(result['workerCleanup'],1)
 
     def test_process_guard_at_every_admission_and_return_stops_further_calls(self):
-        # Initial worker guard is call 1; shadow entry is 2, then before/after
-        # each of five calls, and the final observation guard is call 13.
-        for cutoff in range(2,14):
+        # Initial worker guard is 1; shadow entry is 2, then before/after
+        # five identity and two scalar calls; final observations use guard 17.
+        for cutoff in range(2,18):
             with self.subTest(guard=cutoff):
                 self.prepare();checks=[]
                 def guard():checks.append(1);return len(checks)<cutoff
@@ -990,7 +1018,7 @@ class FalseShadowTests(unittest.TestCase):
         self.assertEqual((result['cleanupError'],result['workerCleanup']),(1,0))
 
     def test_time_expiring_in_guard_prevents_each_call_and_final_completion(self):
-        for cutoff in (2,3,5,7,9,11,13):
+        for cutoff in (2,3,5,7,9,11,13,15,17):
             with self.subTest(guard=cutoff):
                 self.prepare();checks=[]
                 def guard():
@@ -1030,6 +1058,8 @@ class FalseShadowTests(unittest.TestCase):
         import test_owned_native_menu as boundaries
         self.prepare();provider=self.run_worker()
         self.assertEqual((provider['falseShadowCanonicalEqual'],provider['falseShadowChildEqual']),(1,1))
+        self.assertEqual((provider['falseShadowOriginalControlType'],provider['falseShadowRoundTripControlType']),(50011,50011))
+        self.assertEqual((provider['falseShadowOriginalControlTypeObserved'],provider['falseShadowRoundTripControlTypeObserved']),(1,1))
         owner=boundaries.OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
         module,api,process,record,clock,boundary=owner.real_chrome_fixture();probe=boundary.probe
         original=probe.point_snapshot;exposures=[];fresh=[]
@@ -1056,7 +1086,116 @@ class FalseShadowTests(unittest.TestCase):
         self.assertFalse(record['nativeMenuActions'][-1]['success'])
 
 
+class ControlTypeTests(unittest.TestCase):
+    setUp=WorkerTests.setUp
+    run_worker=WorkerTests.run_worker
+    prepare=FalseShadowTests.prepare
+    assert_primary_false=FalseShadowTests.assert_primary_false
+
+    def test_exact_original_and_bridge_scalar_observations_add_no_refs_and_do_not_promote_false(self):
+        for values in ((50011,50011),(50011,50033),(-1,-2**31)):
+            with self.subTest(same=values[0]==values[1]):
+                self.prepare();self.sdk.control_types=values;original=self.sdk.call;inputs=[]
+                def call(key,pointer,*args):
+                    if key=='control_type':
+                        self.assertIs(type(args[0]._obj),C.c_int32)
+                        self.assertEqual(self.sdk.releases,[]);inputs.append(pointer)
+                    return original(key,pointer,*args)
+                self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual(inputs,[1,103])
+                for side,value in zip(('Original','RoundTrip'),values):
+                    prefix='falseShadow'+side+'ControlType'
+                    self.assertEqual(tuple(result.get(prefix+suffix) for suffix in
+                        ('Observed','','Hresult')),(1,value&0xffffffff,0))
+                self.assertEqual(self.sdk.calls[10:12],['control_type','control_type'])
+                self.assertEqual((result['falseShadowAttempted'],result['falseShadowCompleted'],
+                    result['falseShadowStep'],result['falseShadowStatus']),(5,5,5,1))
+                self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7,7))
+                self.assertEqual(self.sdk.releases,[301,301,202,201,103,102,101])
+                self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in result.values()))
+
+    def test_untriggered_failed_compare_and_early_shadow_failure_leave_control_types_unknown(self):
+        for reason in ('true','compare','pattern','shadow'):
+            with self.subTest(reason=reason):
+                self.prepare()
+                if reason=='true':self.sdk.wrong_file=False
+                elif reason=='shadow':self.sdk.fail['accessible_query']=-2147467259
+                else:self.sdk.fail[reason]=-2147467259
+                result=self.run_worker();self.assertNotIn('control_type',self.sdk.calls)
+                for side in ('Original','RoundTrip'):
+                    prefix='falseShadow'+side+'ControlType'
+                    self.assertEqual(tuple(result.get(prefix+suffix) for suffix in
+                        ('Observed','','Hresult')),(0,0,0))
+
+    def test_each_getter_failed_hresult_or_exception_keeps_written_value_unobserved(self):
+        for ordinal in (1,2):
+            for failure in ('hresult','s-false','exception','noninteger'):
+                with self.subTest(ordinal=ordinal,failure=failure):
+                    self.prepare();original=self.sdk.call
+                    def call(key,pointer,*args):
+                        hr=original(key,pointer,*args)
+                        if key=='control_type' and self.sdk.calls.count(key)==ordinal:
+                            if failure=='exception':raise KeyboardInterrupt('Synthetic private control value')
+                            return {'hresult':-2147467259,'s-false':1,'noninteger':True}[failure]
+                        return hr
+                    self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                    self.assertEqual(result.get('falseShadowStatus'),4 if failure in ('hresult','s-false') else 6)
+                    side='Original' if ordinal==1 else 'RoundTrip';prefix='falseShadow'+side+'ControlType'
+                    self.assertEqual((result[prefix+'Observed'],result[prefix]),(0,0))
+                    self.assertEqual(result[prefix+'Hresult'],{'hresult':0x80004005,'s-false':1}.get(failure,0))
+                    self.assertEqual(self.sdk.calls.count('control_type'),ordinal)
+                    self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7,7))
+                    self.assertEqual(result['cleanupError'],int(failure in ('exception','noninteger')))
+                    self.assertNotIn('Synthetic private',str(result))
+
+    def test_late_getter_output_is_unknown_and_next_getter_never_starts(self):
+        for ordinal in (1,2):
+            with self.subTest(ordinal=ordinal):
+                self.prepare();original=self.sdk.call
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if key=='control_type' and self.sdk.calls.count(key)==ordinal:self.platform.now=15.
+                    return hr
+                self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual(result['falseShadowStatus'],2)
+                self.assertEqual(self.sdk.calls.count('control_type'),ordinal)
+                for index,side in enumerate(('Original','RoundTrip'),1):
+                    prefix='falseShadow'+side+'ControlType'
+                    self.assertEqual(result[prefix+'Observed'],int(index<ordinal))
+                    self.assertEqual(result[prefix],50011 if index<ordinal else 0)
+                self.assertEqual(result['workerCleanup'],1)
+
+    def test_process_and_clock_guards_cover_both_getters_and_final_observations(self):
+        for cutoff in range(13,18):
+            for reason in ('process','deadline'):
+                with self.subTest(cutoff=cutoff,reason=reason):
+                    self.prepare();checks=[]
+                    def guard():
+                        checks.append(1)
+                        if reason=='deadline' and len(checks)==cutoff:self.platform.now=15.
+                        return reason!='process' or len(checks)<cutoff
+                    self.platform.guard=guard;result=self.run_worker();self.assert_primary_false(result)
+                    self.assertEqual(result['falseShadowStatus'],3 if reason=='process' else 2)
+                    self.assertEqual(self.sdk.calls.count('control_type'),min(2,(cutoff-12)//2))
+                    self.assertEqual(result['falseShadowGuardAfter'],0)
+                    self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7,7))
+
+
 class RawCallTests(unittest.TestCase):
+    def test_control_type_raw_binding_writes_signed_int32_and_returns_plain_numeric_hresult(self):
+        helper=load_helper();abi=helper.SdkAbi(**sdk_fixture());observed=[]
+        prototype=C.CFUNCTYPE(C.c_int32,C.c_void_p,C.c_void_p)
+        @prototype
+        def getter(this,out):
+            observed.append(1);C.cast(out,C.POINTER(C.c_int32))[0]=-2**31
+            return -2147467259
+        table=(C.c_void_p*(abi.slots['control_type']+1))()
+        table[abi.slots['control_type']]=C.cast(getter,C.c_void_p).value
+        instance=C.pointer(C.cast(table,C.POINTER(C.c_void_p)));output=C.c_int32()
+        hr=abi.call('control_type',instance,C.byref(output))
+        self.assertEqual((hr,output.value),(-2147467259,-2**31))
+        self.assertEqual(observed,[1])
+
     def test_native_duplicate_stays_unacknowledged_until_lease_adopts_it(self):
         helper=load_helper();kernel=helper.WindowsKernel.__new__(helper.WindowsKernel)
         def duplicate(current,handle,target,out,access,inherit,options):
@@ -1161,6 +1300,7 @@ class WindowsMetadataTests(unittest.TestCase):
         self.assertEqual(abi.slots['hit_test'],24)
         self.assertEqual(abi.slots['accessible_query'],0)
         self.assertEqual(abi.slots['accessible_release'],2)
+        self.assertIs(abi.signatures['control_type'][0],C.c_int32)
 
 
 @unittest.skipUnless(os.name=='nt','Actual Windows CLSIDFromString parser only; no input')

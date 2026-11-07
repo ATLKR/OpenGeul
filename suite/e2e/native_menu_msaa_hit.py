@@ -101,6 +101,7 @@ class SdkAbi:
         self._use('pattern',element_interface,'GetCurrentPatternAs',
             (scalar,out(guid),out(void)),(1,1,10))
         self._use('child_id',legacy_interface,'_get_CurrentChildId',(out(scalar),),(10,))
+        self._use('control_type',element_interface,'_get_CurrentControlType',(out(scalar),),(10,))
         self._use('accessible',legacy_interface,'GetIAccessible',(out(com('accessible')),),(10,))
         self._use('from_accessible',client_interface,'ElementFromIAccessible',
             (com('accessible'),scalar,out(com('element'))),(1,1,10))
@@ -127,7 +128,7 @@ class SdkAbi:
         if (not _scalar(item.restype,4,not unsigned) or len(args)!=len(arguments)
                 or any(not test(kind) for test,kind in zip(arguments,args))
                 or actual_flags!=flags
-                or key=='child_id' and 'propget' not in item.idlflags):
+                or key in ('child_id','control_type') and 'propget' not in item.idlflags):
             raise ValueError('COM method ABI differs')
         self.slots[key]=slot
         # ctypes.HRESULT carries a checker which raises before returning the
@@ -181,7 +182,10 @@ def worker_record():
         falseShadowStep=0,falseShadowAttempted=0,falseShadowCompleted=0,falseShadowLastHresult=0,
         falseShadowChildObserved=0,falseShadowChildBits=0,falseShadowIdentityObserved=0,
         falseShadowCanonicalEqual=0,falseShadowChildEqual=0,
-        falseShadowGuardBefore=0,falseShadowGuardAfter=0)
+        falseShadowGuardBefore=0,falseShadowGuardAfter=0,
+        falseShadowOriginalControlTypeObserved=0,falseShadowOriginalControlType=0,
+        falseShadowOriginalControlTypeHresult=0,falseShadowRoundTripControlTypeObserved=0,
+        falseShadowRoundTripControlType=0,falseShadowRoundTripControlTypeHresult=0)
     for name in _OPERATIONS:
         result.update({name+'Attempted':0,name+'Completed':0,name+'Hresult':0})
     return result
@@ -253,6 +257,17 @@ def run_local_hit(source,scope,sdk,platform,deadline):
             if not value.value:
                 record['falseShadowStatus']=5;raise _Stop()
             return value.value
+        def control_type(side,pointer):
+            # A coarse projection observation only; even equal types prove no identity.
+            check();value=C.c_int32()
+            hr=sdk.call('control_type',pointer,C.byref(value))
+            if type(hr) is not int:raise TypeError()
+            prefix='falseShadow'+side+'ControlType'
+            record[prefix+'Hresult']=hr&0xffffffff
+            check()
+            if hr!=0:
+                record['falseShadowStatus']=4;raise _Stop()
+            record[prefix]=value.value&0xffffffff;record[prefix+'Observed']=1
         try:
             check();record['falseShadowGuardBefore']=1
             legacy=shadow_out(1,'pattern',round_trip,10018,C.byref(pattern_iid))
@@ -268,6 +283,8 @@ def run_local_hit(source,scope,sdk,platform,deadline):
             record.update(falseShadowIdentityObserved=1,
                 falseShadowCanonicalEqual=int(original_identity==projected_identity),
                 falseShadowChildEqual=int(child_id==child.value))
+            control_type('Original',source.file)
+            control_type('RoundTrip',round_trip)
             check();record.update(falseShadowGuardAfter=1,falseShadowStatus=1)
         except _Stop:raise
         except BaseException:
