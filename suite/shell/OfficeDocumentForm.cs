@@ -256,6 +256,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         if (!attached || worker is null || closing || busy || statusBusy || menuFailureReported || pendingMenuFailure is not null) return;
         statusBusy = true;
         var statusWorker = worker;
+        var statusFocusCounters = InitialFocusCountersFor(editorFocus);
         try
         {
             var statusSurface = menuSurface ?? throw new SuiteException("문서의 통합 메뉴 연결 정보를 확인할 수 없습니다.");
@@ -267,6 +268,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 if (!ReferenceEquals(menuSurface, statusSurface)) throw new SuiteException("문서의 통합 메뉴 연결 정보가 변경됐습니다.");
                 statusSurface.ObserveStatus(result, statusToken, !closing && !busy, ApplyStatus,
                     () => PublishNativeMenuStatus(statusSurface));
+                WriteInitialFocusPrefix(statusFocusCounters);
             }
         }
         catch (Exception e)
@@ -904,7 +906,16 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         counters.ObserveResult(result, pending);
     }
 
-    private void WriteInitialFocusFinal(InitialFocusCounters? counters)
+    private void WriteInitialFocusPrefix(InitialFocusCounters? counters)
+    {
+        // Copy this retained owner's counters only after the existing status
+        // completion. No fresh focus/availability/native observation is made.
+        if (counters is null || counters.Retired != 0 || counters.DisposeReturned != 0 ||
+            !ReferenceEquals(editorFocus, counters.Owner)) return;
+        WriteInitialFocusFinal(counters, prefix: true);
+    }
+
+    private void WriteInitialFocusFinal(InitialFocusCounters? counters, bool prefix = false)
     {
         if (counters is null) return;
         try
@@ -912,9 +923,10 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             if (counters.SnapshotRevision < 65535) counters.SnapshotRevision++;
             else counters.OverflowMask |= 1 << 16;
             var count = counters.Counts;
-            initialFocusFlowDiagnostics.Write("final", new
+            initialFocusFlowDiagnostics.Write(prefix ? "prefix" : "final", new
             {
-                schemaVersion = 2, ownerGeneration = counters.Generation, identityKnown = counters.IdentityKnown,
+                schemaVersion = 2, snapshotKindCode = prefix ? 1 : 2,
+                ownerGeneration = counters.Generation, identityKnown = counters.IdentityKnown,
                 ownerChanged = counters.OwnerChanged, retired = counters.Retired, disposeReturned = counters.DisposeReturned,
                 updateFailed = counters.UpdateFailed, cap = 65535, overflowMask = counters.OverflowMask,
                 snapshotRevision = counters.SnapshotRevision,

@@ -1,4 +1,4 @@
-"""Pure numeric projection of already framed, identity-checked final diagnostic rows.
+"""Pure numeric projection of already framed, identity-checked counter snapshots.
 
 The caller owns raw framing, envelope/worker/trace identity, bounded collection and
 actual retirement proof. This module performs no IO or native operations. It never
@@ -16,14 +16,16 @@ _WIRE_IDENTITY = dict(formHwnd='originalFormHwnd', panelHwnd='originalPanelHwnd'
 _FLAGS = ('identityKnown ownerChanged retired disposeReturned updateFailed pendingKnown pending '
     'availabilityKnown availabilityValue availabilityMaskKnown evaluationComplete '
     'postUncertain callbackOutstanding').split()
-_KEYS = set(COUNTER_KEYS + _FLAGS + ['sequence', 'schemaVersion', 'ownerGeneration', 'cap',
+_KEYS = set(COUNTER_KEYS + _FLAGS + ['sequence', 'schemaVersion', 'snapshotKindCode', 'ownerGeneration', 'cap',
     'overflowMask', 'snapshotRevision', 'availabilitySourceCode', 'evaluatedMask', 'trueMask',
     'firstRejectId'] + [_WIRE_IDENTITY.get(key, key) for key in IDENTITY_KEYS])
 
 
 def parse_initial_focus_final_counters(rows, *, retained_identity, retirement_confirmed):
-    """Project <=128 numeric final details+sequence rows from one existing read.
+    """Project <=128 numeric snapshot details+sequence rows from one existing read.
 
+    Caller joins actual envelope stage prefix/final to snapshotKindCode1/2.
+    A prefix preserves valid partial latest counts and never closes an interval.
     Only a recovered, retired, same-owner interval without counter/observer loss
     permits interpreting its zero counts. Old event stream completeness stays
     unknown. Error codes:1 missing,2 shape/bounds,3 identity,4 ordering,5 incomplete,
@@ -58,6 +60,9 @@ def parse_initial_focus_final_counters(rows, *, retained_identity, retirement_co
             if integer(row['schemaVersion'], 2, 2) != 2 or integer(row['cap'], 65535, 65535) != 65535:
                 raise ValueError()
             integer(row['availabilitySourceCode'], 5)
+            kind = integer(row['snapshotKindCode'], 2, 1)
+            if kind == 1 and (row['retired'] or row['disposeReturned']) or kind == 2 and row['retired'] != 1:
+                raise ValueError()
             code = 3
             for key, value in identity.items():
                 observed = integer(row[_WIRE_IDENTITY.get(key, key)], 2**63-1)
@@ -67,7 +72,7 @@ def parse_initial_focus_final_counters(rows, *, retained_identity, retirement_co
                 raise ValueError()
             code = 4
             if previous is not None:
-                if row['sequence'] <= previous['sequence'] or row['snapshotRevision'] <= previous['snapshotRevision'] or row['ownerGeneration'] != previous['ownerGeneration']:
+                if row['sequence'] <= previous['sequence'] or row['snapshotRevision'] <= previous['snapshotRevision'] or row['ownerGeneration'] != previous['ownerGeneration'] or kind < previous['snapshotKindCode']:
                     raise ValueError()
                 if any(row[key] < previous[key] for key in COUNTER_KEYS) or any(row[key] < previous[key] for key in ('retired','disposeReturned','ownerChanged','updateFailed','identityKnown')) or row['overflowMask'] | previous['overflowMask'] != row['overflowMask']:
                     raise ValueError()
@@ -99,7 +104,7 @@ def parse_initial_focus_final_counters(rows, *, retained_identity, retirement_co
                     raise ValueError()
             previous = row
         latest = dict(previous)
-        complete = retirement_confirmed and all(latest[key] == 1 for key in ('identityKnown','retired','disposeReturned','pendingKnown','availabilityKnown','availabilityMaskKnown')) and not any(latest[key] for key in ('ownerChanged','updateFailed','overflowMask','postUncertain','callbackOutstanding'))
+        complete = latest['snapshotKindCode'] == 2 and retirement_confirmed and all(latest[key] == 1 for key in ('identityKnown','retired','disposeReturned','pendingKnown','availabilityKnown','availabilityMaskKnown')) and not any(latest[key] for key in ('ownerChanged','updateFailed','overflowMask','postUncertain','callbackOutstanding'))
         result.update(known=int(complete), counterIntervalComplete=int(complete), zeroCountsUsable=int(complete),
             errorCode=0 if complete else 6 if latest['overflowMask'] else 5,
             scope=dict(identity), latest=latest)

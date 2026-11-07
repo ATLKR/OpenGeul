@@ -18,7 +18,7 @@ COUNTS = ('preOwnerActivated preOwnerAppActive preOwnerAppInactive activatedCoun
 
 
 def final_row(**changes):
-    value = dict(sequence=4, schemaVersion=2, ownerGeneration=1, identityKnown=1,
+    value = dict(sequence=4, schemaVersion=2, snapshotKindCode=2, ownerGeneration=1, identityKnown=1,
         ownerChanged=0, retired=1, disposeReturned=1, updateFailed=0, cap=65535,
         overflowMask=0, snapshotRevision=1, pendingKnown=1, pending=1,
         availabilityKnown=1, availabilityValue=0, availabilityMaskKnown=1,
@@ -32,6 +32,10 @@ def final_row(**changes):
     value['availabilityCount'] = 1
     value.update(changes)
     return value
+
+
+def prefix_row(**changes):
+    return final_row(**(dict(snapshotKindCode=1, retired=0, disposeReturned=0) | changes))
 
 
 class InitialFocusFinalCountersTests(unittest.TestCase):
@@ -51,6 +55,34 @@ class InitialFocusFinalCountersTests(unittest.TestCase):
 
     def test_missing_final_never_proves_nonexecution(self):
         self.assertEqual(self.parse([])['zeroCountsUsable'], 0)
+
+    def test_live_prefix_preserves_partial_latest_even_after_forced_cleanup(self):
+        row=prefix_row(activatedCount=3,appActiveCount=2)
+        for retired in (False,True):
+            result=self.parse([row],retired=retired)
+            self.assertEqual((result['known'],result['counterIntervalComplete'],result['zeroCountsUsable'],
+                result['eventCompletenessUnknown']),(0,0,0,1))
+            self.assertEqual((result['latest']['snapshotKindCode'],result['latest']['activatedCount'],
+                result['latest']['appActiveCount']),(1,3,2))
+
+    def test_snapshot_kind_rejects_live_final_disguise_and_terminal_prefix(self):
+        for row in (prefix_row(snapshotKindCode=2),prefix_row(retired=1),prefix_row(disposeReturned=1),
+                    final_row(snapshotKindCode=1),final_row(snapshotKindCode=True),final_row(snapshotKindCode=3)):
+            with self.subTest(kind=row['snapshotKindCode']):
+                result=self.parse([row])
+                self.assertEqual((result['known'],result['zeroCountsUsable']),(0,0))
+                self.assertEqual(result['latest'],{})
+
+    def test_prefix_then_actual_terminal_snapshot_can_complete_original_owner(self):
+        prefix=prefix_row(activatedCount=2)
+        final=final_row(activatedCount=2,sequence=5,snapshotRevision=2)
+        result=self.parse([prefix,final])
+        self.assertEqual((result['known'],result['latest']['snapshotKindCode']),(1,2))
+        self.assertEqual(self.parse([prefix,final],retired=False)['zeroCountsUsable'],0)
+
+    def test_prefix_without_kind_cannot_enter_closed_numeric_contract(self):
+        row=prefix_row();del row['snapshotKindCode']
+        self.assertEqual(self.parse([row])['latest'],{})
 
     def test_actual_retirement_required_even_for_all_zero_counts(self):
         result = self.parse([final_row()], retired=False)
@@ -200,10 +232,24 @@ class FormCounterSeamTests(unittest.TestCase):
 
     def test_actual_final_wire_matches_numeric_parser_fixture_exactly(self):
         import re
-        wire=self.source.split('initialFocusFlowDiagnostics.Write("final", new',1)[1].split('}, counters.WorkerPid',1)[0]
+        wire=self.source.split('initialFocusFlowDiagnostics.Write(prefix ? "prefix" : "final", new',1)[1].split('}, counters.WorkerPid',1)[0]
         fields=set(re.findall(r'\b(\w+)\s*=(?!=)',wire))
         self.assertEqual(fields,set(final_row())-{'sequence'})
         self.assertNotIn('Handle',wire)
+
+    def test_status_prefix_follows_original_success_with_cached_owner_only(self):
+        status=self.source.split('private async Task RefreshStatusAsync()',1)[1].split('private void PublishNativeMenuStatus',1)[0]
+        self.assertLess(status.index('var statusFocusCounters = InitialFocusCountersFor(editorFocus);'),status.index('await statusWorker.SendAsync("status", new { });'))
+        self.assertLess(status.index('statusSurface.ObserveStatus('),status.index('WriteInitialFocusPrefix(statusFocusCounters);'))
+        self.assertLess(status.index('WriteInitialFocusPrefix(statusFocusCounters);'),status.index('catch (Exception e)'))
+        self.assertEqual(status.count('SendAsync('),1)
+        prefix=self.source.split('private void WriteInitialFocusPrefix(',1)[1].split('private void WriteInitialFocusFinal(',1)[0]
+        self.assertIn('ReferenceEquals(editorFocus, counters.Owner)',prefix)
+        self.assertIn('counters.Retired != 0',prefix)
+        self.assertIn('counters.DisposeReturned != 0',prefix)
+        for token in ('Handle','InitialFocusPending','EditorFocusAvailable','SendAsync','Timer','ActiveForm'):
+            self.assertNotIn(token,prefix)
+        self.assertIn('snapshotKindCode = prefix ? 1 : 2',self.source)
 
     def test_pre_owner_events_and_late_callback_keep_distinct_cached_owner_context(self):
         self.assertIn('counters.Count(index + 3)',self.source)
