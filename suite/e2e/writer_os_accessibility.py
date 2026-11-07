@@ -55,7 +55,7 @@ def failure(request, stage=13):
 
 def validate(value, request):
     _request(request)
-    if type(value) is not dict or value.keys() != _MAXIMA.keys():
+    if type(value) is not dict or value.keys() not in (_MAXIMA.keys(), _MAXIMA.keys() | {'focusCall'}):
         raise ValueError('Closed Writer OS result required')
     if any(type(value[key]) is not int or not 0 <= value[key] <= maximum
            for key, maximum in _MAXIMA.items()):
@@ -65,6 +65,13 @@ def validate(value, request):
             or value['referencesReleased'] > value['referencesAcquired']
             or value['variantsCleared'] > value['variantsCreated']):
         raise ValueError('Writer OS result identity or lifetime differs')
+    if 'focusCall' in value:
+        if __package__:
+            from .writer_os_summary import valid_focus_call
+        else:
+            from writer_os_summary import valid_focus_call
+        if not valid_focus_call(value['focusCall'], value['focusVariantType']):
+            raise ValueError('Invalid Writer focus call observation')
     if value['verified'] and not (
             value['stageCode'] == 12 and value['documentRole'] == 15
             and value['rootRole'] > 0 and value['focusedRole'] > 0
@@ -479,13 +486,25 @@ class RawComBackend:
     def focus(self, root):
         self.guard()
         output = self._variant()
-        hr = self._invoke(root, 18, C.c_int32, (C.POINTER(self.Variant),), C.byref(output))
+        # This client boundary is not evidence of native/server entry. Unknown
+        # zero values remain unknown until their corresponding observed bit.
+        call = dict(attempted=1, returned=0, hrObserved=0, hr=0, vtObserved=0, rejectCode=0)
+        self.record['focusCall'] = call
+        try:
+            hr = self._invoke(root, 18, C.c_int32, (C.POINTER(self.Variant),), C.byref(output))
+        except BaseException:
+            call['rejectCode'] = 1
+            raise
+        call.update(returned=1, hrObserved=1, hr=hr & 0xffffffff)
         self.record['focusVariantType'] = output.vt
+        call['vtObserved'] = 1
         if hr != 0:
+            call['rejectCode'] = 2
             raise ProbeFailure(hr)
         if output.vt == 9:
             borrowed = output._.c_void_p
             if not borrowed:
+                call['rejectCode'] = 4
                 raise ProbeFailure()
             return self._query(borrowed, 'accessible')
         if output.vt == 3:
@@ -493,12 +512,14 @@ class RawComBackend:
             if identifier == 0:
                 return self._query(root, 'accessible')
             if not 0 < identifier <= 0x7fffffff:
+                call['rejectCode'] = 5
                 raise ProbeFailure()
             self.guard()
             child = self._child(identifier)
             dispatch = self._owned(lambda result: self._invoke(root, 9, C.c_int32,
                 (self.Variant, C.POINTER(C.c_void_p)), child, result))
             return self._query(dispatch, 'accessible')
+        call['rejectCode'] = 3
         raise ProbeFailure()
 
     def support(self, pointer, interface):

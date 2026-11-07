@@ -21,6 +21,36 @@ STAGE_NAMES = {1:'writer-os-owner', 2:'writer-os-abi', 3:'writer-os-root',
     10:'writer-os-owner', 11:'writer-os-cleanup',
     13:'writer-os-protocol', 14:'writer-os-timeout'}
 
+_FOCUS_CALL_MAXIMA = dict(attempted=1, returned=1, hrObserved=1,
+    hr=0xffffffff, vtObserved=1, rejectCode=5)
+
+
+def valid_focus_call(value, variant_type):
+    """Closed optional client-call diagnostics, never an acceptance predicate."""
+    if (type(value) is not dict or value.keys() != _FOCUS_CALL_MAXIMA.keys()
+            or any(type(value[key]) is not int or not 0 <= value[key] <= maximum
+                   for key, maximum in _FOCUS_CALL_MAXIMA.items())
+            or type(variant_type) is not int or not 0 <= variant_type <= 0xffff):
+        return False
+    if (value['returned'] > value['attempted'] or value['hrObserved'] > value['returned']
+            or value['vtObserved'] > value['returned']
+            or not value['hrObserved'] and value['hr']
+            or not value['vtObserved'] and variant_type):
+        return False
+    code = value['rejectCode']
+    if code == 1:
+        return value['attempted'] == 1 and value['returned'] == value['hrObserved'] == value['vtObserved'] == 0
+    if code in (2, 3, 4, 5):
+        if not value['returned'] == value['hrObserved'] == value['vtObserved'] == 1:
+            return False
+        if code == 2:
+            return value['hr'] != 0
+        return value['hr'] == 0 and (variant_type not in (3, 9) if code == 3 else variant_type == (9 if code == 4 else 3))
+    if value['returned'] == value['hrObserved'] == value['vtObserved'] == 1:
+        return value['hr'] == 0 and variant_type in (3, 9)
+    # Code zero without a complete observation is unknown, not getter success.
+    return True
+
 
 def valid(value):
     """Validate a failure vector without importing producer/native modules."""
@@ -41,8 +71,11 @@ def project(record):
             or record.get('module') != 'writer' or record.get('success') is not False):
         return None
     result = record.get('writerOsAccessibility')
-    if (type(result) is not dict or result.keys() != {'schemaVersion', *FIELDS}
+    base = {'schemaVersion', *FIELDS}
+    if (type(result) is not dict or result.keys() not in (base, base | {'focusCall'})
             or type(result['schemaVersion']) is not int or result['schemaVersion'] != 1):
+        return None
+    if 'focusCall' in result and not valid_focus_call(result['focusCall'], result['focusVariantType']):
         return None
     value = [result[key] for key in FIELDS]
     if not valid(value) or record.get('stage') != STAGE_NAMES[result['stageCode']]:

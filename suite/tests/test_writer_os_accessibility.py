@@ -406,7 +406,8 @@ class RawFixture:
         self.functions, self.tables, self.objects, self.ledger = [], [], [], {}
         self.calls, self.clears, self.bad_releases = [], [], []
         self.focus_vt, self.role_vt, self.clear_hr = 9, 3, 0
-        self.child_id, self.root_hr = 0, 0
+        self.child_id, self.root_hr, self.focus_hr = 0, 0, 0
+        self.focus_null = False
         self.text_reads=[]
         def forbidden(value):
             self.text_reads.append(1)
@@ -483,13 +484,13 @@ class RawFixture:
                 self.calls.append(('focus',))
                 out[0].vt = self.focus_vt
                 if self.focus_vt == 9:
-                    out[0]._.c_void_p = self.nodes['leaf']
-                    self.ledger[self.nodes['leaf']] += 1  # Owned by the VARIANT.
+                    out[0]._.c_void_p = 0 if self.focus_null else self.nodes['leaf']
+                    if not self.focus_null:self.ledger[self.nodes['leaf']] += 1  # Owned by the VARIANT.
                 elif self.focus_vt == 3:
                     out[0]._.VT_I4 = self.child_id
                 else:
                     out[0]._.c_void_p = 1
-                return 0
+                return self.focus_hr
             obj.vtable[18] = self._callback(C.c_int32, (C.POINTER(self.Variant),), focus)
             def child(this, identifier, out):
                 self.calls.append(('child',identifier.vt,identifier._.VT_I4))
@@ -517,7 +518,7 @@ class RawFixture:
             return self.clear_hr
         if variant.vt == 9:
             pointer = variant._.c_void_p
-            self.ledger[pointer] -= 1
+            if pointer:self.ledger[pointer] -= 1
         variant.vt = 0
         return 0
 
@@ -868,6 +869,178 @@ class RootCapabilityDiagnosticTests(unittest.TestCase):
                     encoded+' '*4096,'synthetic private failure'):
             value=decode(raw,REQUEST)
             self.assertEqual((value['known'],value['stageCode']),(0,13))
+
+
+class FocusCallObservationTests(unittest.TestCase):
+    def setUp(self):
+        self.owner=Owner(REQUEST)
+        self.fixture=RawFixture()
+
+    def observe(self, backend=None):
+        return probe.observe(REQUEST, owner_factory=lambda request:self.owner,
+            backend_factory=backend or (lambda guard,record:probe.RawComBackend(guard,record,bindings=self.fixture.bindings)))
+
+    def focus_call(self, value):
+        self.assertTrue('focusCall' in value,'The same focus getter needs a closed numeric observation')
+        row=value['focusCall']
+        self.assertEqual(set(row),{'attempted','returned','hrObserved','hr','vtObserved','rejectCode'})
+        self.assertTrue(all(type(number)is int for number in row.values()))
+        return row
+
+    def balanced(self):
+        self.assertTrue(all(count==0 for count in self.fixture.ledger.values()),'Owned reference imbalance')
+        self.assertTrue(not self.fixture.bad_releases,'Unexpected reference release')
+        self.assertTrue(not self.fixture.text_reads,'No text payload may be read')
+
+    def test_s_ok_empty_variant_is_observed_rejection_with_original_cleanup_and_numbers(self):
+        self.fixture.focus_vt=0
+        value=self.observe();row=self.focus_call(value)
+        self.assertEqual(row,dict(attempted=1,returned=1,hrObserved=1,hr=0,vtObserved=1,rejectCode=3))
+        self.assertEqual(tuple(value[k] for k in ('verified','stageCode','hresult','focusVariantType','rootRole',
+            'ownerBefore','ownerAfter','referencesAcquired','referencesReleased','variantsCreated','variantsCleared',
+            'cleanupFailure','ownerReleased')),(0,4,0,0,10,1,0,2,2,2,2,0,1))
+        self.assertEqual(self.fixture.calls.count(('focus',)),1);self.balanced()
+        self.assertTrue(probe.decode(json.dumps(value),REQUEST)==value)
+
+    def test_same_invoke_exception_before_or_after_output_write_is_not_a_return_or_s_ok(self):
+        class Original(Exception):
+            def __str__(self):raise AssertionError('Exception text must not be read')
+            def __repr__(self):raise AssertionError('Exception object must not be rendered')
+        for wrote in (False,True):
+            with self.subTest(outputWritten=wrote):
+                self.fixture=RawFixture();original=Original();fixture=self.fixture
+                class Fault(probe.RawComBackend):
+                    def _invoke(self,pointer,slot,result,arguments,*values):
+                        if slot==18:
+                            if wrote:super()._invoke(pointer,slot,result,arguments,*values)
+                            raise original
+                        return super()._invoke(pointer,slot,result,arguments,*values)
+                value=probe.failure(REQUEST,4)
+                backend=Fault(lambda:None,value,bindings=fixture.bindings)
+                try:
+                    with self.assertRaises(Original) as caught:backend.focus(fixture.nodes['root'])
+                    self.assertTrue(caught.exception is original,'Original exception identity changed')
+                    row=self.focus_call(value)
+                    self.assertEqual(row,dict(attempted=1,returned=0,hrObserved=0,hr=0,vtObserved=0,rejectCode=1))
+                    self.assertEqual((value['hresult'],value['focusVariantType']),(0,0))
+                finally:self.assertTrue(backend.close())
+                self.assertTrue(probe.validate(value,REQUEST)==value)
+                self.assertEqual(self.fixture.calls.count(('focus',)),int(wrote));self.balanced()
+
+    def test_failed_hresult_with_dispatch_output_preserves_primary_and_releases_variant_reference(self):
+        self.fixture.focus_hr=-2147467259
+        value=self.observe();row=self.focus_call(value)
+        self.assertEqual(row,dict(attempted=1,returned=1,hrObserved=1,hr=0x80004005,vtObserved=1,rejectCode=2))
+        self.assertEqual((value['verified'],value['stageCode'],value['hresult'],value['focusVariantType']),(0,4,0x80004005,9))
+        self.assertEqual((value['referencesAcquired'],value['referencesReleased'],value['variantsCreated'],value['variantsCleared']),(2,2,2,2))
+        self.assertEqual(self.fixture.calls.count(('focus',)),1);self.balanced()
+
+    def test_existing_dispatch_child_and_self_paths_are_observations_not_new_acceptance(self):
+        for vt,child,verified,stage in ((9,0,1,12),(3,7,1,12),(3,0,0,5)):
+            with self.subTest(variantType=vt,selfChild=child==0):
+                self.fixture=RawFixture();self.owner=Owner(REQUEST)
+                self.fixture.focus_vt=vt;self.fixture.child_id=child
+                value=self.observe();row=self.focus_call(value)
+                self.assertEqual(row,dict(attempted=1,returned=1,hrObserved=1,hr=0,vtObserved=1,rejectCode=0))
+                self.assertEqual((value['verified'],value['stageCode'],value['focusVariantType']),(verified,stage,vt))
+                self.assertEqual(self.fixture.calls.count(('focus',)),1);self.balanced()
+
+    def test_unsupported_types_null_dispatch_and_invalid_child_do_not_read_or_export_payload(self):
+        cases=((0,0,False,3),(8,0,False,3),(13,0,False,3),(0x4009,0,False,3),
+               (9,0,True,4),(3,-1,False,5),(3,2**31,False,5))
+        for vt,child,null,reject in cases:
+            with self.subTest(variantType=vt,rejectCode=reject):
+                self.fixture=RawFixture();self.owner=Owner(REQUEST)
+                self.fixture.focus_vt=vt;self.fixture.child_id=child;self.fixture.focus_null=null
+                value=self.observe();row=self.focus_call(value)
+                self.assertEqual((row['rejectCode'],row['returned'],row['hrObserved'],row['vtObserved']),(reject,1,1,1))
+                self.assertEqual((value['verified'],value['stageCode'],value['hresult']),(0,4,0))
+                self.assertEqual(self.fixture.calls.count(('focus',)),1);self.balanced()
+
+    def test_later_support_or_cleanup_failure_cannot_be_hidden_by_getter_observation(self):
+        for missing,cleanup in ((True,False),(False,True)):
+            with self.subTest(missingText=missing,cleanupFailure=cleanup):
+                self.fixture=RawFixture();self.owner=Owner(REQUEST)
+                if missing:self.fixture.supported={'ia2'}
+                if cleanup:self.fixture.clear_hr=-2147467259
+                value=self.observe();row=self.focus_call(value)
+                self.assertEqual(row,dict(attempted=1,returned=1,hrObserved=1,hr=0,vtObserved=1,rejectCode=0))
+                self.assertEqual((value['verified'],value['stageCode']),(0,8 if missing else 11))
+                self.assertEqual(value['hresult'],0x80004002 if missing else 0)
+                self.assertEqual(value['ownerAfter'],0 if missing else 1)
+                self.assertEqual(self.fixture.calls.count(('focus',)),1)
+        self.owner=Owner(REQUEST);self.owner.fail_at=1;self.fixture=RawFixture()
+        value=self.observe();self.assertFalse('focusCall' in value)
+        self.assertEqual((value['verified'],value['stageCode']),(0,1))
+
+    def failure_record(self,value):
+        return dict(case='korean-ui-writer',module='writer',success=False,stage=probe.STAGES[value['stageCode']],
+            **{k:REQUEST[k] for k in ('officePid','officeCreationTime','childHwnd')},writerOsAccessibility=value)
+
+    def test_optional_diagnostic_preserves_base_schema_and_exact_legacy_summary_vector(self):
+        import writer_os_summary as summary
+        self.fixture.focus_vt=0;value=self.observe();self.focus_call(value)
+        base={key:value[key] for key in probe._MAXIMA}
+        self.assertTrue(probe.validate(base,REQUEST)==base)
+        self.assertEqual(len(summary.FIELDS),23)
+        self.assertEqual(tuple(k for k in probe._MAXIMA if k!='schemaVersion'),summary.FIELDS)
+        original=summary.project(self.failure_record(base));extended=summary.project(self.failure_record(value))
+        self.assertTrue(original is not None and original==extended,'Legacy numeric vector changed')
+        self.assertTrue(summary.valid(extended));self.assertEqual(len(extended),23)
+        self.assertEqual(value['focusCall']['rejectCode'],3)
+
+    def test_both_closed_consumers_reject_malformed_extension_without_broad_subset_acceptance(self):
+        import writer_os_summary as summary
+        self.fixture.focus_vt=0;value=self.observe();good=self.focus_call(value)
+        malformed=[None,[],{},dict(good,extra=1)]
+        limits=dict(attempted=1,returned=1,hrObserved=1,hr=0xffffffff,vtObserved=1,rejectCode=5)
+        for key in good:
+            for replacement in (True,-1,limits[key]+1,'synthetic'):
+                malformed.append(dict(good,**{key:replacement}))
+            malformed.append({k:v for k,v in good.items() if k!=key})
+        malformed.extend((dict(good,returned=0),dict(good,hrObserved=0),dict(good,vtObserved=0),
+                          dict(good,rejectCode=6),dict(good,hr=2**32)))
+        for index,row in enumerate(malformed):
+            with self.subTest(mutation=index):
+                candidate=dict(value,focusCall=row)
+                with self.assertRaises(ValueError):probe.validate(candidate,REQUEST)
+                self.assertTrue(summary.project(self.failure_record(candidate)) is None)
+        with self.assertRaises(ValueError):probe.validate(dict(value,otherDiagnostic=0),REQUEST)
+        self.assertTrue(summary.project(self.failure_record(dict(value,otherDiagnostic=0))) is None)
+
+    def test_code_zero_cannot_hide_fully_observed_hresult_or_unsupported_variant_rejection(self):
+        import writer_os_summary as summary
+        for failure in ('hresult','empty-variant'):
+            self.fixture=RawFixture();self.owner=Owner(REQUEST)
+            if failure=='hresult':self.fixture.focus_hr=-2147467259
+            else:self.fixture.focus_vt=0
+            value=self.observe();row=dict(self.focus_call(value),rejectCode=0)
+            candidate=dict(value,focusCall=row)
+            with self.subTest(failure=failure,consumer='producer'),self.assertRaises(ValueError):
+                probe.validate(candidate,REQUEST)
+            with self.subTest(failure=failure,consumer='summary'):
+                self.assertTrue(summary.project(self.failure_record(candidate)) is None,
+                    'Complete getter failure cannot be relabeled as code zero')
+            self.assertEqual(self.fixture.calls.count(('focus',)),1);self.balanced()
+
+    def test_code_zero_partial_observations_remain_unknown_and_do_not_promote_old_zero_fields(self):
+        import writer_os_summary as summary
+        self.fixture.focus_vt=0;value=self.observe();self.focus_call(value)
+        partials=(dict(attempted=0,returned=0,hrObserved=0,hr=0,vtObserved=0,rejectCode=0),
+            dict(attempted=1,returned=0,hrObserved=0,hr=0,vtObserved=0,rejectCode=0),
+            dict(attempted=1,returned=1,hrObserved=0,hr=0,vtObserved=0,rejectCode=0),
+            dict(attempted=1,returned=1,hrObserved=1,hr=0,vtObserved=0,rejectCode=0),
+            dict(attempted=1,returned=1,hrObserved=1,hr=0x80004005,vtObserved=0,rejectCode=0))
+        base={key:value[key] for key in probe._MAXIMA}
+        original=summary.project(self.failure_record(base))
+        for index,row in enumerate(partials):
+            with self.subTest(partial=index):
+                candidate=dict(value,focusCall=row)
+                self.assertTrue(probe.validate(candidate,REQUEST)==candidate)
+                self.assertTrue(summary.project(self.failure_record(candidate))==original)
+                self.assertEqual((candidate['verified'],candidate['hresult'],candidate['focusVariantType']),(0,0,0))
+                self.assertEqual(candidate['focusCall'],row)
+        self.assertEqual(self.fixture.calls.count(('focus',)),1);self.balanced()
 
 
 if __name__ == '__main__':
