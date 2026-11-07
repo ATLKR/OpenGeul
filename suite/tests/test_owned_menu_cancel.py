@@ -6,6 +6,7 @@ import sys
 import tempfile
 from types import SimpleNamespace as NS,MethodType
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
 SOURCE=Path(__file__).resolve().parents[1]/'e2e/owned_menu_cancel.py'
@@ -79,12 +80,13 @@ class OwnedMenuCancelTests(unittest.TestCase):
         self.assertTrue(SOURCE.is_file(),'Native-menu TaskDialog cancel requires its own measured policy')
         spec=importlib.util.spec_from_file_location('tested_menu_cancel',SOURCE)
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
-    def fixture(self,command='exit'):
+    def fixture(self,command='exit',*,suite_root=None):
         module=self.feature()
         from test_owned_native_menu import Clock,Probe
         from owned_native_menu import click_native_menu_action
-        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup);root=Path(tmp.name)
-        out=root/'evidence';out.mkdir();clock=Clock();clock.now=1.
+        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup);temporary=Path(tmp.name)
+        root=temporary if suite_root is None else suite_root
+        out=temporary/'evidence';out.mkdir();clock=Clock();clock.now=1.
         process=NS(pid=77,_handle=8,args=[str(root/'OpenGeul.Office.exe')],poll=lambda:None,
             opengeul_suite_root=root,opengeul_evidence_output=out,opengeul_evidence_case='blank-calc')
         api=NS(attachment=lambda hwnd:(55,56,88),user=NS(GetPropW=lambda hwnd,name:1))
@@ -143,6 +145,114 @@ class OwnedMenuCancelTests(unittest.TestCase):
     def test_cancel_probe_uses_native_menu_private_provider_timeout_policy(self):
         from owned_native_menu import NativeMenuProbe
         self.assertTrue(issubclass(self.feature().NativeMenuCancelProbe,NativeMenuProbe))
+
+    def test_entry_selects_probe_once_before_origin_replay_with_the_original_action_deadline(self):
+        import native_menu_source_selection as source
+        f=self.fixture();module,api,process,record,clock,probe=f;calls=[]
+        replay=module.require_native_menu_action
+        def select(actual,deadline,actual_clock,*,build,supplied=None):
+            calls.append(('select',actual,deadline,actual_clock,supplied))
+            return source.selected_native_menu_probe(actual,deadline,actual_clock,build=build,supplied=supplied)
+        def origin(*args,**kwargs):calls.append(('origin',));return replay(*args,**kwargs)
+        with patch.object(module,'selected_native_menu_probe',select,create=True),patch.object(module,'require_native_menu_action',origin):
+            value=self.run_cancel(f)
+        self.assertEqual([row[0] for row in calls],['select','origin'])
+        self.assertIs(calls[0][1],process);self.assertIs(calls[0][3],clock);self.assertIs(calls[0][4],probe)
+        self.assertEqual(calls[0][2],value['startedAt']+5)
+
+    def test_cancel_constructor_forwards_the_identical_optional_source_selection(self):
+        import inspect
+        module=self.feature();self.assertIn('source_selection',inspect.signature(module.NativeMenuCancelProbe).parameters)
+        context=self.source_context()[1];calls=[]
+        def initialize(probe,deadline,clock,**options):calls.append((deadline,clock,options))
+        with patch.object(module.NativeMenuProbe,'__init__',initialize):
+            probe=module.NativeMenuCancelProbe(6.,lambda:1.,11,44,CAPTION,source_selection=context)
+        self.assertEqual(calls[0][0],6.);self.assertIs(calls[0][2]['source_selection'],context)
+        self.assertEqual((probe.document,probe.dialog,probe.expected_caption),(11,44,CAPTION))
+
+    def test_actual_cancel_point_uses_strict_global_control_without_an_office_target(self):
+        module=self.feature();probe=module.NativeMenuCancelProbe.__new__(module.NativeMenuCancelProbe)
+        target=object();other=object();selected=[target];calls=[]
+        probe._call=lambda fn,*args:fn(*args)
+        def pid(hwnd,out):out._obj.value=77;return 7
+        probe.user=NS(WindowFromPhysicalPoint=lambda point:4321,GetWindowThreadProcessId=pid,
+            GetAncestor=lambda hwnd,kind:44,IsChild=lambda parent,child:False)
+        probe._raw=lambda element:dict(nativeHwnd=4321)
+        probe.desktop=NS(from_point=lambda *point:NS(element_info=NS(_element=selected[0])))
+        probe.uia=NS(iuia=NS(CompareElements=lambda left,right:left is right))
+        probe._provider_local_point_v4=lambda *args,**kwargs:calls.append('forbidden-local-provider')
+        control=NS(element_info=NS(_element=target))
+        self.assertNotIn('_active_target',vars(probe))
+        try:result=probe.point_snapshot(44,[60,115],control)
+        except AttributeError:self.fail('Shell Cancel incorrectly inherited the Office target dependency')
+        self.assertEqual((result['pid'],result['rootHwnd'],result['hitHwnd']),(77,44,4321))
+        self.assertIs(result['uiaMatches'],True);self.assertIs(result['withinControl'],True)
+        selected[0]=other;self.assertIs(probe.point_snapshot(44,[60,115],control)['uiaMatches'],False)
+        self.assertEqual(calls,[])
+
+    @classmethod
+    def source_context(cls):
+        if not hasattr(cls,'_source_context'):
+            from suite.tests.test_native_menu_source_selection import SourceMenuSelectionTests
+            case=SourceMenuSelectionTests(methodName='test_prepares_actual_bare_gate_context_and_freezes_contexts')
+            case.setUp();cls.addClassCleanup(case.doCleanups)
+            cls._source_context=(case,case.selected(case.prepared()))
+        return cls._source_context
+
+    def selected_fixture(self):
+        case,selection=self.source_context()
+        f=self.fixture(suite_root=case.suite);module,api,process,record,clock,probe=f
+        process.opengeul_source_menu_selection=selection;probe.source_selection=selection
+        clock.now=selection.launch_deadline+200
+        return f,selection
+
+    def test_selected_entry_rechecks_once_and_joins_current_generation_before_dpi(self):
+        import owned_native_menu as core
+        import time
+        self.assertTrue(callable(getattr(core,'_bind_source_generation',None)))
+        f,selection=self.selected_fixture();module,api,process,record,clock,probe=f
+        admission=selection.prepared.admission;calls=[];rechecks=[]
+        verify=type(admission).verify_provider_files;bind=core._bind_source_generation
+        def checked(actual,deadline):rechecks.append((actual,deadline));return verify(actual,deadline)
+        def replay(*args,**kwargs):calls.append('origin');self.assertTrue(kwargs.get('source_admission') is admission)
+        def binding(*args):
+            calls.append('bind');self.assertNotIn('dpi-enter',probe.calls)
+            self.assertEqual(args[5]['handleValue'],10);return bind(*args)
+        with patch.object(time,'monotonic',clock),patch.object(type(admission),'verify_provider_files',checked), \
+                patch.object(module,'require_native_menu_action',replay),patch.object(core,'_bind_source_generation',binding):
+            value=self.run_cancel(f)
+        self.assertEqual(calls,['origin','bind']);self.assertEqual(len(rechecks),1)
+        self.assertIs(rechecks[0][0],admission);self.assertEqual(rechecks[0][1],value['deadline'])
+        self.assertEqual(value['sourceMenu']['admission']['admissionSha256'],admission.admission_sha256)
+        self.assertEqual(value['sourceMenu']['generation']['engineHandleValue'],10)
+        self.assertEqual(value['sourceMenu']['generation']['shellHandleValue'],8)
+        self.assertTrue(value['success'])
+
+    def test_selected_factory_rejection_never_replays_origin_opens_or_inputs(self):
+        import time
+        for reason in ('probe','fake','pending','provider','late'):
+            with self.subTest(reason=reason):
+                f,selection=self.selected_fixture();module,api,process,record,clock,probe=f
+                if reason=='probe':probe.source_selection=self.source_context()[0].selected(selection.prepared)
+                elif reason=='fake':process.opengeul_source_menu_selection=True
+                import native_menu_msaa_hit as hit
+                admission=selection.prepared.admission;verify=type(admission).verify_provider_files
+                def checked(actual,deadline):
+                    if reason=='provider':raise ValueError('Synthetic provider recheck rejection')
+                    result=verify(actual,deadline)
+                    if reason=='late':clock.now=deadline
+                    return result
+                with patch.object(time,'monotonic',clock), \
+                        patch.object(type(admission),'verify_provider_files',checked), \
+                        patch.object(hit,'pending_msaa_hit',return_value=object() if reason=='pending' else None), \
+                        patch.object(module,'require_native_menu_action',side_effect=AssertionError('Rejected selection reached origin')):
+                    with self.assertRaises(ValueError):self.run_cancel(f)
+                self.assertEqual(probe.calls,[])
+
+    def test_attachment_must_be_current_before_generation_binding_or_dpi(self):
+        f=self.fixture();f[1].attachment=lambda hwnd:(55,999,88)
+        with self.assertRaises(AssertionError):self.run_cancel(f)
+        self.assertNotIn('dpi-enter',f[-1].calls);self.assertNotIn('click',f[-1].calls)
 
     def schema_fixture(self,bad=None):
         """Exercise production fixed queries, retaining no arbitrary UIA name."""

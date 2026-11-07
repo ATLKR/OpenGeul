@@ -11,8 +11,10 @@ from pathlib import Path
 import time
 from types import SimpleNamespace
 
-from owned_control_actions import NativeWindowClassUnavailable
+from owned_control_actions import NativeWindowClassUnavailable,NativeControlProbe
+import owned_native_menu as _native_menu
 from owned_native_menu import NativeMenuProbe,require_native_menu_action,retain_native_menu_receipt
+from native_menu_source_selection import selected_native_menu_probe
 from generated_calc_close import _require_native_titlebar_close
 
 HEADING='변경 내용을 저장하시겠습니까?'
@@ -90,14 +92,19 @@ def cancel_native_menu_prompt(api,process,document,record,dialog,caption,*,probe
         startedAt=start,deadline=deadline,dpiScope={},snapshots=[],hits=[],
         inputCallAttempts=0,requestedInputs=0,insertedInputs=None,engineHandleReleased=False)
     previous=record.setdefault('nativeMenuPromptCancels',[]);previous.append(value)
-    handle=None;primary=None
+    handle=None;primary=None;supplied=probe;probe=None
     def budget():assert clock()<deadline, 'Original native-menu Cancel deadline expired'
     try:
+        budget()
+        probe=selected_native_menu_probe(process,deadline,clock,
+            build=lambda selection:NativeMenuCancelProbe(deadline,clock,document,dialog,caption,source_selection=selection),supplied=supplied)
         budget();origins=record.get('nativeMenuActions',[])
         assert type(origins) is list and 0<len(origins)<=128, 'Cancel requires its original native menu trigger'
         index=len(origins)-1;origin=origins[index]
         assert origin['command'] in ('home','exit') and origin['gesture'] is False, 'Unrelated native menu trigger'
-        require_native_menu_action(origin,process.pid,document,origin['command'])
+        selection=getattr(probe,'source_selection',None)
+        if selection is None:require_native_menu_action(origin,process.pid,document,origin['command'])
+        else:require_native_menu_action(origin,process.pid,document,origin['command'],source_admission=selection.prepared.admission)
         assert origin['finishedAt']<=start, 'Cancel precedes its native menu trigger'
         assert all(row.get('originIndex')!=index for row in previous[:-1]), 'Native menu prompt trigger already consumed'
         value.update(originIndex=index,nativeMenuTrigger=copy.deepcopy(origin),binding=copy.deepcopy(origin['binding']))
@@ -107,12 +114,14 @@ def cancel_native_menu_prompt(api,process,document,record,dialog,caption,*,probe
         suite=Path(process.opengeul_suite_root).resolve()
         assert Path(shell['image']).resolve()==suite/'OpenGeul.Office.exe'
         assert Path(engine['image']).resolve()==suite/'Office/program/soffice.bin'
-        probe=probe or NativeMenuCancelProbe(deadline,clock,document,dialog,caption)
         observed_shell=probe.process_snapshot(process)
         assert _identity(observed_shell)==_identity(shell) and observed_shell['handleValue']==shell['handleValue'], 'Original menu shell generation changed'
-        handle=probe.open_engine(binding['officePid']);current_engine=probe.engine_snapshot(handle)
+        handle=probe.open_engine(binding['officePid']);_positive(handle);current_engine=probe.engine_snapshot(handle)
         assert _identity(current_engine)==_identity(engine), 'Original menu engine generation changed'
+        assert current_engine['handleValue']==handle
         value.update(originalProcess=copy.deepcopy(shell),originalEngine=copy.deepcopy(engine),engineHandleValue=handle)
+        assert api.attachment(document)==(binding['parent'],binding['child'],binding['officePid'])
+        budget();_native_menu._bind_source_generation(probe,process,suite,binding,shell,current_engine,handle,value)
         probe.enter_dpi(value['dpiScope']);assert value['dpiScope']['verified'] is True
         def continuity():
             budget();now=probe.process_snapshot(process)
@@ -167,9 +176,11 @@ def cancel_native_menu_prompt(api,process,document,record,dialog,caption,*,probe
 
 
 class NativeMenuCancelProbe(NativeMenuProbe):
-    def __init__(self,deadline,clock,document,dialog,caption):
-        super().__init__(deadline,clock)
+    def __init__(self,deadline,clock,document,dialog,caption,*,source_selection=None):
+        super().__init__(deadline,clock,source_selection=source_selection)
         self.document,self.dialog,self.expected_caption=document,dialog,caption
+    def point_snapshot(self,scope,point,control):
+        return NativeControlProbe.point_snapshot(self,scope,point,control)
     def _window(self,hwnd):
         row=self.window_snapshot(hwnd)
         row['ownerHwnd']=int(self._call(self.user.GetWindow,hwnd,4) or 0)

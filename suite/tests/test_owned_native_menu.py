@@ -1987,3 +1987,98 @@ class NativeMenuPointModeTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
                 self.assertEqual(r['nativeMenuActions'][-1]['pointers'],[])
                 self.assertEqual(r['nativeMenuActions'][-1]['keys'],[])
+
+
+class SourceSelectedMenuCoreTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        cls.selected_fixture=SourceMenuSelectionTests(methodName='test_prepares_actual_bare_gate_context_and_freezes_contexts')
+        cls.selected_fixture.setUp();cls.addClassCleanup(cls.selected_fixture.doCleanups)
+        cls.prepared=cls.selected_fixture.prepared();cls.selection=cls.selected_fixture.selected(cls.prepared)
+
+    def selected_case(self):
+        owner=OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
+        module,api,process,record,clock,probe=owner.fixture()
+        root=self.prepared.admission.suite_root
+        process.opengeul_suite_root=root;process.args=[str(root/'OpenGeul.Office.exe')]
+        process.opengeul_source_menu_selection=self.selection
+        probe.source_selection=self.selection;probe._native_point_profile=True;probe._native_point_profile_version=4
+        probe._native_identity_diagnostic=0
+        probe.shell['image']=str(root/'OpenGeul.Office.exe')
+        probe.engine.update(image=str(root/'Office/program/soffice.bin'),handleValue=9)
+        return module,api,process,record,clock,probe
+
+    def test_source_selected_core_has_explicit_authority_and_generation_seams(self):
+        import inspect
+        owner=OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
+        module,*_=owner.real_chrome_fixture()
+        self.assertIn('source_selection',inspect.signature(module.NativeMenuProbe).parameters)
+        self.assertIn('source_admission',inspect.signature(module.require_native_menu_action).parameters)
+        for name in ('require_source_qualified_native_menu_action','_source_admission_summary','_bind_source_generation'):
+            self.assertTrue(callable(getattr(module,name,None)),name)
+
+    def test_selected_action_rechecks_once_and_binds_actual_generation_before_input(self):
+        import native_menu_source_selection as selected
+        module,api,process,record,clock,probe=self.selected_case()
+        with patch.object(selected.time,'monotonic',clock),patch.object(selected,'selected_native_menu_probe',wraps=selected.selected_native_menu_probe) as entry:
+            action=module.click_native_menu_action(api,process,11,record,'save',probe=probe,clock=clock)
+        self.assertEqual(entry.call_count,1)
+        self.assertIn('sourceMenu',action)
+        self.assertEqual(action['sourceMenu']['admission'],module._source_admission_summary(self.prepared.admission))
+        self.assertEqual(action['sourceMenu']['generation'],dict(document=11,parent=55,child=56,officePid=88,
+            shellPid=77,shellCreationTime=100,shellHandleValue=8,engineCreationTime=200,engineHandleValue=9))
+        self.assertIs(module.require_native_menu_action(action,77,11,'save',source_admission=self.prepared.admission),action)
+        with self.assertRaises(AssertionError):module.require_native_menu_action(action,77,11,'save')
+        with self.assertRaises(ValueError):module.require_native_menu_action(action,77,11,'save',source_admission=action['sourceMenu']['admission'])
+
+    def test_selected_generation_or_supplied_context_mismatch_cannot_send_input(self):
+        import native_menu_source_selection as selected
+        for mismatch in ('probe','suite','handle'):
+            with self.subTest(mismatch=mismatch):
+                module,api,process,record,clock,probe=self.selected_case()
+                if mismatch=='probe':probe.source_selection=None
+                elif mismatch=='suite':probe.shell['image']=str(process.opengeul_evidence_output/'OpenGeul.Office.exe')
+                else:probe.engine['handleValue']=10
+                with patch.object(selected.time,'monotonic',clock),self.assertRaises((AssertionError,ValueError)):
+                    module.click_native_menu_action(api,process,11,record,'save',probe=probe,clock=clock)
+                self.assertFalse(any(row[0]=='click' for row in probe.calls if type(row) is tuple))
+
+    def test_native_view_checks_the_actual_selection_before_historical_origin_replay(self):
+        import native_menu_source_selection as selected
+        module,api,process,record,clock,probe=self.selected_case();record['module']='writer'
+        with patch.object(selected.time,'monotonic',clock):
+            module.click_native_menu_action(api,process,11,record,'printPreview',probe=probe,clock=clock)
+        outcome=None
+        with patch.object(selected,'selected_native_menu_probe',side_effect=ValueError('Synthetic selected view entry')) as entry:
+            try:module.observe_native_view(api,process,11,record,module='writer',preview=True,probe=probe,clock=clock)
+            except BaseException as exc:outcome=type(exc)
+        self.assertIs(outcome,ValueError)
+        self.assertEqual(entry.call_count,1)
+
+    def test_source_admission_failure_starts_no_failure_provider_queries(self):
+        import native_menu_source_selection as selected
+        module,api,process,record,clock,probe=self.selected_case();queries=[]
+        probe.capture_primary_failure=lambda _error:queries.append(1)
+        probe.observe_failure_context=lambda _binding:queries.append(2)
+        with patch.object(selected,'selected_native_menu_probe',side_effect=ValueError('Synthetic rejected source')):
+            with self.assertRaises(ValueError):
+                module.click_native_menu_action(api,process,11,record,'save',probe=probe,clock=clock)
+        self.assertEqual(queries,[])
+        self.assertEqual(record['nativeMenuActions'][-1]['pointers'],[])
+        self.assertEqual(record['nativeMenuActions'][-1]['keys'],[])
+
+    def test_global_source_action_rejects_untyped_header_or_unjoined_use(self):
+        import native_menu_source_selection as selected
+        module,api,process,record,clock,probe=self.selected_case()
+        with patch.object(selected.time,'monotonic',clock):
+            action=module.click_native_menu_action(api,process,11,record,'save',probe=probe,clock=clock)
+        changes=(lambda p:p['sourceMenu']['generation'].update(document=True),
+            lambda p:p['sourceMenu']['generation'].update(document=11.),
+            lambda p:p.update(startedAt=True),lambda p:p.update(sourcePointSnapshots=()),
+            lambda p:p['pointUses'].append(dict(sourceScopeId=1,at=p['startedAt'],useCode=1)))
+        for index,change in enumerate(changes):
+            with self.subTest(case=index):
+                changed=copy.deepcopy(action);change(changed)
+                with self.assertRaises(AssertionError):
+                    module.require_native_menu_action(changed,77,11,'save',source_admission=self.prepared.admission)

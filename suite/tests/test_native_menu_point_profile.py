@@ -9,6 +9,138 @@ import test_owned_native_menu as boundaries
 import test_native_menu_point_proof as receipts
 
 
+def _source_qualified_action_context(owner,admission,selection,*,started_at=1.,call_step=.001):
+    """Actual source policy with fresh SDK work at each synthetic native boundary."""
+    import native_menu_msaa_hit as helper
+    import test_native_menu_msaa_hit as metadata
+    policy=boundaries.OwnedNativeMenuTests(methodName='runTest');owner.addCleanup(policy.doCleanups)
+    module,api,process,record,clock,boundary=policy.real_chrome_fixture()
+    root=admission.suite_root;probe=boundary.probe;clock.now=started_at;probe.deadline=started_at+5
+    process.opengeul_suite_root=root;process.args=[str(root/'OpenGeul.Office.exe')]
+    process.opengeul_source_menu_selection=selection
+    probe.source_selection=selection;probe._native_point_profile=True;probe._native_point_profile_version=4
+    probe._native_identity_diagnostic=0;probe._physical_file_refresh=True
+    probe._provider_creator=dict(threadId=123,mta=True);probe._mta_snapshot=lambda:(123,True)
+    boundary.native.shell['image']=str(root/'OpenGeul.Office.exe')
+    boundary.native.engine.update(image=str(root/'Office/program/soffice.bin'),handleValue=9)
+    window=probe.window_snapshot
+    probe.window_snapshot=lambda hwnd:dict(window(hwnd),rectangle=[0,45,258,1000] if hwnd==99 else [0,0,800,1100],iconic=False,cloaked=0)
+    def class_name(hwnd,buffer,size):buffer.value='SALTMPSUBFRAME';return len(buffer.value)
+    probe.user.GetClassNameW=class_name
+    probe.user.GetWindowLongW=lambda hwnd,index:0x80000000 if index==-16 else 0x80
+    class Pane(boundary.Node):
+        @property
+        def CurrentControlType(self):return 50033
+        @property
+        def CurrentNativeWindowHandle(self):return 99
+    original_from_point=boundary.from_point
+    probe.uia.iuia.ElementFromPoint=lambda point:original_from_point(point) if point.y<50 else Pane('popup')
+    state=NS(module=module,api=api,process=process,record=record,clock=clock,probe=probe,boundary=boundary,
+        admission=admission,selection=selection,runs=[],call_step=call_step,call_steps={},pending_on=0,
+        pending_returned=False,post_pending_queries=0,cursor=[50,30],current_receipt=None,
+        native_inputs=[],partial_target=None,expire_cursor_target=None,expire_keyboard=False,
+        partial_keyboard=False,expire_after_partial=False)
+    for name in ('_call','_uia_call','_popup_exposure','_fresh_proof_with_refs'):
+        original=getattr(probe,name)
+        def guarded(*args,_original=original,**kwargs):
+            if state.pending_returned:state.post_pending_queries+=1
+            return _original(*args,**kwargs)
+        setattr(probe,name,guarded)
+    def begin(fresh_refs,negative,scope_id,point,*,admission,captured_at,action_deadline,exposure):
+        role=module._target_role(probe._active_target)
+        token={id(probe._identity_refs['file']):1,id(fresh_refs['file']):11,
+            id(fresh_refs[role]):2,id(probe._identity_refs[role]):3}
+        for value in negative:
+            if id(value) not in token:token[id(value)]=100+len(token)
+        class ScopedCalls(metadata.Ia2DiagnosticCalls):
+            def call(self,key,pointer,*args):
+                if isinstance(pointer,boundary.Node):pointer=token[id(pointer)]
+                if key=='compare':args=(token[id(args[0])],token[id(args[1])],args[2])
+                if key=='hit_test':
+                    value=pointer.value if isinstance(pointer,C.c_void_p) else pointer
+                    assert value==201 and args[:2]==tuple(point)
+                    self.calls.append((key,value));args[2]._obj.vt=9;args[2]._obj._.c_void_p=401;hr=0
+                else:hr=super().call(key,pointer,*args)
+                if key!='release':clock.now+=state.call_steps.get(scope_id,state.call_step)
+                return hr
+        sdk=ScopedCalls();sdk.identities.update({203:303,222:322})
+        sdk.tuples={pointer:(value[0],56) for pointer,value in sdk.tuples.items()}
+        platform=metadata.FakePlatform();platform.clock=clock
+        platform.window_domain=lambda hwnd,source,scope:1 if hwnd==scope.child_hwnd else 0
+        scope=probe._identity_scope;binding=scope['binding']
+        request=helper.MsaaHitScope(scope_id,binding['officePid'],scope['officeCreationTime'],scope['shellPid'],
+            scope['shellCreationTime'],binding['parent'],binding['child'],*point)
+        source=helper.MsaaHitSourceV4(9,probe._identity_refs['file'],fresh_refs['file'],fresh_refs[role],
+            probe._identity_refs[role],tuple(negative),probe._point_source['shellHandle'],
+            probe._point_source['engineHandle'],(probe,fresh_refs,admission),captured_at,action_deadline,
+            binding['document'],exposure['hwnd'],exposure['threadId'],tuple(exposure['ownerChain']),admission,admission.admission_sha256)
+        worker=helper.run_source_qualified_ia2_point_v4(source,request,sdk,platform,action_deadline)
+        packet=helper._record_v4(request,False);packet.update(worker)
+        packet.update(stageCode=13,nativeAttempted=1,nativeExit=1,threadClosed=1,processesClosed=1,
+            controllerPid=500,threadId=124,threadBirth=300+scope_id,threadIdentity=1,callbackIdentity=1,
+            exitCodeObserved=1,nativeExitCode=0)
+        lease=NS(scope=request,pending=scope_id==state.pending_on,source=source)
+        if lease.pending:packet['pending']=1
+        def wait():
+            state.pending_returned=lease.pending
+            return copy.deepcopy(packet)
+        lease.wait=wait
+        state.runs.append(NS(source=source,fresh_refs=fresh_refs,sdk=sdk,worker=worker,packet=packet,lease=lease))
+        return lease
+    probe._begin_source_qualified_ia2_point_v4=begin
+    move=probe.move
+    def moved(point,receipt):move(point,receipt);state.cursor=list(point)
+    probe.move=moved
+    def position(out):
+        out._obj.x,out._obj.y=state.cursor
+        if state.expire_cursor_target==probe._active_target:clock.now=probe.deadline
+        return 1
+    def inserted(count,payload,size):
+        receipt=state.current_receipt;target=receipt['target'] if receipt else probe._active_target
+        state.native_inputs.append(dict(kind='mouse',count=count,at=clock(),deadline=probe.deadline,target=target))
+        if count==1:return 1  # Existing owned-prefix release, not a second click.
+        assert count==2
+        boundary.native.calls.append(('click',target));clock.now+=.01
+        if state.partial_target==target:
+            if state.expire_after_partial:clock.now=probe.deadline
+            return 1
+        boundary.native.opened=target in ('file','new')
+        return 2
+    probe.user.GetPhysicalCursorPos=position;probe.user.GetSystemMetrics=lambda code:0;probe.user.SendInput=inserted
+    def clicked(receipt):
+        state.current_receipt=receipt
+        try:return module.NativeMenuProbe.click(probe,receipt)
+        finally:state.current_receipt=None
+    probe.click=clicked
+    from counted_editor_shortcuts import NativeShortcutProbe
+    class Keyboard(NativeShortcutProbe):
+        def send(self,payload):
+            if state.expire_keyboard:clock.now=self.deadline
+            return super().send(payload)
+    keyboard=Keyboard.__new__(Keyboard);keyboard.clock=clock;keyboard.deadline=started_at+5
+    def key_inserted(count,payload,size):
+        state.native_inputs.append(dict(kind='keyboard',count=count,at=clock(),deadline=keyboard.deadline,target=probe._active_target))
+        if count==1:return 1
+        returned=boundary.send(payload)
+        return 1 if state.partial_keyboard else returned
+    keyboard.user=NS(SendInput=key_inserted,GetKeyboardLayout=lambda thread:0x04090409,
+        GetKeyState=lambda key:0,GetAsyncKeyState=lambda key:0)
+    probe.keyboard_probe=keyboard;del probe._keyboard;state.keyboard=keyboard
+    def run(operation='save',gesture=False):
+        import native_menu_source_selection as selected
+        with patch.object(selected.time,'monotonic',clock):
+            return (module.inspect_native_menu if gesture else module.click_native_menu_action)(api,process,11,record,
+                operation,probe=probe,clock=clock)
+    state.run=run
+    owner._source_qualified_contexts=getattr(owner,'_source_qualified_contexts',[])+[state]
+    return state
+
+
+def source_qualified_action_fixture(owner,admission,selection,operation='save',gesture=False,*,started_at=1.,call_step=.001):
+    state=_source_qualified_action_context(owner,admission,selection,started_at=started_at,call_step=call_step)
+    return state.module,state.run(operation,gesture)
+
+
 class NativeMenuPointProfileTests(unittest.TestCase):
     def test_private_client_creation_measures_mta_before_create_and_again_after_it(self):
         owner=boundaries.OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
@@ -742,6 +874,103 @@ class NativeSourceQualifiedPointV4Tests(unittest.TestCase):
                 changed=copy.deepcopy(original);change(changed)
                 with self.assertRaises(AssertionError):
                     module._require_provider_point_v4(changed,binding,77,'save',admission_sha256=self.admission.admission_sha256,now=1.)
+
+
+class SourceQualifiedLiveMenuTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        cls.gate=SourceMenuSelectionTests(methodName='test_prepares_actual_bare_gate_context_and_freezes_contexts')
+        cls.gate.setUp();cls.addClassCleanup(cls.gate.doCleanups)
+        cls.prepared=cls.gate.prepared();cls.selection=cls.gate.selected(cls.prepared)
+
+    def context(self,**options):
+        return _source_qualified_action_context(self,self.prepared.admission,self.selection,**options)
+
+    def action(self,**options):
+        return source_qualified_action_fixture(self,self.prepared.admission,self.selection,**options)
+
+    def points(self,action):
+        item=action['pointers'][-1]
+        for snapshot in item['snapshots']:self.assertIn('targetPointProof',snapshot)
+        return [item['snapshots'][0]['targetPointProof'],item['snapshots'][1]['targetPointProof'],
+            item['hits'][0],item['snapshots'][2]['targetPointProof'],item['hits'][1]]
+
+    def test_actual_local_dispatch_keeps_five_independent_fresh_worker_measurements(self):
+        module,action=self.action();context=self._source_qualified_contexts[-1]
+        points=self.points(action);self.assertEqual(len(context.runs),5)
+        self.assertEqual([point['providerLocalProof']['sourceScopeId'] for point in points],[1,2,3,4,5])
+        self.assertEqual(len({id(run.fresh_refs) for run in context.runs}),5)
+        self.assertEqual(len({id(run.source.fresh_file) for run in context.runs}),5)
+        self.assertEqual(len({id(run.sdk) for run in context.runs}),5)
+        for point,run in zip(points,context.runs):
+            self.assertIs(run.source.fresh_file,run.fresh_refs['file'])
+            self.assertIs(run.source.fresh_target,run.fresh_refs['target:save'])
+            self.assertIs(run.source.admission,self.prepared.admission)
+            self.assertEqual(point['pointMethod'],'owned-popup-and-source-qualified-ia2-hit-v4')
+            self.assertIs(point['uiaMatches'],False);self.assertIn('pointObservedAt',point)
+            self.assertEqual(len(run.sdk.calls),51+run.worker['negativeCount'])
+            self.assertEqual(run.worker['referencesAcquired'],26)
+            self.assertEqual(run.sdk.releases,list(reversed(run.sdk.owned_outputs)))
+            self.assertEqual(run.worker['localKnown'],0);self.assertEqual(run.worker['localMatch'],0)
+        self.assertEqual([(use['sourceScopeId'],use['useCode']) for use in action['pointUses']],
+            [(1,1),(2,1),(3,2),(4,1),(5,2),(5,3)])
+        self.assertIs(module.require_native_menu_action(action,77,11,'save',source_admission=self.prepared.admission),action)
+
+    def test_current_pointer_uses_last_hit_after_the_prior_snapshot_age_has_expired(self):
+        context=self.context(call_step=.006);context.call_steps[5]=.024
+        action=context.run();points=self.points(action)
+        first=points[0]['providerLocalProof'];previous=points[3]['providerLocalProof'];last=points[4]['providerLocalProof']
+        self.assertGreater(last['capturedAt'],first['capturedAt']+1.0)
+        self.assertGreater(action['pointers'][-1]['inputStartedAt'],first['capturedAt']+1.5)
+        self.assertGreater(action['pointers'][-1]['inputStartedAt'],previous['effectiveDeadline'])
+        self.assertLess(action['pointers'][-1]['inputStartedAt'],last['effectiveDeadline'])
+        self.assertEqual(action['pointUses'][-1]['sourceScopeId'],5)
+        actual=[row for row in context.native_inputs if row['kind']=='mouse' and row['target']=='save']
+        self.assertEqual(len(actual),1);self.assertEqual(actual[0]['deadline'],last['effectiveDeadline'])
+        self.assertEqual(context.probe.deadline,action['deadline'])
+
+    def test_expiry_at_the_actual_base_click_guard_prevents_save_sendinput(self):
+        context=self.context();context.expire_cursor_target='save'
+        with self.assertRaises(AssertionError):context.run()
+        self.assertFalse(any(row['target']=='save' for row in context.native_inputs))
+        self.assertEqual([row['target'] for row in context.native_inputs],['file'])
+        self.assertEqual(context.probe.deadline,6.)
+
+    def test_partial_save_click_keeps_owned_prefix_release_even_after_point_expiry(self):
+        context=self.context();context.partial_target='save';context.expire_after_partial=True
+        with self.assertRaises(AssertionError):context.run()
+        rows=[row for row in context.native_inputs if row['target']=='save']
+        self.assertEqual([row['count'] for row in rows],[2,1])
+        value=context.record['nativeMenuActions'][-1]['pointers'][-1]
+        self.assertEqual(value['insertedInputs'],1);self.assertEqual(value['ownedButtonRelease']['inserted'],1)
+        self.assertEqual(context.probe.deadline,6.)
+
+    def test_cached_keyboard_clamp_and_restore_uses_the_current_snapshot_only(self):
+        context=self.context();action=context.run('open-escape',True)
+        row=action['keys'][-1];point=row['before']['targetPointProof'];proof=point['providerLocalProof']
+        calls=[item for item in context.native_inputs if item['kind']=='keyboard']
+        self.assertEqual(len(calls),1);self.assertEqual(calls[0]['deadline'],proof['effectiveDeadline'])
+        self.assertLess(row['inputStartedAt'],proof['effectiveDeadline'])
+        self.assertEqual(action['pointUses'][-1]['sourceScopeId'],proof['sourceScopeId'])
+        self.assertEqual(action['pointUses'][-1]['useCode'],4)
+        self.assertEqual((context.probe.deadline,context.keyboard.deadline),(6.,6.))
+
+    def test_cached_keyboard_final_guard_expires_without_native_key_input(self):
+        context=self.context();context.expire_keyboard=True
+        with self.assertRaises(AssertionError):context.run('open-escape',True)
+        self.assertFalse(any(row['kind']=='keyboard' for row in context.native_inputs))
+        self.assertEqual((context.probe.deadline,context.keyboard.deadline),(6.,6.))
+
+    def test_started_pending_point_suppresses_later_provider_work_and_target_input(self):
+        context=self.context();context.pending_on=3
+        with self.assertRaises(AssertionError):context.run()
+        self.assertEqual(len(context.runs),3);self.assertEqual(context.post_pending_queries,0)
+        self.assertEqual([row['target'] for row in context.native_inputs],['file'])
+        self.assertIs(context.probe._msaa_lease,context.runs[-1].lease)
+        self.assertIsNotNone(context.probe._uia)
+        # No native callback was launched; this synthetic uncertainty is retained only for the assertion.
+        context.runs[-1].lease.pending=False
 
 
 if __name__=='__main__':unittest.main()

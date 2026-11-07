@@ -198,8 +198,13 @@ def _hit_identity(hit,snapshot,target):
     assert all(value is False for value in different.values())
 
 
-def _require_point(hit,snapshot,target):
+def _require_point(hit,snapshot,target,*,source_admission=None,now=None):
     method=hit.get('pointMethod','global-uia')
+    if source_admission is not None:
+        if method=='owned-popup-and-source-qualified-ia2-hit-v4':
+            _require_source_point_v4(hit,snapshot,target,source_admission,now=now);return
+        assert method=='global-uia', 'Source selection cannot consume a legacy local point'
+        assert 'providerLocalProof' not in hit and 'pointObservedAt' not in hit, 'A local source point cannot be relabeled global'
     assert method in ('global-uia','owned-popup-and-msaa-hit','owned-popup-and-msaa-canonical-hit-v2'), 'Unknown native point proof method'
     if method=='global-uia':assert hit['withinControl'] is hit['uiaMatches'] is True, 'Native menu point is obstructed'
     _hit_identity(hit,snapshot,target)
@@ -341,8 +346,8 @@ def _require_provider_point_v2(hit,snapshot,target):
         assert fresh['scope']==scope and fresh['roles']==roles
 
 
-def _keyboard_recipient(snapshot,binding,shell_pid,*,menu_scope=None):
-    _validate(snapshot,binding,shell_pid,'save',menu_scope=menu_scope)
+def _keyboard_recipient(snapshot,binding,shell_pid,*,menu_scope=None,source_admission=None,point_at=None):
+    _validate(snapshot,binding,shell_pid,'save',menu_scope=menu_scope,source_admission=source_admission,point_at=point_at)
     gui=snapshot['gui']
     if _menu_key_owner(gui,snapshot['popup'],binding['child']):return
     chain=snapshot.get('focusMenuPath',[])
@@ -413,7 +418,7 @@ def _require_shell_menus(snapshot,binding,shell_pid,scope=None):
     assert [row[0] for row in chain[bar:]]==[50010,50037,50032] and chain[-1][2]==binding['document']
 
 
-def _validate(snapshot,binding,shell_pid,target,*,enabled=True,menu_scope=None):
+def _validate(snapshot,binding,shell_pid,target,*,enabled=True,menu_scope=None,source_admission=None,point_at=None):
     assert snapshot['binding']==binding and snapshot['attachmentValid'] is True
     assert snapshot['nativeReady']==1, 'Native menu not exclusive and ready'
     _require_shell_menus(snapshot,binding,shell_pid,menu_scope)
@@ -462,7 +467,7 @@ def _validate(snapshot,binding,shell_pid,target,*,enabled=True,menu_scope=None):
         hit=snapshot['targetPointProof'];assert target!='file' and popup
         assert hit['point']==[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
         assert hit['pid']==binding['officePid'] and hit['rootHwnd']==popup['hwnd']
-        _require_point(hit,snapshot,target)
+        _require_point(hit,snapshot,target,source_admission=source_admission,now=point_at)
     return (control_anchor,control['nativeHwnd'],tuple(rect),
             anchors[file],anchors[bar],binding['child'],doc['threadId'],gui['threadId'])
 
@@ -550,7 +555,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         success=False,deliveryProved=False,documentHwnd=document,shellPid=process.pid,
         startedAt=start,deadline=deadline,pointers=[],keys=[],dpiScope={},engineHandleReleased=False)
     record.setdefault('nativeMenuActions',[]).append(value)
-    handle=None;primary=None;diagnostic=getattr(process,'opengeul_native_menu_identity_diagnostic',0)
+    handle=None;primary=None;source_admission=None;diagnostic=getattr(process,'opengeul_native_menu_identity_diagnostic',0)
     def budget():assert clock()<deadline, 'Original native menu deadline expired'
     def retain():retain_native_menu_receipt(process,value)
     try:
@@ -565,12 +570,21 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         version=getattr(process,'opengeul_native_menu_point_profile_version',1) if profile else 1
         assert type(version) is int and version in (1,2), 'Unknown native point profile version'
         assert not diagnostic or profile and version==2, 'The diagnostic needs the existing retained-ref guards'
+        selection=getattr(process,'opengeul_source_menu_selection',None)
+        if selection is not None:
+            assert not diagnostic and not profile, 'Source selection cannot mix diagnostic or legacy profiles'
+            profile=True;version=4
         if profile:
             from native_menu_msaa_hit import pending_msaa_hit
             assert pending_msaa_hit() is None, 'An original native provider callback is still unretired'
-        if probe is None:probe=NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}),
-            native_point_profile=profile,native_point_profile_version=version,native_identity_diagnostic=diagnostic)
-        elif profile:
+        from native_menu_source_selection import selected_native_menu_probe
+        def build(selected):
+            if selected is not None:
+                return NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}),source_selection=selected)
+            return NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}),
+                native_point_profile=profile,native_point_profile_version=version,native_identity_diagnostic=diagnostic)
+        probe=selected_native_menu_probe(process,deadline,clock,build=build,supplied=probe)
+        if profile:
             assert getattr(probe,'_native_point_profile_version',1)==version, 'Native point profile changed before admission'
             if version==2:assert getattr(probe,'_native_point_profile',False) is True
             assert getattr(probe,'_native_identity_diagnostic',0)==diagnostic, 'Native identity diagnostic changed before admission'
@@ -598,6 +612,8 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         assert len(prior)<128 or key in prior;prior[key]=identity;process.opengeul_native_menu_generations=prior
         value.update(binding=binding,originalProcess=shell,originalEngine=engine,engineHandleValue=handle,
             engineAdmissionBasis=home_basis if home_witness else 'existing-retained-witness' if witness else 'first-native-measurement')
+        _bind_source_generation(probe,process,suite,binding,shell,engine,handle,value)
+        if selection is not None:source_admission=selection.prepared.admission
         if profile:probe._point_source=dict(shellHandle=int(process._handle),engineHandle=handle)
         begin_identity=getattr(probe,'begin_identity_scope',None)
         if begin_identity:
@@ -619,12 +635,17 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 measured['stageCode']=21;value['observationStage']=21
                 try:row=probe.snapshot(binding,target)
                 except NativeMenuPending:
+                    if source_admission is not None:raise
                     if diagnostic:raise NativeIdentityDiagnosticTerminal('Diagnostic source was not ready') from None
                     budget();time.sleep(min(.01,max(0,deadline-clock())));continue
                 measured.update(stageCode=22,snapshot=row);value['observationStage']=22
                 _require_shell_menus(row,binding,process.pid,menu_scope)
                 continuity()
-                _validate(row,binding,process.pid,target,enabled=enabled,menu_scope=menu_scope)
+                observed=clock()
+                _validate(row,binding,process.pid,target,enabled=enabled,menu_scope=menu_scope,
+                    source_admission=source_admission,point_at=observed)
+                if source_admission is not None and 'targetPointProof' in row:
+                    _source_point_use(probe,row['targetPointProof'],1,row['targetPointProof']['pointObservedAt'])
                 if 'identityProof' in row:assert row['identityProof']['scope']==value['elementIdentityScope']
                 measured['stageCode']=23;value['observationStage']=23
                 return row
@@ -663,19 +684,22 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             return row
         def pointer(target):
             assert not diagnostic or target=='file', 'A diagnostic cannot send target input'
-            row=observe(target);anchor=_validate(row,binding,process.pid,target,menu_scope=menu_scope)
+            row=observe(target);anchor=_validate(row,binding,process.pid,target,menu_scope=menu_scope,
+                source_admission=source_admission,point_at=clock())
             rect=row['control']['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
             item=dict(target=target,chosenPhysicalPoint=point,snapshots=[row],hits=[])
             value['pointers'].append(item)
             def check():
-                snap=observe(target);assert _validate(snap,binding,process.pid,target,menu_scope=menu_scope)==anchor
+                snap=observe(target);assert _validate(snap,binding,process.pid,target,menu_scope=menu_scope,
+                    source_admission=source_admission,point_at=clock())==anchor
                 item['snapshots'].append(snap)
                 scope=snap['popup']['hwnd'] if snap['popup'] else document
                 hit=probe.point_snapshot(scope,point,probe.current_control);item['hits'].append(hit)
                 assert hit['point']==point and hit['pid']==pid and hit['rootHwnd']==scope
-                _require_point(hit,snap,target)
+                _require_point(hit,snap,target,source_admission=source_admission,now=clock())
+                if source_admission is not None:_source_point_use(probe,hit,2,hit.get('pointObservedAt'))
             check();retain();probe.move(point,item);assert item['pointerReadback']==point
-            check();retain();continuity();probe.click(item);budget()
+            check();retain();continuity();_arm_source_input(probe,item,item['hits'][-1:],3);probe.click(item);budget()
             assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
             assert item['inputCallAttempts']==1 and item['requestedInputs']==item['insertedInputs']==2
         def keyboard(shortcut):
@@ -683,8 +707,10 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             if shortcut=='ALT_F':
                 before=observe('file');editor_before=editor(2)
             else:
-                before=observe('save');_keyboard_recipient(before,binding,process.pid,menu_scope=menu_scope);editor_before=None
+                before=observe('save');_keyboard_recipient(before,binding,process.pid,menu_scope=menu_scope,
+                    source_admission=source_admission,point_at=clock());editor_before=None
             continuity();item=dict(shortcut=shortcut,before=before,editorBefore=editor_before);value['keys'].append(item);retain()
+            _arm_source_input(probe,item,[before.get('targetPointProof')],4)
             probe.keyboard(binding,shortcut,item);budget()
             if 'identityProof' in before:
                 _comparison_proof(item['identityAdmission'],binding,process.pid,'file' if shortcut=='ALT_F' else 'save')
@@ -692,8 +718,12 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
             assert item['inputCallAttempts']==1 and item['requestedInputs']==item['insertedInputs']==KEY_COUNTS[shortcut]
         if gesture:editor(1)
+        def discarded_observe(target):
+            row=observe(target)
+            if source_admission is not None and 'targetPointProof' in row:
+                retained=value.setdefault('sourcePointSnapshots',[]);assert len(retained)<32;retained.append(row)
         if operation=='keyboard-escape':
-            keyboard('ALT_F');observe('save');keyboard('DOWN');keyboard('ESCAPE')
+            keyboard('ALT_F');discarded_observe('save');keyboard('DOWN');keyboard('ESCAPE')
         else:
             pointer('file')
             if gesture:
@@ -703,13 +733,13 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                     target=operation[len('disabled-'):]
                     value.update(disabledSnapshot=observe(target,enabled=False),disabledObserved=True)
                 else:
-                    observe('save')
+                    discarded_observe('save')
                     if diagnostic:raise NativeIdentityDiagnosticTerminal('Diagnostic point returned without its terminal marker')
                 if operation=='open-outside':
                     continuity();hit=probe.outside_snapshot(binding)
                     assert hit['pid']==process.pid and hit['rootHwnd']==document and hit['hitHwnd']==document and hit['hitTest']==2
                     item=dict(target='outside',chosenPhysicalPoint=hit['point'],nativeBefore=hit);value['pointers'].append(item)
-                    retain();probe.outside_click(binding,item);budget();assert item['requestedInputs']==item['insertedInputs']==2
+                    retain();_arm_source_input(probe,item,[],3);probe.outside_click(binding,item);budget();assert item['requestedInputs']==item['insertedInputs']==2
                 else:keyboard('ESCAPE')
             else:
                 if operation.startswith('new-') and operation!='new-hwp':pointer('new')
@@ -722,7 +752,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         primary=exc;value['failureType']=type(exc).__name__
         try:
             capture=getattr(probe,'capture_primary_failure',None)
-            if capture and not diagnostic:capture(exc)
+            if capture and not diagnostic and getattr(process,'opengeul_source_menu_selection',None) is None and getattr(probe,'source_selection',None) is None:capture(exc)
         except BaseException:value['numericPrimaryCaptureFailed']=1
         try:
             import numeric_notice
@@ -730,7 +760,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         except BaseException:value['numericFailureCaptureFailed']=1
         try:
             observer=getattr(probe,'observe_failure_context',None)
-            if observer and not diagnostic:observer(value.get('binding'))
+            if observer and not diagnostic and getattr(process,'opengeul_source_menu_selection',None) is None and getattr(probe,'source_selection',None) is None:observer(value.get('binding'))
         except BaseException:value['numericContextCaptureFailed']=1
         if diagnostic and not isinstance(exc,NativeIdentityDiagnosticTerminal):
             raise NativeIdentityDiagnosticTerminal('Diagnostic source ended before input') from None
@@ -765,7 +795,7 @@ def inspect_native_menu(api,process,document,record,gesture,**options):
     return _run(api,process,document,record,gesture,gesture=True,**options)
 
 
-def require_native_menu_action(value,shell_pid,document,command=None):
+def _require_native_menu_action_record(value,shell_pid,document,command=None,*,source_admission=None):
     assert type(value) is dict
     assert len(json.dumps(value,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode())<=CAP
     assert value['kind']=='owned-native-menu-action' and value['schemaVersion']==1
@@ -802,11 +832,13 @@ def require_native_menu_action(value,shell_pid,document,command=None):
             assert value['coreCommandsVerified'] is True and value['coreCommands']==list(CORE_COMMANDS)
             assert set(value['coreSnapshots'])==set(CORE_COMMANDS)
             for target in CORE_COMMANDS:
-                replay_scope(value['coreSnapshots'][target]);_validate(value['coreSnapshots'][target],binding,shell_pid,target,menu_scope=menu_scope)
+                replay_scope(value['coreSnapshots'][target]);_validate(value['coreSnapshots'][target],binding,shell_pid,target,menu_scope=menu_scope,
+                    source_admission=source_admission,point_at=_replay_point_at(value['coreSnapshots'][target],source_admission))
         if operation.startswith('disabled-'):
             assert value['disabledObserved'] is True
             replay_scope(value['disabledSnapshot'])
-            _validate(value['disabledSnapshot'],value['binding'],shell_pid,operation[len('disabled-'):],enabled=False,menu_scope=menu_scope)
+            _validate(value['disabledSnapshot'],value['binding'],shell_pid,operation[len('disabled-'):],enabled=False,menu_scope=menu_scope,
+                source_admission=source_admission,point_at=_replay_point_at(value['disabledSnapshot'],source_admission))
     else:
         assert operation in COMMANDS
         expected=['file']+(['new'] if operation.startswith('new-') and operation!='new-hwp' else [])+[operation];keys=[]
@@ -815,8 +847,10 @@ def require_native_menu_action(value,shell_pid,document,command=None):
     for item in value['keys']:
         replay_scope(item['before'])
         if item['shortcut']=='ALT_F':
-            _validate(item['before'],binding,shell_pid,'file',menu_scope=menu_scope);_editor(item['editorBefore'],binding,shell_pid)
-        else:_keyboard_recipient(item['before'],binding,shell_pid,menu_scope=menu_scope)
+            _validate(item['before'],binding,shell_pid,'file',menu_scope=menu_scope,
+                source_admission=source_admission,point_at=_replay_point_at(item['before'],source_admission));_editor(item['editorBefore'],binding,shell_pid)
+        else:_keyboard_recipient(item['before'],binding,shell_pid,menu_scope=menu_scope,
+            source_admission=source_admission,point_at=_replay_point_at(item['before'],source_admission))
         if 'identityProof' in item['before']:
             target='file' if item['shortcut']=='ALT_F' else 'save'
             _comparison_proof(item['identityAdmission'],binding,shell_pid,target)
@@ -829,14 +863,16 @@ def require_native_menu_action(value,shell_pid,document,command=None):
             assert hit['point']==item['chosenPhysicalPoint'] and item['requestedInputs']==item['insertedInputs']==2
             continue
         for snapshot in item['snapshots']:replay_scope(snapshot)
-        anchors=[_validate(s,value['binding'],shell_pid,item['target'],menu_scope=menu_scope) for s in item['snapshots']]
+        anchors=[_validate(s,value['binding'],shell_pid,item['target'],menu_scope=menu_scope,
+            source_admission=source_admission,point_at=_replay_point_at(s,source_admission)) for s in item['snapshots']]
         assert len(anchors)==3 and all(a==anchors[0] for a in anchors)
         assert len(item['hits'])==2 and all(h['point']==item['chosenPhysicalPoint'] and h['pid']==value['binding']['officePid'] for h in item['hits'])
         assert item['pointerReadback']==item['beforeClickCursorReadback']==item['chosenPhysicalPoint']
         rect=item['snapshots'][0]['control']['rectangle']
         assert item['chosenPhysicalPoint']==[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
         for hit,snapshot in zip(item['hits'],item['snapshots'][1:]):
-            _require_point(hit,snapshot,item['target'])
+            _require_point(hit,snapshot,item['target'],source_admission=source_admission,
+                now=hit.get('pointObservedAt') if source_admission is not None else None)
             assert hit['hitHwnd']>0 and hit['rootHwnd']==(snapshot['popup']['hwnd'] if snapshot['popup'] else document)
         assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
         assert item['inputCallAttempts']==1 and item['insertedInputs']==item['requestedInputs']==2
@@ -869,9 +905,16 @@ def observe_native_view(api,process,document,record,*,module,preview,menu_visibl
     handle=None;primary=None
     def budget():assert clock()<deadline, 'Original native view observation deadline expired'
     try:
-        budget();origins=record.get('nativeMenuActions',[])
+        budget()
+        from native_menu_source_selection import selected_native_menu_probe
+        probe=selected_native_menu_probe(process,deadline,clock,
+            build=lambda selected:NativeMenuProbe(deadline,clock,**({} if selected is None else {'source_selection':selected})),supplied=probe)
+        selection=getattr(probe,'source_selection',None)
+        origins=record.get('nativeMenuActions',[])
         assert type(origins) is list and 0<len(origins)<=128
-        origin=origins[-1];require_native_menu_action(origin,process.pid,document)
+        origin=origins[-1]
+        if selection is None:require_native_menu_action(origin,process.pid,document)
+        else:require_native_menu_action(origin,process.pid,document,source_admission=selection.prepared.admission)
         assert origin['finishedAt']<=start
         binding=copy.deepcopy(origin['binding']);shell=origin['originalProcess'];old=origin['originalEngine']
         suite=Path(process.opengeul_suite_root).resolve()
@@ -883,15 +926,17 @@ def observe_native_view(api,process,document,record,*,module,preview,menu_visibl
         assert Path(generation['image']).resolve()==Path(old['image']).resolve()==suite/'Office/program/soffice.bin'
         assert shell['pid']==process.pid and shell['handleValue']==int(process._handle)
         assert Path(shell['image']).resolve()==suite/'OpenGeul.Office.exe'
-        probe=probe or NativeMenuProbe(deadline,clock)
         candidate=probe.open_engine(binding['officePid']);_int(candidate);handle=candidate
+        current_engine=None
         def continuity():
+            nonlocal current_engine
             budget();assert process.poll() is None and probe.process_snapshot(process)==shell
-            engine=probe.engine_snapshot(handle)
+            engine=probe.engine_snapshot(handle);current_engine=engine
             assert all(engine[key]==old[key] for key in ('pid','creationTime','image','waitResult'))
             assert engine['waitResult']==258 and api.attachment(document)==(binding['parent'],binding['child'],binding['officePid'])
         continuity();value.update(originIndex=len(origins)-1,binding=binding,originalProcess=copy.deepcopy(shell),
             originalEngine=copy.deepcopy(old),engineHandleValue=handle)
+        _bind_source_generation(probe,process,suite,binding,shell,current_engine,handle,value)
         menu_scope=_menu_scope(binding,shell,old,start,deadline)
         bind_menu=getattr(probe,'bind_menu_classification',None)
         if bind_menu:bind_menu(menu_scope,continuity)
@@ -970,9 +1015,15 @@ class NativeMenuProbe(NativeControlProbe):
     # CUIAutomation8 is the documented Windows 8+ IUIAutomation2 implementation.
     # A private client avoids changing pywinauto's shared UIA singleton settings.
     CLIENT='{e22ad333-b25f-460c-83d0-0581107395c9}'
-    def __init__(self,deadline,clock,*,interop=None,native_point_profile=False,native_point_profile_version=1,native_identity_diagnostic=0,**libraries):
+    def __init__(self,deadline,clock,*,interop=None,native_point_profile=False,native_point_profile_version=1,native_identity_diagnostic=0,source_selection=None,**libraries):
+        self.source_selection=source_selection
+        if source_selection is not None:
+            from native_menu_source_selection import _require_selection
+            _require_selection(source_selection)
+            assert native_point_profile is False and type(native_point_profile_version) is int and native_point_profile_version==1 and type(native_identity_diagnostic) is int and native_identity_diagnostic==0, 'Source selection cannot mix legacy point profiles'
+            native_point_profile=True;native_point_profile_version=4
         assert type(native_point_profile) is bool
-        assert type(native_point_profile_version) is int and native_point_profile_version in (1,2)
+        assert type(native_point_profile_version) is int and native_point_profile_version in ((1,2,4) if source_selection is not None else (1,2))
         assert native_point_profile_version==1 or native_point_profile
         assert type(native_identity_diagnostic) is int and native_identity_diagnostic in (0,3)
         assert not native_identity_diagnostic or native_point_profile and native_point_profile_version==2
@@ -1502,6 +1553,7 @@ class NativeMenuProbe(NativeControlProbe):
             ownerChain=owners,foreground=foreground,ownershipBefore=True,ownershipAfter=True)
     def point_snapshot(self,scope,point,control):
         from suite_window_activation import Point
+        admission=_source_bound_admission(self) if getattr(self,'source_selection',None) is not None else None
         observation=dict(targetCode=tuple(LABELS).index(self._active_target)+1,stageCode=1,
             point=list(point),failed=False,primary={})
         try:self.interop['pointObservation']=observation
@@ -1555,9 +1607,15 @@ class NativeMenuProbe(NativeControlProbe):
                         match is False and proof['targetEqualsRetained'] is True and proof['hitEqualsRetained'] is False and
                         all(value is False for value in proof['differentFrom'].values())):
                     version=getattr(self,'_native_point_profile_version',1)
-                    assert type(version) is int and version in (1,2)
-                    result['pointMethod']='owned-popup-and-msaa-hit' if version==1 else 'owned-popup-and-msaa-canonical-hit-v2'
-                    result['providerLocalProof']=self._provider_local_point(point,target,actual)
+                    assert type(version) is int and version in (1,2,4)
+                    if version==4:
+                        assert admission is not None
+                        result['pointMethod']='owned-popup-and-source-qualified-ia2-hit-v4'
+                        result['providerLocalProof']=self._provider_local_point_v4(point,target,actual,admission=admission)
+                        result['pointObservedAt']=self.clock()
+                    else:
+                        result['pointMethod']='owned-popup-and-msaa-hit' if version==1 else 'owned-popup-and-msaa-canonical-hit-v2'
+                        result['providerLocalProof']=self._provider_local_point(point,target,actual)
                 else:assert result['identityProof']['targetEqualsRetained'] is result['identityProof']['hitEqualsRetained'] is True
                 observation['stageCode']=10
                 assert all(value is False for value in result['identityProof']['differentFrom'].values())
@@ -1568,7 +1626,7 @@ class NativeMenuProbe(NativeControlProbe):
             observation.update(failed=True,**self._exception_numbers(exc))
             self._failure_point=(actual,original if original is not None else target)
             try:
-                if diagnostic:raise NativeIdentityDiagnosticTerminal('Diagnostic failure observations are suppressed')
+                if diagnostic or admission is not None:raise NativeIdentityDiagnosticTerminal('Late failure observations are suppressed')
                 self.capture_primary_failure(exc)
                 observation['primaryCall']=copy.deepcopy(self.interop.get('primaryFailureCall',{}))
                 observation['primaryComparison']=copy.deepcopy(self.interop.get('lastComparison',{}))
@@ -1886,7 +1944,7 @@ class NativeMenuProbe(NativeControlProbe):
         if target!='file':
             hit=self.point_snapshot(doc,point,self.current_control);popup=self.window_snapshot(hit['rootHwnd'])
             popup['ownerChain']=self._owners(popup['hwnd'],binding)
-            if hit.get('pointMethod') in ('owned-popup-and-msaa-hit','owned-popup-and-msaa-canonical-hit-v2'):target_point=hit
+            if hit.get('pointMethod') in ('owned-popup-and-msaa-hit','owned-popup-and-msaa-canonical-hit-v2','owned-popup-and-source-qualified-ia2-hit-v4'):target_point=hit
         attachment=self.attachment_snapshot(binding);document=self.window_snapshot(doc)
         thread=attachment['windows']['child']['threadId'];gui=self.native_focus(thread)
         permitted={0,child}
@@ -1998,6 +2056,50 @@ class NativeMenuProbe(NativeControlProbe):
             focusRootHwnd=gui['focusRootHwnd'],focusUnderOriginalChild=attachment['focusUnderOriginalChild'],
             captureHwnd=gui['captureHwnd'],menuOwnerHwnd=gui['menuOwnerHwnd'],menuClosed=not gui['captureHwnd'] and not gui['menuOwnerHwnd'],
             hostGui=attachment['hostGui'],engineGui=gui,attachmentWindows=attachment['windows'],attachmentExports=attachment['exported'])
+    def _source_input_deadline(self):
+        points=getattr(self,'_source_input_points',[])
+        admission=_source_bound_admission(self,require_scope=bool(points))
+        from native_menu_msaa_hit import pending_msaa_hit
+        assert pending_msaa_hit() is None, 'A provider callback remains unretired before input'
+        expiry=self.deadline
+        for hit in points:
+            proof=hit['providerLocalProof'];scope=proof['scope']
+            assert scope==self._identity_scope
+            _require_provider_point_v4(proof,scope['binding'],scope['shellPid'],self._active_target,
+                admission_sha256=admission.admission_sha256,now=self.clock())
+            expiry=min(expiry,proof['effectiveDeadline'])
+        return expiry
+
+    def click(self,receipt):
+        if getattr(self,'source_selection',None) is None:return super().click(receipt)
+        original=self.deadline;points=getattr(self,'_source_input_points',[])
+        assert not points or receipt is self._source_input_receipt
+        self.deadline=self._source_input_deadline()
+        try:return super().click(receipt)
+        finally:
+            self.deadline=original
+            if points and receipt.get('inputCallAttempts')==1:
+                for hit in points:_source_point_use(self,hit,3,receipt['inputStartedAt'])
+
+    def _source_send(self,payload):
+        if getattr(self,'source_selection',None) is None:return super().send(payload)
+        original=self.deadline;points=getattr(self,'_source_input_points',[])
+        self.deadline=self._source_input_deadline()
+        keyboard=None;keyboard_deadline=None
+        try:
+            keyboard=self._keyboard();keyboard_deadline=keyboard.deadline
+            keyboard.deadline=min(keyboard_deadline,self.deadline)
+            receipt=getattr(self,'_source_input_receipt',None)
+            at=self.clock();assert at<keyboard.deadline
+            if receipt is not None:receipt.update(inputStartedAt=at,inputCallAttempts=1)
+            result=super().send(payload)
+            if points:
+                for hit in points:_source_point_use(self,hit,4,at)
+            return result
+        finally:
+            self.deadline=original
+            if keyboard is not None:keyboard.deadline=keyboard_deadline
+
     def keyboard(self,binding,shortcut,receipt):
         from ascii_editor_input import input_buffer
         events=_menu_key_events(shortcut)
@@ -2006,7 +2108,7 @@ class NativeMenuProbe(NativeControlProbe):
         held=[key for key in (1,2,4,5,6,0x46,0x28) if self._call(self.user.GetAsyncKeyState,key)&0x8000]
         assert not held, 'A native menu navigation key is already pressed'
         receipt['keyboardBefore']=dict(state,additionalMenuKeysDown=held)
-        receipt.update(requestedInputs=len(events),inputCallAttempts=1,insertedInputs=None)
+        receipt.update(requestedInputs=len(events),inputCallAttempts=0 if getattr(self,'source_selection',None) is not None else 1,insertedInputs=None)
         if getattr(self,'_uses_comparison',False):receipt['identityAdmission']=self._fresh_proof(self._active_target)
         inserted=self.send(input_buffer(events));receipt['insertedInputs']=inserted
         assert type(inserted) is int and 0<=inserted<=len(events), 'Unknown native menu inserted prefix'
@@ -2200,3 +2302,221 @@ def _require_provider_point_v4(proof,binding,shell_pid,target,*,admission_sha256
     assert global_point['nativeHwnd']==(raw&0xffffffff if raw<0 else raw)
     assert global_point==dict(kindCode=50033,pid=binding['officePid'],nativeHwndRaw=raw,nativeHwnd=before['hwnd'])
     return proof
+
+
+def _source_admission_summary(admission):
+    """Only the actual sealed Gate supplies a source replay authority."""
+    from native_menu_msaa_hit import _admission_words_v4
+    from native_menu_source_admission import SourceMenuAdmission
+    if type(admission) is not SourceMenuAdmission:raise ValueError('An actual source menu admission is required')
+    _admission_words_v4(admission,admission.admission_sha256)
+    result=dict(admission.summary())
+    result['providers']=[dict(item) for item in result['providers']]
+    return result
+
+
+def _source_generation(binding,shell,engine,handle):
+    result=dict(document=binding['document'],parent=binding['parent'],child=binding['child'],
+        officePid=binding['officePid'],shellPid=shell['pid'],shellCreationTime=shell['creationTime'],
+        shellHandleValue=shell['handleValue'],engineCreationTime=engine['creationTime'],engineHandleValue=handle)
+    assert all(type(number) is int and 0<number<1<<64 for number in result.values())
+    assert result['officePid']<1<<32 and result['shellPid']<1<<32 and result['officePid']!=result['shellPid']
+    assert result['engineCreationTime']>=result['shellCreationTime']
+    return result
+
+
+def _bind_source_generation(probe,process,suite,binding,shell,engine,handle,receipt):
+    selection=getattr(probe,'source_selection',None)
+    assert selection is getattr(process,'opengeul_source_menu_selection',None), 'Source probe/process selection changed'
+    if selection is None:return
+    from native_menu_source_selection import _require_selection
+    _require_selection(selection)
+    admission=selection.prepared.admission;summary=_source_admission_summary(admission)
+    root=Path(admission.suite_root)
+    assert Path(suite).resolve()==root and Path(process.opengeul_suite_root).resolve()==root
+    assert Path(shell['image']).resolve()==root/'OpenGeul.Office.exe'
+    assert Path(engine['image']).resolve()==root/'Office/program/soffice.bin'
+    assert shell['pid']==process.pid and shell['handleValue']==int(process._handle)
+    assert engine['pid']==binding['officePid'] and engine['handleValue']==handle
+    assert shell['waitResult']==engine['waitResult']==258
+    generation=_source_generation(binding,shell,engine,handle)
+    probe._source_generation_binding=copy.deepcopy(generation)
+    probe._source_process=process;probe._source_bound_selection=selection
+    # Keep the inherited legacy send wrapper exactly intact. Only a successfully
+    # bound source-selected instance installs the extra expiry admission.
+    source_send=getattr(probe,'_source_send',None)
+    if source_send is not None:probe.send=source_send
+    receipt['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,admission=summary,generation=generation)
+    receipt['pointUses']=[]
+    probe._source_point_uses=receipt['pointUses'];probe._source_input_points=[];probe._source_input_receipt=None
+
+
+def _require_source_header(value,admission):
+    summary=_source_admission_summary(admission);header=value['sourceMenu']
+    assert type(header) is dict and set(header)=={'schemaVersion','pointProfileVersion','admission','generation'}
+    assert type(header['schemaVersion']) is int and header['schemaVersion']==1
+    assert type(header['pointProfileVersion']) is int and header['pointProfileVersion']==4
+    assert json.dumps(header['admission'],sort_keys=True,separators=(',',':'),ensure_ascii=True)==json.dumps(summary,sort_keys=True,separators=(',',':'),ensure_ascii=True)
+    shell,engine=value['originalProcess'],value['originalEngine']
+    root=Path(admission.suite_root)
+    assert Path(shell['image']).resolve()==root/'OpenGeul.Office.exe'
+    assert Path(engine['image']).resolve()==root/'Office/program/soffice.bin'
+    expected=_source_generation(value['binding'],shell,engine,value['engineHandleValue'])
+    assert type(header['generation']) is dict and set(header['generation'])==set(expected)
+    assert all(type(number) is int for number in header['generation'].values()) and header['generation']==expected
+    uses=value['pointUses'];assert type(uses) is list and len(uses)<=128
+    assert all(type(value[key]) in (int,float) and math.isfinite(value[key]) for key in ('startedAt','deadline','finishedAt'))
+    pending=[value];count=0
+    while pending:
+        node=pending.pop();count+=1;assert count<=1_000_000
+        if type(node) is dict:
+            if 'pointMethod' in node:assert node['pointMethod'] in ('global-uia','owned-popup-and-source-qualified-ia2-hit-v4')
+            if 'workerSchemaVersion' in node:assert type(node['workerSchemaVersion']) is int and node['workerSchemaVersion']==4
+            assert 'identityDiagnosticResult' not in node and 'identityDiagnosticControl' not in node
+            pending.extend(node.values())
+        elif type(node) is list:pending.extend(node)
+    return summary
+
+
+def require_source_qualified_native_menu_action(value,shell_pid,document,*,admission,command=None):
+    _require_source_header(value,admission)
+    # Only this public actual-object check supplies authority. The shared record
+    # validator itself proves structural/history consistency, never source trust.
+    result=_require_native_menu_action_record(value,shell_pid,document,command,source_admission=admission)
+    _require_source_point_uses(value,admission)
+    return result
+
+
+def require_native_menu_action(value,shell_pid,document,command=None,*,source_admission=None):
+    if source_admission is not None:
+        return require_source_qualified_native_menu_action(value,shell_pid,document,
+            admission=source_admission,command=command)
+    assert 'sourceMenu' not in value, 'Source-qualified menu replay requires the actual Gate'
+    return _require_native_menu_action_record(value,shell_pid,document,command)
+
+
+def _source_bound_admission(probe,*,require_scope=True):
+    selection=probe.source_selection
+    from native_menu_source_selection import _require_selection
+    _require_selection(selection)
+    assert selection is probe._source_bound_selection
+    process=probe._source_process;generation=probe._source_generation_binding
+    assert process.opengeul_source_menu_selection is selection and process.poll() is None
+    assert (process.pid,int(process._handle))==(generation['shellPid'],generation['shellHandleValue'])
+    if not require_scope:return selection.prepared.admission
+    scope=probe._identity_scope;binding=scope['binding']
+    assert all(binding[key]==generation[key] for key in ('document','parent','child','officePid'))
+    assert scope['shellPid']==generation['shellPid'] and scope['shellCreationTime']==generation['shellCreationTime']
+    assert scope['officeCreationTime']==generation['engineCreationTime']
+    assert probe._point_source==dict(shellHandle=generation['shellHandleValue'],engineHandle=generation['engineHandleValue'])
+    return selection.prepared.admission
+
+
+def _replay_point_at(snapshot,admission):
+    if admission is None:return None
+    return snapshot.get('targetPointProof',{}).get('pointObservedAt')
+
+
+def _require_source_point_v4(hit,snapshot,target,admission,*,now):
+    digest=_source_admission_summary(admission)['admissionSha256']
+    assert target!='file' and hit['uiaMatches'] is False
+    proof=hit['providerLocalProof'];scope=snapshot['identityProof']['scope']
+    binding=scope['binding'];shell_pid=scope['shellPid']
+    _require_provider_point_v4(proof,binding,shell_pid,target,admission_sha256=digest,now=now)
+    assert proof['scope']==scope and proof['targetRectangle']==snapshot['control']['rectangle']
+    original=hit['identityProof'];role=_target_role(target)
+    assert original['scope']==scope and original['role']==role
+    assert original['targetEqualsRetained'] is True and original['hitEqualsRetained'] is False
+    assert original['differentFrom']==proof['primaryComparison']['differentFrom']
+    assert all(value is False for value in original['differentFrom'].values())
+    popup=snapshot['popup'];before=proof['before']
+    assert before['hwnd']==before['rootHwnd']==hit['hitHwnd']==hit['rootHwnd']==popup['hwnd']
+    assert before['pid']==hit['pid']==binding['officePid'] and before['threadId']==popup['threadId']
+    assert before['ownerChain']==popup['ownerChain'] and before['point']==hit['point']
+    observed=hit['pointObservedAt']
+    assert type(observed) in (int,float) and math.isfinite(observed)
+    assert proof['capturedAt']<=observed<=now<proof['effectiveDeadline']
+
+
+def _source_point_use(probe,hit,code,at):
+    if hit is None or hit.get('pointMethod')!='owned-popup-and-source-qualified-ia2-hit-v4':return
+    uses=probe._source_point_uses;assert len(uses)<128
+    uses.append(dict(sourceScopeId=hit['providerLocalProof']['sourceScopeId'],at=at,useCode=code))
+
+
+def _arm_source_input(probe,receipt,points,uses):
+    if getattr(probe,'source_selection',None) is None:return
+    probe._source_input_points=[hit for hit in points if hit is not None and hit.get('pointMethod')=='owned-popup-and-source-qualified-ia2-hit-v4']
+    assert len(probe._source_input_points)<=1
+    probe._source_input_receipt=receipt;probe._source_input_use_code=uses
+
+
+def _require_source_point_uses(value,admission):
+    """Replay recorded observations and consumption; no current provider or clock."""
+    points={};expected=[]
+    def add(hit,snapshot,target,code):
+        if hit is None or hit.get('pointMethod')!='owned-popup-and-source-qualified-ia2-hit-v4':return None
+        at=hit['pointObservedAt'];_require_source_point_v4(hit,snapshot,target,admission,now=at)
+        identity=hit['providerLocalProof']['sourceScopeId']
+        assert identity not in points, 'A source measurement was reused for a new semantic site'
+        points[identity]=hit;expected.append(dict(sourceScopeId=identity,at=at,useCode=code))
+        return identity
+    for item in value['pointers']:
+        if item['target']=='outside':continue
+        snapshots=item['snapshots'];hits=item['hits'];target=item['target']
+        add(snapshots[0].get('targetPointProof'),snapshots[0],target,1)
+        last=None
+        for snapshot,hit in zip(snapshots[1:],hits):
+            add(snapshot.get('targetPointProof'),snapshot,target,1)
+            last=add(hit,snapshot,target,2)
+        if last is not None:
+            at=item['inputStartedAt'];proof=points[last]['providerLocalProof']
+            finished=item['inputFinishedAt']
+            assert type(finished) in (int,float) and math.isfinite(finished)
+            assert at<=finished<proof['effectiveDeadline'] and finished<=value['finishedAt']
+            assert proof['capturedAt']<=at<proof['effectiveDeadline']
+            expected.append(dict(sourceScopeId=last,at=at,useCode=3))
+    # Snapshot-only gestures occur after pointer preparation and before keys.
+    observations=[]
+    if value.get('coreCommandsVerified') is True:
+        observations.extend((target,value['coreSnapshots'][target]) for target in CORE_COMMANDS)
+    if value.get('disabledObserved') is True:
+        observations.append((value['command'][len('disabled-'):],value['disabledSnapshot']))
+    for target,snapshot in observations:add(snapshot.get('targetPointProof'),snapshot,target,1)
+    extras=value.get('sourcePointSnapshots',[])
+    assert type(extras) is list and len(extras)<=1
+    assert not extras or value['gesture'] is True and value['command'] in ('open-escape','open-outside','keyboard-escape')
+    for snapshot in extras:
+        hit=snapshot.get('targetPointProof');assert hit is not None
+        identity=hit['providerLocalProof']['sourceScopeId']
+        assert identity not in points, 'Stored source observation duplicates a semantic site'
+        assert snapshot['identityProof']['scope']==value['elementIdentityScope']
+        role=hit['identityProof']['role'];assert role=='target:save'
+        _validate(snapshot,value['binding'],value['shellPid'],role[len('target:'):],
+            menu_scope=_menu_scope(value['binding'],value['originalProcess'],value['originalEngine'],value['startedAt'],value['deadline']),
+            source_admission=admission,point_at=hit['pointObservedAt'])
+        add(hit,snapshot,role[len('target:'):],1)
+    for item in value['keys']:
+        snapshot=item['before'];hit=snapshot.get('targetPointProof')
+        if hit is None:continue
+        identity=hit['providerLocalProof']['sourceScopeId']
+        add(hit,snapshot,'save',1)
+        at=item['inputStartedAt'];proof=hit['providerLocalProof']
+        assert proof['capturedAt']<=at<proof['effectiveDeadline']
+        expected.append(dict(sourceScopeId=identity,at=at,useCode=4))
+    uses=value['pointUses']
+    assert all(type(row) is dict and set(row)=={'sourceScopeId','at','useCode'} and
+        type(row['sourceScopeId']) is int and type(row['useCode']) is int and
+        type(row['at']) in (int,float) and math.isfinite(row['at']) for row in uses)
+    # Replay the producer order; sorting observations by an attacker-supplied
+    # time would erase the serial fresh-discovery boundary.
+    assert uses==expected
+    assert list(points)==list(range(1,len(points)+1)), 'Independent source sites changed order'
+    assert all(value['startedAt']<=row['at']<value['finishedAt'] for row in uses)
+    previous=value['startedAt'];seen=set()
+    for row in uses:
+        identity=row['sourceScopeId']
+        if identity not in seen:
+            assert points[identity]['providerLocalProof']['capturedAt']>=previous
+            seen.add(identity)
+        assert row['at']>=previous;previous=row['at']

@@ -248,4 +248,128 @@ class NativeMenuCanonicalPointProofTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):module._require_point(hit,snapshot,'save')
 
 
+class SourceQualifiedHistoricalPointTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        cls.gate=SourceMenuSelectionTests(methodName='test_prepares_actual_bare_gate_context_and_freezes_contexts')
+        cls.gate.setUp();cls.addClassCleanup(cls.gate.doCleanups)
+        cls.prepared=cls.gate.prepared();cls.selection=cls.gate.selected(cls.prepared)
+
+    def fixture(self,operation='save',gesture=False):
+        from test_native_menu_point_profile import source_qualified_action_fixture
+        module,action=source_qualified_action_fixture(self,self.prepared.admission,self.selection,operation,gesture)
+        if action['pointers']:return module,action,action['pointers'][-1]['snapshots'][-1],action['pointers'][-1]['hits'][-1]
+        snapshot=action['keys'][-1]['before']
+        return module,action,snapshot,snapshot['targetPointProof']
+
+    def require(self,module,action):
+        return module.require_native_menu_action(action,77,11,'save',source_admission=self.prepared.admission)
+
+    def test_historical_replay_uses_recorded_consumption_without_querying_live_time(self):
+        from unittest.mock import patch
+        module,action,snapshot,hit=self.fixture()
+        with patch.object(module.time,'monotonic',side_effect=AssertionError('Historical replay queried live time')):
+            self.assertIs(self.require(module,action),action)
+        with self.assertRaises(AssertionError):
+            module._require_point(hit,snapshot,'save',source_admission=self.prepared.admission,now=100.)
+
+    def test_serial_measurements_cannot_reverse_observation_time_and_sort_the_use_ledger(self):
+        module,action,snapshot,hit=self.fixture()
+        first,second=[row['targetPointProof'] for row in action['pointers'][-1]['snapshots'][:2]]
+        times=[(row['pointObservedAt'],row['providerLocalProof']['capturedAt'],row['providerLocalProof']['effectiveDeadline']) for row in (first,second)]
+        for row,values in zip((first,second),reversed(times)):
+            row['pointObservedAt']=values[0]
+            row['providerLocalProof'].update(capturedAt=values[1],effectiveDeadline=values[2])
+        for use in action['pointUses']:
+            if use['sourceScopeId'] in (1,2):use['at']=(first,second)[use['sourceScopeId']-1]['pointObservedAt']
+        action['pointUses'].sort(key=lambda row:(row['at'],row['sourceScopeId'],row['useCode']))
+        with self.assertRaises(AssertionError):self.require(module,action)
+
+    def test_actual_admission_is_required_and_default_old_policy_cannot_accept_four(self):
+        module,action,snapshot,hit=self.fixture()
+        with self.assertRaises(AssertionError):module.require_native_menu_action(action,77,11,'save')
+        with self.assertRaises((AssertionError,ValueError)):
+            module.require_native_menu_action(action,77,11,'save',source_admission=action['sourceMenu']['admission'])
+        with self.assertRaises(AssertionError):module._require_point(hit,snapshot,'save')
+        with self.assertRaises(AssertionError):
+            module._require_point(hit,snapshot,'save',source_admission=self.prepared.admission)
+
+    def test_public_four_replay_rejects_other_modes_raw_false_and_native_schema_tampering(self):
+        module,original,snapshot,hit=self.fixture()
+        mutations=(lambda hit:hit.update(pointMethod='owned-popup-and-msaa-canonical-hit-v2'),
+            lambda hit:(hit.update(pointMethod='global-uia',uiaMatches=True,withinControl=True),hit['identityProof'].update(hitEqualsRetained=True)),
+            lambda hit:hit.update(uiaMatches=True),lambda hit:hit['identityProof'].update(hitEqualsRetained=True),
+            lambda hit:hit['providerLocalProof'].update(schemaVersion=3),
+            lambda hit:hit['providerLocalProof']['provider'].update(workerSchemaVersion=3),
+            lambda hit:hit['providerLocalProof']['provider'].update(nativeExit=0),
+            lambda hit:hit['providerLocalProof']['provider'].update(pending=1),
+            lambda hit:hit['providerLocalProof']['globalPoint'].update(nativeHwndRaw=99.),
+            lambda hit:hit['providerLocalProof'].update(sourceAdmissionSha256='0'*64))
+        for index,change in enumerate(mutations):
+            with self.subTest(case=index):
+                action=copy.deepcopy(original);change(action['pointers'][-1]['hits'][-1])
+                with self.assertRaises((AssertionError,ValueError)):self.require(module,action)
+
+    def test_point_uses_join_completion_expiry_real_input_and_finite_typed_scope(self):
+        module,original,snapshot,hit=self.fixture()
+        mutations=(lambda action:action['pointUses'][-1].update(at=hit['providerLocalProof']['capturedAt']),
+            lambda action:action['pointUses'][-1].update(sourceScopeId=True),
+            lambda action:action['pointUses'][-1].update(useCode=2),
+            lambda action:action['pointUses'][-1].update(at=float('nan')),
+            lambda action:action['pointers'][-1].update(inputStartedAt=hit['providerLocalProof']['effectiveDeadline']),
+            lambda action:action['pointers'][-1]['hits'][-1].update(pointObservedAt=hit['providerLocalProof']['effectiveDeadline']),
+            lambda action:action['pointUses'].pop(),
+            lambda action:action.update(pointUses=[copy.deepcopy(action['pointUses'][0]) for _ in range(129)]))
+        for index,change in enumerate(mutations):
+            with self.subTest(case=index):
+                action=copy.deepcopy(original);change(action)
+                with self.assertRaises((AssertionError,ValueError)):self.require(module,action)
+
+    def test_duplicate_fifth_site_cannot_pass_by_relabeling_the_use_and_latest_worker(self):
+        module,action,snapshot,hit=self.fixture()
+        item=action['pointers'][-1];item['hits'][-1]=copy.deepcopy(item['hits'][0])
+        for use in action['pointUses']:
+            if use['sourceScopeId']==5:use['sourceScopeId']=3
+        action['uiaInterop']['providerLocalResult']=copy.deepcopy(item['hits'][0]['providerLocalProof']['provider'])
+        with self.assertRaises(AssertionError):self.require(module,action)
+
+    def test_closed_header_binds_actual_source_root_original_generation_and_summary(self):
+        module,original,snapshot,hit=self.fixture()
+        mutations=(lambda action:action['sourceMenu']['admission'].update(admissionSha256='0'*64),
+            lambda action:action['sourceMenu']['generation'].update(shellHandleValue=9),
+            lambda action:action['sourceMenu']['generation'].update(engineHandleValue=10),
+            lambda action:action['originalEngine'].update(image=str(self.prepared.admission.suite_root/'wrong.bin')),
+            lambda action:action['sourceMenu'].update(extra=1),
+            lambda action:action['sourceMenu'].update(pointProfileVersion=3),
+            lambda action:action.update(sourcePointSnapshots=[copy.deepcopy(action['pointers'][-1]['snapshots'][0])]))
+        for index,change in enumerate(mutations):
+            with self.subTest(case=index):
+                action=copy.deepcopy(original);change(action)
+                with self.assertRaises((AssertionError,ValueError)):self.require(module,action)
+
+    def test_missing_or_late_actual_input_finish_cannot_be_replayed_as_success(self):
+        module,original,snapshot,hit=self.fixture()
+        for missing in (True,False):
+            with self.subTest(missing=missing):
+                action=copy.deepcopy(original);pointer=action['pointers'][-1]
+                if missing:pointer.pop('inputFinishedAt')
+                else:pointer['inputFinishedAt']=hit['providerLocalProof']['effectiveDeadline']
+                with self.assertRaises((AssertionError,KeyError,ValueError)):self.require(module,action)
+
+    def test_keyboard_before_snapshot_cannot_reuse_the_previous_key_source_site(self):
+        module,action,snapshot,hit=self.fixture('keyboard-escape',True)
+        self.assertIs(module.require_native_menu_action(action,77,11,'keyboard-escape',source_admission=self.prepared.admission),action)
+        keys=action['keys'];self.assertEqual([key['shortcut'] for key in keys],['ALT_F','DOWN','ESCAPE'])
+        earlier=keys[1]['before']['targetPointProof']['providerLocalProof']['sourceScopeId']
+        later=keys[2]['before']['targetPointProof']['providerLocalProof']['sourceScopeId']
+        self.assertNotEqual(earlier,later)
+        keys[2]['before']=copy.deepcopy(keys[1]['before'])
+        for use in action['pointUses']:
+            if use['sourceScopeId']==later:use['sourceScopeId']=earlier
+        action['uiaInterop']['providerLocalResult']=copy.deepcopy(keys[1]['before']['targetPointProof']['providerLocalProof']['provider'])
+        with self.assertRaises(AssertionError):
+            module.require_native_menu_action(action,77,11,'keyboard-escape',source_admission=self.prepared.admission)
+
+
 if __name__=='__main__':unittest.main()

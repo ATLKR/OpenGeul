@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +24,340 @@ ROOT = '.work/suite-native-menu/worker-diagnostics'
 MODULES = ('writer', 'calc', 'impress', 'draw', 'math', 'base')
 VIEW_MODULES = ('writer', 'calc')
 CORE_COMMANDS = ['new-hwp', 'home', 'new', 'open', 'save', 'saveAs', 'close']
+
+
+class SourceQualifiedMenuArchiveTests(unittest.TestCase):
+    def local_action(self,legacy,admission,*,row_index=-1,ledger_index=-2,operation='save'):
+        from test_native_menu_point_profile import source_qualified_action_fixture
+        row=legacy.report['tests'][row_index];origin=row['nativeMenuActions'][ledger_index]
+        _,action=source_qualified_action_fixture(self,admission,legacy.source_selection,
+            operation=operation,started_at=origin['startedAt'])
+        action=legacy.remap_action(action,row)
+        action['sourceMenu']=copy.deepcopy(origin['sourceMenu'])
+        # Synthetic archive cases renumber the fixture's original HWNDs. Keep
+        # the separately observed signed raw field consistent with that remap.
+        for node in legacy.implementation()._nodes(action):
+            if type(node) is dict and 'providerLocalProof' in node:
+                raw=node['providerLocalProof']['globalPoint']
+                self.assertGreaterEqual(raw['nativeHwndRaw'],0)
+                raw['nativeHwndRaw']=raw['nativeHwnd']
+        row['nativeMenuActions'][ledger_index]=copy.deepcopy(action)
+        if operation=='save':row['baseSaveMenuAction']=copy.deepcopy(action)
+        else:
+            self.assertEqual((row_index,ledger_index,operation),(0,5,'printPreview'))
+            view=row['nativeViewRoundtrip'];view['previewActions'][1]=copy.deepcopy(action)
+            for field in ('observations','fullscreenActions'):
+                for item in view[field]:
+                    if item['originIndex']!=ledger_index:continue
+                    for key in ('binding','originalProcess','originalEngine'):item[key]=copy.deepcopy(action[key])
+                    if field=='fullscreenActions':item['nativeMenuOrigin']=copy.deepcopy(action)
+        legacy.save_report()
+        return action
+
+    def fixture(self):
+        legacy=NativeMenuArchiveCompletenessTests(methodName='runTest')
+        legacy.setUp();self.addCleanup(legacy.doCleanups)
+        from suite.tests.test_native_menu_source_admission import SourceMenuAdmissionTests
+        import native_menu_source_admission as gate
+        source=SourceMenuAdmissionTests(methodName='runTest')
+        source.setUp();self.addCleanup(source.doCleanups)
+        shutil.copytree(source.root,legacy.suite,dirs_exist_ok=True)
+        source.root=legacy.suite
+        inputs=source.trusted/'.work/source-engine-input';inputs.mkdir(parents=True)
+        (inputs/'OpenGeul-Office-engine-arm64.zip').write_bytes(source.archive.read_bytes())
+        (inputs/'source-build-receipt.json').write_bytes(source.receipt.read_bytes())
+        import native_menu_source_selection as selected
+        self.enterContext(patch.object(gate,'_HARNESS_ROOT',source.trusted))
+        prepared=selected.prepare_source_menu_runtime(legacy.suite,'arm64',deadline=time.monotonic()+30)
+        legacy.source_selection=selected.source_menu_for_launch(prepared,deadline=time.monotonic()+30)
+        admission=prepared.admission
+        summary=dict(admission.summary());summary['providers']=[dict(item) for item in summary['providers']]
+        legacy.report.update(nativePointProfileVersion=4,sourceMenuAdmission=summary)
+        for row in legacy.report['tests']:
+            row.update(nativePointProfileVersion=4,sourceMenuAdmission=copy.deepcopy(summary))
+            for action in legacy.implementation()._nodes(row):
+                if type(action) is not dict or action.get('kind')!='owned-native-menu-action':continue
+                binding=action['binding'];shell=action['originalProcess'];engine=action['originalEngine']
+                action['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,admission=copy.deepcopy(summary),
+                    generation=dict(binding,shellPid=shell['pid'],shellCreationTime=shell['creationTime'],
+                        shellHandleValue=shell['handleValue'],engineCreationTime=engine['creationTime'],
+                        engineHandleValue=action['engineHandleValue']))
+                action['pointUses']=[]
+            if row['module'] in VIEW_MODULES:
+                view=row['nativeViewRoundtrip']
+                for field in ('observations','fullscreenActions'):
+                    for index,item in enumerate(view[field]):
+                        origin_index=4 if field=='observations' and index==0 else 5
+                        origin=row['nativeMenuActions'][origin_index]
+                        item.update(originIndex=origin_index,binding=copy.deepcopy(origin['binding']),
+                            originalProcess=copy.deepcopy(origin['originalProcess']),
+                            originalEngine=copy.deepcopy(origin['originalEngine']),engineHandleValue=9,
+                            sourceMenu=copy.deepcopy(origin['sourceMenu']),pointUses=[])
+                        offset=((.1,.1,3.3,6.5)[index] if field=='observations' else (3.2,6.4)[index])
+                        item['startedAt']=origin['finishedAt']+offset
+                        item['deadline']=item['startedAt']+5
+                        item['finishedAt']=item['startedAt']+(3 if field=='observations' else .05)
+                        if field=='fullscreenActions':item['nativeMenuOrigin']=copy.deepcopy(origin)
+        legacy.save_report()
+        return legacy,admission
+
+    def verify(self,legacy,admission):
+        verify=getattr(legacy.implementation(),'verify_source_qualified_native_menu_archive_completeness',None)
+        self.assertTrue(callable(verify),'Separate actual-Gate source archive entry is missing')
+        return verify(legacy.root,legacy.suite,admission=admission)
+
+    def test_source_entry_rejects_saved_summary_or_boolean_authority_before_report_read(self):
+        legacy=NativeMenuArchiveCompletenessTests(methodName='runTest')
+        module=legacy.implementation()
+        verify=getattr(module,'verify_source_qualified_native_menu_archive_completeness',None)
+        self.assertTrue(callable(verify), 'Separate actual-Gate source archive entry is missing')
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for invalid in (None,True,{},object()):
+                with self.subTest(authority=type(invalid).__name__), self.assertRaises(ValueError):
+                    verify(root,root,admission=invalid)
+
+    def test_actual_gate_replays_global_source_actions_without_promoting_complete_suite_acceptance(self):
+        legacy,admission=self.fixture()
+        before=(legacy.root/REPORT).read_bytes()
+        result=self.verify(legacy,admission)
+        self.assertTrue(result['success']);self.assertIs(result['acceptanceEligible'],False)
+        self.assertEqual((result['expectedGenerations'],result['matchedGenerations']),(6,6))
+        self.assertEqual(result['nativePointProfileVersion'],4)
+        self.assertEqual((legacy.root/REPORT).read_bytes(),before)
+        with self.assertRaises(ValueError):legacy.verify()
+
+    def test_full_archive_replays_five_distinct_new_worker4_sites_and_recorded_input_use(self):
+        legacy,admission=self.fixture();action=self.local_action(legacy,admission)
+        legacy.implementation()._action_profiles_v4(action,admission)
+        try:result=self.verify(legacy,admission)
+        except ValueError:
+            self.fail('Actual source-aware public action replay did not accept five fresh worker4 sites')
+        self.assertTrue(result['success'])
+        points=[node['providerLocalProof'] for node in legacy.implementation()._nodes(action)
+            if type(node) is dict and 'providerLocalProof' in node]
+        scopes={}
+        for proof in points:
+            exact=(json.dumps(proof,sort_keys=True,allow_nan=False),
+                json.dumps(proof['provider'],sort_keys=True,allow_nan=False))
+            self.assertEqual(scopes.setdefault(proof['sourceScopeId'],exact),exact)
+        self.assertEqual(sorted(scopes),[1,2,3,4,5])
+        self.assertEqual([use['useCode'] for use in action['pointUses']],[1,1,2,1,2,3])
+
+    def test_historical_local_points_replay_after_wall_clock_expiry_only_at_original_use_times(self):
+        legacy,admission=self.fixture();self.local_action(legacy,admission)
+        with patch.object(time,'monotonic',return_value=10**12):
+            self.assertTrue(self.verify(legacy,admission)['success'])
+
+    def test_full_archive_rejects_missing_copied_reordered_sites_and_invalid_recorded_consumption(self):
+        legacy,admission=self.fixture();original=self.local_action(legacy,admission)
+        self.verify(legacy,admission)
+        for mutation in ('missing','copied','reordered','unobserved','expired-use','expired-current-input','before-capture',
+                         'late-input','unused-scope','wrong-use-code','duplicate-use','missing-use',
+                         'oversized-uses','oversized-action'):
+            with self.subTest(mutation=mutation):
+                action=copy.deepcopy(original);pointer=action['pointers'][-1]
+                if mutation=='missing':del pointer['snapshots'][0]['targetPointProof']
+                elif mutation=='copied':pointer['snapshots'][2]['targetPointProof']=copy.deepcopy(pointer['snapshots'][1]['targetPointProof'])
+                elif mutation=='reordered':
+                    first,last=pointer['snapshots'][0],pointer['snapshots'][1]
+                    first['targetPointProof'],last['targetPointProof']=last['targetPointProof'],first['targetPointProof']
+                elif mutation=='unobserved':action['orphanPoint']=copy.deepcopy(pointer['hits'][0])
+                elif mutation=='expired-use':action['pointUses'][-1]['at']=pointer['hits'][-1]['providerLocalProof']['effectiveDeadline']
+                elif mutation=='expired-current-input':
+                    pointer['inputStartedAt']=action['deadline']-.1
+                    pointer['inputFinishedAt']=action['deadline']-.09
+                    action['pointUses'][-1]['at']=pointer['inputStartedAt']
+                    action['finishedAt']=action['deadline']-.05
+                elif mutation=='before-capture':pointer['hits'][0]['pointObservedAt']-=1
+                elif mutation=='late-input':pointer['inputStartedAt']=action['finishedAt']+1
+                elif mutation=='unused-scope':action['pointUses'][-1]['sourceScopeId']=31
+                elif mutation=='wrong-use-code':action['pointUses'][-1]['useCode']=4
+                elif mutation=='duplicate-use':action['pointUses'].append(copy.deepcopy(action['pointUses'][-1]))
+                elif mutation=='oversized-uses':action['pointUses']=[copy.deepcopy(action['pointUses'][0]) for _ in range(129)]
+                elif mutation=='oversized-action':action['unplannedPadding']='x'*(128*1024)
+                else:action['pointUses'].pop()
+                row=legacy.report['tests'][-1]
+                row['nativeMenuActions'][-2]=copy.deepcopy(action);row['baseSaveMenuAction']=copy.deepcopy(action)
+                legacy.save_report()
+                with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_full_archive_rejects_missing_older_and_conflicting_final_worker_packets(self):
+        legacy,admission=self.fixture();original=self.local_action(legacy,admission)
+        self.verify(legacy,admission)
+        for mutation in ('missing','older','different-copy','reused-source-id'):
+            with self.subTest(mutation=mutation):
+                action=copy.deepcopy(original);pointer=action['pointers'][-1]
+                if mutation=='missing':del action['uiaInterop']['providerLocalResult']
+                elif mutation=='older':action['uiaInterop']['providerLocalResult']=copy.deepcopy(pointer['hits'][0]['providerLocalProof']['provider'])
+                elif mutation=='different-copy':action['otherDiagnostic']=dict(providerLocalResult=copy.deepcopy(pointer['hits'][0]['providerLocalProof']['provider']))
+                else:
+                    proof=pointer['hits'][-1]['providerLocalProof']
+                    proof['sourceScopeId']=1;proof['sourceScope']['scope_id']=1;proof['provider']['scopeId']=1
+                    proof['provider']['threadBirth']+=1
+                    action['uiaInterop']['providerLocalResult']=copy.deepcopy(proof['provider'])
+                row=legacy.report['tests'][-1]
+                row['nativeMenuActions'][-2]=copy.deepcopy(action);row['baseSaveMenuAction']=copy.deepcopy(action)
+                legacy.save_report()
+                with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_report_case_and_action_summaries_cannot_replace_actual_source_identity(self):
+        legacy,admission=self.fixture();original=copy.deepcopy(legacy.report)
+        for site in ('report','case','action'):
+            with self.subTest(site=site):
+                legacy.report=copy.deepcopy(original)
+                target=(legacy.report['sourceMenuAdmission'] if site=='report' else
+                    legacy.report['tests'][0]['sourceMenuAdmission'] if site=='case' else
+                    legacy.report['tests'][0]['nativeMenuActions'][0]['sourceMenu']['admission'])
+                target['admissionSha256']='0'*64
+                legacy.save_report()
+                with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_source_report_case_profile_and_generation_downgrades_fail_closed(self):
+        legacy,admission=self.fixture();original=copy.deepcopy(legacy.report)
+        for site in ('report','case','action-generation','missing-source'):
+            with self.subTest(site=site):
+                legacy.report=copy.deepcopy(original);row=legacy.report['tests'][0]
+                if site=='report':legacy.report['nativePointProfileVersion']=2
+                elif site=='case':row['nativePointProfileVersion']=3
+                elif site=='action-generation':row['nativeMenuActions'][0]['sourceMenu']['generation']['engineCreationTime']+=1
+                else:del row['nativeMenuActions'][0]['sourceMenu']
+                legacy.save_report()
+                with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_actual_admission_suite_root_cannot_authorize_another_payload(self):
+        legacy,admission=self.fixture()
+        with self.assertRaises(ValueError):
+            legacy.implementation().verify_source_qualified_native_menu_archive_completeness(
+                legacy.root,legacy.root,admission=admission)
+
+    def test_source_plan_rejects_reused_slots_and_missing_finish_even_with_matching_summary(self):
+        legacy,admission=self.fixture();original=copy.deepcopy(legacy.report)
+        for mutation in ('reuse-gesture','missing-finish','nested-only'):
+            with self.subTest(mutation=mutation):
+                legacy.report=copy.deepcopy(original);row=legacy.report['tests'][0]
+                if mutation=='reuse-gesture':row['gestures'][3]['receipt']['receipt']=copy.deepcopy(row['nativeMenuActions'][0])
+                elif mutation=='missing-finish':row['nativeMenuActions'].pop()
+                else:row['nativeHwpLauncher']['menuAction']['sourceMenu']['generation']['shellHandleValue']+=1
+                legacy.save_report()
+                with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_report_and_case_source_summary_require_exact_closed_wire_types(self):
+        legacy,admission=self.fixture();original=copy.deepcopy(legacy.report)
+        for site in ('report','case'):
+            for mutation in ('bool-schema','float-role','extra-field'):
+                with self.subTest(site=site,mutation=mutation):
+                    legacy.report=copy.deepcopy(original)
+                    summary=(legacy.report if site=='report' else legacy.report['tests'][0])['sourceMenuAdmission']
+                    if mutation=='bool-schema':summary['schemaVersion']=True
+                    elif mutation=='float-role':summary['providers'][0]['role']=1.0
+                    else:summary['unreviewed']=0
+                    legacy.save_report()
+                    with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_historical_archive_never_uses_current_clock_or_live_provider_rechecks(self):
+        legacy,admission=self.fixture()
+        with patch.object(time,'monotonic',side_effect=AssertionError('Historical replay queried current clock')), \
+                patch.object(type(admission),'verify_provider_files',side_effect=AssertionError('Historical replay queried provider files')):
+            self.assertTrue(self.verify(legacy,admission)['success'])
+
+    def test_source_view_and_fullscreen_headers_join_actual_admission_generation_and_original_ledger(self):
+        legacy,admission=self.fixture();self.verify(legacy,admission);original=copy.deepcopy(legacy.report)
+        for field in ('observations','fullscreenActions'):
+            for mutation in ('missing-header','wrong-source','wrong-generation','wrong-origin'):
+                with self.subTest(field=field,mutation=mutation):
+                    legacy.report=copy.deepcopy(original)
+                    item=legacy.report['tests'][0]['nativeViewRoundtrip'][field][0]
+                    if mutation=='missing-header':del item['sourceMenu']
+                    elif mutation=='wrong-source':item['sourceMenu']['admission']['schemaVersion']=True
+                    elif mutation=='wrong-generation':item['sourceMenu']['generation']['engineHandleValue']+=1
+                    else:item['originIndex']=0
+                    legacy.save_report()
+                    with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_global_only_direct_view_receipts_reject_orphan_local_packets_and_points(self):
+        legacy,admission=self.fixture();action=self.local_action(legacy,admission)
+        self.verify(legacy,admission);original=copy.deepcopy(legacy.report)
+        packet=action['uiaInterop']['providerLocalResult'];point=action['pointers'][-1]['hits'][-1]
+        for module_index in (0,1):
+            for field,count in (('observations',4),('fullscreenActions',2)):
+                for index in range(count):
+                    for payload in ('packet','point','raw-worker','bare-proof'):
+                        with self.subTest(module=module_index,field=field,index=index,payload=payload):
+                            legacy.report=copy.deepcopy(original)
+                            item=legacy.report['tests'][module_index]['nativeViewRoundtrip'][field][index]
+                            if payload=='packet':item['uiaInterop']=dict(providerLocalResult=copy.deepcopy(packet))
+                            elif payload=='point':item['targetPointProof']=copy.deepcopy(point)
+                            elif payload=='raw-worker':item['unjoined']=dict(rawWorker=copy.deepcopy(packet))
+                            else:item['unjoined']=dict(rawProof=copy.deepcopy(point['providerLocalProof']))
+                            legacy.save_report()
+                            with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_direct_fullscreen_keeps_its_exact_validated_local_menu_origin(self):
+        legacy,admission=self.fixture()
+        action=self.local_action(legacy,admission,row_index=0,ledger_index=5,operation='printPreview')
+        self.assertIn('providerLocalResult',action['uiaInterop'])
+        self.assertTrue(self.verify(legacy,admission)['success'])
+
+    def local_profile(self,admission):
+        # Obtain a new4 result through the real Task2 adapter and fake native
+        # SDK worker. No older packet is relabelled into a source candidate.
+        from test_native_menu_point_profile import NativeSourceQualifiedPointV4Tests
+        owner=NativeSourceQualifiedPointV4Tests(methodName='runTest')
+        self.addCleanup(owner.doCleanups);owner.admission=admission
+        fixture=owner.source_fixture();proof=owner.observe(fixture)
+        scope=proof['scope'];binding=scope['binding'];position=proof['before']['point']
+        point=dict(point=list(position),hitHwnd=proof['before']['hwnd'],rootHwnd=proof['before']['hwnd'],
+            pid=binding['officePid'],pointMethod=proof['method'],providerLocalProof=proof,
+            uiaMatches=False,withinControl=False,pointObservedAt=proof['capturedAt'])
+        snapshot=dict(binding=copy.deepcopy(binding),identityProof=copy.deepcopy(proof['sourceFresh']),
+            targetPointProof=point)
+        action=dict(binding=copy.deepcopy(binding),originalProcess=dict(pid=scope['shellPid']),
+            elementIdentityScope=copy.deepcopy(scope),pointers=[],observations=[snapshot],
+            uiaInterop=dict(providerLocalResult=copy.deepcopy(proof['provider'])))
+        return action
+
+    def test_archive_profile_replays_a_new_worker4_and_keeps_raw_false_and_old_zeros(self):
+        legacy,admission=self.fixture();action=self.local_profile(admission)
+        legacy.implementation()._action_profiles_v4(action,admission)
+        point=action['observations'][0]['targetPointProof'];packet=point['providerLocalProof']['provider']
+        self.assertIs(point['uiaMatches'],False)
+        self.assertEqual((packet['localKnown'],packet['localMatch'],packet['acceptanceEligible']),(0,0,0))
+
+    def test_archive_profile_rejects_worker_cleanup_schema_digest_and_raw_comparison_mutations(self):
+        legacy,admission=self.fixture();original=self.local_profile(admission)
+        paths=[(('uiaMatches',),True),(('pointMethod',),'owned-popup-and-msaa-canonical-hit-v2'),
+            (('providerLocalProof','schemaVersion'),3),(('providerLocalProof','finalPointVerified'),0),
+            (('providerLocalProof','sourceAdmissionSha256'),'0'*64),
+            (('providerLocalProof','globalPoint','nativeHwndRaw'),True),
+            (('providerLocalProof','provider','workerSchemaVersion'),3),
+            (('providerLocalProof','provider','admissionDigest0'),0),
+            (('providerLocalProof','provider','workerCleanup'),0),
+            (('providerLocalProof','provider','nativeExit'),0),
+            (('providerLocalProof','provider','pending'),1),
+            (('providerLocalProof','provider','referencesReleased'),25),
+            (('providerLocalProof','provider','localKnown'),1)]
+        for path,value in paths:
+            with self.subTest(path=path):
+                action=copy.deepcopy(original);node=action['observations'][0]['targetPointProof']
+                for part in path[:-1]:node=node[part]
+                node[path[-1]]=value
+                with self.assertRaises((AssertionError,ValueError)):
+                    legacy.implementation()._action_profiles_v4(action,admission)
+
+    def test_archive_profile_requires_latest_packet_on_original_path_and_rejects_hidden_global_packet(self):
+        legacy,admission=self.fixture();original=self.local_profile(admission)
+        for mutation in ('missing','older','hidden','unjoined'):
+            with self.subTest(mutation=mutation):
+                action=copy.deepcopy(original)
+                if mutation=='missing':del action['uiaInterop']['providerLocalResult']
+                elif mutation=='older':action['uiaInterop']['providerLocalResult']['scopeId']+=1
+                elif mutation=='hidden':action['hidden']=action.pop('uiaInterop')
+                else:action['unjoined']=copy.deepcopy(action['observations'][0]['targetPointProof'])
+                with self.assertRaises((AssertionError,ValueError)):
+                    legacy.implementation()._action_profiles_v4(action,admission)
+        action=dict(pointers=[],uiaInterop=copy.deepcopy(original['uiaInterop']))
+        with self.assertRaises(ValueError):legacy.implementation()._action_profiles_v4(action,admission)
 
 
 class NativeMenuArchiveCompletenessTests(unittest.TestCase):

@@ -12,7 +12,9 @@ import time
 
 from ascii_editor_input import input_buffer
 from counted_editor_shortcuts import _owned_release
+import owned_native_menu as _native_menu
 from owned_native_menu import NativeMenuProbe,READY_PROPERTY,_editor,require_native_menu_action,retain_native_menu_receipt
+from native_menu_source_selection import selected_native_menu_probe
 
 US_LAYOUT=0x04090409
 EXTRA_KEYS=(1,2,4,5,6,0x4a)  # Mouse buttons and J, in addition to the shared neutral set.
@@ -92,14 +94,19 @@ def toggle_native_fullscreen(api,process,document,record,*,module,probe=None,clo
         engineHandleReleased=False,providerClientReleased=False)
     previous=record.setdefault('nativeFullscreenActions',[])
     assert type(previous) is list and len(previous)<128
-    previous.append(value);handle=None;primary=None
+    previous.append(value);handle=None;primary=None;supplied=probe;probe=None
     def budget():assert clock()<deadline, 'Original fullscreen input deadline expired'
     try:
+        budget()
+        probe=selected_native_menu_probe(process,deadline,clock,
+            build=lambda selection:NativeMenuProbe(deadline,clock,source_selection=selection),supplied=supplied)
         budget();assert record.get('module')==module, 'Fullscreen belongs to another document module'
         assert all(row.get('success') is True for row in previous[:-1]), 'Failed fullscreen action cannot be retried'
         origins=record.get('nativeMenuActions',[])
         assert type(origins) is list and 0<len(origins)<=128, 'Fullscreen requires its original native menu receipt'
-        origin=origins[-1];require_native_menu_action(origin,process.pid,document)
+        origin=origins[-1];selection=getattr(probe,'source_selection',None)
+        if selection is None:require_native_menu_action(origin,process.pid,document)
+        else:require_native_menu_action(origin,process.pid,document,source_admission=selection.prepared.admission)
         assert origin['finishedAt']<=start
         binding=copy.deepcopy(origin['binding']);shell=origin['originalProcess'];engine=origin['originalEngine']
         archive=record['nativeArchiveGeneration']
@@ -111,7 +118,6 @@ def toggle_native_fullscreen(api,process,document,record,*,module,probe=None,clo
         assert Path(engine['image']).resolve()==suite/'Office/program/soffice.bin'
         value.update(originIndex=len(origins)-1,nativeMenuOrigin=copy.deepcopy(origin),binding=binding,
             nativeArchiveGeneration=copy.deepcopy(archive),originalProcess=copy.deepcopy(shell),originalEngine=copy.deepcopy(engine))
-        probe=probe or NativeMenuProbe(deadline,clock)
         assert callable(getattr(probe,'close_provider',None)), 'Fullscreen requires owned provider cleanup'
         assert probe.process_snapshot(process)==shell, 'Original fullscreen shell generation changed'
         handle=probe.open_engine(binding['officePid']);_positive(handle)
@@ -119,6 +125,8 @@ def toggle_native_fullscreen(api,process,document,record,*,module,probe=None,clo
         observed_engine=probe.engine_snapshot(handle)
         assert _identity(observed_engine)==_identity(engine), 'Original fullscreen engine generation changed'
         assert observed_engine['handleValue']==handle
+        assert api.attachment(document)==(binding['parent'],binding['child'],binding['officePid'])
+        budget();_native_menu._bind_source_generation(probe,process,suite,binding,shell,observed_engine,handle,value)
         probe.enter_dpi(value['dpiScope']);assert value['dpiScope']['verified'] is True
         assert type(value['dpiScope'].get('previousContext')) is int and value['dpiScope']['previousContext']!=0
         def continuity():

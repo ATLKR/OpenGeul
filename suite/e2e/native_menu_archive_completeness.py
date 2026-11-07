@@ -20,6 +20,7 @@ from suite.e2e.native_menu_smoke import CORE_COMMANDS, GESTURES, MODULES, VIEW_M
 REPORT = '.work/suite-native-menu/results.json'
 ROOT = '.work/suite-native-menu/worker-diagnostics'
 POINT_METHOD_V2 = 'owned-popup-and-msaa-canonical-hit-v2'
+POINT_METHOD_V4 = 'owned-popup-and-source-qualified-ia2-hit-v4'
 
 
 def _require(condition, message):
@@ -111,8 +112,102 @@ def _action_profiles(action):
     else:_require(not results, 'A global-only menu action retained a local worker packet')
 
 
-def _menu_actions(row,shell,attachment,generation,suite):
-    from owned_native_menu import require_native_menu_action
+def _source_authority(admission,suite):
+    from owned_native_menu import _source_admission_summary
+    summary=_source_admission_summary(admission)
+    _require(str(Path(suite).absolute())==str(admission.suite_root),
+        'Source menu archive belongs to another admitted Suite root')
+    return summary
+
+
+def _action_profiles_v4(action,admission):
+    from owned_native_menu import _require_provider_point_v4
+    digest=admission.admission_sha256
+    words=tuple(int(digest[index:index+8],16) for index in range(0,64,8))
+    points=[];snapshots=[];results=[]
+    for item in _nodes(action):
+        if type(item) is not dict:continue
+        point=item.get('targetPointProof')
+        if type(point) is dict and 'providerLocalProof' in point:snapshots.append((point,item))
+        if 'providerLocalProof' in item:
+            proof=item['providerLocalProof']
+            _require(item.get('pointMethod')==POINT_METHOD_V4 and item.get('uiaMatches') is False
+                and type(proof) is dict and type(proof.get('schemaVersion')) is int
+                and proof['schemaVersion']==4 and proof.get('method')==POINT_METHOD_V4
+                and proof.get('sourceAdmissionSha256')==digest,
+                'Source menu point proof differs from its actual admitted profile')
+            provider=proof.get('provider')
+            _require(type(provider) is dict and type(provider.get('schemaVersion')) is int
+                and provider['schemaVersion']==4 and type(provider.get('workerSchemaVersion')) is int
+                and provider['workerSchemaVersion']==4
+                and tuple(provider.get('admissionDigest'+str(index)) for index in range(8))==words,
+                'Source menu worker is not joined to the actual source admission')
+            points.append(item)
+        elif item.get('pointMethod') not in (None,'global-uia'):
+            raise ValueError('Source menu local point proof is missing or mixes profiles')
+        if 'providerLocalResult' in item:
+            result=item['providerLocalResult']
+            _require(type(result) is dict and type(result.get('schemaVersion')) is int
+                and result['schemaVersion']==4 and type(result.get('workerSchemaVersion')) is int
+                and result['workerSchemaVersion']==4,
+                'Source menu worker observation mixes profiles')
+            results.append(result)
+    replayed=set()
+    def replay(point,snapshot,target):
+        _require(snapshot.get('binding')==action['binding']
+            and type(snapshot.get('identityProof')) is dict
+            and snapshot['identityProof'].get('scope')==action.get('elementIdentityScope'),
+            'Source menu retained point belongs to another action scope')
+        _require_provider_point_v4(point['providerLocalProof'],action['binding'],
+            action['originalProcess']['pid'],target,admission_sha256=digest,now=point['pointObservedAt'])
+        replayed.add(id(point))
+    for point,snapshot in snapshots:
+        role=point['providerLocalProof'].get('role')
+        _require(type(role) is str and role.startswith('target:'),
+            'Source menu point does not identify its exact command')
+        replay(point,snapshot,role[len('target:'):])
+    for pointer in action['pointers']:
+        samples=pointer.get('snapshots',[]);hits=pointer.get('hits',[])
+        if len(samples)==3 and len(hits)==2:
+            sites=(samples[0].get('targetPointProof'),samples[1].get('targetPointProof'),
+                hits[0],samples[2].get('targetPointProof'),hits[1])
+            previous_id=0;previous_at=None
+            for point in sites:
+                if type(point) is not dict or 'providerLocalProof' not in point:continue
+                proof=point['providerLocalProof']
+                _require(proof['sourceScopeId']>previous_id
+                    and (previous_at is None or previous_at<=proof['capturedAt']),
+                    'Source menu point sites reused or reordered their fresh acquisitions')
+                previous_id=proof['sourceScopeId'];previous_at=point['pointObservedAt']
+        for hit,snapshot in zip(hits,samples[1:]):
+            if 'providerLocalProof' in hit:replay(hit,snapshot,pointer['target'])
+    _require(all(id(point) in replayed for point in points),
+        'Source menu point has no replayed snapshot or explicit hit')
+    providers={}
+    for point in points:
+        proof=point['providerLocalProof'];scope_id=proof['sourceScopeId']
+        packet=_action_bytes(proof['provider'])
+        _require(scope_id not in providers or providers[scope_id]==packet,
+            'One source menu scope describes different worker packets')
+        providers[scope_id]=packet
+    if providers:
+        interop=action.get('uiaInterop')
+        _require(type(interop) is dict and 'providerLocalResult' in interop,
+            'Source menu final worker diagnostic path is missing')
+        latest=providers[max(providers)]
+        _require(_action_bytes(interop['providerLocalResult'])==latest
+            and all(_action_bytes(result)==latest for result in results),
+            'Source menu worker diagnostic packet is not its final replayed point')
+    else:_require(not results, 'A global-only source menu action retained a local worker packet')
+
+
+def _menu_actions(row,shell,attachment,generation,suite,*,source_admission=None):
+    from owned_native_menu import require_native_menu_action as require_action
+    def require_native_menu_action(*args):
+        return (require_action(*args) if source_admission is None else
+            require_action(*args,source_admission=source_admission))
+    profiles=(_action_profiles if source_admission is None else
+        lambda action:_action_profiles_v4(action,source_admission))
     document=attachment['hwnd'];ledger=row.get('nativeMenuActions')
     # The producer's original content-free journal admits at most 128 entries.
     _require(type(ledger) is list and 0<len(ledger)<=128,
@@ -136,7 +231,7 @@ def _menu_actions(row,shell,attachment,generation,suite):
             previous=action['finishedAt'];encoded=_action_bytes(action)
             _require(encoded not in members, 'Duplicate original native action ledger entry')
             members[encoded]=ledger_index
-            _action_profiles(action)
+            profiles(action)
         previous_slot=-1;used=set()
         def slot(action,command,gesture):
             nonlocal previous_slot
@@ -187,7 +282,7 @@ def _menu_actions(row,shell,attachment,generation,suite):
                 require_native_menu_action(action,shell,document)
                 _require(_action_bytes(action) in members,
                     'Nested native action differs from the original flat ledger')
-                _action_profiles(action)
+                profiles(action)
     except (AssertionError,KeyError,TypeError,OverflowError,RecursionError):
         raise ValueError('Original native menu action receipt is incomplete, foreign or changed') from None
 
@@ -238,13 +333,54 @@ def _view_case(row, module):
         for item in view['coreCommands']), 'Original native core command plan differs')
 
 
-def _expected(workspace, suite):
+def _source_view_receipts_v4(row,admission):
+    """Join already-produced direct view headers to the same flat menu plan."""
+    from owned_native_menu import _require_source_header,CAP
+    if row['module'] not in VIEW_MODULES:return
+    view=row['nativeViewRoundtrip'];ledger=row['nativeMenuActions']
+    try:
+        for field in ('observations','fullscreenActions'):
+            for index,item in enumerate(view[field]):
+                _require_source_header(item,admission)
+                _require(len(_action_bytes(item))<=CAP and item['pointUses']==[],
+                    'Source view receipt exceeds its bound or invents local point uses')
+                wanted=len(GESTURES)+(0 if field=='observations' and index==0 else 1)
+                _require(type(item['originIndex']) is int and item['originIndex']==wanted,
+                    'Source view receipt belongs to another original plan slot')
+                origin=ledger[wanted]
+                _require(all(item[key]==origin[key] for key in ('binding','originalProcess','originalEngine')),
+                    'Source view receipt belongs to another original generation')
+                if field=='fullscreenActions':
+                    _require(_action_bytes(item['nativeMenuOrigin'])==_action_bytes(origin),
+                        'Source fullscreen origin differs from the original flat ledger')
+                # These direct operations perform no provider-local point work.
+                # Fullscreen alone retains its separately replayed menu origin.
+                direct={key:value for key,value in item.items()
+                    if not (field=='fullscreenActions' and key=='nativeMenuOrigin')}
+                local_fields={'providerLocalResult','providerLocalProof','targetPointProof',
+                    'pointObservedAt','workerSchemaVersion','sourceAdmissionSha256'}
+                for node in _nodes(direct):
+                    if type(node) is not dict:continue
+                    _require(not local_fields.intersection(node)
+                        and node.get('pointMethod')!=POINT_METHOD_V4 and node.get('method')!=POINT_METHOD_V4,
+                        'Global-only source view receipt retained an orphan local point or worker')
+    except (AssertionError,KeyError,TypeError,OverflowError,RecursionError):
+        raise ValueError('Source view or fullscreen receipt is incomplete, foreign or changed') from None
+
+
+def _expected(workspace, suite, *, source_admission=None):
     raw = original._bytes(workspace / REPORT, original.MAX_REPORT_BYTES)
     report = original._json(raw)
     _require(type(report.get('schemaVersion')) is int and report['schemaVersion'] == 1
         and report.get('kind') == 'native-menu-gesture-matrix', 'Wrong original menu report')
-    _require(type(report.get('nativePointProfileVersion')) is int and report['nativePointProfileVersion']==2,
+    profile=2 if source_admission is None else 4
+    summary=None if source_admission is None else _source_authority(source_admission,suite)
+    _require(type(report.get('nativePointProfileVersion')) is int and report['nativePointProfileVersion']==profile,
         'Original native menu controller profile is missing')
+    if summary is not None:
+        _require(type(report.get('sourceMenuAdmission')) is dict
+            and _action_bytes(report['sourceMenuAdmission'])==_action_bytes(summary),
+            'Source menu report differs from the actual admitted source')
     try:require_native_point_preflight(report['nativePointPreflight'])
     except (AssertionError,KeyError,TypeError,ValueError):
         raise ValueError('Original native menu controller preflight did not pass') from None
@@ -265,6 +401,11 @@ def _expected(workspace, suite):
     image = str(suite / 'Office/program/soffice.bin')
     expected = {}
     for module, row in zip(MODULES, rows):
+        if summary is not None:
+            _require(type(row) is dict and type(row.get('nativePointProfileVersion')) is int
+                and row['nativePointProfileVersion']==4 and type(row.get('sourceMenuAdmission')) is dict
+                and _action_bytes(row['sourceMenuAdmission'])==_action_bytes(summary),
+                'Source menu case differs from the actual admitted source')
         _require(type(row) is dict and row.get('module') == module
             and row.get('case') == 'native-menu-' + module
             and row.get('kind') == 'native-menu-gesture-case',
@@ -288,13 +429,15 @@ def _expected(workspace, suite):
         if module=='writer':
             _require(row.get('nativeHwpMenuLaunchExecuted') is True and row.get('hwpLauncherCompleted') is True,
                 'Original Writer native HWP launcher case did not pass')
-            require_hwp_launcher_receipt(row.get('nativeHwpLauncher'),row,suite)
+            if source_admission is None:require_hwp_launcher_receipt(row.get('nativeHwpLauncher'),row,suite)
+            else:require_hwp_launcher_receipt(row.get('nativeHwpLauncher'),row,suite,source_admission=source_admission)
         else:
             _require(row.get('nativeHwpMenuLaunchExecuted') is False and row.get('hwpLauncherCompleted') is False
                 and 'nativeHwpLauncher' not in row, 'Unplanned native HWP launcher case')
         key = _key(generation)
         _require(key not in expected, 'Duplicate original native menu engine generation')
-        _menu_actions(row,shell,attachment,generation,suite)
+        _menu_actions(row,shell,attachment,generation,suite,source_admission=source_admission)
+        if source_admission is not None:_source_view_receipts_v4(row,source_admission)
         expected[key] = dict(scope='suite-native-menu', case=row['case'], slot=0,
             suiteShellPid=shell, root=ROOT, **generation)
     descriptor = dict(path=REPORT, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
@@ -389,6 +532,10 @@ def verify_native_menu_archive_completeness(workspace, suite):
     _require(workspace.is_absolute() and suite.is_absolute(), 'Absolute menu coverage roots required')
     original._plain(workspace); original._plain(suite)
     expected, descriptor = _expected(workspace, suite)
+    return _verify_archive_matches(workspace,suite,expected,descriptor)
+
+
+def _verify_archive_matches(workspace,suite,expected,descriptor):
     archives = original._archived(workspace, {ROOT}, str(suite / 'Office/program/soffice.bin'))
     matched = {}
     for archive in archives:
@@ -403,6 +550,22 @@ def verify_native_menu_archive_completeness(workspace, suite):
     return dict(schemaVersion=1, kind='native-menu-archive-generation-completeness', success=True,
         acceptanceEligible=False, expectedGenerations=len(expected), matchedGenerations=len(matched),
         sourceReceipts=[descriptor], archives=proofs)
+
+
+def verify_source_qualified_native_menu_archive_completeness(workspace,suite,*,admission):
+    """Replay source4 only with a caller's actual, freshly authenticated Gate.
+
+    Saved summaries select no authority. Historical point times are checked by
+    the public source-aware action validator, without a live provider query.
+    """
+    workspace,suite=Path(workspace),Path(suite)
+    summary=_source_authority(admission,suite)
+    _require(workspace.is_absolute() and suite.is_absolute(), 'Absolute menu coverage roots required')
+    original._plain(workspace);original._plain(suite)
+    expected,descriptor=_expected(workspace,suite,source_admission=admission)
+    result=_verify_archive_matches(workspace,suite,expected,descriptor)
+    result.update(nativePointProfileVersion=4,sourceMenuAdmission=summary)
+    return result
 
 
 def main(argv=None):
