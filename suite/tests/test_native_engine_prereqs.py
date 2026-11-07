@@ -22,6 +22,133 @@ def import_library(machine):
 
 
 class NativeJavaPrerequisiteTests(unittest.TestCase):
+    def crt_observation_tree(self, count=1):
+        vs=self.root/'VS';redist=vs/'VC/Redist/MSVC';redist.mkdir(parents=True)
+        for index in range(count):
+            family=redist/f'14.44.{35200+index}'/'x64/Microsoft.VC143.CRT';family.mkdir(parents=True)
+            (family/'msvcp140.dll').write_bytes(pe(0x8664,dll=True))
+        defaults=vs/'VC/Auxiliary/Build';defaults.mkdir(parents=True)
+        (defaults/'Microsoft.VCToolsVersion.default.txt').write_text('14.44.35207\n')
+        (defaults/'Microsoft.VCToolsRedistVersion.default.txt').write_text('14.44.35200\n')
+        return vs
+
+    def crt_failure_case(self, observation='normal'):
+        vs=self.crt_observation_tree();compiler=vs/'VC/Tools/MSVC/14.44.35207'
+        tools=compiler/'bin/Hostx64/x64';tools.mkdir(parents=True)
+        for name in ('cl','link','lib'):(tools/(name+'.exe')).write_bytes(pe(0x8664))
+        sdk=self.root/'SDK';version='10.0.26100.0'
+        for name in (f'Include/{version}/um/Windows.h',f'Include/{version}/shared/sdkddkver.h',f'Include/{version}/ucrt/stdio.h',
+                     f'Lib/{version}/um/x64/kernel32.lib',f'Lib/{version}/ucrt/x64/ucrt.lib'):
+            q=sdk/name;q.parent.mkdir(parents=True,exist_ok=True);q.write_bytes(b'synthetic SDK fixture')
+        rc=sdk/f'bin/{version}/x64/rc.exe';rc.parent.mkdir(parents=True);rc.write_bytes(pe(0x8664))
+        vswhere=self.root/'Microsoft Visual Studio/Installer/vswhere.exe';vswhere.parent.mkdir(parents=True);vswhere.write_bytes(b'synthetic seam')
+        found=self.root/'instances.json';found.write_text(json.dumps([dict(installationPath=str(vs),installationVersion='17.14.1',isComplete=True,isLaunchable=True,isPrerelease=False)]))
+        evidence=self.root/'evidence'
+        body=f"""
+${{env:ProgramFiles(x86)}}={quote(self.root)}
+function Assert-NativeEngineEnvironment {{param($Architecture)}}
+function Get-NativeBuildHost {{param($Architecture) @{{isWindows=$true;processMachine=0;nativeMachine=34404}}}}
+function Get-SourceRunBinding {{@{{sourceCommit=('a'*40);sourceTree=('b'*40)}}}}
+function Resolve-NativeJdk {{@{{home='synthetic'}}}};function Resolve-Ant {{@{{home='synthetic'}}}}
+function Get-ItemProperty {{@{{InstallationFolder={quote(sdk)};ProductVersion='10.0.26100'}}}}
+function Get-NativeCompilerFileVersion($Path) {{if([IO.Path]::GetFileName($Path) -ceq 'cl.exe'){{'19.44.35229.0'}}elseif($Path.EndsWith('.exe')){{'14.44.35229.0'}}else{{'14.44.35200.0'}}}}
+$expectedCompiler=Get-NativeCompilerPlan {quote(vs)} '17.14.1' x64
+$expectedSdk=Get-NativeSdkPlan {quote(sdk)} '{version}' x64
+$script:actualCrt=${{function:Get-AppLocalCrtPlan}}
+function Get-AppLocalCrtPlan($CompilerRoot,$Toolset,$Architecture,$ActualCompilerRuntimeFloor) {{
+ if($CompilerRoot -cne {quote(compiler)} -or $Toolset -cne 'v143' -or $Architecture -cne 'x64' -or $ActualCompilerRuntimeFloor -cne '14.44.35229.0'){{throw 'CRT selection arguments changed'}}
+ foreach($entry in @(@('native-selected-compiler.json',$expectedCompiler),@('native-selected-sdk.json',$expectedSdk))) {{
+  $saved=Get-Content -LiteralPath (Join-Path {quote(evidence)} $entry[0]) -Raw|ConvertFrom-Json
+  if(-not $saved.diagnosticOnly -or -not $saved.sourceOnly -or $saved.fullEngineQualified){{throw 'Plan was promoted to qualification'}}
+  if(($saved.plan|ConvertTo-Json -Depth 30 -Compress) -cne ($entry[1]|ConvertTo-Json -Depth 30 -Compress)){{throw 'Selected plan not preserved before CRT'}}
+ }}
+ &$script:actualCrt $CompilerRoot $Toolset $Architecture $ActualCompilerRuntimeFloor
+}}
+function Invoke-LoggedCommand($FilePath,$Arguments,$WorkingDirectory,$LogPrefix,[switch]$NativeEnvironment) {{
+ if($FilePath -cne {quote(vswhere)}){{throw 'COMPILER MUST NOT RUN'}}
+ @{{stdout={quote(found)};exitCode=0;passed=$true}}
+}}
+function Get-AuthenticatedDownload {{throw 'DOWNLOAD MUST NOT RUN'}}
+$script:actualObservation=${{function:Save-NativeCrtObservation}}
+if('{observation}' -ceq 'failure'){{function Save-NativeCrtObservation {{throw 'Synthetic observation failure'}}}}
+if('{observation}' -ceq 'expired'){{function Save-NativeCrtObservation($InstallationPath,$OutputPath) {{
+ $script:NativeEngineBuildBudget.clock=[pscustomobject]@{{Elapsed=[pscustomobject]@{{TotalMilliseconds=($script:NativeEngineBuildBudget.record.timeoutMilliseconds+1);TotalSeconds=20000}}}}
+ &$script:actualObservation $InstallationPath $OutputPath
+}}}}
+$failed=$false
+try{{Invoke-NativeEngineBuild Full {quote(self.root/'work')} {quote(evidence)} '' 4 -Architecture x64}}
+catch{{if($_.Exception.Message -notmatch 'No native VC redist.*14.44.35229.0'){{throw}};$failed=$true}}
+if(-not $failed){{throw 'CRT rejection was rescued'}}
+"""
+        self.ps(body)
+        if observation=='failure':
+            self.assertFalse((evidence/'native-crt-observation.json').exists())
+        else:
+            result=json.loads((evidence/'native-crt-observation.json').read_text())
+            self.assertTrue(result['diagnosticOnly']);self.assertTrue(result['sourceOnly'])
+            self.assertFalse(result['fullEngineQualified']);self.assertFalse(result['selectedForBuild'])
+            if observation=='normal':
+                self.assertTrue(result['observationCompleted']);row=result['versionDirectories'][0]
+                self.assertEqual('14.44.35200',row['directory'])
+                present=[f for f in row['files'] if f['exists']]
+                self.assertEqual([dict(name='msvcp140.dll',exists=True,fileVersion='14.44.35200.0')],present)
+                self.assertEqual(9,len(row['files']))
+                self.assertEqual(['14.44.35207','14.44.35200'],[d['version'] for d in result['defaults']])
+            else:
+                self.assertFalse(result['observationCompleted']);self.assertEqual([],result['versionDirectories'])
+        proof=json.loads((evidence/'source-build-receipt.json').read_text())
+        for field in ('passed','fullEngineQualified','acceptanceEligible','guiVerified'):self.assertIs(False,proof[field])
+        self.assertFalse(list(evidence.glob('*.zip')))
+
+    def test_x64_crt_failure_preserves_exact_selected_plans_before_observation(self):
+        self.crt_failure_case()
+
+    def test_x64_crt_observation_failure_preserves_original_rejection(self):
+        self.crt_failure_case('failure')
+
+    def test_x64_crt_observation_expiry_preserves_original_rejection(self):
+        self.crt_failure_case('expired')
+
+    def test_crt_observation_caps_directories_and_reuses_nine_names_without_selection(self):
+        vs=self.crt_observation_tree(17);output=self.root/'observation.json'
+        self.ps(f"$script:NativeEngineBuildBudget=New-NativeBuildBudget '' 1; $before=$script:NativeEngineBuildBudget; function Get-NativeCompilerFileVersion {{'14.44.35200.0'}}; Save-NativeCrtObservation {quote(vs)} {quote(output)}; if(-not [object]::ReferenceEquals($before,$script:NativeEngineBuildBudget)){{throw 'Budget reset'}}")
+        result=json.loads(output.read_text());self.assertTrue(result['observationCompleted'])
+        self.assertEqual(16,len(result['versionDirectories']));self.assertTrue(result['directoryLimitReached'])
+        self.assertLessEqual(result['timeoutMilliseconds'],60000)
+        names=json.loads(self.ps("@(Get-CrtNames x64)|ConvertTo-Json -Compress"))
+        for row in result['versionDirectories']:self.assertEqual(names,[f['name'] for f in row['files']])
+        original=output.read_bytes()
+        self.rejected(f"Save-NativeCrtObservation {quote(vs)} {quote(output)}")
+        self.assertEqual(original,output.read_bytes())
+
+    def test_crt_observation_rejects_linked_and_oversized_or_invalid_default_metadata(self):
+        vs=self.crt_observation_tree();path=vs/'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt'
+        for index,raw in enumerate((b'x'*4097,b'not a version')):
+            with self.subTest(case=index):
+                path.write_bytes(raw);output=self.root/f'bad-{index}.json'
+                self.ps(f"function Get-NativeCompilerFileVersion {{'14.44.35200.0'}}; Save-NativeCrtObservation {quote(vs)} {quote(output)}")
+                result=json.loads(output.read_text());self.assertFalse(result['observationCompleted'])
+                self.assertNotIn(raw.decode(),output.read_text());self.assertFalse(result['fullEngineQualified'])
+                self.assertEqual(1,len(result['versionDirectories']))
+        path.unlink();target=self.root/'other.txt';target.write_text('14.44.35207')
+        path.symlink_to(target);output=self.root/'linked.json'
+        self.ps(f"Save-NativeCrtObservation {quote(vs)} {quote(output)}")
+        self.assertFalse(json.loads(output.read_text())['observationCompleted'])
+
+    def test_crt_observation_rejects_linked_redist_directory_before_resource_reads(self):
+        vs=self.crt_observation_tree();path=vs/'VC/Redist/MSVC/14.44.35200'
+        target=self.root/'other-directory';path.rename(target);path.symlink_to(target,target_is_directory=True)
+        output=self.root/'linked-directory.json'
+        self.ps(f"function Get-NativeCompilerFileVersion {{throw 'MUST NOT READ VERSION'}}; Save-NativeCrtObservation {quote(vs)} {quote(output)}")
+        result=json.loads(output.read_text());self.assertFalse(result['observationCompleted'])
+        self.assertEqual([],result['versionDirectories'])
+
+    def test_crt_observation_expired_budget_does_not_read_versions(self):
+        vs=self.crt_observation_tree();output=self.root/'expired.json'
+        self.ps(f"$script:NativeEngineBuildBudget=[pscustomobject]@{{record=@{{timeoutMilliseconds=1}};clock=[pscustomobject]@{{Elapsed=[pscustomobject]@{{TotalMilliseconds=2}}}}}}; function Get-NativeCompilerFileVersion {{throw 'MUST NOT READ VERSION'}}; Save-NativeCrtObservation {quote(vs)} {quote(output)}")
+        result=json.loads(output.read_text());self.assertFalse(result['observationCompleted'])
+        self.assertEqual([],result['versionDirectories']);self.assertEqual([],result['defaults'])
+
     def vs_selection_failure(self, count, diagnostic='success'):
         case=self.root/(str(count)+'-'+diagnostic);case.mkdir()
         vswhere=case/'Microsoft Visual Studio/Installer/vswhere.exe'

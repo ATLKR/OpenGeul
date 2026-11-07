@@ -699,6 +699,55 @@ function Get-NativeSdkPlan([string]$SdkRoot,[string]$Version,[ValidateSet('arm64
     return [ordered]@{root=$root;version=$Version;architecture=$Architecture;files=$files;resourceCompiler=$tool}
 }
 
+function Save-NativeCrtObservation([string]$InstallationPath,[string]$OutputPath) {
+    $result=[ordered]@{schemaVersion=1;kind='unsigned-crt-version-observation';sourceOnly=$true;diagnosticOnly=$true;
+        selectedForBuild=$false;fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false;
+        observationCompleted=$false;directoryLimitReached=$false;defaults=@();versionDirectories=@()}
+    $watch=[Diagnostics.Stopwatch]::StartNew();$limit=60000
+    $check={Assert-NativeBuildTimeRemaining;if($watch.Elapsed.TotalMilliseconds -ge $limit){throw 'CRT observation time limit expired.'}}
+    try {
+        $limit=Get-NativeBuildRemaining 60000;$result.timeoutMilliseconds=$limit
+        &$check;Assert-UnlinkedPath $InstallationPath
+        $root=Join-Path $InstallationPath 'VC/Redist/MSVC';&$check;Assert-UnlinkedPath $root
+        foreach($directory in [IO.Directory]::EnumerateDirectories($root)) {
+            &$check;$name=[IO.Path]::GetFileName($directory)
+            if($name -cnotmatch '^v?(14\.\d+\.\d+(?:\.\d+)?)$' -and $name -cne 'v143') {continue}
+            Assert-UnlinkedPath $directory
+            $row=[ordered]@{directory=$name;files=@()};$result.versionDirectories+=,$row
+            foreach($file in Get-CrtNames x64) {
+                &$check;$path=Join-Path $directory ('x64/Microsoft.VC143.CRT/'+$file);Assert-UnlinkedPath $path
+                $item=Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                $observed=[ordered]@{name=$file;exists=($null -ne $item)};$row.files+=,$observed
+                if($item) {
+                    if($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {throw 'CRT observation requires an unlinked file.'}
+                    &$check;$observed.fileVersion=[string][Version](Get-NativeCompilerFileVersion $path);&$check
+                }
+            }
+            if($result.versionDirectories.Count -eq 16) {$result.directoryLimitReached=$true;break}
+        }
+        foreach($name in @('Microsoft.VCToolsVersion.default.txt','Microsoft.VCToolsRedistVersion.default.txt')) {
+            &$check;$path=Join-Path $InstallationPath ('VC/Auxiliary/Build/'+$name);Assert-UnlinkedPath $path
+            $item=Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            $row=[ordered]@{name=$name;exists=($null -ne $item)};$result.defaults+=,$row
+            if($item) {
+                if($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {throw 'CRT default metadata must be an unlinked file.'}
+                &$check;$stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+                try {
+                    if($stream.Length -lt 1 -or $stream.Length -gt 4096) {throw 'CRT default metadata exceeds its bound.'}
+                    $bytes=[byte[]]::new([int]$stream.Length);$stream.ReadExactly($bytes,0,$bytes.Length)
+                } finally {$stream.Dispose()}
+                &$check;$version=[Text.UTF8Encoding]::new($false,$true).GetString($bytes).Trim()
+                if($version -cnotmatch '^14\.\d+\.\d+(?:\.\d+)?$') {throw 'CRT default metadata is not a version.'}
+                $row.version=[string][Version]$version
+            }
+            &$check
+        }
+        &$check;$result.observationCompleted=$true
+    } catch {$result.errorType=$_.Exception.GetType().FullName}
+    # Failure evidence can be retained after expiry; it never qualifies a CRT.
+    Write-NewIdentityBytes $OutputPath ([Text.UTF8Encoding]::new($false).GetBytes(($result|ConvertTo-Json -Depth 12 -Compress)))
+}
+
 function Invoke-NativeX64Preflight([string]$WorkingDirectory,[string]$EvidenceDirectory) {
     Assert-NativeBuildHost (Get-NativeBuildHost x64) x64
     $overrides=@{}
@@ -722,10 +771,21 @@ function Invoke-NativeX64Preflight([string]$WorkingDirectory,[string]$EvidenceDi
     }
     if($instances.Count -ne 1 -or $instances[0].isComplete -ne $true -or $instances[0].isLaunchable -ne $true -or $instances[0].isPrerelease -ne $false) {throw 'Exactly one complete installed release VS2022 native profile is required.'}
     $compiler=Get-NativeCompilerPlan $instances[0].installationPath $instances[0].installationVersion x64
+    Assert-NativeBuildTimeRemaining
+    Write-NewIdentityBytes (Join-Path $EvidenceDirectory 'native-selected-compiler.json') ([Text.UTF8Encoding]::new($false).GetBytes((@{schemaVersion=1;sourceOnly=$true;diagnosticOnly=$true;fullEngineQualified=$false;plan=$compiler}|ConvertTo-Json -Depth 30 -Compress)))
+    Assert-NativeBuildTimeRemaining
     $registry=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\Windows\v10.0' -ErrorAction Stop
     if(-not $registry.InstallationFolder -or $registry.ProductVersion -cnotmatch '^10\.0\.\d+$') {throw 'Installed SDK registration does not match the pinned configure selection.'}
     $sdk=Get-NativeSdkPlan $registry.InstallationFolder ($registry.ProductVersion+'.0') x64
-    $crt=Get-AppLocalCrtPlan $compiler.compilerRoot v143 x64 $compiler.minimumRuntimeVersion
+    Assert-NativeBuildTimeRemaining
+    Write-NewIdentityBytes (Join-Path $EvidenceDirectory 'native-selected-sdk.json') ([Text.UTF8Encoding]::new($false).GetBytes((@{schemaVersion=1;sourceOnly=$true;diagnosticOnly=$true;fullEngineQualified=$false;plan=$sdk}|ConvertTo-Json -Depth 30 -Compress)))
+    Assert-NativeBuildTimeRemaining
+    try {$crt=Get-AppLocalCrtPlan $compiler.compilerRoot v143 x64 $compiler.minimumRuntimeVersion}
+    catch {
+        $originalCrtFailure=$_
+        try {Save-NativeCrtObservation $compiler.installationPath (Join-Path $EvidenceDirectory 'native-crt-observation.json')} catch {}
+        throw $originalCrtFailure
+    }
     $probeRoot=Join-Path $WorkingDirectory 'native-toolchain-probe';New-Item -ItemType Directory $probeRoot -ErrorAction Stop|Out-Null
     $source=Join-Path $probeRoot 'probe.c';$librarySource=Join-Path $probeRoot 'member.c'
     @'
