@@ -498,6 +498,7 @@
         "firebirdLoaderPath",
         "zstdSourceLinks",
         "gpgBuildCompilerPath",
+        "atlNativePaths",
         "winAccFocusOrder"
       ]
     }
@@ -525,5 +526,52 @@
     "afterSize": 10480,
     "afterSha256": "f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b",
     "condition": "WNT_X86_64 && BUILD_PLATFORM=%cygwin"
+  },
+  "windowsAtlNativePaths": {
+    "condition": "WNT_X86_64_MSC && MAKE_HOST=%-cygwin",
+    "recipes": [
+      {
+        "path": "extensions/Library_so_activex.mk",
+        "size": 1376,
+        "sha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c",
+        "afterSize": 2662,
+        "afterSha256": "d18d632cd8b3c412f4a4db7355c4bd34611e8f52c9c7436e7887f32b64ca16bf"
+      },
+      {
+        "path": "embedserv/Library_emser.mk",
+        "size": 1586,
+        "sha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef",
+        "afterSize": 3044,
+        "afterSha256": "b28ffc6d984789ce4dece3e075de45d00f895303d58816490918ea37d4e340de"
+      },
+      {
+        "path": "extensions/Library_oleautobridge.mk",
+        "size": 1639,
+        "sha256": "815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8",
+        "afterSize": 2988,
+        "afterSha256": "ad7789e247b238f017166312bf7a7c5c16c75b8ef01dee2a6835db993a1f3633"
+      },
+      {
+        "path": "winaccessibility/Library_uacccom.mk",
+        "size": 2200,
+        "sha256": "d5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062",
+        "afterSize": 3408,
+        "afterSha256": "d2b826ed5c44957ba7fe633b284877ffef03074f0d8a3b3d1466cc8b4ff8d37f"
+      },
+      {
+        "path": "winaccessibility/Library_winaccessibility.mk",
+        "size": 2478,
+        "sha256": "0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4",
+        "afterSize": 3393,
+        "afterSha256": "b0cc4d11e536fe8ac7351f19ee9ae5724918779062350163db9d0e4d804fe483"
+      },
+      {
+        "path": "winaccessibility/WinResTarget_uacccom.mk",
+        "size": 803,
+        "sha256": "9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00",
+        "afterSize": 1718,
+        "afterSha256": "56894ac63dea26ace6629fbab6b7dcf04e640447b4a173045da2b7761fd265cb"
+      }
+    ]
   }
 }

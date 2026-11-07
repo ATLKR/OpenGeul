@@ -446,6 +446,23 @@ hashes under `sourceHooks.atlConsumerNativePaths.recipes`. Validation failures
 leave source and evidence unchanged. Installation still uses an owned fresh
 source tree and does not promise rollback after arbitrary filesystem I/O errors.
 
+The x64 source recipe has a separate `windowsAtlNativePaths` descriptor for the
+same six pristine ATL recipes, including ActiveX. The existing ARM renderers,
+pins and output bytes stay unchanged. X64 outputs use only
+`WNT_X86_64_MSC` with a genuine GNU make `MAKE_HOST` ending in `-cygwin`;
+other profiles retain the original arguments. Recipe-local quoted native paths
+cover include, resource and existing static ATL linker operands, including the
+authentic merged `emser` receiver. No global compiler flags or feature selection
+change. This hook follows the GPG compiler correction and precedes the common
+accessibility patch.
+
+All six preimages, candidate hashes and twelve evidence destinations are checked
+before source writes. `sourceHooks.atlNativePaths` records the ordered group and
+each exact original/effective recipe. The source plan still has eighteen inputs;
+six move from unchanged guards to explicit x64 outputs, leaving five guards.
+Source installation, argv replay and owned ATL prerequisite checks do not qualify
+native compilation. Full source-build and Suite UI acceptance remain separate.
+
 The native driver exports `OPENGEUL_LIBREOFFICE_ATL_SOURCE` as the pristine
 extracted LibreOffice root and sets both `OPENGEUL_FIREBIRD_PORT_REQUIRE_SOURCE=1`
 and `OPENGEUL_ATL_REQUIRE_CYGWIN_REPLAY=1`. The shared source flag requires

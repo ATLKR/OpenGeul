@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder'],
-          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'winAccFocusOrder']}
+          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'winAccFocusOrder']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
 GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
@@ -88,14 +88,59 @@ class ReceiptNormalizationTests(unittest.TestCase):
 
 
 class RecipePolicyTests(unittest.TestCase):
+    def test_x64_atl_descriptor_reclassifies_six_exact_inputs_without_changing_arm(self):
+        lock = manifest(); module = load('apply_native_source')
+        self.assertTrue('windowsAtlNativePaths' in lock, 'x64 native ATL source descriptor is missing')
+        descriptor = lock['windowsAtlNativePaths']
+        self.assertEqual({'condition', 'recipes'}, set(descriptor))
+        self.assertEqual('WNT_X86_64_MSC && MAKE_HOST=%-cygwin', descriptor['condition'])
+        original = [lock['atlNativePaths']['recipe'], *lock['atlConsumerNativePaths']['recipes']]
+        self.assertEqual([r['path'] for r in original], [r['path'] for r in descriptor['recipes']])
+        for before, row in zip(original, descriptor['recipes']):
+            self.assertEqual({'path', 'size', 'sha256', 'afterSize', 'afterSha256'}, set(row))
+            self.assertEqual({k: before[k] for k in ('path', 'size', 'sha256')},
+                             {k: row[k] for k in ('path', 'size', 'sha256')})
+            self.assertNotEqual(before['afterSha256'], row['afterSha256'])
+        policy = (ENGINE / 'native-targets.json').read_bytes()
+        arm = module._select_plan(lock, policy, 'arm64')
+        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+                         hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
+        selected = module._select_plan(lock, policy, 'x64')
+        self.assertEqual((18, 5), (len(selected['sources']), len(selected['armGuardedSources'])))
+        self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks',
+                          'gpgBuildCompilerPath', 'atlNativePaths', 'winAccFocusOrder'], selected['recipe']['hooks'])
+        guarded = {r['path'] for r in selected['armGuardedSources']}
+        self.assertTrue(guarded.isdisjoint(r['path'] for r in original))
+        for mutate in [lambda d: d.update(extra=False), lambda d: d.update(condition='WNT_AARCH64'),
+                       lambda d: d['recipes'].reverse(), lambda d: d['recipes'].pop(),
+                       lambda d: d['recipes'][0].update(size=True),
+                       lambda d: d['recipes'][0].update(sha256='0' * 64),
+                       lambda d: d['recipes'][0].update(afterSize=1.5)]:
+            changed = copy.deepcopy(lock); mutate(changed['windowsAtlNativePaths'])
+            with self.assertRaises(ValueError): module._select_plan(changed, policy, 'x64')
+
+    def test_x64_atl_transforms_reject_changed_repeated_or_forged_pins(self):
+        module = load('apply_native_source'); lock = manifest()
+        for index, pin in enumerate(lock['windowsAtlNativePaths']['recipes']):
+            path = (ROOT / 'suite/tests/fixtures/native-atl-path' / Path(pin['path']).name if index == 0 else
+                    ROOT / 'suite/tests/fixtures/native-atl-consumers' / pin['path'])
+            original = path.read_bytes(); changed = module._atl_bytes(original, pin)
+            self.assertEqual(pin['afterSha256'], hashlib.sha256(changed).hexdigest())
+            for field, value in [('path', '../escape'), ('size', True), ('afterSize', 1.5),
+                                 ('sha256', '0' * 64), ('afterSha256', '0' * 64), ('extra', False)]:
+                with self.subTest(path=pin['path'], field=field), self.assertRaises(ValueError):
+                    module._atl_bytes(original, dict(pin, **{field: value}))
+            for wrong in (original + b'\n', changed):
+                with self.assertRaises(ValueError): module._atl_bytes(wrong, pin)
+
     def test_x64_zstd_source_link_exception_reclassifies_only_its_exact_input(self):
         module = load('apply_native_source'); lock = manifest()
         raw = (ENGINE / 'native-targets.json').read_bytes()
         plan = module._select_plan(lock, raw, 'x64')
-        self.assertEqual(11, len(plan['armGuardedSources']))
+        self.assertEqual(5, len(plan['armGuardedSources']))
         self.assertNotIn('external/zstd/UnpackedTarball_zstd.mk',
                          [row['path'] for row in plan['armGuardedSources']])
-        self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'winAccFocusOrder'],
+        self.assertEqual(ORDERS['x64'],
                          plan['recipe']['hooks'])
         arm = module._select_plan(lock, raw, 'arm64')
         self.assertEqual(13, len(arm['armGuardedSources']))
@@ -125,7 +170,7 @@ class RecipePolicyTests(unittest.TestCase):
     def test_x64_retains_the_pinned_firebird_loader_recipe_with_the_zstd_exception(self):
         module = load('apply_native_source'); lock = manifest()
         plan = module._select_plan(lock, (ENGINE / 'native-targets.json').read_bytes(), 'x64')
-        self.assertEqual(11, len(plan['armGuardedSources']))
+        self.assertEqual(5, len(plan['armGuardedSources']))
         self.assertNotIn('external/firebird/ExternalProject_firebird.mk',
                          [row['path'] for row in plan['armGuardedSources']])
         self.assertEqual(ORDERS['x64'], plan['recipe']['hooks'])
@@ -142,7 +187,7 @@ class RecipePolicyTests(unittest.TestCase):
             plan = module._select_plan(manifest(), (ENGINE / 'native-targets.json').read_bytes(), architecture)
             self.assertEqual(ORDERS[architecture], plan['recipe']['hooks'])
             self.assertEqual(RECIPES[architecture], plan['recipeId'])
-            self.assertEqual(13 if architecture == 'arm64' else 11, len(plan['armGuardedSources']))
+            self.assertEqual(13 if architecture == 'arm64' else 5, len(plan['armGuardedSources']))
             self.assertEqual(17 if architecture == 'arm64' else 18, len(plan['sources']))
             self.assertIn('sourceDependencies', plan)
             self.assertEqual(1 if architecture == 'arm64' else 0, len(plan['sourceDependencies']))
@@ -209,7 +254,7 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
             hashlib.sha256(json.dumps(arm,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest())
         self.assertEqual((17,13),(len(arm['sources']),len(arm['armGuardedSources'])))
-        self.assertEqual((18,11),(len(x64['sources']),len(x64['armGuardedSources'])))
+        self.assertEqual((18,5),(len(x64['sources']),len(x64['armGuardedSources'])))
         self.assertEqual(GPG_PATH,x64['sources'][6]['path'])
         self.assertNotIn(GPG_PATH,[row['path'] for row in arm['sources']])
         for field,value in [('path','../escape'),('condition','WNT_AARCH64'),('size',True),
@@ -269,6 +314,111 @@ class ActualSourceRecipeTests(unittest.TestCase):
         if not target.exists():
             target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(GPG_FIXTURE.read_bytes())
         return target
+
+    def test_x64_atl_retains_all_six_exact_recipes_and_group_evidence(self):
+        result = self.install('x64')
+        self.assertTrue('atlNativePaths' in result['sourceHooks'], 'x64 native ATL source hook is missing')
+        proof = result['sourceHooks']['atlNativePaths']
+        self.assertEqual({'schemaVersion', 'kind', 'condition', 'recipes', 'nativeBuildVerified',
+                          'fullEngineQualified', 'acceptanceEligible', 'guiVerified'}, set(proof))
+        self.assertEqual(1, proof['schemaVersion'])
+        self.assertEqual('windows-x64-native-atl-source-hooks', proof['kind'])
+        self.assertEqual('WNT_X86_64_MSC && MAKE_HOST=%-cygwin', proof['condition'])
+        self.assertEqual(6, len(proof['recipes']))
+        for i, (pin, row) in enumerate(zip(self.lock['windowsAtlNativePaths']['recipes'], proof['recipes']), 1):
+            self.assertEqual({'path', 'beforeBytes', 'afterBytes', 'beforeSha256', 'afterSha256', 'evidence'}, set(row))
+            self.assertEqual(pin['path'], row['path'])
+            for field, key in [('beforeBytes', 'size'), ('afterBytes', 'afterSize'),
+                               ('beforeSha256', 'sha256'), ('afterSha256', 'afterSha256')]:
+                self.assertEqual(pin[key], row[field])
+            self.assertEqual({'original', 'effective'}, set(row['evidence']))
+            for label in ('original', 'effective'):
+                path = Path(row['evidence'][label])
+                self.assertEqual(self.evidence / f'{label}-x64-atl-{i:02d}-{Path(pin["path"]).name}', path)
+                data = path.read_bytes()
+                self.assertEqual(self.inputs[pin['path']] if label == 'original' else
+                                 (self.source / pin['path']).read_bytes(), data)
+            self.assertEqual(pin['afterSha256'], hashlib.sha256((self.source / pin['path']).read_bytes()).hexdigest())
+        for key in ('nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified'):
+            self.assertIs(proof[key], False)
+
+    @unittest.skipUnless(os.name != 'nt' and shutil.which('make') and shutil.which('bash'),
+                         'Portable argv replay does not replace native Windows compilation')
+    def test_x64_atl_actual_make_argv_is_native_only_for_msc_cygwin(self):
+        from suite.tests import test_native_atl_path as replay
+        make, bash = Path(shutil.which('make')), Path(shutil.which('bash'))
+        argv_root = self.folder / 'argv'; argv_root.mkdir()
+        replay.consumer_adapter(argv_root)
+        (argv_root / 'observe.py').write_text('import json,sys;print(json.dumps(sys.argv[1:]))\n')
+        library = replay.LIB.replace('/arm64', '/x64')
+        self.install('x64')
+        # The shared legacy replay copies its mapping; replace the mapping itself
+        # so neither this fixture nor that helper reads the real environment.
+        synthetic = {'PATH': os.pathsep.join(dict.fromkeys(map(str, (make.parent, bash.parent,
+                                                        Path(sys.executable).parent)))), 'PYTHONUTF8': '1'}
+        with patch.object(os, 'environ', synthetic):
+            for index, pin in enumerate(self.lock['windowsAtlNativePaths']['recipes']):
+                name = pin['path']; original = self.inputs[name]; effective = (self.source / name).read_bytes()
+                def invoke(raw, **kwargs):
+                    return replay.replay_consumer(argv_root, name, raw, make, bash, cpu='X86_64', lib=library, **kwargs)
+                before = invoke(original); after = invoke(effective)
+                self.assertEqual((0, 0), (before.returncode, after.returncode), name)
+                old = replay.observed_argv(before.stdout); actual = replay.observed_argv(after.stdout)
+                native_include = replay.NATIVE + '/include'; native_lib = replay.NATIVE + '/lib/spectre/x64'
+                expected = [[a.replace(replay.INCLUDE, native_include).replace(library, native_lib) for a in row] for row in old]
+                atls = native_lib + '/atls.lib'
+                self.assertEqual([[a for a in row if a != atls] for row in expected],
+                                 [[a for a in row if a != atls] for row in actual], name)
+                self.assertEqual(1 if index < 4 else 0, sum(row.count(atls) for row in actual), name)
+                self.assertTrue(any('-I' + native_include in row for row in actual), name)
+                self.assertFalse(any('-I' + replay.INCLUDE in row for row in actual), name)
+                for kwargs in ({'com': 'GCC'}, {'host': 'x86_64-pc-linux-gnu'}, {'os_value': 'LINUX'}):
+                    baseline = invoke(original, **kwargs); candidate = invoke(effective, **kwargs)
+                    self.assertEqual((0, 0), (baseline.returncode, candidate.returncode), name)
+                    self.assertEqual(baseline.stdout, candidate.stdout, (name, kwargs))
+                arm_before = replay.replay_consumer(argv_root, name, original, make, bash, lib=library)
+                arm_after = replay.replay_consumer(argv_root, name, effective, make, bash, lib=library)
+                self.assertEqual((0, 0), (arm_before.returncode, arm_after.returncode), name)
+                self.assertEqual(arm_before.stdout, arm_after.stdout, name)
+                for wrong in ('', '/missing/atl', '/empty/atl'):
+                    for key in ('include', 'lib'):
+                        if index >= 4 and key == 'lib': continue  # Include-only consumers do not use ATL_LIB.
+                        rejected = invoke(effective, **{key: wrong}) if key == 'include' else \
+                            replay.replay_consumer(argv_root, name, effective, make, bash, cpu='X86_64', lib=wrong)
+                        self.assertNotEqual(0, rejected.returncode, (name, key, wrong))
+
+    @unittest.skipUnless(os.name != 'nt' and shutil.which('make') and shutil.which('bash'),
+                         'Portable merged argv replay does not replace Windows linking')
+    def test_x64_atl_emser_paths_reach_the_authentic_merged_receiver(self):
+        from suite.tests import test_native_atl_path as replay
+        make, bash = Path(shutil.which('make')), Path(shutil.which('bash'))
+        argv_root = self.folder / 'merged-argv'; argv_root.mkdir()
+        replay.consumer_adapter(argv_root)
+        (argv_root / 'observe.py').write_text('import json,sys;print(json.dumps(sys.argv[1:]))\n')
+        self.install('x64'); name = 'embedserv/Library_emser.mk'
+        library = replay.LIB.replace('/arm64', '/x64'); native_lib = replay.NATIVE + '/lib/spectre/x64'
+        synthetic = {'PATH': os.pathsep.join(dict.fromkeys(map(str, (make.parent, bash.parent,
+                                                        Path(sys.executable).parent)))), 'PYTHONUTF8': '1'}
+        def links(raw, **kwargs):
+            result = replay.replay_emser_merged(argv_root, raw, make, bash, cpu='X86_64', lib=library, **kwargs)
+            self.assertEqual(0, result.returncode)
+            rows = replay.observed_argv(result.stdout)
+            return ([row[1] for row in rows if row[0] == 'include'],
+                    {Path(row[0].split('=', 1)[1]).name: row[1:] for row in rows if row[0].startswith('--receiver=')})
+        with patch.object(os, 'environ', synthetic):
+            original = self.inputs[name]; effective = (self.source / name).read_bytes()
+            order, actual = links(effective)
+            self.assertEqual(['Library_merged', 'Library_emser'], order)
+            self.assertEqual(1, actual['mergedlo.dll'].count(native_lib + '/atls.lib'))
+            self.assertEqual(1, actual['mergedlo.dll'].count('-LIBPATH:' + native_lib))
+            _, before = links(original)
+            strip = lambda row: [a for a in row if a not in (library + '/atls.lib', native_lib + '/atls.lib',
+                                                             '-LIBPATH:' + native_lib)]
+            self.assertEqual(strip(before['mergedlo.dll']), strip(actual['mergedlo.dll']))
+            standalone_order, standalone = links(effective, merged=False)
+            self.assertEqual(['Library_emser'], standalone_order)
+            self.assertNotIn('mergedlo.dll', standalone)
+            self.assertEqual(actual['emserlo.dll'], standalone['emserlo.dll'])
 
     @unittest.skipUnless(os.name != 'nt' and shutil.which('make') and shutil.which('bash'),
                          'GNU make replay is portable; native CreateProcess remains a Windows gate')
@@ -469,7 +619,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256((ENGINE / filename).read_bytes()).hexdigest(), proof[key])
         plan = self.module._select_plan(self.lock, (ENGINE / 'native-targets.json').read_bytes(), architecture)
         self.assertEqual(hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(), proof['recipeSha256'])
-        self.assertEqual(13 if architecture == 'arm64' else 11, len(proof['armGuardedSources']))
+        self.assertEqual(13 if architecture == 'arm64' else 5, len(proof['armGuardedSources']))
         for pin, row in zip(plan['armGuardedSources'], proof['armGuardedSources']):
             expected = pin['beforeSha256'] if architecture == 'x64' else pin['afterSha256']
             self.assertEqual({'path': pin['path'], 'beforeSha256': pin['beforeSha256'],
@@ -503,26 +653,29 @@ class ActualSourceRecipeTests(unittest.TestCase):
         self.assertEqual({p.relative_to(direct).as_posix(): p.read_bytes() for p in direct.rglob('*') if p.is_file()},
                          {p.relative_to(self.source).as_posix(): p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
-    def test_x64_recipe_applies_exactly_bootstrap_loader_zstd_gpg_then_winacc(self):
+    def test_x64_recipe_applies_exactly_bootstrap_loader_zstd_gpg_atl_then_winacc(self):
         events = []; bootstrap = self.module.ARM.install_module_bootstrap; winacc = self.module.WINACC.install
         loader = self.module._install_firebird_loader_path
         zstd = self.module._install_zstd_source_links
         gpg = self.module._install_gpg_build_compiler_path
+        atl = self.module._install_atl_native_paths
         def common(*args): events.append('moduleBootstrap'); return bootstrap(*args)
         def loader_path(*args): events.append('firebirdLoaderPath'); return loader(*args)
         def zstd_links(*args): events.append('zstdSourceLinks'); return zstd(*args)
         def gpg_path(*args): events.append('gpgBuildCompilerPath'); return gpg(*args)
+        def atl_paths(*args): events.append('atlNativePaths'); return atl(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         with patch.object(self.module.ARM, 'install', side_effect=AssertionError('x64 selected full ARM installer')), \
                 patch.object(self.module.ARM, 'install_module_bootstrap', side_effect=common), \
                 patch.object(self.module, '_install_firebird_loader_path', side_effect=loader_path), \
                 patch.object(self.module, '_install_zstd_source_links', side_effect=zstd_links), \
                 patch.object(self.module, '_install_gpg_build_compiler_path', side_effect=gpg_path), \
+                patch.object(self.module, '_install_atl_native_paths', side_effect=atl_paths), \
                 patch.object(self.module.WINACC, 'install', side_effect=focus):
             result = self.install('x64')
         self.proof(result, 'x64'); self.assertEqual(ORDERS['x64'], events)
         hooks = result['sourceHooks']
-        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath',
+        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths',
                           'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
         self.assertEqual('native-windows-common-source-hooks', hooks['kind']); self.assertEqual('x64', hooks['architecture'])
         self.assertIs(hooks['nativeBuildVerified'], False); self.assertIs(hooks['basePersistenceVerified'], False)
@@ -542,13 +695,14 @@ class ActualSourceRecipeTests(unittest.TestCase):
         for field in ['nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified']:
             self.assertIs(proof[field], False)
 
-    def test_x64_leaves_all_11_arm_only_targets_unchanged(self):
+    def test_x64_leaves_all_five_remaining_arm_only_targets_unchanged(self):
         result = self.install('x64'); self.proof(result, 'x64')
         changed = {name for name, raw in self.inputs.items() if (self.source / name).read_bytes() != raw}
         if (self.source/GPG_PATH).read_bytes()!=GPG_FIXTURE.read_bytes():changed.add(GPG_PATH)
         self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path'],
                           self.lock['windowsFirebirdLoaderPath']['path'],
-                          self.lock['windowsZstdSourceLinks']['path'],GPG_PATH}, changed)
+                          self.lock['windowsZstdSourceLinks']['path'], GPG_PATH,
+                          *(pin['path'] for pin in self.lock['windowsAtlNativePaths']['recipes'])}, changed)
         self.assertEqual(set(self.inputs)|{GPG_PATH}, {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
 
     def test_every_input_drift_rejects_before_any_recipe_write(self):

@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'winAccFocusOrder'])}
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'winAccFocusOrder'])}
 LOADER_PATH = 'external/firebird/ExternalProject_firebird.mk'
 ZSTD_PATH = 'external/zstd/UnpackedTarball_zstd.mk'
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
@@ -30,6 +30,8 @@ ARM_PATHS = ('configure.ac', 'external/firebird/UnpackedTarball_firebird.mk',
              'extensions/Library_oleautobridge.mk', 'winaccessibility/Library_uacccom.mk',
              'winaccessibility/Library_winaccessibility.mk', 'winaccessibility/WinResTarget_uacccom.mk',
              'external/harfbuzz/ExternalProject_harfbuzz.mk')
+ATL_PATHS = ARM_PATHS[6:12]
+ATL_CONDITION = 'WNT_X86_64_MSC && MAKE_HOST=%-cygwin'
 COMMON_PATHS = ('bin/unpack-sources', 'winaccessibility/source/service/AccObjectWinManager.cxx',
                 'winaccessibility/source/service/AccObject.cxx',
                 'winaccessibility/source/UAccCOM/MAccessible.cxx')
@@ -157,7 +159,8 @@ def _select_plan(lock, policy_raw, architecture):
                     or gpg['condition'] != GPG_CONDITION):
                 raise ValueError('source-recipe-input')
             common.append(_pin(gpg, GPG_PATH))
-            guarded = [row for row in guarded if row['path'] not in (LOADER_PATH, ZSTD_PATH)]
+            common.extend(_pin(pin, path) for pin, path in zip(_atl_pins(lock), ATL_PATHS))
+            guarded = [row for row in guarded if row['path'] not in (LOADER_PATH, ZSTD_PATH, *ATL_PATHS)]
         payloads = [('winacc-focus-order.patch', winacc['patch'])]
         dependencies = []
         if architecture == 'arm64':
@@ -295,6 +298,65 @@ def _install_gpg_build_compiler_path(source, evidence, pin):
             'acceptanceEligible': False, 'guiVerified': False}
 
 
+def _atl_pins(lock):
+    descriptor = lock['windowsAtlNativePaths']
+    original = [lock['atlNativePaths']['recipe'], *lock['atlConsumerNativePaths']['recipes']]
+    if (set(descriptor) != {'condition', 'recipes'} or descriptor['condition'] != ATL_CONDITION
+            or type(descriptor['recipes']) is not list or len(descriptor['recipes']) != 6):
+        raise ValueError('source-recipe-input')
+    for path, baseline, pin in zip(ATL_PATHS, original, descriptor['recipes']):
+        if (set(pin) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256'}
+                or pin['path'] != path or baseline['path'] != path
+                or any(pin[key] != baseline[key] for key in ('size', 'sha256'))):
+            raise ValueError('source-recipe-input')
+        _pin(pin, path)
+    return descriptor['recipes']
+
+
+def _atl_bytes(original, pin):
+    if (set(pin) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256'}
+            or pin['path'] not in ATL_PATHS or type(pin['size']) is not int
+            or type(pin['afterSize']) is not int or not 0 < pin['size'] <= 1024 * 1024
+            or not 0 < pin['afterSize'] <= 1024 * 1024
+            or len(original) != pin['size'] or _sha(original) != pin['sha256']):
+        raise ValueError('source-recipe-input')
+    # Reuse the finite recipe renderer without changing its ARM defaults or pins.
+    consumers = ((ATL_PATHS[0], 'so_activex', b'$(foreach i,$(ATL_INCLUDE), -I$(i))', 'libpath'),
+                 *ARM._ATL_CONSUMERS)
+    changed = ARM._atl_consumer_native_recipe(original, consumers[ATL_PATHS.index(pin['path'])])
+    guard = b'ifeq ($(OS)_$(CPUNAME)_$(COM),WNT_AARCH64_MSC)'
+    if changed.count(guard) != 1: raise ValueError('source-recipe-input')
+    changed = changed.replace(guard, b'ifeq ($(OS)_$(CPUNAME)_$(COM),WNT_X86_64_MSC)', 1)
+    if len(changed) != pin['afterSize'] or _sha(changed) != pin['afterSha256']:
+        raise ValueError('source-recipe-input')
+    return changed
+
+
+def _install_atl_native_paths(source, evidence, descriptor):
+    planned = []
+    for index, pin in enumerate(descriptor['recipes'], 1):
+        target = source / pin['path']; original = _regular(target)
+        changed = _atl_bytes(original, pin)
+        retained = {label: evidence / f'{label}-x64-atl-{index:02d}-{target.name}'
+                    for label in ('original', 'effective')}
+        if any(path.exists() or path.is_symlink() for path in retained.values()):
+            raise ValueError('source-recipe-input')
+        planned.append((pin, target, original, changed, retained))
+    rows = []
+    for pin, target, original, changed, retained in planned:
+        for label, raw in (('original', original), ('effective', changed)):
+            with retained[label].open('xb') as stream: stream.write(raw)
+            if _regular(retained[label]) != raw: raise ValueError('source-recipe-output')
+        target.write_bytes(changed)
+        if _regular(target) != changed: raise ValueError('source-recipe-output')
+        rows.append(dict(path=pin['path'], beforeBytes=len(original), afterBytes=len(changed),
+                         beforeSha256=_sha(original), afterSha256=_sha(changed),
+                         evidence={label: str(path) for label, path in retained.items()}))
+    return dict(schemaVersion=1, kind='windows-x64-native-atl-source-hooks',
+                condition=ATL_CONDITION, recipes=rows, nativeBuildVerified=False,
+                fullEngineQualified=False, acceptanceEligible=False, guiVerified=False)
+
+
 def _validate_common(inputs, lock, payloads, architecture):
     bootstrap = lock['moduleBootstrap']
     original = inputs[COMMON_PATHS[0]]
@@ -314,6 +376,7 @@ def _validate_common(inputs, lock, payloads, architecture):
         _loader_bytes(inputs[LOADER_PATH], lock['windowsFirebirdLoaderPath'])
         _zstd_bytes(inputs[ZSTD_PATH], lock['windowsZstdSourceLinks'])
         _gpg_build_compiler_bytes(inputs[GPG_PATH], lock['windowsGpgBuildCompilerPath'])
+        for pin in _atl_pins(lock): _atl_bytes(inputs[pin['path']], pin)
 
 
 def apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict:
@@ -355,6 +418,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
                  'firebirdLoaderPath': _install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath']),
                  'zstdSourceLinks': _install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks']),
                  'gpgBuildCompilerPath': _install_gpg_build_compiler_path(source, evidence, lock['windowsGpgBuildCompilerPath']),
+                 'atlNativePaths': _install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths']),
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
     if architecture == 'arm64':
