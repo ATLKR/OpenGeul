@@ -313,6 +313,11 @@ def _source_x64_plan(manifest: dict) -> dict:
             or zstd.get('path') != 'external/zstd/UnpackedTarball_zstd.mk'
             or zstd.get('sha256') != manifest['zstdSourceLinks']['sha256']):
         raise ValueError('x64 zstd source-link plan has an unknown source or condition')
+    gpg=manifest.get('windowsGpgBuildCompilerPath')
+    if (not isinstance(gpg,dict) or set(gpg) != {'path','size','sha256','afterSize','afterSha256','condition'}
+            or gpg.get('condition') != 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
+            or gpg.get('path') != 'solenv/gbuild/platform/com_MSC_defs.mk'):
+        raise ValueError('x64 GPG compiler-path plan has an unknown source or condition')
     winacc=manifest['winAccFocusOrder']
     common=[pin(manifest['moduleBootstrap'])]
     for source in winacc['sources']:
@@ -320,7 +325,7 @@ def _source_x64_plan(manifest: dict) -> dict:
     if (len(common) != 4 or common[1]['path'] != winacc['path']
             or common[1]['beforeSha256'] != winacc['sha256'] or common[1].get('beforeBytes') != winacc['beforeBytes']):
         raise ValueError('x64 WinAcc common source-plan identity differs')
-    common[1]['afterBytes']=winacc['afterBytes'];common.extend((pin(loader),pin(zstd)))
+    common[1]['afterBytes']=winacc['afterBytes'];common.extend((pin(loader),pin(zstd),pin(gpg)))
     guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
     guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
     guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
@@ -330,7 +335,7 @@ def _source_x64_plan(manifest: dict) -> dict:
     plan=dict(recipeId='windows-x64-common-v2',recipe=manifest['nativeSourceRecipes']['windows-x64-common-v2'],
         sources=common+guarded,armGuardedSources=guarded,sourceDependencies=[],payloads=[payload_pin])
     digest=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
-    if digest != '6fded074bb8bc92809ba44aa5e606d86f1f4f416eebf230916b9ee14b1d5410c':
+    if digest != '2a47c43202e16fd8e1774b3b747b97d57521b71dd706afb90da4427da4988044':
         raise ValueError('x64 source plan differs from the reviewed canonical recipe')
     return plan
 
@@ -363,6 +368,20 @@ def _source_x64_zstd_evidence(value) -> None:
         raise ValueError('x64 zstd source-link evidence must share one producer directory descriptor')
 
 
+def _source_x64_gpg_evidence(value) -> None:
+    if not isinstance(value,dict) or set(value) != {'original','effective'}:
+        raise ValueError('x64 GPG compiler-path evidence descriptors are incomplete')
+    paths={}
+    for name in ('original','effective'):
+        path=_source_windows_path(value[name])
+        archive_path('/'.join(path.parts[1:]))
+        if path.name != name+'-x64-com_MSC_defs.mk':
+            raise ValueError('x64 GPG compiler-path evidence basename differs')
+        paths[name]=path
+    if paths['original'].parent != paths['effective'].parent or not paths['original'].parent.name:
+        raise ValueError('x64 GPG compiler-path evidence must share one producer directory descriptor')
+
+
 def _source_x64_recipe(proof: dict) -> None:
     folder=Path(__file__).resolve().parent/'engine-build'
     raw=(folder/'source-build.json').read_bytes();manifest=json.loads(raw)
@@ -372,8 +391,8 @@ def _source_x64_recipe(proof: dict) -> None:
     expected=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
         recipeId='windows-x64-common-v2',policySha256=proof['nativeTargetsSha256'],
         manifestSha256=proof['sourcePortManifestSha256'],
-        recipeSha256='6fded074bb8bc92809ba44aa5e606d86f1f4f416eebf230916b9ee14b1d5410c',
-        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','winAccFocusOrder'],nativeBuildVerified=False,
+        recipeSha256='2a47c43202e16fd8e1774b3b747b97d57521b71dd706afb90da4427da4988044',
+        hookOrder=['moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder'],nativeBuildVerified=False,
         fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
     expected['armGuardedSources']=[dict(path=item['path'],beforeSha256=item['beforeSha256'],sha256=item['beforeSha256'],unchanged=True)
                                   for item in plan['armGuardedSources']]
@@ -397,7 +416,7 @@ def _source_x64_recipe(proof: dict) -> None:
     if not _source_exact(patch.get('sourceFiles'), files):
         raise ValueError('x64 WinAcc unchanged dependency/patch identities differ')
     hooks=proof.get('sourceHooks');bootstrap=manifest['moduleBootstrap']
-    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','nativeBuildVerified','basePersistenceVerified'}
+    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','nativeBuildVerified','basePersistenceVerified'}
             or hooks.get('kind') != 'native-windows-common-source-hooks' or hooks.get('architecture') != 'x64'
             or hooks.get('nativeBuildVerified') is not False or hooks.get('basePersistenceVerified') is not False
             or not isinstance(hooks.get('moduleBootstrap'),dict)
@@ -420,6 +439,15 @@ def _source_x64_recipe(proof: dict) -> None:
             or not _source_exact({key:zstd[key] for key in fields},fields)):
         raise ValueError('x64 zstd source-link descriptor differs from the reviewed source-only hook')
     _source_x64_zstd_evidence(zstd['evidence'])
+    gpg=hooks.get('gpgBuildCompilerPath');pin=manifest['windowsGpgBuildCompilerPath']
+    fields=dict(schemaVersion=1,kind='windows-gpg-build-compiler-path-source-hook',path=pin['path'],
+        condition='WNT_X86_64 && BUILD_PLATFORM=%cygwin',beforeBytes=pin['size'],afterBytes=pin['afterSize'],
+        beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],nativeBuildVerified=False,
+        fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+    if (not isinstance(gpg,dict) or set(gpg) != set(fields)|{'evidence'}
+            or not _source_exact({key:gpg[key] for key in fields},fields)):
+        raise ValueError('x64 GPG compiler-path descriptor differs from the reviewed source-only hook')
+    _source_x64_gpg_evidence(gpg['evidence'])
 
 
 def _source_x64_retirement(base: dict) -> None:
