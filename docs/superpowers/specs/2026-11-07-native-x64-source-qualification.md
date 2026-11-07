@@ -95,6 +95,35 @@ also lists VS2022. Zero or ambiguous filtered selections retain a read-only
 unfiltered instance diagnostic under the same deadline and still fail closed.
 There is no automatic runner/profile fallback or tool installation.
 
+For x64, the runtime floor is the selected MSVC **package** version, explicitly
+correcting the former maximum-of-tool-resource-builds rule. The compiler plan
+records `runtimeFloorBasis='selected-msvc-package-v1'` and
+`toolsetMetadata={path,size,sha256,version}` from the same selected VS
+`VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt`. Require a regular,
+unlinked file of 1–4096 bytes whose numeric version equals the selected compiler
+directory; normalize that package version to four parts for
+`minimumRuntimeVersion`. Preserve each tool's independently measured PE/hash,
+resource family and native `_MSC_FULL_VER` witness. Recheck the original
+metadata descriptor at configured-toolchain admission and final qualification.
+Preserve the matching raw metadata bytes as
+`native-selected-toolset-version.txt` in diagnostic evidence only; the runtime
+artifact's exact two members do not change.
+
+The x64 CRT directory label is path identity, not a DLL-version proxy. Within
+that same VS installation, only the fixed native VC143 family and the existing
+nine filenames are eligible. Every file and product resource version must meet
+the package floor, with all existing Microsoft signature/company, PE, size and
+hash guards. Incomplete or actually old sets are ineligible; a complete
+version-eligible set with a signature/PE/structural error fails rather than
+triggering fallback. Rank valid sets by their actual minimum file version,
+descending, then directory name in ascending ordinal order. Record
+`selectionBasis='actual-signed-crt-files-v1'` and `selectedFileVersionFloor`
+from the actual nine signed file records. ARM v1 retains its existing floor,
+folder selection and receipt behavior. Package metadata is provenance, not a
+Microsoft signature; unsigned observations do not qualify a runtime. Consumers
+replay the recorded path/version/hash joins and authenticated receipt; root's
+independent adoption check can additionally hash the separate raw evidence.
+
 The reviewed source-policy inventory approves exactly `moduleBootstrap` then
 `winAccFocusOrder` for x64. Both are common exact-hash corrections whose
 before/after transformations were independently recomputed. Exclude the 13

@@ -56,7 +56,7 @@ $expectedCompiler=Get-NativeCompilerPlan {quote(vs)} '17.14.1' x64
 $expectedSdk=Get-NativeSdkPlan {quote(sdk)} '{version}' x64
 $script:actualCrt=${{function:Get-AppLocalCrtPlan}}
 function Get-AppLocalCrtPlan($CompilerRoot,$Toolset,$Architecture,$ActualCompilerRuntimeFloor) {{
- if($CompilerRoot -cne {quote(compiler)} -or $Toolset -cne 'v143' -or $Architecture -cne 'x64' -or $ActualCompilerRuntimeFloor -cne '14.44.35229.0'){{throw 'CRT selection arguments changed'}}
+ if($CompilerRoot -cne {quote(compiler)} -or $Toolset -cne 'v143' -or $Architecture -cne 'x64' -or $ActualCompilerRuntimeFloor -cne '14.44.35207.0'){{throw 'CRT selection arguments changed'}}
  foreach($entry in @(@('native-selected-compiler.json',$expectedCompiler),@('native-selected-sdk.json',$expectedSdk))) {{
   $saved=Get-Content -LiteralPath (Join-Path {quote(evidence)} $entry[0]) -Raw|ConvertFrom-Json
   if(-not $saved.diagnosticOnly -or -not $saved.sourceOnly -or $saved.fullEngineQualified){{throw 'Plan was promoted to qualification'}}
@@ -77,10 +77,12 @@ if('{observation}' -ceq 'expired'){{function Save-NativeCrtObservation($Installa
 }}}}
 $failed=$false
 try{{Invoke-NativeEngineBuild Full {quote(self.root/'work')} {quote(evidence)} '' 4 -Architecture x64}}
-catch{{if($_.Exception.Message -notmatch 'No native VC redist.*14.44.35229.0'){{throw}};$failed=$true}}
+catch{{if($_.Exception.Message -notmatch 'No native VC redist.*14.44.35207.0'){{throw}};$failed=$true}}
 if(-not $failed){{throw 'CRT rejection was rescued'}}
 """
         self.ps(body)
+        self.assertEqual((vs/'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt').read_bytes(),
+                         (evidence/'native-selected-toolset-version.txt').read_bytes())
         if observation=='failure':
             self.assertFalse((evidence/'native-crt-observation.json').exists())
         else:
@@ -225,15 +227,63 @@ Write-BuildJson {quote(calls)} @{{queries=@($script:queries);diagnosticChildStar
     def test_x64_compiler_profile_requires_exact_native_cl_link_and_lib(self):
         root=self.root/'VS';compiler=root/'VC/Tools/MSVC/14.44.35207';tools=compiler/'bin/Hostx64/x64';tools.mkdir(parents=True)
         for name in ('cl','link','lib'): (tools/(name+'.exe')).write_bytes(pe(0x8664))
-        version="function Get-NativeCompilerFileVersion($Path) { if([IO.Path]::GetFileName($Path) -ceq 'cl.exe'){'19.44.35211.0'}else{'14.44.35211.0'} }; "
+        metadata=root/'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt';metadata.parent.mkdir(parents=True);metadata.write_bytes(b'14.44.35207\r\n')
+        version="function Get-NativeCompilerFileVersion($Path) { if([IO.Path]::GetFileName($Path) -ceq 'cl.exe'){'19.44.35229.0'}else{'14.44.35229.0'} }; "
         call=f"Get-NativeCompilerPlan {quote(root)} '17.14.1' -Architecture x64"
         data=json.loads(self.ps(version+call+'|ConvertTo-Json -Depth 12 -Compress'))
-        self.assertEqual(str(compiler),data['compilerRoot']);self.assertEqual('14.44.35211.0',data['minimumRuntimeVersion'])
+        self.assertEqual(str(compiler),data['compilerRoot']);self.assertEqual('14.44.35207.0',data['minimumRuntimeVersion'])
+        self.assertEqual('selected-msvc-package-v1',data['runtimeFloorBasis'])
+        self.assertEqual(dict(path=str(metadata),size=13,sha256=hashlib.sha256(metadata.read_bytes()).hexdigest(),version='14.44.35207'),data['toolsetMetadata'])
+        self.assertEqual('19.44.35229.0',data['tools']['cl']['version'])
+        self.assertEqual('14.44.35229.0',data['tools']['link']['version'])
         self.assertEqual(['cl','link','lib'],list(data['tools']))
         for name in ('cl','link','lib'):
             path=tools/(name+'.exe');path.write_bytes(pe(0xaa64));self.rejected(version+call);path.write_bytes(pe(0x8664))
         self.rejected(version+call.replace("'17.14.1'","'18.0.1'"))
-        self.rejected(version.replace('19.44.35211.0','19.43.35211.0')+call)
+        self.rejected(version.replace('19.44.35229.0','19.43.35229.0')+call)
+        self.rejected(version.replace('19.44.35229.0','19.44.35206.0')+call)
+
+    def test_x64_package_metadata_is_fixed_bounded_and_rechecked_after_preflight(self):
+        root=self.root/'VS';compiler=root/'VC/Tools/MSVC/14.44.35207';tools=compiler/'bin/Hostx64/x64';tools.mkdir(parents=True)
+        for name in ('cl','link','lib'):(tools/(name+'.exe')).write_bytes(pe(0x8664))
+        metadata=root/'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt';metadata.parent.mkdir(parents=True)
+        version="function Get-NativeCompilerFileVersion($Path) {if([IO.Path]::GetFileName($Path) -ceq 'cl.exe'){'19.44.35229.0'}else{'14.44.35229.0'}}; "
+        call=f"Get-NativeCompilerPlan {quote(root)} '17.14.1' x64"
+        self.rejected(version+call)
+        for raw in (b'14.44.35206',b'14.43.35207',b'14.44.35207.0',b'14.44.35207\nextra',b'x'*4097):
+            metadata.write_bytes(raw);self.rejected(version+call)
+        metadata.write_bytes(b'14.44.35207\r\n')
+        snapshot=self.root/'compiler.json'
+        self.ps(version+f"$plan={call}; Write-BuildJson {quote(snapshot)} $plan; Assert-NativeToolsetMetadata $plan|Out-Null")
+        plan=json.loads(snapshot.read_text())
+        self.ps(f"Assert-NativeToolsetMetadata (Get-Content {quote(snapshot)} -Raw|ConvertFrom-Json)|Out-Null")
+        configured=f"""
+function Get-NativeLongPath($Path) {{[IO.Path]::GetFullPath($Path)}}
+$compiler=Get-Content {quote(snapshot)} -Raw|ConvertFrom-Json -AsHashtable
+$sdk=@{{root={quote(self.root/'SDK')};version='10.0.26100.0'}}
+$preflight=@{{passed=$true;architecture='x64';compiler=$compiler;sdk=$sdk}}
+$configuration=@{{VCTOOLSET='v143';VCVER='17.14';UCRTVERSION=$sdk.version;WINDOWS_SDK_LIB_SUBDIR=$sdk.version;UCRTSDKDIR=$sdk.root;WINDOWS_SDK_HOME=$sdk.root;CC=$compiler.tools.cl.path;CXX=$compiler.tools.cl.path;MSVC_CXX=$compiler.tools.cl.path}}
+Assert-NativeConfiguredToolchain {quote(compiler)} $configuration $preflight|Out-Null
+"""
+        self.ps(version+configured)
+        metadata.write_bytes(b'14.44.35207\n');self.rejected(version+configured)
+        metadata.write_bytes(b'14.44.35207\r\n')
+        for field,value in [('runtimeFloorBasis','resource-max'),('minimumRuntimeVersion','14.44.35229.0')]:
+            changed=dict(plan,**{field:value});snapshot.write_text(json.dumps(changed));self.rejected(f"Assert-NativeToolsetMetadata (Get-Content {quote(snapshot)} -Raw|ConvertFrom-Json)")
+        for field,value in [('sha256','0'*64),('path',str(self.root/'foreign/default.txt')),('version','14.44.35206'),('size',12)]:
+            changed=dict(plan,toolsetMetadata=dict(plan['toolsetMetadata'],**{field:value}));snapshot.write_text(json.dumps(changed));self.rejected(f"Assert-NativeToolsetMetadata (Get-Content {quote(snapshot)} -Raw|ConvertFrom-Json)")
+        snapshot.write_text(json.dumps(plan));metadata.write_bytes(b'14.44.35207\n')
+        self.rejected(f"Assert-NativeToolsetMetadata (Get-Content {quote(snapshot)} -Raw|ConvertFrom-Json)")
+        metadata.unlink();outside=self.root/'outside.txt';outside.write_bytes(b'14.44.35207');metadata.symlink_to(outside)
+        self.rejected(version+call)
+
+    def test_x64_final_qualification_rechecks_package_before_archive(self):
+        raw=SOURCE.read_text()
+        final=raw.split('function Assert-NativeX64Qualification(',1)[1].split('\nfunction ',1)[0]
+        self.assertIn('Assert-NativeToolsetMetadata $Receipt.nativePreflight.compiler|Out-Null',final)
+        self.assertLess(final.index('Assert-NativeToolsetMetadata'),final.index('Assert-NativeBuildHost'))
+        lifecycle=raw.split('function Invoke-NativeEngineBuild(',1)[1]
+        self.assertLess(lifecycle.index('Assert-NativeX64Qualification $receipt $instdir'),lifecycle.index('Write-NativeEngineArchive $instdir $zip $evidence'))
 
     def test_x64_sdk_requires_complete_selected_headers_libraries_and_native_tools(self):
         root=self.root/'SDK';version='10.0.26100.0'

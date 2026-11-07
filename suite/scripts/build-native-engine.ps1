@@ -653,6 +653,42 @@ function Get-NativeCompilerFileVersion([string]$Path) {
     return [string][Version]::new($version.FileMajorPart,$version.FileMinorPart,$version.FileBuildPart,$version.FilePrivatePart)
 }
 
+function Read-NativeToolsetPackage([string]$CompilerRoot) {
+    Assert-NativeBuildTimeRemaining;Assert-UnlinkedPath $CompilerRoot
+    $compiler=[IO.Path]::GetFullPath($CompilerRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $version=Split-Path $compiler -Leaf;$msvc=Split-Path $compiler -Parent;$tools=Split-Path $msvc -Parent;$vc=Split-Path $tools -Parent
+    if($version -cnotmatch '^14\.\d+\.\d+(?:\.\d+)?$' -or (Split-Path $msvc -Leaf) -cne 'MSVC' -or
+       (Split-Path $tools -Leaf) -cne 'Tools' -or (Split-Path $vc -Leaf) -cne 'VC') {throw 'Selected MSVC package path is invalid.'}
+    $path=Join-Path $vc 'Auxiliary/Build/Microsoft.VCToolsVersion.default.txt';Assert-UnlinkedPath $path
+    $item=Get-Item -LiteralPath $path -Force
+    if($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {throw 'Selected MSVC package metadata must be an unlinked regular file.'}
+    $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try {
+        if($stream.Length -lt 1 -or $stream.Length -gt 4096) {throw 'Selected MSVC package metadata exceeds its bound.'}
+        $bytes=[byte[]]::new([int]$stream.Length);$stream.ReadExactly($bytes,0,$bytes.Length)
+    } finally {$stream.Dispose()}
+    Assert-NativeBuildTimeRemaining
+    $text=[Text.UTF8Encoding]::new($false,$true).GetString($bytes).Trim()
+    if($text -cne $version) {throw 'Selected MSVC package metadata differs from the compiler directory.'}
+    $parsed=[Version]$version;$minimum=[Version]::new(14,$parsed.Minor,$parsed.Build,[Math]::Max(0,$parsed.Revision))
+    return @{bytes=$bytes;minimumRuntimeVersion=[string]$minimum;metadata=[ordered]@{path=$path;size=$bytes.Length;
+        sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant();version=$version}}
+}
+
+function Assert-NativeToolsetMetadata($Compiler) {
+    $actual=Read-NativeToolsetPackage $Compiler.compilerRoot
+    $expectedRoot=Join-Path $Compiler.installationPath ('VC/Tools/MSVC/'+$Compiler.compilerToolsVersion)
+    if($Compiler.architecture -cne 'x64' -or $Compiler.toolset -cne 'v143' -or
+       [IO.Path]::GetFullPath($Compiler.compilerRoot) -cne [IO.Path]::GetFullPath($expectedRoot) -or
+       $Compiler.runtimeFloorBasis -cne 'selected-msvc-package-v1' -or $Compiler.minimumRuntimeVersion -cne $actual.minimumRuntimeVersion -or
+       $Compiler.compilerToolsVersion -cne $actual.metadata.version -or
+       ($Compiler.toolsetMetadata.size -isnot [int] -and $Compiler.toolsetMetadata.size -isnot [long])) {throw 'Selected MSVC package floor provenance changed.'}
+    foreach($field in @('path','size','sha256','version')) {
+        if($Compiler.toolsetMetadata.$field -cne $actual.metadata[$field]) {throw 'Selected MSVC package metadata changed after preflight.'}
+    }
+    return $actual
+}
+
 function Get-NativeCompilerPlan([string]$InstallationPath,[string]$InstallationVersion,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $target=Get-NativeEngineTarget $Architecture
     $major=if($Architecture -ceq 'x64'){17}else{18}
@@ -678,11 +714,17 @@ function Get-NativeCompilerPlan([string]$InstallationPath,[string]$InstallationV
         $expectedMajor=if($name -ceq 'cl'){19}else{14}
         if($version.Major -ne $expectedMajor -or $version.Minor -ne $directoryVersion.Minor -or $version.Build -lt $directoryVersion.Build) {throw 'Selected compiler resource version differs from its MSVC directory.'}
         $floor=[Version]::new(14,$version.Minor,$version.Build,[Math]::Max(0,$version.Revision))
-        if($floor -gt $minimum) {$minimum=$floor}
+        if($Architecture -ceq 'arm64' -and $floor -gt $minimum) {$minimum=$floor}
         $pe.version=[string]$version;$pe.role='nativeCompilerTool';$pe.tool=$name;$tools[$name]=$pe
     }
-    return [ordered]@{architecture=$Architecture;compilerYear=$target.compilerYear;toolset=$target.toolset;installationPath=$root;
+    $result=[ordered]@{architecture=$Architecture;compilerYear=$target.compilerYear;toolset=$target.toolset;installationPath=$root;
         installationVersion=$InstallationVersion;compilerRoot=$compiler;compilerToolsVersion=$names[0];minimumRuntimeVersion=[string]$minimum;tools=$tools}
+    if($Architecture -ceq 'x64') {
+        $package=Read-NativeToolsetPackage $compiler
+        $result.runtimeFloorBasis='selected-msvc-package-v1';$result.toolsetMetadata=$package.metadata
+        $result.minimumRuntimeVersion=$package.minimumRuntimeVersion
+    }
+    return $result
 }
 
 function Get-NativeSdkPlan([string]$SdkRoot,[string]$Version,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
@@ -773,6 +815,13 @@ function Invoke-NativeX64Preflight([string]$WorkingDirectory,[string]$EvidenceDi
     $compiler=Get-NativeCompilerPlan $instances[0].installationPath $instances[0].installationVersion x64
     Assert-NativeBuildTimeRemaining
     Write-NewIdentityBytes (Join-Path $EvidenceDirectory 'native-selected-compiler.json') ([Text.UTF8Encoding]::new($false).GetBytes((@{schemaVersion=1;sourceOnly=$true;diagnosticOnly=$true;fullEngineQualified=$false;plan=$compiler}|ConvertTo-Json -Depth 30 -Compress)))
+    Assert-NativeBuildTimeRemaining
+    $package=Assert-NativeToolsetMetadata $compiler
+    $metadataEvidence=Join-Path $EvidenceDirectory 'native-selected-toolset-version.txt'
+    Write-NewIdentityBytes $metadataEvidence $package.bytes
+    Assert-NativeBuildTimeRemaining
+    if((Get-Item -LiteralPath $metadataEvidence).Length -ne $compiler.toolsetMetadata.size -or
+       (Get-FileHash -LiteralPath $metadataEvidence -Algorithm SHA256).Hash.ToLowerInvariant() -cne $compiler.toolsetMetadata.sha256) {throw 'Retained toolset metadata differs from preflight.'}
     Assert-NativeBuildTimeRemaining
     $registry=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\Windows\v10.0' -ErrorAction Stop
     if(-not $registry.InstallationFolder -or $registry.ProductVersion -cnotmatch '^10\.0\.\d+$') {throw 'Installed SDK registration does not match the pinned configure selection.'}
@@ -1414,7 +1463,11 @@ function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset,[ValidateSet
     if($versionText -notmatch '^14\.\d+\.\d+(?:\.\d+)?$' -or (Split-Path (Split-Path $compiler -Parent) -Leaf) -ine 'MSVC') {throw 'Configured COMPATH must identify the actual VC/Tools/MSVC version directory.'}
     $version=[Version]$versionText
     $minimum=[Version]::new($version.Major,$version.Minor,$version.Build,[Math]::Max(0,$version.Revision))
-    if($ActualCompilerRuntimeFloor) {
+    if($Architecture -ceq 'x64') {
+        $package=Read-NativeToolsetPackage $compiler
+        if($package.minimumRuntimeVersion -cne [string]$minimum -or
+           ($ActualCompilerRuntimeFloor -and $ActualCompilerRuntimeFloor -cne [string]$minimum)) {throw 'x64 CRT floor must match the selected MSVC package.'}
+    } elseif($ActualCompilerRuntimeFloor) {
         $actual=[Version]$ActualCompilerRuntimeFloor
         if($actual.Major -ne 14) {throw 'Invalid actual compiler runtime floor.'}
         if($actual -gt $minimum) {$minimum=$actual}
@@ -1428,6 +1481,39 @@ function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset,[ValidateSet
         if($directory.Name -match '^v?(14\.\d+\.\d+(?:\.\d+)?)$') {$candidateVersion=[Version]$Matches[1]}
         elseif($directory.Name -ceq $target.toolset) {$candidateVersion=$minimum}
         else {continue}
+        if($Architecture -ceq 'x64') {
+            $path=Join-Path $directory.FullName 'x64/Microsoft.VC143.CRT';Assert-UnlinkedPath $path
+            if(-not (Test-Path -LiteralPath $path -PathType Container)) {continue}
+            $complete=$true
+            foreach($name in Get-CrtNames x64) {
+                Assert-NativeBuildTimeRemaining;$file=Join-Path $path $name;Assert-UnlinkedPath $file
+                $item=Get-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+                if($null -eq $item) {$complete=$false}
+                elseif($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {throw 'Native CRT candidate contains a non-regular file.'}
+            }
+            if(-not $complete) {continue}
+            $eligible=$true
+            foreach($name in Get-CrtNames x64) {
+                Assert-NativeBuildTimeRemaining;$identity=Get-CrtSigningIdentity (Join-Path $path $name)
+                foreach($parts in @($identity.fileVersionParts,$identity.productVersionParts)) {
+                    if(@($parts).Count -ne 4) {throw 'Native CRT resource version is incomplete.'}
+                    foreach($part in $parts) {if(($part -isnot [int] -and $part -isnot [long]) -or $part -lt 0 -or $part -gt 65535) {throw 'Native CRT resource version is not numeric.'}}
+                    $actual=[Version]::new($parts[0],$parts[1],$parts[2],$parts[3])
+                    if($actual.Major -ne 14) {throw 'Native CRT resource family differs.'}
+                    if($actual -lt $minimum) {$eligible=$false}
+                }
+            }
+            if(-not $eligible) {continue}
+            # Eligible sets cannot bypass a signature/PE failure by falling back.
+            $files=@(foreach($name in Get-CrtNames x64) {Assert-NativeBuildTimeRemaining;Assert-CrtFile (Join-Path $path $name) ([string]$minimum) x64})
+            $floor=$null
+            foreach($file in $files) {
+                $parts=$file.signature.fileVersionParts;$actual=[Version]::new($parts[0],$parts[1],$parts[2],$parts[3])
+                if($null -eq $floor -or $actual -lt $floor) {$floor=$actual}
+            }
+            $candidates+=@{path=$path;family='Microsoft.VC143.CRT';version=$floor;directory=$directory.Name;files=$files}
+            continue
+        }
         $candidateVersion=[Version]::new($candidateVersion.Major,$candidateVersion.Minor,$candidateVersion.Build,[Math]::Max(0,$candidateVersion.Revision))
         if($candidateVersion -lt $minimum) {continue}
         $families=if($Architecture -ceq 'arm64'){@('Microsoft.VC145.CRT','Microsoft.VC143.CRT')}else{@('Microsoft.VC143.CRT')}
@@ -1437,12 +1523,26 @@ function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset,[ValidateSet
         }
     }
     if($candidates.Count -eq 0) {throw "No native VC redist from the selected VS installation is at least MSVC $minimum under $redistRoot"}
-    $selected=@($candidates|Sort-Object -Property @{Expression={$_.version};Descending=$true},@{Expression={$_.family};Descending=$true})[0]
-    Assert-UnlinkedPath $selected.path
-    $files=@(foreach($name in Get-CrtNames $Architecture) {Assert-CrtFile (Join-Path $selected.path $name) ([string]$minimum) $Architecture})
-    return [ordered]@{schemaVersion=1;architecture=$Architecture;toolset=$Toolset;compilerRoot=$compiler;compilerToolsVersion=$versionText;minimumRuntimeVersion=[string]$minimum;
+    if($Architecture -ceq 'x64') {
+        $selected=$null
+        foreach($candidate in $candidates) {
+            if($null -eq $selected -or $candidate.version -gt $selected.version -or
+               ($candidate.version -eq $selected.version -and [StringComparer]::Ordinal.Compare($candidate.directory,$selected.directory) -lt 0)) {$selected=$candidate}
+        }
+        $files=$selected.files
+    } else {
+        $selected=@($candidates|Sort-Object -Property @{Expression={$_.version};Descending=$true},@{Expression={$_.family};Descending=$true})[0]
+        Assert-UnlinkedPath $selected.path
+        $files=@(foreach($name in Get-CrtNames $Architecture) {Assert-CrtFile (Join-Path $selected.path $name) ([string]$minimum) $Architecture})
+    }
+    $result=[ordered]@{schemaVersion=1;architecture=$Architecture;toolset=$Toolset;compilerRoot=$compiler;compilerToolsVersion=$versionText;minimumRuntimeVersion=[string]$minimum;
         redistRoot=$redistRoot;sourceDirectory=$selected.path;redistVersionDirectory=$selected.directory;redistFamily=$selected.family;
         selection=('selected VS installation; highest installed v14 '+$Architecture.ToUpperInvariant()+' CRT not older than configured build tools; each DLL signature/version verified');files=$files}
+    if($Architecture -ceq 'x64') {
+        $result.selection='selected VS installation; highest actual minimum signed CRT file version, then ordinal directory name; fixed native VC143 family'
+        $result.selectionBasis='actual-signed-crt-files-v1';$result.selectedFileVersionFloor=[string]$selected.version
+    }
+    return $result
 }
 
 function Assert-VcRedistributionTerms([string]$Path,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
@@ -1690,6 +1790,7 @@ function Assert-NativeConfiguredToolchain([string]$CompilerRoot,[Collections.IDi
        $Configuration.UCRTVERSION -cne $Preflight.sdk.version -or $Configuration.WINDOWS_SDK_LIB_SUBDIR -cne $Preflight.sdk.version -or
        (Get-NativeLongPath $Configuration.UCRTSDKDIR) -ine (Get-NativeLongPath $Preflight.sdk.root) -or
        (Get-NativeLongPath $Configuration.WINDOWS_SDK_HOME) -ine (Get-NativeLongPath $Preflight.sdk.root)) {throw 'Configured compiler/SDK differs from the native preflight selection.'}
+    Assert-NativeToolsetMetadata $Preflight.compiler|Out-Null
     foreach($name in @('CC','CXX','MSVC_CXX')) {
         if(-not $Configuration[$name] -or (Get-NativeLongPath $Configuration[$name]) -ine (Get-NativeLongPath $Preflight.compiler.tools.cl.path)) {throw 'Configured C/C++ compiler differs from native preflight.'}
     }
@@ -1743,6 +1844,7 @@ function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot) {
        @($Receipt.appLocalCrt.files).Count -ne @(Get-CrtNames x64).Count -or $Receipt.appLocalCrt.architecture -cne 'x64' -or
        $Receipt.crtRedistributionTerms.url -cne $target.crtRedistributionUrl -or $Receipt.crtRedistributionTerms.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
        $Receipt.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $Receipt.sourceTree -cnotmatch '^[0-9a-f]{40}$' -or $Receipt.sourceRun -le 0 -or $Receipt.runAttempt -ne 1) {throw 'Normal x64 Full qualification prerequisites are incomplete.'}
+    Assert-NativeToolsetMetadata $Receipt.nativePreflight.compiler|Out-Null
     Assert-NativeBuildHost $Receipt.host x64
     Assert-NativeSourceRecipeBinding $Receipt x64
     Assert-WinAccBinaryProof $Receipt.winAccBinary $RuntimeRoot x64

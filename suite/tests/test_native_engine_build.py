@@ -108,19 +108,65 @@ class NativeEngineBuildTests(unittest.TestCase):
         from suite.crt import crt_names
         from suite.tests.test_payload import pe
         tools=self.root/'VS/VC/Tools/MSVC/14.44.35207';tools.mkdir(parents=True)
-        redist=self.root/'VS/VC/Redist/MSVC/14.44.35211/x64/Microsoft.VC143.CRT';redist.mkdir(parents=True)
+        metadata=self.root/'VS/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt';metadata.parent.mkdir(parents=True);metadata.write_bytes(b'14.44.35207\r\n')
+        redist=self.root/'VS/VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT';redist.mkdir(parents=True)
         for name in crt_names('x64'): (redist/name).write_bytes(pe(0x8664,dll=True))
+        mock=self.crt_mock().replace('14.50.12350.0','14.44.35211.0').replace('14,50,12350,0','14,44,35211,0')
         call=f"Get-AppLocalCrtPlan {quote(tools)} v143 -Architecture x64"
-        raw=self.ps(self.crt_mock()+call+'|ConvertTo-Json -Depth 12 -Compress')
+        raw=self.ps(mock+call+'|ConvertTo-Json -Depth 12 -Compress')
         plan=json.loads(raw);self.assertEqual(9,len(plan['files']))
         self.assertEqual('14.44.35207.0',plan['minimumRuntimeVersion'])
+        self.assertEqual('14.44.35211.0',plan['selectedFileVersionFloor'])
         for name in crt_names('x64'):
             path=redist/name;original=path.read_bytes();path.unlink()
-            self.rejected(self.crt_mock()+call);path.write_bytes(original)
-        self.rejected(self.crt_mock().replace('14,50,12350,0','14,44,35206,0')+call)
-        self.rejected(self.crt_mock().replace("status='Valid'","status='NotSigned'")+call)
+            self.rejected(mock+call);path.write_bytes(original)
+        self.rejected(mock.replace('14,44,35211,0','14,44,35206,0')+call)
+        self.rejected(mock.replace("status='Valid'","status='NotSigned'")+call)
         (redist/'vcruntime140_1.dll').write_bytes(pe(0xaa64,dll=True))
-        self.rejected(self.crt_mock()+call)
+        self.rejected(mock+call)
+
+    def x64_crt_package_fixture(self):
+        from suite.crt import crt_names
+        from suite.tests.test_payload import pe
+        tools=self.root/'VS/VC/Tools/MSVC/14.44.35207';tools.mkdir(parents=True)
+        metadata=self.root/'VS/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt';metadata.parent.mkdir(parents=True);metadata.write_bytes(b'14.44.35207\r\n')
+        roots=[]
+        for directory in ('14.44.35112','14.44.99999'):
+            path=self.root/'VS/VC/Redist/MSVC'/directory/'x64/Microsoft.VC143.CRT';path.mkdir(parents=True);roots.append(path)
+            for name in crt_names('x64'):(path/name).write_bytes(pe(0x8664,dll=True))
+        mock=self.crt_mock().replace('14.50.12350.0','14.44.35211.0').replace('14,50,12350,0','14,44,35211,0')
+        return tools,roots,mock
+
+    def test_x64_crt_package_floor_uses_actual_files_and_deterministic_minimum(self):
+        tools,roots,mock=self.x64_crt_package_fixture()
+        call=f"Get-AppLocalCrtPlan {quote(tools)} v143 x64 '14.44.35207.0'"
+        old_in_new=mock.replace('@(14,44,35211,0)',"$(if($Path -like '*99999*'){@(14,44,35206,0)}else{@(14,44,35211,0)})")
+        plan=json.loads(self.ps(old_in_new+call+'|ConvertTo-Json -Depth 12 -Compress'))
+        self.assertEqual(str(roots[0]),plan['sourceDirectory'])
+        self.assertEqual('actual-signed-crt-files-v1',plan['selectionBasis'])
+        self.assertEqual('14.44.35211.0',plan['selectedFileVersionFloor'])
+        # Directory label alone cannot rescue old actual files.
+        for file in roots[0].iterdir():file.unlink()
+        self.rejected(old_in_new+call)
+        from suite.tests.test_payload import pe
+        from suite.crt import crt_names
+        for name in crt_names('x64'):(roots[0]/name).write_bytes(pe(0x8664,dll=True))
+        newer=mock.replace('@(14,44,35211,0)',"$(if($Path -like '*99999*'){@(14,44,35212,0)}else{@(14,44,35211,0)})")
+        plan=json.loads(self.ps(newer+call+'|ConvertTo-Json -Depth 12 -Compress'))
+        self.assertEqual(str(roots[1]),plan['sourceDirectory']);self.assertEqual('14.44.35212.0',plan['selectedFileVersionFloor'])
+        one_lower=newer.replace("$Path -like '*99999*'","$Path -like '*99999*' -and [IO.Path]::GetFileName($Path) -cne 'vcruntime140.dll'")
+        plan=json.loads(self.ps(one_lower+call+'|ConvertTo-Json -Depth 12 -Compress'))
+        self.assertEqual(str(roots[0]),plan['sourceDirectory'])
+        self.rejected(mock+call.replace('14.44.35207.0','14.44.35229.0'))
+
+    def test_x64_crt_eligible_signature_or_machine_failure_has_no_fallback(self):
+        from suite.tests.test_payload import pe
+        tools,roots,mock=self.x64_crt_package_fixture()
+        call=f"Get-AppLocalCrtPlan {quote(tools)} v143 x64 '14.44.35207.0'"
+        bad=mock.replace("status='Valid'","status=$(if($Path -like '*99999*'){'NotSigned'}else{'Valid'})")
+        self.rejected(bad+call)
+        (roots[1]/'vcruntime140.dll').write_bytes(pe(0xaa64,dll=True));self.rejected(mock+call)
+        (roots[1]/'vcruntime140.dll').write_bytes(b'bad PE');self.rejected(mock+call)
 
     def setUp(self):
         self.assertTrue(SOURCE.is_file(),'Native ARM64 source-build driver is missing')
