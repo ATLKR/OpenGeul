@@ -1845,6 +1845,144 @@ public static class NativeEnginePath {
     return $buffer.ToString().TrimEnd('\','/')
 }
 
+function Initialize-NativeAtlFileApi {
+    if('NativeEngineAtlFile' -as [type]) {return}
+    # Typed layout already used by the owned reader; build inputs only.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+public static class NativeEngineAtlFile {
+    [StructLayout(LayoutKind.Sequential)] public struct Time { public uint Low, High; }
+    [StructLayout(LayoutKind.Sequential)] public struct Info {
+        public uint Attributes; public Time Creation, Access, Write;
+        public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+    [DllImport("kernel32.dll",EntryPoint="CreateFileW",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]
+    public static extern SafeFileHandle Open(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+    [DllImport("kernel32.dll",EntryPoint="GetFileInformationByHandle",SetLastError=true)]
+    [return:MarshalAs(UnmanagedType.Bool)] public static extern bool Identity(SafeFileHandle handle,out Info info);
+    [DllImport("kernel32.dll",EntryPoint="GetFileType",SetLastError=true)]
+    public static extern uint FileType(SafeFileHandle handle);
+    [DllImport("kernel32.dll",EntryPoint="GetFinalPathNameByHandleW",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]
+    public static extern uint FinalPath(SafeFileHandle handle,StringBuilder buffer,uint capacity,uint flags);
+}
+'@
+}
+
+function Open-NativeAtlFile([string]$Path) {
+    Initialize-NativeAtlFileApi
+    $handle=[NativeEngineAtlFile]::Open($Path,[uint32]2147483648,1,[IntPtr]::Zero,3,0x200080,[IntPtr]::Zero)
+    if($handle.IsInvalid) {$handle.Dispose();throw 'Native ATL input could not be opened.'}
+    try {return [IO.FileStream]::new($handle,[IO.FileAccess]::Read,65536,$false)}
+    catch {$handle.Dispose();throw}
+}
+
+function Get-NativeAtlHandleIdentity($Handle,[string]$Path) {
+    Initialize-NativeAtlFileApi
+    $info=[NativeEngineAtlFile+Info]::new()
+    if(-not [NativeEngineAtlFile]::Identity($Handle,[ref]$info)) {throw 'Native ATL handle identity is unavailable.'}
+    $buffer=[Text.StringBuilder]::new(32768)
+    $length=[NativeEngineAtlFile]::FinalPath($Handle,$buffer,32768,0)
+    if($length -eq 0 -or $length -ge 32768) {throw 'Native ATL handle path is unavailable.'}
+    $final=$buffer.ToString()
+    if($final.StartsWith('\\?\')) {$final=$final.Substring(4)}
+    return [ordered]@{finalPath=$final;fileAttributes=$info.Attributes;fileType=[NativeEngineAtlFile]::FileType($Handle);
+        size=([long]$info.SizeHigh*4294967296+[long]$info.SizeLow);
+        generation=[ordered]@{volumeSerialNumber=$info.Volume;fileIndexHigh=$info.IndexHigh;fileIndexLow=$info.IndexLow;
+            creationHigh=$info.Creation.High;creationLow=$info.Creation.Low;writeHigh=$info.Write.High;writeLow=$info.Write.Low}}
+}
+
+function Assert-NativeAtlKeys($Value,[string[]]$Expected) {
+    if($null -eq $Value -or $Value -is [string] -or $Value -is [array]) {throw 'Native ATL proof object is invalid.'}
+    $keys=if($Value -is [Collections.IDictionary]){@($Value.Keys)}else{@($Value.PSObject.Properties.Name)}
+    if(Compare-Object -CaseSensitive $keys $Expected) {throw 'Native ATL proof fields differ.'}
+}
+
+function Get-NativeAtlFileIdentity([string]$Path) {
+    Assert-NativeBuildTimeRemaining;Assert-UnlinkedPath $Path
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)) {throw 'Native ATL input is absent.'}
+    $canonical=Get-NativeLongPath $Path;$stream=$null;$sha=$null
+    $fields=@('volumeSerialNumber','fileIndexHigh','fileIndexLow','creationHigh','creationLow','writeHigh','writeLow')
+    try {
+        $stream=Open-NativeAtlFile $canonical
+        $before=Get-NativeAtlHandleIdentity $stream.SafeFileHandle $canonical
+        Assert-NativeAtlKeys $before.generation $fields
+        if($before.fileType -ne 1 -or ($before.fileAttributes -band 0x410) -or $before.size -le 0 -or $before.size -gt 1073741824 -or
+           $before.finalPath -ine $canonical -or $stream.Length -ne $before.size -or
+           (-not $before.generation.fileIndexHigh -and -not $before.generation.fileIndexLow)) {throw 'Native ATL input is not the canonical regular file.'}
+        $generation=[ordered]@{}
+        foreach($field in $fields) {
+            $value=$before.generation.$field
+            if(($value -isnot [int] -and $value -isnot [long] -and $value -isnot [uint32]) -or $value -lt 0 -or $value -gt [uint32]::MaxValue) {throw 'Native ATL handle generation is invalid.'}
+            $generation[$field]=$value
+        }
+        $sha=[Security.Cryptography.SHA256]::Create();$buffer=[byte[]]::new(65536);$count=0L
+        while(($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0) {
+            Assert-NativeBuildTimeRemaining
+            $null=$sha.TransformBlock($buffer,0,$read,$null,0);$count+=$read
+        }
+        $null=$sha.TransformFinalBlock([byte[]]::new(0),0,0)
+        $digest=([BitConverter]::ToString($sha.Hash)).Replace('-','').ToLowerInvariant()
+        $after=Get-NativeAtlHandleIdentity $stream.SafeFileHandle $canonical
+        Assert-NativeBuildTimeRemaining;Assert-UnlinkedPath $canonical
+        Assert-NativeAtlKeys $after.generation $fields
+        if($count -ne $before.size -or $after.size -ne $before.size -or $after.fileType -ne 1 -or ($after.fileAttributes -band 0x410) -or
+           $after.finalPath -ine $canonical) {throw 'Native ATL input generation changed while hashing.'}
+        foreach($field in $fields) {if($generation[$field] -ne $after.generation.$field) {throw 'Native ATL input generation changed while hashing.'}}
+        return [ordered]@{path=$canonical;size=$count;sha256=$digest;generation=$generation}
+    } finally {if($sha){$sha.Dispose()};if($stream){$stream.Dispose()}}
+}
+
+function Get-NativeX64AtlPlan([string]$CompilerRoot,$Configuration,$NativeConfiguration) {
+    Assert-NativeBuildTimeRemaining
+    foreach($pair in @(@('OS','WNT'),@('COM','MSC'),@('CPUNAME','X86_64'),@('HOST_PLATFORM','x86_64-pc-cygwin'),@('BUILD_PLATFORM','x86_64-pc-cygwin'))) {
+        if($Configuration.($pair[0]) -isnot [string] -or $Configuration.($pair[0]) -cne $pair[1] -or $NativeConfiguration.($pair[0]) -isnot [string] -or $NativeConfiguration.($pair[0]) -cne $pair[1]) {throw 'Native ATL prerequisite requires the selected x64 Cygwin MSC profile.'}
+    }
+    foreach($name in @('ATL_INCLUDE','ATL_LIB')) {
+        if($Configuration.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($Configuration.$name) -or $Configuration.$name -match '[\x00\r\n]' -or
+           $NativeConfiguration.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($NativeConfiguration.$name)) {throw 'Configured native ATL path is absent.'}
+    }
+    Assert-UnlinkedPath $CompilerRoot;$root=Get-NativeLongPath $CompilerRoot
+    $include=Get-NativeLongPath $NativeConfiguration.ATL_INCLUDE;$library=Get-NativeLongPath $NativeConfiguration.ATL_LIB
+    $expectedInclude=[IO.Path]::GetFullPath((Join-Path $root 'atlmfc/include'))
+    $allowedLibraries=@([IO.Path]::GetFullPath((Join-Path $root 'atlmfc/lib/x64')),[IO.Path]::GetFullPath((Join-Path $root 'atlmfc/lib/spectre/x64')))
+    if($include -ine $expectedInclude -or $library -notin $allowedLibraries) {throw 'Configured ATL input is outside the selected compiler root.'}
+    # Observe configure's variant; do not select or substitute a library.
+    $header=Get-NativeAtlFileIdentity (Join-Path $include 'atlbase.h')
+    $archive=Get-NativeAtlFileIdentity (Join-Path $library 'atls.lib')
+    return [ordered]@{schemaVersion=1;kind='native-x64-atl-prerequisite';passed=$true;compilerRoot=$root;
+        configuredInclude=$Configuration.ATL_INCLUDE;configuredLibrary=$Configuration.ATL_LIB;includeRoot=$include;libraryRoot=$library;
+        header=$header;library=$archive;productPayload=$false;fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false}
+}
+
+function Assert-NativeX64AtlPlanCurrent($Plan,[string]$CompilerRoot,$Configuration) {
+    Assert-NativeAtlKeys $Plan @('schemaVersion','kind','passed','compilerRoot','configuredInclude','configuredLibrary','includeRoot','libraryRoot','header','library','productPayload','fullEngineQualified','acceptanceEligible','guiVerified')
+    foreach($name in @('kind','compilerRoot','configuredInclude','configuredLibrary','includeRoot','libraryRoot')) {
+        if($Plan.$name -isnot [string]) {throw 'Native ATL binding requires scalar paths and kind.'}
+    }
+    if(($Plan.schemaVersion -isnot [int] -and $Plan.schemaVersion -isnot [long]) -or $Plan.schemaVersion -ne 1 -or $Plan.kind -cne 'native-x64-atl-prerequisite' -or
+       $Plan.passed -isnot [bool] -or -not $Plan.passed -or $Plan.configuredInclude -cne $Configuration.ATL_INCLUDE -or $Plan.configuredLibrary -cne $Configuration.ATL_LIB -or
+       $Plan.compilerRoot -ine (Get-NativeLongPath $CompilerRoot)) {throw 'Native ATL preflight binding differs.'}
+    foreach($name in @('productPayload','fullEngineQualified','acceptanceEligible','guiVerified')) {
+        if($Plan.$name -isnot [bool] -or $Plan.$name) {throw 'Native ATL build input cannot qualify a product.'}
+    }
+    $native=@{};foreach($name in @('OS','COM','CPUNAME','HOST_PLATFORM','BUILD_PLATFORM')) {$native[$name]=$Configuration.$name}
+    $native.ATL_INCLUDE=$Plan.includeRoot;$native.ATL_LIB=$Plan.libraryRoot
+    $actual=Get-NativeX64AtlPlan $CompilerRoot $Configuration $native
+    foreach($role in @('header','library')) {
+        $item=$Plan.$role;Assert-NativeAtlKeys $item @('path','size','sha256','generation')
+        Assert-NativeAtlKeys $item.generation @('volumeSerialNumber','fileIndexHigh','fileIndexLow','creationHigh','creationLow','writeHigh','writeLow')
+        if($item.path -isnot [string] -or $item.path -ine $actual.$role.path -or $item.sha256 -isnot [string] -or $item.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+           ($item.size -isnot [int] -and $item.size -isnot [long]) -or $item.size -ne $actual.$role.size -or $item.sha256 -cne $actual.$role.sha256) {throw 'Native ATL file identity changed.'}
+        foreach($field in @('volumeSerialNumber','fileIndexHigh','fileIndexLow','creationHigh','creationLow','writeHigh','writeLow')) {
+            $value=$item.generation.$field
+            if(($value -isnot [int] -and $value -isnot [long] -and $value -isnot [uint32]) -or $value -lt 0 -or $value -gt [uint32]::MaxValue -or $value -ne $actual.$role.generation.$field) {throw 'Native ATL file generation changed.'}
+        }
+    }
+}
+
 function Assert-NativeConfiguredToolchain([string]$CompilerRoot,[Collections.IDictionary]$Configuration,$Preflight) {
     if($Preflight.passed -ne $true -or $Preflight.architecture -cne 'x64' -or $Configuration.VCTOOLSET -cne 'v143' -or
        $Configuration.VCVER -cnotin @('17.0','17.14') -or (Get-NativeLongPath $CompilerRoot) -ine (Get-NativeLongPath $Preflight.compiler.compilerRoot) -or
@@ -1863,10 +2001,42 @@ function Assert-NativeConfiguredToolchain([string]$CompilerRoot,[Collections.IDi
     return [ordered]@{matched=$true;compilerRoot=(Get-NativeLongPath $CompilerRoot);toolset='v143';sdkRoot=(Get-NativeLongPath $Preflight.sdk.root);sdkVersion=$Preflight.sdk.version}
 }
 
+function Assert-NativeX64AtlSourceBinding($Proof,$Descriptor,[string]$EvidenceDirectory) {
+    $paths=@('extensions/Library_so_activex.mk','embedserv/Library_emser.mk','extensions/Library_oleautobridge.mk',
+        'winaccessibility/Library_uacccom.mk','winaccessibility/Library_winaccessibility.mk','winaccessibility/WinResTarget_uacccom.mk')
+    Assert-NativeAtlKeys $Descriptor @('condition','recipes')
+    Assert-NativeAtlKeys $Proof @('schemaVersion','kind','condition','recipes','nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')
+    if(($Proof.schemaVersion -isnot [int] -and $Proof.schemaVersion -isnot [long]) -or $Proof.schemaVersion -ne 1 -or
+       $Proof.kind -isnot [string] -or $Proof.kind -cne 'windows-x64-native-atl-source-hooks' -or $Proof.condition -isnot [string] -or
+       $Proof.condition -cne 'WNT_X86_64_MSC && MAKE_HOST=%-cygwin' -or $Descriptor.condition -cne $Proof.condition -or
+       @($Proof.recipes).Count -ne 6 -or @($Descriptor.recipes).Count -ne 6) {throw 'Native x64 ATL source group differs.'}
+    foreach($flag in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+        if($Proof.$flag -isnot [bool] -or $Proof.$flag) {throw 'Native ATL source group cannot qualify an engine.'}
+    }
+    $directory=[IO.Path]::GetFullPath($EvidenceDirectory);Assert-UnlinkedPath $directory
+    for($i=0;$i -lt 6;$i++) {
+        $pin=$Descriptor.recipes[$i];$row=$Proof.recipes[$i]
+        Assert-NativeAtlKeys $pin @('path','size','sha256','afterSize','afterSha256')
+        Assert-NativeAtlKeys $row @('path','beforeBytes','afterBytes','beforeSha256','afterSha256','evidence')
+        Assert-NativeAtlKeys $row.evidence @('original','effective')
+        foreach($name in @('path','beforeSha256','afterSha256')) {if($row.$name -isnot [string]) {throw 'Native ATL source identity requires scalar strings.'}}
+        if($pin.path -cne $paths[$i] -or $row.path -cne $paths[$i] -or
+           ($row.beforeBytes -isnot [int] -and $row.beforeBytes -isnot [long]) -or ($row.afterBytes -isnot [int] -and $row.afterBytes -isnot [long]) -or
+           $row.beforeBytes -ne $pin.size -or $row.afterBytes -ne $pin.afterSize -or $row.beforeSha256 -cne $pin.sha256 -or $row.afterSha256 -cne $pin.afterSha256) {throw 'Native ATL source recipe identity differs.'}
+        foreach($phase in @('original','effective')) {
+            $path=$row.evidence.$phase;$name=('{0}-x64-atl-{1:D2}-{2}' -f $phase,($i+1),[IO.Path]::GetFileName($paths[$i]))
+            if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or $path -cne [IO.Path]::GetFullPath($path) -or
+               [IO.Path]::GetDirectoryName($path) -cne $directory -or [IO.Path]::GetFileName($path) -cne $name) {throw 'Native ATL source evidence path differs.'}
+            if($phase -ceq 'original') {Confirm-FileIdentity $path $pin.size SHA256 $pin.sha256|Out-Null}
+            else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
+        }
+    }
+}
+
 function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','winAccFocusOrder')}
-    $guardCount=if($Architecture -ceq 'arm64'){13}else{11}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder')}
+    $guardCount=if($Architecture -ceq 'arm64'){13}else{5}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
        $proof.recipeSha256 -cnotmatch '^[0-9a-f]{64}$' -or ($proof.hookOrder -join '/') -cne ($order -join '/') -or @($proof.armGuardedSources).Count -ne $guardCount -or
@@ -1877,10 +2047,8 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
         $manifestPath=Join-Path $PSScriptRoot '../engine-build/source-build.json';Assert-UnlinkedPath $manifestPath
         if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
         $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
-        $pins=@($manifest.configureSource,$manifest.sourceHook,
-            $manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe,$manifest.atlNativePaths.recipe)+
-            @($manifest.atlConsumerNativePaths.recipes)+@($manifest.harfbuzzNativeMesonPaths.recipe)
-        for($i=0;$i -lt 11;$i++) {
+        $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe,$manifest.harfbuzzNativeMesonPaths.recipe)
+        for($i=0;$i -lt 5;$i++) {
             $row=$proof.armGuardedSources[$i]
             if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
         }
@@ -1958,6 +2126,7 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
             else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
         }
         if([IO.Path]::GetDirectoryName($gpg.evidence.original) -cne [IO.Path]::GetDirectoryName($gpg.evidence.effective)) {throw 'Source GPG evidence directories differ.'}
+        Assert-NativeX64AtlSourceBinding $Receipt.sourceHooks.atlNativePaths $manifest.windowsAtlNativePaths ([IO.Path]::GetDirectoryName($loader.evidence.original))
     }
 }
 
@@ -1992,6 +2161,7 @@ function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot) {
        @($Receipt.appLocalCrt.files).Count -ne @(Get-CrtNames x64).Count -or $Receipt.appLocalCrt.architecture -cne 'x64' -or
        $Receipt.crtRedistributionTerms.url -cne $target.crtRedistributionUrl -or $Receipt.crtRedistributionTerms.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
        $Receipt.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $Receipt.sourceTree -cnotmatch '^[0-9a-f]{40}$' -or $Receipt.sourceRun -le 0 -or $Receipt.runAttempt -ne 1) {throw 'Normal x64 Full qualification prerequisites are incomplete.'}
+    Assert-NativeX64AtlPlanCurrent $Receipt.atlBuildInputs $Receipt.nativePreflight.compiler.compilerRoot $Receipt.configuration
     Assert-NativeToolsetMetadata $Receipt.nativePreflight.compiler|Out-Null
     Assert-NativeBuildHost $Receipt.host x64
     Assert-NativeSourceRecipeBinding $Receipt x64
@@ -2152,13 +2322,17 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $nativeCompilerRoot=(Get-Content -LiteralPath $compilerPath.stdout -Raw).Trim()
         if($Architecture -ceq 'x64') {
             $nativeConfiguration=$receipt.configuration.Clone()
-            foreach($name in @('CC','CXX','MSVC_CXX','UCRTSDKDIR','WINDOWS_SDK_HOME')) {
+            foreach($name in @('CC','CXX','MSVC_CXX','UCRTSDKDIR','WINDOWS_SDK_HOME','ATL_INCLUDE','ATL_LIB')) {
                 if(-not $receipt.configuration[$name]) {throw "Configured native path is absent: $name"}
                 $converted=Invoke-LoggedCommand $cygpath @('-w',$receipt.configuration[$name]) $work (Join-Path $evidence ('configured-'+$name.ToLowerInvariant()))
                 $nativeConfiguration[$name]=(Get-Content -LiteralPath $converted.stdout -Raw).Trim()
             }
             $receipt.configuredToolchain=Assert-NativeConfiguredToolchain $nativeCompilerRoot $nativeConfiguration $receipt.nativePreflight
             $receipt.crtPreflight=Get-AppLocalCrtPlan $nativeCompilerRoot $receipt.configuration.VCTOOLSET x64 $receipt.nativePreflight.compiler.minimumRuntimeVersion
+            $stageBeforeAtl=$receipt.stage;$receipt.stage='selected-atl-input-preflight'
+            $receipt.atlBuildInputs=Get-NativeX64AtlPlan $nativeCompilerRoot $receipt.configuration $nativeConfiguration
+            Write-BuildJson (Join-Path $evidence 'native-atl-prerequisite.json') $receipt.atlBuildInputs
+            $receipt.stage=$stageBeforeAtl
         } else {$receipt.crtPreflight=Get-AppLocalCrtPlan $nativeCompilerRoot $receipt.configuration.VCTOOLSET}
         Write-BuildJson (Join-Path $evidence 'app-local-crt-preflight.json') $receipt.crtPreflight
         $receipt.nativeLibrarian=Get-NativeLibrarianPlan $nativeCompilerRoot $Architecture
@@ -2266,6 +2440,9 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 Confirm-FileIdentity (Join-Path $source $manifest.winAccFocusOrder.path) $manifest.winAccFocusOrder.afterBytes SHA256 $manifest.winAccFocusOrder.afterSha256|Out-Null
                 Confirm-FileIdentity (Join-Path $source $manifest.windowsZstdSourceLinks.path) $manifest.windowsZstdSourceLinks.afterSize SHA256 $manifest.windowsZstdSourceLinks.afterSha256|Out-Null
                 Confirm-FileIdentity (Join-Path $source $manifest.windowsGpgBuildCompilerPath.path) $manifest.windowsGpgBuildCompilerPath.afterSize SHA256 $manifest.windowsGpgBuildCompilerPath.afterSha256|Out-Null
+                foreach($atlPin in $manifest.windowsAtlNativePaths.recipes) {
+                    Confirm-FileIdentity (Join-Path $source $atlPin.path) $atlPin.afterSize SHA256 $atlPin.afterSha256|Out-Null
+                }
             }
             $receipt.stage='actual-native-uno-base-persistence';Assert-NativeBuildTimeRemaining
             $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe $Architecture

@@ -20,8 +20,7 @@ def quote(value): return "'"+str(value).replace("'","''")+"'"
 
 
 class NativeEngineBuildTests(unittest.TestCase):
-    def _assert_x64_source_hook_binding(self,hook):
-        import copy
+    def _x64_source_hook_fixture(self):
         import hashlib
         from suite.tests.test_native_source_recipe import load
         module = load('apply_native_source'); engine = SOURCE.parents[1] / 'engine-build'
@@ -37,10 +36,17 @@ class NativeEngineBuildTests(unittest.TestCase):
         loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
         zstd = module._install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks'])
         gpg = module._install_gpg_build_compiler_path(source, evidence, lock['windowsGpgBuildCompilerPath'])
+        for pin in lock['windowsAtlNativePaths']['recipes']:
+            relative = pin['path']
+            fixture = ('native-atl-path/Library_so_activex.mk' if relative == 'extensions/Library_so_activex.mk'
+                       else 'native-atl-consumers/'+relative)
+            target = source/relative; target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((SOURCE.parents[1]/'tests/fixtures'/fixture).read_bytes())
+        atl = module._install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths'])
         good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
                     nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
                     sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
-                                     firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg),
+                                     firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg, atlNativePaths=atl),
                     sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
                         recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
                         policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
@@ -49,6 +55,11 @@ class NativeEngineBuildTests(unittest.TestCase):
                         armGuardedSources=[dict(path=row['path'], beforeSha256=row['beforeSha256'],
                                                sha256=row['beforeSha256'], unchanged=True) for row in plan['armGuardedSources']],
                         nativeBuildVerified=False, fullEngineQualified=False, acceptanceEligible=False, guiVerified=False))
+        return module, lock, source, evidence, good
+
+    def _assert_x64_source_hook_binding(self,hook):
+        import copy
+        _, _, _, _, good = self._x64_source_hook_fixture()
         path = self.root / 'receipt.json'; path.write_text(json.dumps(good))
         call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64"
         self.ps(call)
@@ -77,6 +88,51 @@ class NativeEngineBuildTests(unittest.TestCase):
 
     def test_x64_gpg_binding_rejects_malformed_proof_or_missing_evidence(self):
         self._assert_x64_source_hook_binding('gpgBuildCompilerPath')
+
+    def test_x64_atl_group_binding_rejects_malformed_or_missing_recipe_evidence(self):
+        import copy
+        _, _, _, _, good = self._x64_source_hook_fixture()
+        packet = self.root/'atl-receipt.json'
+        call = f'Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64'
+        packet.write_text(json.dumps(good)); self.ps(call)
+        cases = []
+        for field, value in [('schemaVersion', True), ('kind', 'other'), ('condition', 'WNT_AARCH64'),
+                             ('nativeBuildVerified', 0), ('fullEngineQualified', True), ('acceptanceEligible', None), ('guiVerified', True), ('extra', False)]:
+            changed=copy.deepcopy(good);changed['sourceHooks']['atlNativePaths'][field]=value;cases.append(changed)
+        changed=copy.deepcopy(good);changed['sourceHooks'].pop('atlNativePaths');cases.append(changed)
+        for mutation in ('missing','extra','reorder'):
+            changed=copy.deepcopy(good);rows=changed['sourceHooks']['atlNativePaths']['recipes']
+            if mutation=='missing':rows.pop()
+            elif mutation=='extra':rows.append(copy.deepcopy(rows[0]))
+            else:rows[0],rows[1]=rows[1],rows[0]
+            cases.append(changed)
+        for field, value in [('path','../escape'),('beforeBytes',True),('afterBytes',1.5),('beforeSha256',['0'*64]),('afterSha256','0'*64),('evidence',{}),('extra',False)]:
+            changed=copy.deepcopy(good);changed['sourceHooks']['atlNativePaths']['recipes'][0][field]=value;cases.append(changed)
+        for index, changed in enumerate(cases):
+            with self.subTest(packet=index):packet.write_text(json.dumps(changed));self.rejected(call)
+        packet.write_text(json.dumps(good))
+        for index, row in enumerate(good['sourceHooks']['atlNativePaths']['recipes']):
+            for phase in ('original','effective'):
+                with self.subTest(recipe=index,phase=phase):
+                    path=Path(row['evidence'][phase]);raw=path.read_bytes();path.unlink();self.rejected(call)
+                    path.write_bytes(raw+b'changed');self.rejected(call);path.write_bytes(raw)
+
+    def test_x64_atl_final_source_binding_checks_all_six_actual_outputs(self):
+        _, lock, source, _, _ = self._x64_source_hook_fixture()
+        engine=SOURCE.parents[1]/'engine-build'
+        execute=f"""
+$source={quote(source)};$manifest=Get-Content {quote(engine/'source-build.json')} -Raw|ConvertFrom-Json
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile({quote(SOURCE)},[ref]$tokens,[ref]$errors)
+$loops=@($ast.FindAll({{param($n) $n -is [Management.Automation.Language.ForEachStatementAst] -and $n.Condition.Extent.Text -ceq '$manifest.windowsAtlNativePaths.recipes'}},$true))
+if($errors.Count -or $loops.Count -ne 1){{throw 'Expected one final finite ATL source check'}}
+Invoke-Expression $loops[0].Extent.Text
+"""
+        self.ps(execute)
+        for pin in lock['windowsAtlNativePaths']['recipes']:
+            target=source/pin['path'];raw=target.read_bytes();target.write_bytes(raw+b'changed')
+            with self.subTest(recipe=pin['path']):self.rejected(execute)
+            target.write_bytes(raw)
 
     def test_x64_final_gpg_source_mutation_is_rejected(self):
         from suite.tests.test_native_source_recipe import load
@@ -119,35 +175,10 @@ Invoke-Expression $calls[0].Extent.Text|Out-Null
         target.write_bytes(target.read_bytes() + b'changed')
         self.rejected(execute)
 
-    def test_x64_source_binding_requires_exact_loader_hook_and_eleven_unchanged_guards(self):
+    def test_x64_source_binding_requires_exact_loader_hook_and_five_unchanged_guards(self):
         import copy
-        import hashlib
-        from suite.tests.test_native_source_recipe import load
-        module = load('apply_native_source'); engine = SOURCE.parents[1] / 'engine-build'
-        lock = json.loads((engine / 'source-build.json').read_bytes())
-        plan = module._select_plan(lock, (engine / 'native-targets.json').read_bytes(), 'x64')
-        source = self.root / 'source'; target = source / module.LOADER_PATH; target.parent.mkdir(parents=True)
-        target.write_bytes((SOURCE.parents[1] / 'tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes())
-        zstd_target = source / module.ZSTD_PATH; zstd_target.parent.mkdir(parents=True)
-        zstd_target.write_bytes((SOURCE.parents[1] / 'tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes())
-        gpg_target=source/module.GPG_PATH;gpg_target.parent.mkdir(parents=True)
-        gpg_target.write_bytes((SOURCE.parents[1]/'tests/fixtures/native-gpg-build-compiler/com_MSC_defs.mk').read_bytes())
-        evidence = self.root / 'evidence'; evidence.mkdir()
-        loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
-        zstd = module._install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks'])
-        gpg = module._install_gpg_build_compiler_path(source, evidence, lock['windowsGpgBuildCompilerPath'])
-        good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
-                    nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
-                    sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
-                                     firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg),
-                    sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
-                        recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
-                        policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
-                        manifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
-                        recipeSha256=hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(),
-                        armGuardedSources=[dict(path=row['path'], beforeSha256=row['beforeSha256'],
-                                               sha256=row['beforeSha256'], unchanged=True) for row in plan['armGuardedSources']],
-                        nativeBuildVerified=False, fullEngineQualified=False, acceptanceEligible=False, guiVerified=False))
+        _, _, _, _, good = self._x64_source_hook_fixture()
+        self.assertEqual(5, len(good['sourceRecipeProof']['armGuardedSources']))
         path = self.root / 'receipt.json'; path.write_text(json.dumps(good))
         call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64"
         self.ps(call)

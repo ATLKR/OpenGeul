@@ -409,6 +409,200 @@ Assert-NativeConfiguredToolchain {quote(compiler)} $configuration $preflight|Out
         self.assertNotIn('ant', packages)
         self.assertNotIn('nasm', packages)
 
+    def atl_case(self, variant='spectre'):
+        compiler = self.root/('selected MSVC '+variant)
+        include = compiler/'atlmfc/include'; library = compiler/('atlmfc/lib/'+('spectre/' if variant == 'spectre' else '')+'x64')
+        include.mkdir(parents=True); library.mkdir(parents=True)
+        (include/'atlbase.h').write_bytes(b'synthetic ATL header')
+        (library/'atls.lib').write_bytes(b'synthetic ATL library')
+        prefix = f"""
+$compiler={quote(compiler)}
+$raw=@{{OS='WNT';COM='MSC';CPUNAME='X86_64';HOST_PLATFORM='x86_64-pc-cygwin';BUILD_PLATFORM='x86_64-pc-cygwin';ATL_INCLUDE='/cygdrive/c/selected/atlmfc/include';ATL_LIB='/cygdrive/c/selected/atlmfc/lib/{'spectre/' if variant == 'spectre' else ''}x64'}}
+$native=$raw.Clone();$native.ATL_INCLUDE={quote(include)};$native.ATL_LIB={quote(library)}
+"""
+        if os.name != 'nt':
+            prefix += """
+function Get-NativeLongPath($Path){[IO.Path]::GetFullPath($Path)}
+function Open-NativeAtlFile($Path){Initialize-NativeAtlFileApi;[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)}
+$script:AtlEpoch=1
+function Get-NativeAtlHandleIdentity($Handle,$Path){
+ @{finalPath=[IO.Path]::GetFullPath($Path);fileAttributes=32;fileType=1;size=([IO.FileInfo]::new($Path)).Length;
+   generation=@{volumeSerialNumber=1;fileIndexHigh=0;fileIndexLow=($(if($Path.EndsWith('atlbase.h')){1}else{2})+100*$script:AtlEpoch);creationHigh=1;creationLow=1;writeHigh=1;writeLow=1}}
+}
+"""
+        call = 'Get-NativeX64AtlPlan $compiler $raw $native'
+        return compiler, include/'atlbase.h', library/'atls.lib', prefix, call
+
+    def test_x64_atl_preflight_binds_observed_library_variant_without_selecting_another(self):
+        for variant in ('spectre', 'regular'):
+            with self.subTest(variant=variant):
+                compiler, header, library, prefix, call = self.atl_case(variant)
+                result = json.loads(self.ps(prefix+f'$p={call};Assert-NativeX64AtlPlanCurrent $p $compiler $raw;$p|ConvertTo-Json -Depth 8 -Compress'))
+                self.assertEqual(str(compiler), result['compilerRoot'])
+                self.assertEqual(hashlib.sha256(header.read_bytes()).hexdigest(), result['header']['sha256'])
+                self.assertEqual(hashlib.sha256(library.read_bytes()).hexdigest(), result['library']['sha256'])
+                self.assertEqual(str(library.parent), result['libraryRoot'])
+                for flag in ('productPayload', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified'):
+                    self.assertIs(False, result[flag])
+
+    def test_x64_atl_preflight_rejects_other_profiles_or_inputs_outside_selected_root(self):
+        _, _, _, prefix, call = self.atl_case()
+        self.rejected(prefix+"$raw.COM='GCC';"+call)
+        self.rejected(prefix+"$raw.CPUNAME='AARCH64';"+call)
+        self.rejected(prefix+"$raw.HOST_PLATFORM='x86_64-pc-linux';"+call)
+        self.rejected(prefix+f'$native.ATL_INCLUDE={quote(self.root)};'+call)
+        self.rejected(prefix+f'$native.ATL_LIB={quote(self.root)};'+call)
+        self.rejected(prefix+"$native.ATL_LIB=$native.ATL_LIB.Replace('x64','arm64');"+call)
+
+    def test_x64_atl_preflight_rejects_empty_missing_header_and_library(self):
+        _, header, library, prefix, call = self.atl_case()
+        for path in (header, library):
+            original = path.read_bytes()
+            for raw in (None, b''):
+                with self.subTest(file=path.name, empty=raw == b''):
+                    if raw is None:path.unlink()
+                    else:path.write_bytes(raw)
+                    self.rejected(prefix+call)
+                    path.write_bytes(original)
+        self.rejected(prefix+"$raw.ATL_INCLUDE='';"+call)
+        self.rejected(prefix+"$raw.ATL_LIB='';"+call)
+
+    def test_x64_atl_preflight_rejects_reparse_file(self):
+        _, header, _, prefix, call = self.atl_case()
+        target = self.root/'outside-header'; target.write_bytes(header.read_bytes()); header.unlink()
+        try:header.symlink_to(target)
+        except OSError:self.skipTest('Host does not permit the symbolic-link fixture')
+        self.rejected(prefix+call)
+
+    def test_x64_atl_serialized_binding_rejects_typed_or_identity_forgery(self):
+        _, _, _, prefix, call = self.atl_case()
+        self.ps(prefix+f'$p={call};$saved=$p|ConvertTo-Json -Depth 8;$good=$saved|ConvertFrom-Json;Assert-NativeX64AtlPlanCurrent $good $compiler $raw;'+"""
+foreach($pair in @(@('schemaVersion',$true),@('kind','other'),@('kind',@('native-x64-atl-prerequisite')),@('configuredInclude',@($raw.ATL_INCLUDE)),@('passed',1),@('productPayload',0),@('guiVerified',$true),@('fullEngineQualified',$true),@('acceptanceEligible',$null))) {
+ $bad=$saved|ConvertFrom-Json;$bad.($pair[0])=$pair[1];$rejected=$false
+ try{Assert-NativeX64AtlPlanCurrent $bad $compiler $raw}catch{$rejected=$true}
+ if(-not $rejected){throw 'Malformed native ATL proof accepted'}
+}
+foreach($field in @('size','sha256','generation')) {
+ $bad=$saved|ConvertFrom-Json
+ if($field -ceq 'size'){$bad.header.size=$true}elseif($field -ceq 'sha256'){$bad.header.sha256=@($bad.header.sha256)}else{$bad.header.generation.fileIndexLow=$bad.header.generation.fileIndexLow+1}
+ $rejected=$false;try{Assert-NativeX64AtlPlanCurrent $bad $compiler $raw}catch{$rejected=$true}
+ if(-not $rejected){throw 'Forged native ATL file identity accepted'}
+}
+$raw.ATL_LIB='/cygdrive/c/other/lib/x64';$rejected=$false
+try{Assert-NativeX64AtlPlanCurrent $good $compiler $raw}catch{$rejected=$true}
+if(-not $rejected){throw 'Changed configured ATL alias accepted'}
+""")
+
+    def test_x64_atl_generation_change_is_rejected_even_with_identical_bytes(self):
+        _, header, _, prefix, call = self.atl_case()
+        self.ps(prefix+f'$p={call};$bytes=[IO.File]::ReadAllBytes({quote(header)});Remove-Item -LiteralPath {quote(header)};[IO.File]::WriteAllBytes({quote(header)},$bytes);'+
+                ("$script:AtlEpoch=2;" if os.name != 'nt' else '')+
+                "$bad=$false;try{Assert-NativeX64AtlPlanCurrent $p $compiler $raw}catch{$bad=$true};if(-not $bad){throw 'Replaced ATL generation accepted'}")
+
+    def test_x64_atl_canonical_aliases_bind_to_the_same_owned_files(self):
+        compiler, _, library, prefix, call = self.atl_case()
+        alias = self.root/'synthetic short alias'
+        self.ps(prefix+f"""
+$alias={quote(alias)}
+function Get-NativeLongPath($Path){{
+ if($Path.StartsWith($alias+[IO.Path]::DirectorySeparatorChar)){{return [IO.Path]::GetFullPath($compiler+$Path.Substring($alias.Length))}}
+ return [IO.Path]::GetFullPath($Path)
+}}
+$native.ATL_INCLUDE=Join-Path $alias 'atlmfc/include';$native.ATL_LIB=Join-Path $alias 'atlmfc/lib/spectre/x64'
+$p={call};if($p.compilerRoot -cne {quote(compiler)} -or $p.libraryRoot -cne {quote(library.parent)}){{throw 'Canonical ATL alias changed selected files'}}
+Assert-NativeX64AtlPlanCurrent $p $compiler $raw
+""")
+
+    def test_x64_atl_probe_failure_or_clock_expiry_releases_owned_file_handle(self):
+        _, header, _, prefix, call = self.atl_case()
+        self.ps(prefix+"""
+Get-Command Get-NativeX64AtlPlan -ErrorAction Stop|Out-Null
+$script:originalAtlIdentity=${function:Get-NativeAtlHandleIdentity};$script:reads=0
+function Get-NativeAtlHandleIdentity($Handle,$Path){
+ $r=&$script:originalAtlIdentity $Handle $Path;$script:reads++
+ if($script:reads -eq 2){$r.generation.fileIndexLow++};return $r
+}
+$bad=$false;try{Get-NativeX64AtlPlan $compiler $raw $native}catch{$bad=$true}
+if(-not $bad){throw 'Changing handle generation accepted'}
+"""+f'$stream=[IO.File]::Open({quote(header)},[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$stream.Dispose();')
+
+        self.ps(prefix+"""
+Get-Command Get-NativeX64AtlPlan -ErrorAction Stop|Out-Null
+$script:NativeEngineBuildBudget=New-NativeBuildBudget ([DateTime]::UtcNow.AddMinutes(5).ToString('o'))
+$script:originalAtlIdentity=${function:Get-NativeAtlHandleIdentity};$script:reads=0
+function Get-NativeAtlHandleIdentity($Handle,$Path){
+ $r=&$script:originalAtlIdentity $Handle $Path;$script:reads++
+ if($script:reads -eq 2){$script:NativeEngineBuildBudget.clock=[pscustomobject]@{Elapsed=[pscustomobject]@{TotalMilliseconds=($script:NativeEngineBuildBudget.record.timeoutMilliseconds+1);TotalSeconds=20000}}};return $r
+}
+$bad=$false;try{Get-NativeX64AtlPlan $compiler $raw $native}catch{$bad=$true}
+if(-not $bad){throw 'Expired ATL preflight returned proof'}
+"""+f'$stream=[IO.File]::Open({quote(header)},[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$stream.Dispose();')
+
+    def test_x64_atl_driver_converts_configured_paths_and_records_real_preflight(self):
+        _, header, library, prefix, _ = self.atl_case()
+        self.ps(prefix+f"""
+$Architecture='x64';$nativeCompilerRoot=$compiler;$cygpath='owned-cygpath';$work={quote(self.root)};$evidence={quote(self.root/'evidence')}
+New-Item -ItemType Directory $evidence|Out-Null
+$raw.VCTOOLSET='v143';$mapping=@{{}}
+foreach($name in @('CC','CXX','MSVC_CXX','UCRTSDKDIR','WINDOWS_SDK_HOME')){{$raw[$name]='raw-'+$name;$mapping['raw-'+$name]='native-'+$name}}
+$mapping[$raw.ATL_INCLUDE]={quote(header.parent)};$mapping[$raw.ATL_LIB]={quote(library.parent)}
+$receipt=@{{stage='selected-toolchain-app-local-crt-preflight';configuration=$raw;nativePreflight=@{{compiler=@{{minimumRuntimeVersion='14.44.35207.0'}}}}}}
+function Invoke-LoggedCommand($FilePath,$Arguments,$WorkingDirectory,$LogPrefix){{
+ if($FilePath -cne 'owned-cygpath' -or $Arguments.Count -ne 2 -or $Arguments[0] -cne '-w' -or -not $mapping.ContainsKey($Arguments[1])){{throw 'Wrong selected path conversion'}}
+ $path=$LogPrefix+'.stdout.log';[IO.File]::WriteAllText($path,$mapping[$Arguments[1]]);@{{stdout=$path}}
+}}
+function Assert-NativeConfiguredToolchain($Root,$Config,$Preflight){{if($Root -cne $compiler -or $Config.VCTOOLSET -cne 'v143'){{throw 'Compiler selection changed'}};@{{matched=$true}}}}
+function Get-AppLocalCrtPlan($Root,$Toolset,$Arch,$Floor){{if($Root -cne $compiler -or $Toolset -cne 'v143' -or $Arch -cne 'x64' -or $Floor -cne '14.44.35207.0'){{throw 'CRT selection changed'}};@{{observed=$true}}}}
+$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile({quote(SOURCE)},[ref]$tokens,[ref]$errors)
+$branches=@($ast.FindAll({{param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.Contains('Assert-NativeConfiguredToolchain $nativeCompilerRoot')}},$true))
+if($errors.Count -or $branches.Count -ne 1){{throw 'Expected selected x64 configuration branch'}}
+Invoke-Expression $branches[0].Extent.Text
+if(-not $receipt.atlBuildInputs.passed -or $receipt.atlBuildInputs.header.path -cne {quote(header)}){{throw 'Driver did not bind observed ATL files'}}
+if(-not(Test-Path -LiteralPath (Join-Path $evidence 'native-atl-prerequisite.json'))){{throw 'ATL prerequisite evidence was not retained'}}
+""")
+
+    def test_x64_atl_strict_qualification_rejects_missing_input_proof(self):
+        _, _, _, prefix, call = self.atl_case()
+        self.ps(prefix+f'$atl={call};'+"""
+$target=Get-NativeEngineTarget x64
+$r=@{schemaVersion=2;architecture='x64';phase='Full';kind='native-office-engine-source-build';passed=$false;fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false;
+ nativePreflight=@{passed=$true;compiler=@{compilerRoot=$compiler}};configuration=$raw;atlBuildInputs=$atl;configuredToolchain=@{matched=$true};sourceRecipeChecksExecuted=$true;
+ installedRuntimeStage=@{passed=$true};externalSources=@{pythonSourceVerified=$true};baseProof=@{schemaVersion=2;passed=$true};crtImportClosure=@{passed=$true;architecture='x64'};
+ appLocalCrt=@{files=@(1..9);architecture='x64'};crtRedistributionTerms=@{url=$target.crtRedistributionUrl;sha256=('a'*64)};sourceCommit=('a'*40);sourceTree=('b'*40);sourceRun=1;runAttempt=1}
+$script:afterAtl=$false
+function Assert-NativeToolsetMetadata($Compiler){$script:afterAtl=$true;throw 'STOP_AFTER_ATL'}
+try{Assert-NativeX64Qualification $r '.'}catch{if($_.Exception.Message -cne 'STOP_AFTER_ATL'){throw}}
+if(-not $script:afterAtl){throw 'Valid ATL proof did not reach later independent gates'}
+$r.Remove('atlBuildInputs');$script:afterAtl=$false;$bad=$false
+try{Assert-NativeX64Qualification $r '.'}catch{$bad=$true}
+if(-not $bad -or $script:afterAtl){throw 'Qualification omitted the mandatory ATL proof'}
+""")
+
+
+    def test_x64_atl_open_passes_unsigned_read_only_access_to_native_boundary(self):
+        path=self.root/'atl-input';path.write_bytes(b'synthetic ATL input')
+        self.ps("""
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using Microsoft.Win32.SafeHandles;
+public static class NativeEngineAtlFile {
+ public static FileStream Owner; public static uint Access,Share,Creation,Flags; public static int Calls;
+ public static SafeFileHandle Open(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template) {
+  Calls++;Access=access;Share=share;Creation=creation;Flags=flags;
+  Owner=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read);return Owner.SafeFileHandle;
+ }
+}
+'@
+$stream=$null
+try {
+"""+f"$stream=Open-NativeAtlFile {quote(path)};"+"""
+ if([NativeEngineAtlFile]::Calls -ne 1 -or [NativeEngineAtlFile]::Access -ne 2147483648 -or
+    [NativeEngineAtlFile]::Share -ne 1 -or [NativeEngineAtlFile]::Creation -ne 3 -or [NativeEngineAtlFile]::Flags -ne 2097280 -or
+    $stream.ReadByte() -ne 115){throw 'Native ATL open did not preserve read-only Win32 arguments'}
+} finally {if($stream){$stream.Dispose()};if([NativeEngineAtlFile]::Owner){[NativeEngineAtlFile]::Owner.Dispose()}}
+""")
+
     def nasm_case(self, shell_version='2.16.03', perl_version='2.16.03', resolved='owned'):
         bindir = self.root/'cygwin/bin'; bindir.mkdir(parents=True, exist_ok=True)
         for name in ('nasm.exe', 'perl.exe', 'bash.exe', 'cygpath.exe'):
