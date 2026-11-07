@@ -20,6 +20,108 @@ def quote(value): return "'"+str(value).replace("'","''")+"'"
 
 
 class NativeEngineBuildTests(unittest.TestCase):
+    def test_crt_terms_snapshot_hash_and_url_match_selected_visual_studio(self):
+        import hashlib
+        path=self.root/'terms.html'
+        for arch,year in [('arm64','2026'),('x64','2022')]:
+            raw=('Visual Studio '+year+' REDIST.TXT VC\\redist').encode();path.write_bytes(raw)
+            result=json.loads(self.ps(f"Assert-VcRedistributionTerms {quote(path)} {arch}|ConvertTo-Json -Compress"))
+            self.assertEqual('https://learn.microsoft.com/en-us/visualstudio/releases/'+year+'/redistribution',result['url'])
+            self.assertEqual(hashlib.sha256(raw).hexdigest(),result['sha256'])
+            self.rejected(f"Assert-VcRedistributionTerms {quote(path)} "+('x64' if arch=='arm64' else 'arm64'))
+        path.write_bytes(b'Visual Studio 2022');self.rejected(f"Assert-VcRedistributionTerms {quote(path)} x64")
+
+    def test_x64_winacc_requires_actual_native_binary_hash_and_both_import_tables(self):
+        import hashlib
+        from suite.tests.test_payload import pe
+        path=self.root/'program/winaccessibility.dll';path.parent.mkdir();path.write_bytes(pe(0x8664,dll=True))
+        good=dict(path='program/winaccessibility.dll',machine=0x8664,role='nativeX64',size=path.stat().st_size,
+                  sha256=hashlib.sha256(path.read_bytes()).hexdigest(),imports=dict(normal=['kernel32.dll'],delay=[]))
+        proof=self.root/'winacc.json';proof.write_text(json.dumps(good))
+        call=f"Assert-WinAccBinaryProof (Get-Content {quote(proof)} -Raw|ConvertFrom-Json) {quote(self.root)} x64"
+        self.ps(call)
+        for key,value in [('machine',0xaa64),('role','buildHostTool'),('sha256','0'*64),('size',0),('imports',{}),('imports',dict(normal=[],delay=[])),('imports',dict(normal=['kernel32.dll']))]:
+            with self.subTest(key=key,value=value):
+                proof.write_text(json.dumps(dict(good,**{key:value})));self.rejected(call)
+        proof.write_text(json.dumps(good));path.unlink();self.rejected(call)
+
+    def test_x64_failed_preflight_never_reaches_download_or_qualified_archive(self):
+        work=self.root/'work';output=self.root/'evidence'
+        self.ps("function Assert-NativeEngineEnvironment {param($Architecture)}; function Get-NativeBuildHost {param($Architecture) @{isWindows=$true;processMachine=0;nativeMachine=34404}}; "
+                "function Get-SourceRunBinding {@{sourceCommit=('a'*40);sourceTree=('b'*40)}}; "
+                "function Resolve-NativeJdk {@{home='synthetic'}}; function Resolve-Ant {@{home='synthetic'}}; "
+                "function Invoke-NativeX64Preflight {throw 'owned preflight rejected'}; function Get-AuthenticatedDownload {throw 'DOWNLOAD MUST NOT RUN'}; "
+                f"try{{Invoke-NativeEngineBuild Full {quote(work)} {quote(output)} '' 4 -Architecture x64}}catch{{}}")
+        receipt=json.loads((output/'source-build-receipt.json').read_text())
+        self.assertEqual(2,receipt['schemaVersion']);self.assertEqual('x64',receipt['architecture'])
+        self.assertIn('owned preflight rejected',receipt['error']);self.assertNotIn('DOWNLOAD MUST NOT RUN',receipt['error'])
+        for field in ('passed','fullEngineQualified','acceptanceEligible','guiVerified'):self.assertIs(False,receipt[field])
+        self.assertFalse(list(output.glob('*.zip')))
+
+    def test_x64_base_requires_independent_native_generations_rows_and_original_retirement(self):
+        import copy
+        image=str(self.root/'runtime/program/soffice.bin')
+        processes=[dict(role='uno-python',pid=10,processMachine=0,nativeMachine=0x8664)]
+        retirement=[]
+        for phase,pid in [('create',20),('reopen',30)]:
+            host=dict(role='uno-host',pid=pid,processMachine=0,nativeMachine=0x8664,jobOwned=True,phase=phase,image=image,creationTime=pid*100)
+            processes.append(host)
+            member=dict(pid=pid,creationTime=pid*100,image=image,handleValue=pid+5,alive=True,exitCode=259)
+            retirement.append(dict(phase=phase,handlesClosed=True,cleanup=dict(schemaVersion=1,kind='owned-engine-job-cleanup',
+                gracefulQualified=True,forcedTermination=False,jobEmptyVerified=True,finalJobPids=[],launcherExitCode=0,
+                errors=[],jobHandleValue=pid+7,expectedEngineImage=image,initialMembers=[member],finalMembers=[dict(member,alive=False,exitCode=0)])))
+        good=dict(schemaVersion=2,passed=True,guiVerified=False,independentReopenVerified=True,nativeProcesses=processes,
+                  rows=[dict(id=1,text='Engine-OpenGeul-base 한글',amount=42)],retirement=retirement)
+        path=self.root/'base.json'
+        call=f"Assert-BaseProof {quote(path)} -Architecture x64 -RuntimeRoot {quote(self.root/'runtime')}"
+        path.write_text(json.dumps(good));self.ps(call+'|Out-Null')
+        bad=[]
+        for key,value in [('passed',False),('rows',[]),('independentReopenVerified',False),('schemaVersion',1),('retirement',[])]:
+            bad.append(dict(good,**{key:value}))
+        for field,value in [('handlesClosed',False),('cleanup',{})]:
+            changed=copy.deepcopy(good);changed['retirement'][0][field]=value;bad.append(changed)
+        for field,value in [('forcedTermination',True),('launcherExitCode',1),('jobEmptyVerified',False)]:
+            changed=copy.deepcopy(good);changed['retirement'][0]['cleanup'][field]=value;bad.append(changed)
+        for field,value in [('nativeMachine',0xaa64),('processMachine',0x8664),('image',str(self.root/'foreign/soffice.bin')),('creationTime',0)]:
+            changed=copy.deepcopy(good);changed['nativeProcesses'][1][field]=value;bad.append(changed)
+        changed=copy.deepcopy(good);changed['nativeProcesses'][2].update(pid=20,creationTime=2000);bad.append(changed)
+        changed=copy.deepcopy(good);changed['retirement'][0]['cleanup']['finalMembers'][0]['exitCode']=1;bad.append(changed)
+        for index,value in enumerate(bad):
+            with self.subTest(case=index):
+                path.write_text(json.dumps(value));self.rejected(call)
+
+    def test_x64_native_host_product_and_archive_mode(self):
+        from suite.tests.test_payload import pe
+        self.ps("Assert-NativeBuildHost @{isWindows=$true;processMachine=0;nativeMachine=34404} x64")
+        for machine,process in [(43620,0),(34404,34404),(34404,332)]:
+            self.rejected(f"Assert-NativeBuildHost @{{isWindows=$true;processMachine={process};nativeMachine={machine}}} x64")
+        path=self.root/'native.exe';path.write_bytes(pe(0x8664))
+        data=json.loads(self.ps(f"Get-ProductPeIdentity {quote(path)} -Architecture x64|ConvertTo-Json -Compress"))
+        self.assertEqual('nativeX64',data['role'])
+        path.write_bytes(pe(0xaa64))
+        self.rejected(f"Get-ProductPeIdentity {quote(path)} -Architecture x64")
+        mode=json.loads(self.ps("Get-NativeEngineBuildMode Full -Architecture x64|ConvertTo-Json -Compress"))
+        self.assertEqual('OpenGeul-Office-engine-x64.zip',mode['archive'])
+        self.rejected('Get-NativeEngineBuildMode Full -Architecture x64 -CalcDispatchDiagnostic')
+
+    def test_x64_crt_requires_all_nine_signed_files_and_actual_compiler_floor(self):
+        from suite.crt import crt_names
+        from suite.tests.test_payload import pe
+        tools=self.root/'VS/VC/Tools/MSVC/14.44.35207';tools.mkdir(parents=True)
+        redist=self.root/'VS/VC/Redist/MSVC/14.44.35211/x64/Microsoft.VC143.CRT';redist.mkdir(parents=True)
+        for name in crt_names('x64'): (redist/name).write_bytes(pe(0x8664,dll=True))
+        call=f"Get-AppLocalCrtPlan {quote(tools)} v143 -Architecture x64"
+        raw=self.ps(self.crt_mock()+call+'|ConvertTo-Json -Depth 12 -Compress')
+        plan=json.loads(raw);self.assertEqual(9,len(plan['files']))
+        self.assertEqual('14.44.35207.0',plan['minimumRuntimeVersion'])
+        for name in crt_names('x64'):
+            path=redist/name;original=path.read_bytes();path.unlink()
+            self.rejected(self.crt_mock()+call);path.write_bytes(original)
+        self.rejected(self.crt_mock().replace('14,50,12350,0','14,44,35206,0')+call)
+        self.rejected(self.crt_mock().replace("status='Valid'","status='NotSigned'")+call)
+        (redist/'vcruntime140_1.dll').write_bytes(pe(0xaa64,dll=True))
+        self.rejected(self.crt_mock()+call)
+
     def setUp(self):
         self.assertTrue(SOURCE.is_file(),'Native ARM64 source-build driver is missing')
         self.assertTrue(Path(PWSH).is_file(),'Portable PowerShell is required for command-boundary tests')
@@ -641,6 +743,121 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
         self.assertEqual('failed',receipt['status'])
         self.assertIn('Observed final shared build deadline',receipt['error'])
 
+    def finalization_deadline_case(self, expiry):
+        source=self.root/'synthetic-source';source.mkdir();(source/'config_host.mk').write_text('synthetic diagnostics')
+        evidence=self.root/'synthetic-evidence';evidence.mkdir()
+        archive=evidence/'synthetic-engine.zip';archive.write_bytes(b'synthetic archive sentinel')
+        body=f"""
+$tokens=$null;$errors=$null;$text=Get-Content -LiteralPath {quote(SOURCE)} -Raw
+$ast=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors)
+$build=$ast.Find({{param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-NativeEngineBuild'}},$true)
+$outer=$build.Body.Find({{param($n) $n -is [Management.Automation.Language.TryStatementAst]}},$true)
+$Architecture='x64';$source={quote(source)};$evidence={quote(evidence)};$zip={quote(archive)};$manifest=$null
+$mode=@{{receipt='synthetic-result.json'}}
+$receipt=[ordered]@{{passed=$true;fullEngineQualified=$true;acceptanceEligible=$true;status='native-engine-source-build-qualified';buildBudget=@{{}}}}
+$previousBudget=[pscustomobject]@{{marker='previous scope'}}
+$script:fixtureClock=[pscustomobject]@{{Elapsed=[pscustomobject]@{{TotalMilliseconds=0;TotalSeconds=0}}}}
+$script:originalBudget=[pscustomobject]@{{record=@{{timeoutMilliseconds=100}};clock=$script:fixtureClock}}
+$script:NativeEngineBuildBudget=$script:originalBudget
+$script:writeObservations=[Collections.Generic.List[object]]::new()
+$script:fixtureWriter=${{function:Write-BuildJson}}
+function Copy-Item {{param($LiteralPath,$Destination,[switch]$Force)
+ Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force
+ if('{expiry}' -ceq 'copy'){{$script:fixtureClock.Elapsed.TotalMilliseconds=200;$script:fixtureClock.Elapsed.TotalSeconds=0.2}}
+}}
+function Write-BuildJson($Path,$Value) {{
+ $script:writeObservations.Add(@{{passed=$Value.passed;originalBudget=[object]::ReferenceEquals($script:NativeEngineBuildBudget,$script:originalBudget)}})
+ &$script:fixtureWriter $Path $Value
+ if('{expiry}' -ceq 'write'){{$script:fixtureClock.Elapsed.TotalMilliseconds=200;$script:fixtureClock.Elapsed.TotalSeconds=0.2}}
+}}
+$thrown=$false
+try {{& ([scriptblock]::Create('try {{Assert-NativeBuildTimeRemaining}} finally '+$outer.Finally.Extent.Text))}}
+catch {{if($_.Exception.Message -notmatch 'shared build deadline'){{throw}};$thrown=$true}}
+[ordered]@{{thrown=$thrown;archivePresent=(Test-Path -LiteralPath $zip);budgetRestored=[object]::ReferenceEquals($script:NativeEngineBuildBudget,$previousBudget);writes=@($script:writeObservations);proof=(Get-Content -LiteralPath (Join-Path $evidence $mode.receipt) -Raw|ConvertFrom-Json)}}|ConvertTo-Json -Depth 10 -Compress
+"""
+        result=json.loads(self.ps(body))
+        self.assertTrue(result['budgetRestored'])
+        self.assertTrue(all(row['originalBudget'] for row in result['writes']))
+        return result
+
+    def test_x64_final_diagnostic_copy_expiry_revokes_proof_and_archive(self):
+        result=self.finalization_deadline_case('copy')
+        self.assertTrue(result['thrown']);self.assertFalse(result['archivePresent'])
+        self.assertEqual([False],[row['passed'] for row in result['writes']])
+        for name in ('passed','fullEngineQualified','acceptanceEligible'):self.assertIs(False,result['proof'][name])
+
+    def test_x64_final_receipt_write_expiry_revokes_persisted_success_and_archive(self):
+        result=self.finalization_deadline_case('write')
+        self.assertTrue(result['thrown']);self.assertFalse(result['archivePresent'])
+        self.assertEqual([True,False],[row['passed'] for row in result['writes']])
+        for name in ('passed','fullEngineQualified','acceptanceEligible'):self.assertIs(False,result['proof'][name])
+
+    def test_x64_in_budget_finalization_keeps_proof_and_restores_budget_last(self):
+        result=self.finalization_deadline_case('none')
+        self.assertFalse(result['thrown']);self.assertTrue(result['archivePresent'])
+        self.assertEqual([True],[row['passed'] for row in result['writes']])
+        for name in ('passed','fullEngineQualified','acceptanceEligible'):self.assertIs(True,result['proof'][name])
+
+    def test_native_unit_child_clears_ambient_values_and_retains_required_tool_paths(self):
+        prefix=self.root/'unit-environment'
+        child=self.root/'unit-environment.py'
+        child.write_text("import json,os,shutil\n"
+            "assert os.environ.get('OPENGEUL_SYNTHETIC_UNIT_SENTINEL') is None\n"
+            "assert shutil.which('pwsh') is not None\n"
+            "assert os.environ.get('PYTHONUTF8')=='1'\n"
+            "assert os.environ.get('PYTHONDONTWRITEBYTECODE')=='1'\n"
+            "print(json.dumps({'isolated':True,'requiredTools':True}))\n")
+        setup=""
+        if os.name!='nt':
+            system=self.root/'synthetic-os';(system/'System32').mkdir(parents=True)
+            setup=f"$env:SystemRoot={quote(system)}; "
+        self.ps(setup+"$env:OPENGEUL_SYNTHETIC_UNIT_SENTINEL='synthetic-only'; "+
+            f"Invoke-LoggedCommand {quote(os.sys.executable)} @({quote(child)}) {quote(self.root)} {quote(prefix)} -NativeUnitEnvironment|Out-Null")
+        receipt=json.loads((self.root/'unit-environment.command.json').read_text())
+        self.assertTrue(receipt['passed'])
+        self.assertEqual('native-unit-required-paths-only',receipt['environmentPolicy'])
+        self.assertEqual({'isolated':True,'requiredTools':True},json.loads((self.root/'unit-environment.stdout.log').read_text()))
+
+    def test_native_unit_gate_requires_original_unexpired_deadline_before_child(self):
+        evidence=self.root/'unit-deadline';evidence.mkdir()
+        body=f"""
+$script:previous=[pscustomobject]@{{marker='prior budget'}};$script:NativeEngineBuildBudget=$script:previous
+function Invoke-LoggedCommand {{throw 'CHILD MUST NOT START'}}
+foreach($deadline in @('',[DateTime]::UtcNow.AddMinutes(-1).ToString('o'))) {{
+ $rejected=$false
+ try {{Invoke-NativeEngineUnitGate {quote(Path(os.sys.executable).resolve(strict=True))} {quote(SOURCE.parents[2])} {quote(evidence)} $deadline}}
+ catch {{if($_.Exception.Message -match 'CHILD MUST NOT START'){{throw}};$rejected=$true}}
+ if(-not $rejected){{throw 'Missing or expired deadline accepted'}}
+ if(-not [object]::ReferenceEquals($script:previous,$script:NativeEngineBuildBudget)){{throw 'Original budget scope lost'}}
+}}
+"""
+        self.ps(body)
+        self.assertFalse(json.loads((evidence/'native-unit-gate.json').read_text())['passed'])
+        self.assertFalse(list(evidence.glob('*.command.json')))
+
+    def test_native_unit_gate_nonzero_child_prevents_following_step(self):
+        evidence=self.root/'unit-gate';evidence.mkdir()
+        system=self.root/'synthetic-os';(system/'System32').mkdir(parents=True)
+        marker=self.root/'following-step'
+        setup=f"$env:SystemRoot={quote(system)}; " if os.name!='nt' else ''
+        body=setup+f"""
+function Get-NativeBuildHost {{param($Architecture) @{{isWindows=$true;processMachine=0;nativeMachine=34404}}}}
+$script:actualUnitLogger=${{function:Invoke-LoggedCommand}}
+function Invoke-LoggedCommand($FilePath,$Arguments,$WorkingDirectory,$LogPrefix,[switch]$NativeUnitEnvironment) {{
+ if(-not $NativeUnitEnvironment){{throw 'Unit isolation was omitted'}}
+ &$script:actualUnitLogger $FilePath @('-c','import sys;sys.exit(7)') $WorkingDirectory $LogPrefix -NativeUnitEnvironment
+}}
+Invoke-NativeEngineUnitGate {quote(Path(os.sys.executable).resolve(strict=True))} {quote(SOURCE.parents[2])} {quote(evidence)} ([DateTime]::UtcNow.AddMinutes(1).ToString('o'))
+Set-Content -LiteralPath {quote(marker)} -Value 'following step must not execute'
+"""
+        script=self.root/'unit-failure.ps1';script.write_text("$ErrorActionPreference='Stop'\n. "+quote(SOURCE)+'\n'+body)
+        result=subprocess.run([PWSH,'-NoLogo','-NoProfile','-File',str(script)],capture_output=True,text=True,timeout=30)
+        self.assertNotEqual(0,result.returncode)
+        receipt=json.loads((evidence/'native-unit-checks.command.json').read_text())
+        self.assertEqual(7,receipt['exitCode']);self.assertFalse(receipt['passed'])
+        proof=json.loads((evidence/'native-unit-gate.json').read_text())
+        self.assertFalse(proof['passed']);self.assertFalse(marker.exists())
+
     def test_authenticated_redirect_keeps_bytes_and_status_without_signed_query(self):
         import hashlib
         import http.server
@@ -786,6 +1003,17 @@ $receipt.cygwinSetup|ConvertTo-Json -Compress
                                     (chosen['path'],0xAA64,chosen['sha256']),
                                     (chosen['path'],chosen['machine'],'0'*64)]:
             self.rejected(f"Assert-PythonTemplateAdmission {quote(path)} {machine} {quote(digest)}")
+
+    def test_x64_templates_reuse_only_existing_foreign_payload_admissions(self):
+        from suite.payload import COMPANION_PE_ADMISSIONS
+        pins=json.loads(self.ps('@(Get-PinnedPythonTemplates x64)|ConvertTo-Json -Compress'))
+        foreign={pin['path']: {key:pin[key] for key in ('machine','sha256','role')} for pin in pins if pin['machine']!=0x8664}
+        expected={path.removeprefix('Office/'):value for path,value in COMPANION_PE_ADMISSIONS.items() if value['role']=='pythonLauncherTemplate'}
+        self.assertEqual(expected,foreign)
+        for path,pin in foreign.items():
+            self.ps(f"Assert-PythonTemplateAdmission {quote(path)} {pin['machine']} {quote(pin['sha256'])} x64|Out-Null")
+            self.rejected(f"Assert-PythonTemplateAdmission {quote(path)} {pin['machine']} {quote('0'*64)} x64")
+        self.rejected("Assert-PythonTemplateAdmission 'program/twain32shim.exe' 332 ('a'*64) x64")
 
     def test_external_archives_match_authenticated_download_list_before_qualification(self):
         import hashlib

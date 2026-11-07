@@ -12,6 +12,14 @@ from suite.tests.test_native_engine_build import PWSH, SOURCE, quote
 
 
 class NativeEngineOemPolicyTests(unittest.TestCase):
+    def test_exact_x64_configure_and_oem_overrides(self):
+        arguments=json.loads(self.ps('@(Get-ConfigureArguments -Architecture x64)|ConvertTo-Json -Compress'))
+        self.assertEqual(['--with-distro=LibreOfficeWin64','--build=x86_64-pc-cygwin',
+            '--host=x86_64-pc-cygwin','--with-visual-studio=2022','--with-package-format=archive',
+            '--enable-firebird-sdbc','--enable-database-connectivity','--disable-online-update',
+            '--disable-online-update-mar','--disable-breakpad','--without-system-firebird',
+            '--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'],arguments)
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)

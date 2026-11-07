@@ -190,17 +190,17 @@ function Get-NativeBuildHost {{throw 'Observed ARM host boundary'}}
             self.rejected(prefix+f"$env:{key}='{value}';Invoke-NativeEngineBuild Full {quote(work)} {quote(output)} '' 4")
             self.assertFalse(output.exists())
 
-    def test_x64_modes_fail_before_any_build_or_qualified_output(self):
-        for options in ("Firebird", "Full -MutexSymbols", "Full -CalcDispatchDiagnostic", "Firebird -MutexSymbols -CalcDispatchDiagnostic", 'Full'):
+    def test_x64_invalid_modes_fail_before_any_build_or_qualified_output(self):
+        for options in ("Firebird", "Full -MutexSymbols", "Full -CalcDispatchDiagnostic", "Firebird -MutexSymbols -CalcDispatchDiagnostic"):
             self.ps(f"""
 function Assert-NativeEngineEnvironment {{param($Architecture)}}
 function Assert-MutexSymbolsEnvironment {{throw 'Unexpected symbols admission'}}
-function New-BuildDirectories {{throw 'Build started before x64 support'}}
+function New-BuildDirectories {{throw 'Invalid x64 mode reached build directories'}}
 $rejected=$false
 try {{Invoke-NativeEngineBuild {options} -WorkDirectory {quote(self.root/'work')} -OutputDirectory {quote(self.root/'output')} -SourceLockPath '' -Jobs 4 -Architecture x64}} catch {{
- if($_.Exception.Message -notmatch 'x64.*(normal Full|Task 3)'){{throw}};$rejected=$true
+ if($_.Exception.Message -notmatch 'x64.*normal Full'){{throw}};$rejected=$true
 }}
-if(-not $rejected -or (Test-Path {quote(self.root/'output')})){{throw 'Unimplemented x64 lifecycle admitted'}}
+if(-not $rejected -or (Test-Path {quote(self.root/'output')})){{throw 'Invalid x64 mode admitted'}}
 """)
 
     def test_target_resolution_preserves_single_script_budget(self):
@@ -212,7 +212,16 @@ if(-not [object]::ReferenceEquals($before,$script:NativeEngineBuildBudget)){thro
 if((Get-NativeBuildRemaining) -gt $remaining){throw 'Budget allowance reset'}
 """)
         raw = SOURCE.read_text()
-        self.assertEqual(1, raw.count('$script:NativeEngineBuildBudget=New-NativeBuildBudget'))
+        self.assertEqual(2, raw.count('$script:NativeEngineBuildBudget=New-NativeBuildBudget'))
+        self.ps("""
+foreach($name in @('Invoke-NativeEngineBuild','Invoke-NativeEngineUnitGate')) {
+ $body=(Get-Command $name).ScriptBlock.ToString()
+ $initializations=[regex]::Matches($body,'\\$script:NativeEngineBuildBudget=New-NativeBuildBudget[^\\r\\n]*')
+ if($initializations.Count -ne 1 -or $initializations[0].Value -cne '$script:NativeEngineBuildBudget=New-NativeBuildBudget $DeadlineUtc') {
+  throw 'Entrypoint must use the one original absolute deadline'
+ }
+}
+""")
         self.assertIn('[ValidateRange(0.000001,330)]', raw)
         self.assertNotIn('Import-Module', raw)
 

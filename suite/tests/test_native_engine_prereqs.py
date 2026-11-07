@@ -22,6 +22,44 @@ def import_library(machine):
 
 
 class NativeJavaPrerequisiteTests(unittest.TestCase):
+    def test_x64_compiler_profile_requires_exact_native_cl_link_and_lib(self):
+        root=self.root/'VS';compiler=root/'VC/Tools/MSVC/14.44.35207';tools=compiler/'bin/Hostx64/x64';tools.mkdir(parents=True)
+        for name in ('cl','link','lib'): (tools/(name+'.exe')).write_bytes(pe(0x8664))
+        version="function Get-NativeCompilerFileVersion($Path) { if([IO.Path]::GetFileName($Path) -ceq 'cl.exe'){'19.44.35211.0'}else{'14.44.35211.0'} }; "
+        call=f"Get-NativeCompilerPlan {quote(root)} '17.14.1' -Architecture x64"
+        data=json.loads(self.ps(version+call+'|ConvertTo-Json -Depth 12 -Compress'))
+        self.assertEqual(str(compiler),data['compilerRoot']);self.assertEqual('14.44.35211.0',data['minimumRuntimeVersion'])
+        self.assertEqual(['cl','link','lib'],list(data['tools']))
+        for name in ('cl','link','lib'):
+            path=tools/(name+'.exe');path.write_bytes(pe(0xaa64));self.rejected(version+call);path.write_bytes(pe(0x8664))
+        self.rejected(version+call.replace("'17.14.1'","'18.0.1'"))
+        self.rejected(version.replace('19.44.35211.0','19.43.35211.0')+call)
+
+    def test_x64_sdk_requires_complete_selected_headers_libraries_and_native_tools(self):
+        root=self.root/'SDK';version='10.0.26100.0'
+        for name in ('Include/'+version+'/um/Windows.h','Include/'+version+'/shared/sdkddkver.h','Include/'+version+'/ucrt/stdio.h',
+                     'Lib/'+version+'/um/x64/kernel32.lib','Lib/'+version+'/ucrt/x64/ucrt.lib'):
+            path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'owned sdk fixture')
+        tool=root/'bin'/version/'x64/rc.exe';tool.parent.mkdir(parents=True);tool.write_bytes(pe(0x8664))
+        call=f"Get-NativeSdkPlan {quote(root)} '{version}' -Architecture x64"
+        data=json.loads(self.ps(call+'|ConvertTo-Json -Depth 12 -Compress'));self.assertEqual(version,data['version'])
+        tool.write_bytes(pe(0xaa64));self.rejected(call);tool.write_bytes(pe(0x8664))
+        (root/'Include'/version/'ucrt/stdio.h').unlink();self.rejected(call)
+
+    def test_x64_jdk_requires_native_launchers_jvm_jni_and_metadata(self):
+        jdk=self.jdk('x64',0x8664)
+        (jdk/'release').write_text('JAVA_VERSION="21.0.12"\nOS_ARCH="amd64"\n')
+        data=json.loads(self.ps(f"Get-NativeJdkPlan {quote(jdk)} -Architecture x64|ConvertTo-Json -Depth 12 -Compress"))
+        self.assertTrue(all(row['machine']==0x8664 for row in data['nativeFiles']))
+        for relative in ('bin/java.exe','bin/javac.exe','bin/server/jvm.dll','bin/jawt.dll','lib/jvm.lib','lib/jawt.lib'):
+            with self.subTest(relative=relative):
+                path=jdk/relative; original=path.read_bytes()
+                path.write_bytes(import_library(0xaa64) if path.suffix=='.lib' else pe(0xaa64,dll=path.suffix=='.dll'))
+                self.rejected(f"Get-NativeJdkPlan {quote(jdk)} -Architecture x64")
+                path.write_bytes(original)
+        (jdk/'release').write_text('JAVA_VERSION="21.0.12"\nOS_ARCH="aarch64"\n')
+        self.rejected(f"Get-NativeJdkPlan {quote(jdk)} -Architecture x64")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

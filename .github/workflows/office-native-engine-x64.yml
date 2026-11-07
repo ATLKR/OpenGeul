@@ -1,0 +1,91 @@
+name: OpenGeul native x64 Office engine source build
+'on':
+  push:
+    branches: [work/opengeul-office-native-engine-x64]
+    paths:
+      - .github/workflows/office-native-engine-x64.yml
+      - suite/scripts/build-native-engine.ps1
+      - suite/engine-build/**
+      - suite/tests/**
+      - suite/crt.py
+      - suite/pe_imports.py
+      - suite/payload.py
+      - suite/e2e/**
+      - suite/worker/**
+      - suite/config/runtime.lock.json
+permissions:
+  contents: read
+jobs:
+  native-firebird-and-office-x64:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Reserve finalization and evidence time before checkout
+        shell: pwsh
+        run: |
+          $started = [DateTime]::UtcNow
+          $deadline = $started.AddMinutes(330).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+          $owned = Join-Path $env:RUNNER_TEMP ('opengeul-engine-x64-budget-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $owned) { throw 'Preserve the original job-budget receipt.' }
+          New-Item -ItemType Directory -Path $owned | Out-Null
+          $receipt = Join-Path $owned 'job-budget.json'
+          [ordered]@{schemaVersion=1;origin='first-user-step';startedUtc=$started.ToString('o');deadlineUtc=$deadline;buildMinutes=330;jobTimeoutMinutes=360;nominalReserveMinutes=30;runnerSetupIncluded=$false} |
+            ConvertTo-Json | Set-Content -LiteralPath $receipt -Encoding utf8NoBOM
+          "OPENGEUL_ENGINE_BUILD_DEADLINE_UTC=$deadline" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "OPENGEUL_ENGINE_BUDGET_RECEIPT=$receipt" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Admit exact first owner push for normal Full
+        shell: pwsh
+        run: |
+          . ./suite/scripts/build-native-engine.ps1
+          Assert-NativeEngineEnvironment x64
+          New-Item -ItemType Directory .work/native-engine-host-evidence | Out-Null
+          Copy-Item -LiteralPath $env:OPENGEUL_ENGINE_BUDGET_RECEIPT -Destination .work/native-engine-host-evidence/job-budget.json -ErrorAction Stop
+      - name: Admit isolated native producer policy and boundary units
+        shell: pwsh
+        run: |
+          . ./suite/scripts/build-native-engine.ps1
+          $python = (Get-Command python -ErrorAction Stop).Source
+          Invoke-NativeEngineUnitGate $python (Get-Location).Path .work/native-engine-host-evidence $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC | Out-Null
+          if (-not $?) { throw 'Native producer unit admission failed.' }
+      - name: Build and verify native x64 Firebird and the full Office engine
+        shell: pwsh
+        run: |
+          ./suite/scripts/build-native-engine.ps1 -Phase Full -Architecture x64 -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC
+          if (-not $?) { throw 'Native x64 Office source build or functional verification failed.' }
+      - name: Retain original source build diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-x64-engine-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/native-engine-host-evidence/
+            .work/native-engine-evidence/
+            !.work/native-engine-evidence/*.zip
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain the qualified native engine input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-x64-engine-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/native-engine-evidence/OpenGeul-Office-engine-x64.zip
+            .work/native-engine-evidence/source-build-receipt.json
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0

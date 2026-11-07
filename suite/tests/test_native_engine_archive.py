@@ -11,6 +11,24 @@ from suite.tests.test_native_engine_build import PWSH, SOURCE, quote
 
 
 class NativeEngineArchiveTests(unittest.TestCase):
+    def test_x64_configuration_requires_archive_and_oem_exclusions(self):
+        config = self.root/'x64.mk'
+        good = dict(OS='WNT', COM='MSC', CPUNAME='X86_64', HOST_PLATFORM='x86_64-pc-cygwin',
+                    BUILD_PLATFORM='x86_64-pc-cygwin', ENABLE_FIREBIRD_SDBC='TRUE', SYSTEM_FIREBIRD='',
+                    CROSS_COMPILING='', BUILD_TYPE='FIREBIRD ICU LIBTOMMATH', PKGFORMAT='archive',
+                    ENABLE_ONLINE_UPDATE='', ENABLE_ONLINE_UPDATE_MAR='', ENABLE_BREAKPAD='', VCTOOLSET='v143')
+        def write(values): config.write_text(''.join(key+'='+value+'\n' for key,value in values.items()))
+        write(good)
+        parsed=json.loads(self.ps(f"Assert-GeneratedConfiguration {quote(config)} -Architecture x64|ConvertTo-Json -Compress"))
+        self.assertEqual('X86_64',parsed['CPUNAME'])
+        for key,value in [('PKGFORMAT','msi'),('CROSS_COMPILING','TRUE'),('SYSTEM_FIREBIRD','TRUE'),
+                          ('BUILD_TYPE','FIREBIRD'),('BUILD_TYPE','FIREBIRD LIBTOMMATH LIBATOMIC_OPS'),
+                          ('VCTOOLSET','v145'),('ENABLE_ONLINE_UPDATE','TRUE'),('ENABLE_ONLINE_UPDATE_MAR','TRUE'),
+                          ('ENABLE_BREAKPAD','TRUE'),('BUILD_TYPE','FIREBIRD LIBTOMMATH BREAKPAD')]:
+            with self.subTest(key=key,value=value):
+                write(dict(good,**{key:value}))
+                self.ps(f"$rejected=$false;try{{Assert-GeneratedConfiguration {quote(config)} -Architecture x64}}catch{{$rejected=$true}};if(-not $rejected){{throw 'Unsafe x64 configuration admitted'}}")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

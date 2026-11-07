@@ -97,13 +97,15 @@ function Get-NativeEngineTarget {
     return ConvertFrom-NativeEngineTargetPolicy ([IO.File]::ReadAllBytes($path)) $manifest.nativeTargets $Architecture
 }
 
-function Get-NativeEngineBuildMode([ValidateSet('Firebird','Full')][string]$Phase,[switch]$CalcDispatchDiagnostic) {
+function Get-NativeEngineBuildMode([ValidateSet('Firebird','Full')][string]$Phase,[switch]$CalcDispatchDiagnostic,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    if($Architecture -ceq 'x64' -and ($Phase -ine 'Full' -or $CalcDispatchDiagnostic)) {throw 'x64 supports normal Full only.'}
     if($CalcDispatchDiagnostic) {
         if($Phase -cne 'Full') {throw 'Calc dispatch diagnostics require the full native source build.'}
         return [ordered]@{kind='native-office-engine-calc-dispatch-diagnostic';archive='OpenGeul-Office-engine-arm64-calc-dispatch.zip';
             receipt='calc-dispatch-source-build-receipt.json';status='native-engine-calc-dispatch-diagnostic-built';fullEngineQualified=$false;acceptanceEligible=$false}
     }
-    return [ordered]@{kind='native-office-engine-source-build';archive='OpenGeul-Office-engine-arm64.zip';receipt='source-build-receipt.json';
+    return [ordered]@{kind='native-office-engine-source-build';archive=$target.archive;receipt='source-build-receipt.json';
         status=$(if($Phase -eq 'Full'){'native-engine-source-build-qualified'}else{'native-firebird-pe-built-full-engine-unqualified'});
         fullEngineQualified=($Phase -eq 'Full');acceptanceEligible=($Phase -eq 'Full')}
 }
@@ -167,9 +169,9 @@ function Assert-NativeBuildHost($Identity,[ValidateSet('arm64','x64',IgnoreCase=
     }
 }
 
-function Get-NativeBuildHost {
+function Get-NativeBuildHost([ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     if(-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
-        throw 'This source build requires actual Windows ARM64 hardware.'
+        throw 'This source build requires actual native Windows hardware.'
     }
     if(-not ('NativeEngineHost' -as [type])) {
         Add-Type @'
@@ -186,7 +188,7 @@ public static class NativeEngineHost {
         throw 'IsWow64Process2 could not establish the real controller/OS architecture.'
     }
     $identity=[ordered]@{isWindows=$true;processMachine=[int]$processMachine;nativeMachine=[int]$nativeMachine;controllerPid=$PID;osDescription=[Runtime.InteropServices.RuntimeInformation]::OSDescription}
-    Assert-NativeBuildHost ([pscustomobject]$identity)
+    Assert-NativeBuildHost ([pscustomobject]$identity) $Architecture
     return $identity
 }
 
@@ -485,7 +487,7 @@ function Get-CommandCreationIdentity($Process) {
         creationIdentityUnavailableReason=$reason}
 }
 
-function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350,[hashtable]$EnvironmentOverrides=@{}) {
+function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350,[hashtable]$EnvironmentOverrides=@{},[switch]$NativeEnvironment,[switch]$NativeUnitEnvironment) {
     $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null;
         timeoutMinutes=$TimeoutMinutes;pipeDrainComplete=$false;forcedTermination=$false;directProcessDeathVerified=$false;processTreeCleanup='not-requested';cleanupErrors=@()}
     $stdout=$LogPrefix+'.stdout.log';$stderr=$LogPrefix+'.stderr.log'
@@ -498,17 +500,39 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         $receipt.effectiveTimeoutMilliseconds=$timeoutMilliseconds
         $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$FilePath;$info.WorkingDirectory=$WorkingDirectory
         $info.UseShellExecute=$false;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
+        if($NativeEnvironment -or $NativeUnitEnvironment) {
+            if($NativeEnvironment -and $NativeUnitEnvironment) {throw 'Select one isolated native child environment.'}
+            if($NativeUnitEnvironment -and $EnvironmentOverrides.Count) {throw 'Native unit environment cannot accept ambient overrides.'}
+            # New native preflight children receive only required nonsecret OS
+            # paths. Never import a developer shell or enumerate its environment.
+            $info.Environment.Clear()
+            foreach($name in @('SystemRoot','SystemDrive','WINDIR','TEMP','TMP')) {
+                $value=[Environment]::GetEnvironmentVariable($name)
+                if($value) {$info.Environment[$name]=$value}
+            }
+            $info.Environment['PATH']=(Split-Path $FilePath -Parent)+[IO.Path]::PathSeparator+(Join-Path $env:SystemRoot 'System32')
+            $receipt.environmentPolicy='native-required-os-paths-only'
+            if($NativeUnitEnvironment) {
+                $controller=(Get-Process -Id $PID).Path
+                $info.Environment['PATH']=@((Split-Path $FilePath -Parent),(Split-Path $controller -Parent),(Join-Path $env:SystemRoot 'System32')) -join [IO.Path]::PathSeparator
+                $info.Environment['PATHEXT']='.COM;.EXE;.BAT;.CMD'
+                $info.Environment['PYTHONUTF8']='1'
+                $info.Environment['PYTHONDONTWRITEBYTECODE']='1'
+                $receipt.environmentPolicy='native-unit-required-paths-only'
+            }
+        }
         foreach($argument in $Arguments) {$info.ArgumentList.Add($argument)}
         if($EnvironmentOverrides.Count) {
             $receipt.environmentOverrideSha256=[ordered]@{}
             foreach($name in $EnvironmentOverrides.Keys) {
-                if($name -cnotin @('PATH','FIREBIRD','OPENGEUL_CALC_DISPATCH_SOURCE_ROOT') -or $EnvironmentOverrides[$name] -isnot [string] -or $EnvironmentOverrides[$name].Contains([char]0)) {throw 'Unsupported child environment override.'}
+                if($name -cnotin @('PATH','FIREBIRD','OPENGEUL_CALC_DISPATCH_SOURCE_ROOT','OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE','OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE') -or $EnvironmentOverrides[$name] -isnot [string] -or $EnvironmentOverrides[$name].Contains([char]0)) {throw 'Unsupported child environment override.'}
                 $value=$EnvironmentOverrides[$name]
-                if($name -ceq 'OPENGEUL_CALC_DISPATCH_SOURCE_ROOT') {
+                if($name -cin @('OPENGEUL_CALC_DISPATCH_SOURCE_ROOT','OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE')) {
                     if(-not [IO.Path]::IsPathFullyQualified($value)) {throw 'Diagnostic source override requires an absolute owned directory.'}
                     Assert-UnlinkedPath $value
                     if(-not (Get-Item -LiteralPath $value -ErrorAction Stop).PSIsContainer) {throw 'Diagnostic source override requires an owned directory.'}
                 }
+                if($name -ceq 'OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE' -and $value -cne '1') {throw 'Source recipe gate must be mandatory.'}
                 $info.Environment[$name]=$value
                 $receipt.environmentOverrideSha256[$name]=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($value))).ToLowerInvariant()
             }
@@ -579,6 +603,155 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
     return [pscustomobject]@{stdout=$stdout;stderr=$stderr;receipt=$LogPrefix+'.command.json';exitCode=$receipt.exitCode}
 }
 
+function Invoke-NativeEngineUnitGate([string]$Python,[string]$RepoRoot,[string]$EvidenceDirectory,[string]$DeadlineUtc) {
+    if(-not $DeadlineUtc) {throw 'Native unit admission requires the original first-step deadline.'}
+    Assert-UnlinkedPath $Python;Assert-UnlinkedPath $RepoRoot;Assert-UnlinkedPath $EvidenceDirectory
+    $previousBudget=$script:NativeEngineBuildBudget
+    $receipt=[ordered]@{schemaVersion=1;kind='native-engine-unit-admission';architecture='x64';passed=$false}
+    $proof=Join-Path $EvidenceDirectory 'native-unit-gate.json'
+    try {
+        # This workflow step and the later producer share one absolute deadline;
+        # no new 330-minute allowance starts when a new PowerShell step starts.
+        $script:NativeEngineBuildBudget=New-NativeBuildBudget $DeadlineUtc
+        $receipt.buildBudget=$script:NativeEngineBuildBudget.record
+        $receipt.host=Get-NativeBuildHost x64
+        $tests=@(
+            'suite.tests.test_native_engine_targets',
+            'suite.tests.test_native_source_recipe.RecipePolicyTests.test_fixed_policy_selects_exact_finite_recipes',
+            'suite.tests.test_native_source_recipe.RecipePolicyTests.test_unknown_missing_duplicate_reordered_or_modified_hook_fails',
+            'suite.tests.test_native_source_recipe.RecipePolicyTests.test_schema_membership_core_architecture_and_source_membership_drift_fail',
+            'suite.tests.test_native_source_recipe.RecipePolicyTests.test_policy_bytes_and_duplicate_json_names_fail_closed',
+            'suite.tests.test_native_engine_prereqs.NativeJavaPrerequisiteTests.test_x64_compiler_profile_requires_exact_native_cl_link_and_lib',
+            'suite.tests.test_native_engine_prereqs.NativeJavaPrerequisiteTests.test_x64_sdk_requires_complete_selected_headers_libraries_and_native_tools',
+            'suite.tests.test_native_engine_prereqs.NativeJavaPrerequisiteTests.test_x64_jdk_requires_native_launchers_jvm_jni_and_metadata',
+            'suite.tests.test_native_engine_build.NativeEngineBuildTests.test_x64_native_host_product_and_archive_mode',
+            'suite.tests.test_native_engine_build.NativeEngineBuildTests.test_x64_crt_requires_all_nine_signed_files_and_actual_compiler_floor',
+            'suite.tests.test_native_engine_build.NativeEngineBuildTests.test_x64_winacc_requires_actual_native_binary_hash_and_both_import_tables',
+            'suite.tests.test_native_engine_build.NativeEngineBuildTests.test_x64_base_requires_independent_native_generations_rows_and_original_retirement',
+            'suite.tests.test_native_engine_build.NativeEngineBuildTests.test_x64_final_diagnostic_copy_expiry_revokes_proof_and_archive',
+            'suite.tests.test_native_engine_build.NativeEngineBuildTests.test_x64_final_receipt_write_expiry_revokes_persisted_success_and_archive',
+            'suite.tests.test_native_engine_build.NativeEngineBuildTests.test_x64_in_budget_finalization_keeps_proof_and_restores_budget_last',
+            'suite.tests.test_native_engine_archive.NativeEngineArchiveTests.test_x64_configuration_requires_archive_and_oem_exclusions',
+            'suite.tests.test_native_engine_oem_policy.NativeEngineOemPolicyTests.test_exact_x64_configure_and_oem_overrides'
+        )
+        $receipt.selectedTests=$tests
+        $receipt.command=Invoke-LoggedCommand $Python (@('-m','unittest')+$tests+@('-v')) $RepoRoot (Join-Path $EvidenceDirectory 'native-unit-checks') -NativeUnitEnvironment
+        Assert-NativeBuildTimeRemaining
+        $receipt.passed=$true
+        Write-BuildJson $proof $receipt
+        Assert-NativeBuildTimeRemaining
+    } catch {
+        $receipt.passed=$false;$receipt.error=$_.Exception.GetType().FullName
+        Write-BuildJson $proof $receipt
+        throw
+    } finally {$script:NativeEngineBuildBudget=$previousBudget}
+    return $receipt
+}
+
+function Get-NativeCompilerFileVersion([string]$Path) {
+    $version=[Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    return [string][Version]::new($version.FileMajorPart,$version.FileMinorPart,$version.FileBuildPart,$version.FilePrivatePart)
+}
+
+function Get-NativeCompilerPlan([string]$InstallationPath,[string]$InstallationVersion,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    $major=if($Architecture -ceq 'x64'){17}else{18}
+    if(([Version]$InstallationVersion).Major -ne $major) {throw 'Installed Visual Studio differs from the fixed native profile.'}
+    Assert-UnlinkedPath $InstallationPath
+    $root=[IO.Path]::GetFullPath($InstallationPath)
+    $versions=Join-Path $root 'VC/Tools/MSVC';Assert-UnlinkedPath $versions
+    # Mirrors the pinned configure's ls -A1r, but rejects unexpected directory
+    # names rather than silently selecting a different installed toolset.
+    $names=[string[]]@(Get-ChildItem -LiteralPath $versions -Directory|ForEach-Object {$_.Name})
+    if(-not $names.Count -or @($names|Where-Object {$_ -cnotmatch '^14\.\d+\.\d+(?:\.\d+)?$'}).Count) {throw 'MSVC version directories are missing or ambiguous.'}
+    [Array]::Sort($names,[StringComparer]::Ordinal);[Array]::Reverse($names)
+    $compiler=Join-Path $versions $names[0];Assert-UnlinkedPath $compiler
+    $directoryVersion=[Version]$names[0]
+    $minimum=[Version]::new(14,$directoryVersion.Minor,$directoryVersion.Build,[Math]::Max(0,$directoryVersion.Revision))
+    $tools=[ordered]@{}
+    foreach($name in @('cl','link','lib')) {
+        $path=Join-Path $compiler ('bin/'+$target.compilerTools+'/'+$name+'.exe')
+        $pe=Get-ProductPeIdentity $path -Architecture $Architecture
+        $bytes=[IO.File]::ReadAllBytes($path);$offset=[BitConverter]::ToUInt32($bytes,60)
+        if($pe.machine -ne $target.nativeMachine -or $pe.role -cnotin @('nativeArm64','nativeX64') -or ([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw 'Selected compiler tools must be native executables.'}
+        $version=[Version](Get-NativeCompilerFileVersion $path)
+        $expectedMajor=if($name -ceq 'cl'){19}else{14}
+        if($version.Major -ne $expectedMajor -or $version.Minor -ne $directoryVersion.Minor -or $version.Build -lt $directoryVersion.Build) {throw 'Selected compiler resource version differs from its MSVC directory.'}
+        $floor=[Version]::new(14,$version.Minor,$version.Build,[Math]::Max(0,$version.Revision))
+        if($floor -gt $minimum) {$minimum=$floor}
+        $pe.version=[string]$version;$pe.role='nativeCompilerTool';$pe.tool=$name;$tools[$name]=$pe
+    }
+    return [ordered]@{architecture=$Architecture;compilerYear=$target.compilerYear;toolset=$target.toolset;installationPath=$root;
+        installationVersion=$InstallationVersion;compilerRoot=$compiler;compilerToolsVersion=$names[0];minimumRuntimeVersion=[string]$minimum;tools=$tools}
+}
+
+function Get-NativeSdkPlan([string]$SdkRoot,[string]$Version,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    if($Version -cnotmatch '^10\.0\.\d+\.0$' -or [Version]$Version -lt [Version]'10.0.20348.0') {throw 'The fixed native profile requires a source-supported installed Windows 10 SDK version.'}
+    Assert-UnlinkedPath $SdkRoot;$root=[IO.Path]::GetFullPath($SdkRoot);$files=@()
+    foreach($relative in @("Include/$Version/um/Windows.h","Include/$Version/shared/sdkddkver.h","Include/$Version/ucrt/stdio.h",
+            "Lib/$Version/um/$Architecture/kernel32.lib","Lib/$Version/ucrt/$Architecture/ucrt.lib")) {
+        $path=Join-Path $root $relative;Assert-UnlinkedPath $path;$file=Get-Item -LiteralPath $path
+        if($file.PSIsContainer -or $file.Length -le 0) {throw 'Selected Windows SDK input is missing.'}
+        $files+=@{path=$path;size=$file.Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
+    }
+    $tool=Get-ProductPeIdentity (Join-Path $root "bin/$Version/$Architecture/rc.exe") -Architecture $Architecture
+    if($tool.role -cnotin @('nativeArm64','nativeX64')) {throw 'Selected SDK resource compiler must be native.'}
+    return [ordered]@{root=$root;version=$Version;architecture=$Architecture;files=$files;resourceCompiler=$tool}
+}
+
+function Invoke-NativeX64Preflight([string]$WorkingDirectory,[string]$EvidenceDirectory) {
+    Assert-NativeBuildHost (Get-NativeBuildHost x64) x64
+    $overrides=@{}
+    foreach($name in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_symbols','debug','dbglevel','enable_optimized','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS','CL','_CL_','LINK','_LINK_')) {$overrides[$name]=[Environment]::GetEnvironmentVariable($name)}
+    Assert-MutexSymbolsOverrides $overrides
+    foreach($name in @('CC','CXX','CPP','AR','LD','MSVC_CXX','CCACHE','INCLUDE','LIB','LIBPATH')) {
+        if([Environment]::GetEnvironmentVariable($name)) {throw "Ambient native compiler override is forbidden: $name"}
+    }
+    $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe';Assert-UnlinkedPath $vswhere
+    $found=Invoke-LoggedCommand $vswhere @('-products','*','-version','[17,18)','-requires','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-format','json','-utf8') $WorkingDirectory (Join-Path $EvidenceDirectory 'native-vs-selection') -NativeEnvironment
+    $instances=@(Get-Content -LiteralPath $found.stdout -Raw|ConvertFrom-Json)
+    if($instances.Count -ne 1 -or $instances[0].isComplete -ne $true -or $instances[0].isLaunchable -ne $true -or $instances[0].isPrerelease -ne $false) {throw 'Exactly one complete installed release VS2022 native profile is required.'}
+    $compiler=Get-NativeCompilerPlan $instances[0].installationPath $instances[0].installationVersion x64
+    $registry=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\Windows\v10.0' -ErrorAction Stop
+    if(-not $registry.InstallationFolder -or $registry.ProductVersion -cnotmatch '^10\.0\.\d+$') {throw 'Installed SDK registration does not match the pinned configure selection.'}
+    $sdk=Get-NativeSdkPlan $registry.InstallationFolder ($registry.ProductVersion+'.0') x64
+    $crt=Get-AppLocalCrtPlan $compiler.compilerRoot v143 x64 $compiler.minimumRuntimeVersion
+    $probeRoot=Join-Path $WorkingDirectory 'native-toolchain-probe';New-Item -ItemType Directory $probeRoot -ErrorAction Stop|Out-Null
+    $source=Join-Path $probeRoot 'probe.c';$librarySource=Join-Path $probeRoot 'member.c'
+    @'
+#include <windows.h>
+#include <stdio.h>
+int owned_library_value(void);
+int main(void) {
+    USHORT processMachine=1, nativeMachine=0;
+    if (!IsWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine)) return 71;
+    if (processMachine != 0 || nativeMachine != 0x8664 || owned_library_value() != 42) return 72;
+    printf("{\"processMachine\":%u,\"nativeMachine\":%u,\"compilerFullVersion\":%d,\"libraryValue\":42}\n", processMachine, nativeMachine, _MSC_FULL_VER);
+    return 0;
+}
+'@|Set-Content -LiteralPath $source -Encoding ascii
+    'int owned_library_value(void) { return 42; }'|Set-Content -LiteralPath $librarySource -Encoding ascii
+    $include=@('/nologo','/c','/MT','/W4','/WX',('/I'+(Join-Path $compiler.compilerRoot 'include')))
+    foreach($name in @('ucrt','shared','um')) {$include+=('/I'+(Join-Path $sdk.root ('Include/'+$sdk.version+'/'+$name)))}
+    $commands=[ordered]@{}
+    foreach($name in @('member','probe')) {
+        $commands[$name]=Invoke-LoggedCommand $compiler.tools.cl.path ($include+@((Join-Path $probeRoot ($name+'.c')),('/Fo'+(Join-Path $probeRoot ($name+'.obj'))))) $probeRoot (Join-Path $EvidenceDirectory ('native-compile-'+$name)) -NativeEnvironment
+    }
+    $library=Join-Path $probeRoot 'owned.lib';$exe=Join-Path $probeRoot 'probe.exe'
+    $commands.archive=Invoke-LoggedCommand $compiler.tools.lib.path @('/nologo','/MACHINE:X64',('/OUT:'+$library),(Join-Path $probeRoot 'member.obj')) $probeRoot (Join-Path $EvidenceDirectory 'native-archive') -NativeEnvironment
+    $archive=Get-NativeImportLibrary $library x64
+    $commands.link=Invoke-LoggedCommand $compiler.tools.link.path @('/nologo','/MACHINE:X64','/SUBSYSTEM:CONSOLE',('/OUT:'+$exe),
+        (Join-Path $probeRoot 'probe.obj'),$library,'kernel32.lib',('/LIBPATH:'+(Join-Path $compiler.compilerRoot 'lib/x64')),
+        ('/LIBPATH:'+(Join-Path $sdk.root ('Lib/'+$sdk.version+'/ucrt/x64'))),('/LIBPATH:'+(Join-Path $sdk.root ('Lib/'+$sdk.version+'/um/x64')))) $probeRoot (Join-Path $EvidenceDirectory 'native-link') -NativeEnvironment
+    $pe=Get-ProductPeIdentity $exe -Architecture x64
+    $commands.run=Invoke-LoggedCommand $exe @() $probeRoot (Join-Path $EvidenceDirectory 'native-run') -NativeEnvironment
+    $native=Get-Content -LiteralPath $commands.run.stdout -Raw|ConvertFrom-Json
+    $version=[Version]$compiler.tools.cl.version
+    if($native.processMachine -ne 0 -or $native.nativeMachine -ne 0x8664 -or $native.libraryValue -ne 42 -or
+       $native.compilerFullVersion -ne ($version.Major*10000000+$version.Minor*100000+$version.Build) -or $commands.run.exitCode -ne 0) {throw 'Actual native compile/archive/link/run witness differs from selected tools.'}
+    return [ordered]@{schemaVersion=1;passed=$true;architecture='x64';compiler=$compiler;sdk=$sdk;crt=$crt;archive=$archive;executable=$pe;nativeProcess=$native;commands=$commands}
+}
+
 function Get-ExtraSourcePins {
     $base='https://download.documentfoundation.org/libreoffice/src/26.8.1/'
     # Published .sha256 files and archive sizes, fetched from the official
@@ -590,7 +763,10 @@ function Get-ExtraSourcePins {
     )) { [ordered]@{filename=$pin[0];url=$base+$pin[0];size=$pin[1];sha256=$pin[2];checksumUrl=$base+$pin[0]+'.sha256'} }
 }
 
-function Get-Arm64ImportLibrary([string]$Path) {
+function Get-Arm64ImportLibrary([string]$Path) {Get-NativeImportLibrary $Path 'arm64'}
+
+function Get-NativeImportLibrary([string]$Path,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
     Assert-UnlinkedPath $Path
     $data=[IO.File]::ReadAllBytes($Path)
     if($data.Length -lt 8 -or [Text.Encoding]::ASCII.GetString($data,0,8) -cne "!<arch>`n") {throw 'JNI import library is not a COFF archive.'}
@@ -604,48 +780,51 @@ function Get-Arm64ImportLibrary([string]$Path) {
         if($name -notin @('/','//','/SYM64/')) {
             if($size -lt 20) {throw 'JNI COFF object is truncated.'}
             $machine=if([BitConverter]::ToUInt16($data,$member) -eq 0 -and [BitConverter]::ToUInt16($data,$member+2) -eq 0xffff) {[BitConverter]::ToUInt16($data,$member+6)} else {[BitConverter]::ToUInt16($data,$member)}
-            if($machine -ne 0xaa64) {throw 'JNI import library contains a non-ARM64 object.'}
+            if($machine -ne $target.productMachine) {throw 'JNI import library contains a non-native object.'}
             $machines+=[int]$machine
         }
         $offset+=60+$size+($size%2)
     }
-    if($machines.Count -eq 0 -or $offset -ne $data.Length) {throw 'JNI import library has no complete ARM64 objects.'}
+    if($machines.Count -eq 0 -or $offset -ne $data.Length) {throw 'Native library has no complete target COFF objects.'}
     return [ordered]@{path=[IO.Path]::GetFullPath($Path);size=$data.Length;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant();machines=@($machines|Sort-Object -Unique)}
 }
 
-function Get-NativeJdkPlan([string]$JdkHome) {
+function Get-NativeJdkPlan([string]$JdkHome,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
     Assert-UnlinkedPath $JdkHome
     $jdk=[IO.Path]::GetFullPath($JdkHome)
     $native=@();$libraries=@()
     foreach($relative in @('bin/java.exe','bin/javac.exe','bin/server/jvm.dll','bin/jawt.dll')) {
         Assert-NativeBuildTimeRemaining
         $path=Join-Path $jdk $relative;Assert-UnlinkedPath $path
-        $identity=Get-ProductPeIdentity $path
-        if($identity.role -ne 'nativeArm64') {throw "Installed JDK executable/library must be native ARM64: $path"}
+        $identity=Get-ProductPeIdentity $path -Architecture $Architecture
+        if($identity.machine -ne $target.productMachine -or $identity.role -cnotin @('nativeArm64','nativeX64')) {throw "Installed JDK executable/library must be native: $path"}
         $native+=$identity
     }
-    foreach($relative in @('lib/jvm.lib','lib/jawt.lib')) {$libraries+=Get-Arm64ImportLibrary (Join-Path $jdk $relative)}
+    foreach($relative in @('lib/jvm.lib','lib/jawt.lib')) {$libraries+=Get-NativeImportLibrary (Join-Path $jdk $relative) $Architecture}
     foreach($relative in @('include/jni.h','include/win32/jni_md.h','release')) {
         $path=Join-Path $jdk $relative;Assert-UnlinkedPath $path
         if(-not(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) {throw "Installed JDK is missing required JNI/release input: $relative"}
     }
     $release=Join-Path $jdk 'release';$text=Get-Content -LiteralPath $release -Raw
     $version=[regex]::Match($text,'(?m)^JAVA_VERSION="([0-9]+(?:\.[^"\r\n]+)?)"\s*$')
-    if(-not $version.Success -or [int]$version.Groups[1].Value.Split('.')[0] -lt 8 -or $text -notmatch '(?m)^OS_ARCH="(?:aarch64|arm64)"\s*$') {throw 'Installed JDK release metadata does not identify a supported ARM64 JDK.'}
+    $archPattern=if($Architecture -ceq 'arm64'){'aarch64|arm64'}else{'amd64|x86_64'}
+    if(-not $version.Success -or [int]$version.Groups[1].Value.Split('.')[0] -lt 8 -or $text -notmatch ('(?m)^OS_ARCH="(?:'+$archPattern+')"\s*$')) {throw 'Installed JDK release metadata does not identify a supported native JDK.'}
     return [ordered]@{home=$jdk;javaVersion=$version.Groups[1].Value;nativeFiles=@($native);importLibraries=@($libraries);releaseSha256=(Get-FileHash -LiteralPath $release -Algorithm SHA256).Hash.ToLowerInvariant();origin='preinstalled build-host tool; no download performed'}
 }
 
-function Resolve-NativeJdk([string]$ExplicitHome='') {
-    if($ExplicitHome) {$plan=Get-NativeJdkPlan $ExplicitHome;$plan.selection='explicit';return $plan}
+function Resolve-NativeJdk([string]$ExplicitHome='',[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    if($ExplicitHome) {$plan=Get-NativeJdkPlan $ExplicitHome $Architecture;$plan.selection='explicit';return $plan}
     $errors=@()
-    foreach($name in @('JAVA_HOME_21_AARCH64','JAVA_HOME_17_AARCH64','JAVA_HOME_21_ARM64','JAVA_HOME_17_ARM64','JAVA_HOME_23_AARCH64','JAVA_HOME_25_AARCH64','JAVA_HOME')) {
+    $names=if($Architecture -ceq 'arm64'){@('JAVA_HOME_21_AARCH64','JAVA_HOME_17_AARCH64','JAVA_HOME_21_ARM64','JAVA_HOME_17_ARM64','JAVA_HOME_23_AARCH64','JAVA_HOME_25_AARCH64','JAVA_HOME')}else{@('JAVA_HOME_21_X64')}
+    foreach($name in $names) {
         Assert-NativeBuildTimeRemaining
         $candidate=[Environment]::GetEnvironmentVariable($name)
         if(-not $candidate) {continue}
-        try {$plan=Get-NativeJdkPlan $candidate;$plan.selection=$name;return $plan}
+        try {$plan=Get-NativeJdkPlan $candidate $Architecture;$plan.selection=$name;return $plan}
         catch {$errors+=($name+': '+$_.Exception.Message)}
     }
-    throw ('No usable installed native Windows ARM64 JDK was found. Set -JdkHome or JAVA_HOME_21_AARCH64; keep Java enabled. '+($errors -join '; '))
+    throw ('No usable installed native Windows JDK was found for '+$Architecture+'. Set -JdkHome; keep Java enabled. '+($errors -join '; '))
 }
 
 function Get-AntPlan([string]$AntHome) {
@@ -752,11 +931,15 @@ function Get-AuthenticatedWindowsPkgconf([string]$DownloadDirectory,[string]$Evi
     return $result
 }
 
-function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='',[string]$PkgConfig='',[switch]$MutexSymbols) {
-    '--with-distro=LibreOfficeWinArm64','--build=aarch64-pc-cygwin','--host=aarch64-pc-cygwin',
-    '--with-visual-studio=2026','--with-package-format=archive','--enable-firebird-sdbc','--enable-database-connectivity',
-    '--disable-online-update','--disable-online-update-mar','--disable-breakpad',
-    '--without-system-firebird','--without-system-libatomic_ops','--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'
+function Get-ConfigureArguments([string]$ExternalTar='',[string]$JdkHome='',[string]$AntHome='',[string]$PkgConfig='',[switch]$MutexSymbols,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    if($Architecture -ceq 'x64' -and $MutexSymbols) {throw 'x64 supports normal Full only.'}
+    '--with-distro='+$target.distro;'--build='+$target.configureTriple;'--host='+$target.configureTriple
+    '--with-visual-studio='+$target.compilerYear
+    '--with-package-format=archive','--enable-firebird-sdbc','--enable-database-connectivity',
+    '--disable-online-update','--disable-online-update-mar','--disable-breakpad','--without-system-firebird'
+    if($Architecture -ceq 'arm64') {'--without-system-libatomic_ops'}
+    '--without-system-libtommath','--without-system-icu','--with-lang=en-US ko'
     if($MutexSymbols) {'--enable-symbols=Library_vclplug_win'}
     if($ExternalTar) {'--with-external-tar='+$ExternalTar}
     if($JdkHome) {'--with-jdk-home='+$JdkHome}
@@ -769,12 +952,14 @@ function Get-BuildTargets([ValidateSet('Firebird','Full')][string]$Phase) {
     if($Phase -eq 'Full') {'build'}
 }
 
-function Assert-GeneratedConfiguration([string]$Path) {
+function Assert-GeneratedConfiguration([string]$Path,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
     $values=@{}
     foreach($line in Get-Content -LiteralPath $Path) {
         if($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::|\?)?=\s*(.*?)\s*$') {$values[$Matches[1]]=$Matches[2]}
     }
-    $required=@{OS='WNT';COM='MSC';CPUNAME='AARCH64';HOST_PLATFORM='aarch64-pc-cygwin';BUILD_PLATFORM='aarch64-pc-cygwin';ENABLE_FIREBIRD_SDBC='TRUE';PKGFORMAT='archive'}
+    $required=@{OS='WNT';COM='MSC';CPUNAME=$target.configureCpu;HOST_PLATFORM=$target.configureTriple;BUILD_PLATFORM=$target.configureTriple;ENABLE_FIREBIRD_SDBC='TRUE';PKGFORMAT='archive'}
+    if($Architecture -ceq 'x64') {$required.VCTOOLSET=$target.toolset}
     foreach($key in $required.Keys) {if($values[$key] -cne $required[$key]){throw "Generated configuration rejects native Firebird: $key=$($values[$key])"}}
     foreach($key in @('ENABLE_ONLINE_UPDATE','ENABLE_ONLINE_UPDATE_MAR','ENABLE_BREAKPAD')) {
         if(-not $values.ContainsKey($key) -or $values[$key] -cne '') {throw "Generated configuration enables or omits an unsupported OEM network service: $key=$($values[$key])"}
@@ -783,7 +968,8 @@ function Assert-GeneratedConfiguration([string]$Path) {
         if($values.BUILD_TYPE -match ('(^|\s)'+$token+'(\s|$)')) {throw "Unsupported OEM network service remains in BUILD_TYPE: $token"}
     }
     if(-not $values.ContainsKey('CROSS_COMPILING') -or $values.CROSS_COMPILING -ne '' -or $values.SYSTEM_FIREBIRD -ne '') {throw 'Cross-compiling or system Firebird is forbidden.'}
-    foreach($token in @('FIREBIRD','LIBATOMIC_OPS','LIBTOMMATH')) {if($values.BUILD_TYPE -notmatch ('(^|\s)'+$token+'(\s|$)')) {throw "Required internal build dependency is absent: $token"}}
+    foreach($token in $target.requiredBuildTypes) {if($values.BUILD_TYPE -notmatch ('(^|\s)'+$token+'(\s|$)')) {throw "Required internal build dependency is absent: $token"}}
+    if($Architecture -ceq 'x64' -and $values.BUILD_TYPE -match '(^|\s)LIBATOMIC_OPS(\s|$)') {throw 'ARM-only dependency was enabled for x64.'}
     return $values
 }
 
@@ -834,7 +1020,7 @@ function Assert-MutexSymbolsConfiguration([Collections.IDictionary]$Values) {
     }
 }
 
-function Get-PinnedPythonTemplates {
+function Get-PinnedPythonTemplates([ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     # Exact nonexecuted launcher templates from authenticated official ARM64 MSI
     # SHA256 97c2173752325af1da3d8731f41c8e09a7c4ad491cf55d9b1069fadb5668e6d7.
     # A new source build must independently match every admitted byte/hash.
@@ -851,15 +1037,27 @@ function Get-PinnedPythonTemplates {
         @('setuptools/gui-64.exe',34404,'3471b6140eadc6412277dbbefe3fef8c345a0f1a59776086b80a3618c3a83e3b'),
         @('setuptools/gui.exe',332,'85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c')
     )) {[ordered]@{path=$prefix+$pin[0];machine=$pin[1];sha256=$pin[2];role='pythonLauncherTemplate'}}
+    if($Architecture -ceq 'x64') {
+        # Existing suite/payload.py x64 exceptions; these bytes are templates,
+        # never executable witnesses. A fresh product must match independently.
+        foreach($pin in @(
+            @('pip/_vendor/distlib/t64-arm.exe','ebc4c06b7d95e74e315419ee7e88e1d0f71e9e9477538c00a93a9ff8c66a6cfc'),
+            @('pip/_vendor/distlib/w64-arm.exe','c5dc9884a8f458371550e09bd396e5418bf375820a31b9899f6499bf391c7b2e'),
+            @('setuptools/cli-arm64.exe','b9a7d08da880dfac8bcf548eba4b06fb59b6f09b17d33148a0f6618328926c61'),
+            @('setuptools/gui-arm64.exe','e694f4743405c8b5926ff457db6fe7f1a12dec7c16a9c3864784d3f4e07ae097')
+        )) {[ordered]@{path=$prefix+$pin[0];machine=0xaa64;sha256=$pin[1];role='pythonLauncherTemplate'}}
+    }
 }
 
-function Assert-PythonTemplateAdmission([string]$RelativePath,[int]$Machine,[string]$Hash) {
-    $pins=@(Get-PinnedPythonTemplates|Where-Object {$_.path -ceq $RelativePath})
+function Assert-PythonTemplateAdmission([string]$RelativePath,[int]$Machine,[string]$Hash,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $pins=@(Get-PinnedPythonTemplates $Architecture|Where-Object {$_.path -ceq $RelativePath})
     if($pins.Count -ne 1 -or $pins[0].machine -ne $Machine -or $pins[0].sha256 -cne $Hash) {throw "Unknown path/machine/hash for nonnative product code: $RelativePath"}
     return $pins[0]
 }
 
-function Get-ProductPeIdentity([string]$Path,[string]$RuntimeRoot='') {
+function Get-ProductPeIdentity([string]$Path,[string]$RuntimeRoot='',[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    Assert-UnlinkedPath $Path
     $data=[IO.File]::ReadAllBytes($Path)
     if($data.Length -lt 64 -or $data[0] -ne 77 -or $data[1] -ne 90) {throw "Invalid PE: $Path"}
     $offset=[BitConverter]::ToUInt32($data,60)
@@ -867,8 +1065,8 @@ function Get-ProductPeIdentity([string]$Path,[string]$RuntimeRoot='') {
     $machine=[BitConverter]::ToUInt16($data,[int]$offset+4)
     $magic=[BitConverter]::ToUInt16($data,[int]$offset+24)
     $hash=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-    $role='nativeArm64'
-    if($machine -ne 0xaa64 -or $magic -ne 0x20b) {
+    $role=if($Architecture -ceq 'arm64'){'nativeArm64'}else{'nativeX64'}
+    if($machine -ne $target.productMachine -or $magic -ne 0x20b) {
         $role=''
         $optional=[int]$offset+24;$optionalSize=[BitConverter]::ToUInt16($data,[int]$offset+20)
         $characteristics=[BitConverter]::ToUInt16($data,[int]$offset+22)
@@ -895,11 +1093,11 @@ function Get-ProductPeIdentity([string]$Path,[string]$RuntimeRoot='') {
         }
         if(-not $role -and $RuntimeRoot) {
             $relative=[IO.Path]::GetRelativePath($RuntimeRoot,$Path).Replace('\','/')
-            $pin=Assert-PythonTemplateAdmission $relative $machine $hash
-            if(($machine -eq 0x14c -and $magic -ne 0x10b) -or ($machine -eq 0x8664 -and $magic -ne 0x20b)) {throw 'Pinned template optional-header architecture changed.'}
+            $pin=Assert-PythonTemplateAdmission $relative $machine $hash $Architecture
+            if(($machine -eq 0x14c -and $magic -ne 0x10b) -or ($machine -in @(0x8664,0xaa64) -and $magic -ne 0x20b)) {throw 'Pinned template optional-header architecture changed.'}
             $role=$pin.role
         }
-        if(-not $role) {throw "Product PE is not native ARM64 or verified AnyCPU: $Path (machine $machine)"}
+        if(-not $role) {throw "Product PE is not native $Architecture or verified AnyCPU: $Path (machine $machine)"}
     }
     return [ordered]@{path=$Path;machine=[int]$machine;role=$role;sha256=$hash;size=$data.Length}
 }
@@ -970,7 +1168,8 @@ QUIT;
     return [ordered]@{create=$create;verify=$verify}
 }
 
-function Get-IsqlIcuPlan([string]$SourceDirectory,[Collections.IDictionary]$Configuration) {
+function Get-IsqlIcuPlan([string]$SourceDirectory,[Collections.IDictionary]$Configuration,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
     # This source pin builds ICU 78.3 in release mode. Do not silently use an
     # ambient/system or debug ICU, or substitute foreign product DLLs.
     foreach($entry in @(@('ICU_MAJOR','78'),@('ICU_MINOR','3'),@('SYSTEM_ICU',''),@('MSVC_USE_DEBUG_RUNTIME',''))) {
@@ -984,15 +1183,16 @@ function Get-IsqlIcuPlan([string]$SourceDirectory,[Collections.IDictionary]$Conf
     foreach($name in @('icudt78.dll','icuuc78.dll','icuin78.dll')) {
         $path=Join-Path $directory $name;Assert-UnlinkedPath $path
         if(-not(Test-Path -LiteralPath $path -PathType Leaf)) {throw "Compiled ICU DLL is missing: $name"}
-        $identity=Get-ProductPeIdentity $path
+        $identity=Get-ProductPeIdentity $path -Architecture $Architecture
         $bytes=[IO.File]::ReadAllBytes($path);$offset=[BitConverter]::ToUInt32($bytes,60)
-        if($identity.role -cne 'nativeArm64' -or $identity.machine -ne 0xaa64 -or -not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw "Compiled ICU must be a native ARM64 DLL: $name"}
+        if($identity.role -cnotin @('nativeArm64','nativeX64') -or $identity.machine -ne $target.productMachine -or -not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw "Compiled ICU must be a native DLL: $name"}
         $identity.name=$name;$files+=$identity
     }
-    return [ordered]@{directory=$directory;version='78.3';architecture='arm64';origin='compiled internal ICU from authenticated pinned source';files=$files}
+    return [ordered]@{directory=$directory;version='78.3';architecture=$Architecture;origin='compiled internal ICU from authenticated pinned source';files=$files}
 }
 
-function Get-IsqlPluginPlan([string]$FirebirdDirectory) {
+function Get-IsqlPluginPlan([string]$FirebirdDirectory,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
     # The locked LO Engine12 patch returns a bare plugin name outside boot
     # mode; the standalone proof must find the actual compiled plugin normally.
     $directory=[IO.Path]::GetFullPath((Join-Path $FirebirdDirectory 'plugins'))
@@ -1001,11 +1201,11 @@ function Get-IsqlPluginPlan([string]$FirebirdDirectory) {
     if(-not(Test-Path -LiteralPath $directory -PathType Container)) {throw 'Compiled Firebird plugin directory is missing.'}
     $path=Join-Path $directory 'Engine12.dll';Assert-UnlinkedPath $path
     if(-not(Test-Path -LiteralPath $path -PathType Leaf)) {throw 'Compiled embedded Engine12.dll is missing.'}
-    $identity=Get-ProductPeIdentity $path
+    $identity=Get-ProductPeIdentity $path -Architecture $Architecture
     $bytes=[IO.File]::ReadAllBytes($path);$offset=[BitConverter]::ToUInt32($bytes,60)
-    if($identity.role -cne 'nativeArm64' -or $identity.machine -ne 0xaa64 -or -not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw 'Compiled embedded engine must be a native ARM64 DLL.'}
+    if($identity.role -cnotin @('nativeArm64','nativeX64') -or $identity.machine -ne $target.productMachine -or -not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw 'Compiled embedded engine must be a native DLL.'}
     $identity.name='Engine12.dll'
-    return [ordered]@{directory=$directory;architecture='arm64';origin='compiled internal Firebird from authenticated pinned source';files=@($identity)}
+    return [ordered]@{directory=$directory;architecture=$Architecture;origin='compiled internal Firebird from authenticated pinned source';files=@($identity)}
 }
 
 function Assert-IsqlOutput([string]$Path) {
@@ -1016,16 +1216,40 @@ function Assert-IsqlOutput([string]$Path) {
     }
 }
 
-function Assert-BaseProof([string]$Path) {
+function Assert-BaseProof([string]$Path,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[string]$RuntimeRoot='') {
+    $target=Get-NativeEngineTarget $Architecture
     $proof=Get-Content -LiteralPath $Path -Raw|ConvertFrom-Json
-    if($proof.schemaVersion -ne 1 -or $proof.passed -ne $true -or $proof.guiVerified -ne $false -or $proof.independentReopenVerified -ne $true -or @($proof.nativeProcesses).Count -ne 3) {throw 'Actual native Python/Office independent Base proof is incomplete.'}
-    foreach($identity in $proof.nativeProcesses) {Assert-NativeBuildHost ([pscustomobject]@{isWindows=$true;processMachine=$identity.processMachine;nativeMachine=$identity.nativeMachine})}
+    if($proof.schemaVersion -ne $target.proofVersion -or $proof.passed -ne $true -or $proof.guiVerified -ne $false -or $proof.independentReopenVerified -ne $true -or @($proof.nativeProcesses).Count -ne 3) {throw 'Actual native Python/Office independent Base proof is incomplete.'}
+    foreach($identity in $proof.nativeProcesses) {Assert-NativeBuildHost ([pscustomobject]@{isWindows=$true;processMachine=$identity.processMachine;nativeMachine=$identity.nativeMachine}) $Architecture}
     if($proof.nativeProcesses[0].role -ne 'uno-python') {throw 'Native proof did not observe the actual UNO Python process.'}
     for($i=1;$i -lt 3;$i++) {
         if($proof.nativeProcesses[$i].role -ne 'uno-host' -or $proof.nativeProcesses[$i].jobOwned -ne $true -or $proof.nativeProcesses[$i].phase -ne @('create','reopen')[$i-1]) {throw 'Native proof must observe owned soffice.bin hosts, not launcher processes.'}
     }
     $rows=@($proof.rows)
     if($rows.Count -ne 1 -or $rows[0].id -ne 1 -or $rows[0].text -cne 'Engine-OpenGeul-base 한글' -or $rows[0].amount -ne 42) {throw 'Native Base persisted row differs.'}
+    if($Architecture -ceq 'x64') {
+        foreach($name in @('passed','guiVerified','independentReopenVerified')) {if($proof.$name -isnot [bool]) {throw 'Native Base qualification flags require booleans.'}}
+        if(-not $RuntimeRoot -or @($proof.retirement).Count -ne 2) {throw 'Native Base retirement evidence is missing.'}
+        $image=[IO.Path]::GetFullPath((Join-Path $RuntimeRoot 'program/soffice.bin'))
+        $generations=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        for($i=1;$i -lt 3;$i++) {
+            $hostIdentity=$proof.nativeProcesses[$i];$phase=@('create','reopen')[$i-1];$retired=$proof.retirement[$i-1]
+            if($hostIdentity.pid -le 0 -or $hostIdentity.creationTime -le 0 -or $hostIdentity.image -ine $image -or
+               -not $generations.Add([string]$hostIdentity.pid+'/'+$hostIdentity.creationTime) -or $retired.phase -cne $phase -or $retired.handlesClosed -ne $true) {throw 'Native Base host generations/handle retirement differ.'}
+            $cleanup=$retired.cleanup
+            if($cleanup.schemaVersion -ne 1 -or $cleanup.kind -cne 'owned-engine-job-cleanup' -or $cleanup.gracefulQualified -ne $true -or
+               $cleanup.forcedTermination -ne $false -or $cleanup.jobEmptyVerified -ne $true -or $null -eq $cleanup.finalJobPids -or @($cleanup.finalJobPids).Count -ne 0 -or
+               $cleanup.launcherExitCode -ne 0 -or $null -eq $cleanup.errors -or @($cleanup.errors).Count -ne 0 -or $cleanup.jobHandleValue -le 0 -or $cleanup.expectedEngineImage -ine $image) {throw 'Native Base original job did not retire cleanly.'}
+            $initial=@($cleanup.initialMembers);$final=@($cleanup.finalMembers)
+            if(-not $initial.Count -or -not $final.Count) {throw 'Native Base retained handles are missing.'}
+            foreach($member in $initial) {
+                $matches=@($final|Where-Object {$_.pid -eq $member.pid -and $_.creationTime -eq $member.creationTime -and $_.handleValue -eq $member.handleValue -and $_.image -ieq $member.image})
+                if($member.pid -le 0 -or $member.creationTime -le 0 -or $member.handleValue -le 0 -or $member.error -or $matches.Count -ne 1) {throw 'Native Base retained generation/handle changed.'}
+            }
+            if(@($initial|Where-Object {$_.pid -eq $hostIdentity.pid -and $_.creationTime -eq $hostIdentity.creationTime -and $_.image -ieq $image -and $_.alive -eq $true}).Count -ne 1 -or
+               @($final|Where-Object {$_.error -or $_.alive -ne $false -or $_.exitCode -ne 0 -or $_.handleValue -le 0}).Count) {throw 'Native Base original engine exit is unverified.'}
+        }
+    }
     return $proof
 }
 
@@ -1081,12 +1305,12 @@ function Get-CrtSigningIdentity([string]$Path) {
         companyName=$version.CompanyName;originalFilename=$version.OriginalFilename}
 }
 
-function Assert-CrtFile([string]$Path,[string]$MinimumVersion) {
+function Assert-CrtFile([string]$Path,[string]$MinimumVersion,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     Assert-UnlinkedPath $Path
     $name=[IO.Path]::GetFileName($Path)
-    if($name -cnotin @(Get-CrtNames 'arm64')) {throw "Unexpected app-local CRT filename: $name"}
-    $pe=Get-ProductPeIdentity $Path
-    if($pe.role -ne 'nativeArm64') {throw "App-local CRT must be native ARM64: $Path"}
+    if($name -cnotin @(Get-CrtNames $Architecture)) {throw "Unexpected app-local CRT filename: $name"}
+    $pe=Get-ProductPeIdentity $Path -Architecture $Architecture
+    if($pe.role -cnotin @('nativeArm64','nativeX64')) {throw "App-local CRT must be native: $Path"}
     $identity=Get-CrtSigningIdentity $Path
     if($identity.status -ne 'Valid' -or $identity.signerSubject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)' -or $identity.signerThumbprint -notmatch '^[0-9a-fA-F]{40}$' -or $identity.companyName -ne 'Microsoft Corporation' -or $identity.originalFilename -ine $name) {throw "CRT Microsoft signature/resource identity rejected: $Path"}
     foreach($parts in @($identity.fileVersionParts,$identity.productVersionParts)) {
@@ -1097,27 +1321,34 @@ function Assert-CrtFile([string]$Path,[string]$MinimumVersion) {
     return [ordered]@{name=$name;sourcePath=[IO.Path]::GetFullPath($Path);machine=$pe.machine;size=$pe.size;sha256=$pe.sha256;signature=$identity}
 }
 
-function Get-NativeLibrarianPlan([string]$CompilerRoot) {
+function Get-NativeLibrarianPlan([string]$CompilerRoot,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     # COMPATH is the actual configured VS tools version directory, already
     # checked by CRT preflight. Never resolve this ARM64 librarian via PATH.
     Assert-UnlinkedPath $CompilerRoot
-    $path=Join-Path ([IO.Path]::GetFullPath($CompilerRoot)) 'bin/Hostarm64/arm64/lib.exe'
+    $target=Get-NativeEngineTarget $Architecture
+    $path=Join-Path ([IO.Path]::GetFullPath($CompilerRoot)) ('bin/'+$target.compilerTools+'/lib.exe')
     Assert-UnlinkedPath $path
-    $identity=Get-ProductPeIdentity $path
-    if($identity.role -cne 'nativeArm64') {throw 'Selected VS librarian must be native ARM64.'}
+    $identity=Get-ProductPeIdentity $path -Architecture $Architecture
+    if($identity.role -cnotin @('nativeArm64','nativeX64')) {throw 'Selected VS librarian must be native.'}
     $identity.compilerRoot=[IO.Path]::GetFullPath($CompilerRoot)
-    $identity.selection='configured COMPATH/bin/Hostarm64/arm64/lib.exe; no PATH fallback'
+    $identity.selection='configured COMPATH/bin/'+$target.compilerTools+'/lib.exe; no PATH fallback'
     return $identity
 }
 
-function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset) {
-    if($Toolset -cne 'v145') {throw 'App-local runtime discovery requires the configured VS2026 v145 toolset.'}
+function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[string]$ActualCompilerRuntimeFloor='') {
+    $target=Get-NativeEngineTarget $Architecture
+    if($Toolset -cne $target.toolset) {throw 'App-local runtime discovery requires the selected fixed VS toolset.'}
     Assert-UnlinkedPath $CompilerRoot
     $compiler=[IO.Path]::GetFullPath($CompilerRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $versionText=Split-Path $compiler -Leaf
     if($versionText -notmatch '^14\.\d+\.\d+(?:\.\d+)?$' -or (Split-Path (Split-Path $compiler -Parent) -Leaf) -ine 'MSVC') {throw 'Configured COMPATH must identify the actual VC/Tools/MSVC version directory.'}
     $version=[Version]$versionText
     $minimum=[Version]::new($version.Major,$version.Minor,$version.Build,[Math]::Max(0,$version.Revision))
+    if($ActualCompilerRuntimeFloor) {
+        $actual=[Version]$ActualCompilerRuntimeFloor
+        if($actual.Major -ne 14) {throw 'Invalid actual compiler runtime floor.'}
+        if($actual -gt $minimum) {$minimum=$actual}
+    }
     $vc=Split-Path (Split-Path (Split-Path $compiler -Parent) -Parent) -Parent
     if((Split-Path $vc -Leaf) -ine 'VC' -or (Split-Path (Split-Path $compiler -Parent) -Parent|Split-Path -Leaf) -ine 'Tools' -or -not(Test-Path -LiteralPath $compiler -PathType Container)) {throw 'Configured compiler root is outside the selected VS VC toolchain.'}
     $redistRoot=Join-Path $vc 'Redist/MSVC';Assert-UnlinkedPath $redistRoot
@@ -1125,54 +1356,66 @@ function Get-AppLocalCrtPlan([string]$CompilerRoot,[string]$Toolset) {
     foreach($directory in Get-ChildItem -LiteralPath $redistRoot -Directory) {
         Assert-NativeBuildTimeRemaining
         if($directory.Name -match '^v?(14\.\d+\.\d+(?:\.\d+)?)$') {$candidateVersion=[Version]$Matches[1]}
-        elseif($directory.Name -ceq 'v145') {$candidateVersion=$minimum}
+        elseif($directory.Name -ceq $target.toolset) {$candidateVersion=$minimum}
         else {continue}
         $candidateVersion=[Version]::new($candidateVersion.Major,$candidateVersion.Minor,$candidateVersion.Build,[Math]::Max(0,$candidateVersion.Revision))
         if($candidateVersion -lt $minimum) {continue}
-        foreach($family in @('Microsoft.VC145.CRT','Microsoft.VC143.CRT')) {
-            $path=Join-Path $directory.FullName ('arm64/'+$family)
+        $families=if($Architecture -ceq 'arm64'){@('Microsoft.VC145.CRT','Microsoft.VC143.CRT')}else{@('Microsoft.VC143.CRT')}
+        foreach($family in $families) {
+            $path=Join-Path $directory.FullName ($Architecture+'/'+$family)
             if(Test-Path -LiteralPath $path -PathType Container) {$candidates+=@{path=$path;family=$family;version=$candidateVersion;directory=$directory.Name}}
         }
     }
-    if($candidates.Count -eq 0) {throw "No ARM64 VC redist from the selected VS installation is at least MSVC $minimum under $redistRoot"}
+    if($candidates.Count -eq 0) {throw "No native VC redist from the selected VS installation is at least MSVC $minimum under $redistRoot"}
     $selected=@($candidates|Sort-Object -Property @{Expression={$_.version};Descending=$true},@{Expression={$_.family};Descending=$true})[0]
     Assert-UnlinkedPath $selected.path
-    $files=@(foreach($name in Get-CrtNames 'arm64') {Assert-CrtFile (Join-Path $selected.path $name) ([string]$minimum)})
-    return [ordered]@{schemaVersion=1;architecture='arm64';toolset=$Toolset;compilerRoot=$compiler;compilerToolsVersion=$versionText;minimumRuntimeVersion=[string]$minimum;
+    $files=@(foreach($name in Get-CrtNames $Architecture) {Assert-CrtFile (Join-Path $selected.path $name) ([string]$minimum) $Architecture})
+    return [ordered]@{schemaVersion=1;architecture=$Architecture;toolset=$Toolset;compilerRoot=$compiler;compilerToolsVersion=$versionText;minimumRuntimeVersion=[string]$minimum;
         redistRoot=$redistRoot;sourceDirectory=$selected.path;redistVersionDirectory=$selected.directory;redistFamily=$selected.family;
-        selection='selected VS installation; highest installed v14 ARM64 CRT not older than configured build tools; each DLL signature/version verified';files=$files}
+        selection=('selected VS installation; highest installed v14 '+$Architecture.ToUpperInvariant()+' CRT not older than configured build tools; each DLL signature/version verified');files=$files}
 }
 
-function Save-VcRedistributionTerms([string]$OutputPath) {
+function Assert-VcRedistributionTerms([string]$Path,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    Assert-UnlinkedPath $Path
+    $bytes=Read-BoundedIdentityBytes $Path 2097152
+    $text=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
+    if($text -notmatch ('Visual Studio '+$target.compilerYear) -or $text -notmatch 'REDIST.TXT' -or $text -notmatch 'VC\\redist') {throw 'Preserved redistribution terms differ from the selected VS profile.'}
+    return [ordered]@{url=$target.crtRedistributionUrl;path=$Path;size=$bytes.Length;sha256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}
+}
+
+function Save-VcRedistributionTerms([string]$OutputPath,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     if(Test-Path -LiteralPath $OutputPath) {throw 'CRT redistribution terms snapshot already exists.'}
-    $url='https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution'
+    $target=Get-NativeEngineTarget $Architecture
+    $url=$target.crtRedistributionUrl
     $client=[Net.Http.HttpClient]::new();$client.Timeout=[TimeSpan]::FromMinutes(2)
     $cancel=[Threading.CancellationTokenSource]::new();$response=$null
     try {
         $cancel.CancelAfter((Get-NativeBuildRemaining 120000))
         $response=$client.GetAsync($url,$cancel.Token).GetAwaiter().GetResult();$response.EnsureSuccessStatusCode()|Out-Null
-        if($response.RequestMessage.RequestUri.Scheme -ne 'https' -or $response.RequestMessage.RequestUri.Host -ne 'learn.microsoft.com') {throw 'Microsoft redistribution terms left their official HTTPS origin.'}
+        if($response.RequestMessage.RequestUri.AbsoluteUri -cne $url) {throw 'Microsoft redistribution terms left the selected VS profile URL.'}
         $bytes=$response.Content.ReadAsByteArrayAsync($cancel.Token).GetAwaiter().GetResult()
         $text=[Text.Encoding]::UTF8.GetString($bytes)
-        if($bytes.Length -gt 2097152 -or $text -notmatch 'Visual Studio 2026' -or $text -notmatch 'REDIST.TXT' -or $text -notmatch 'VC\\redist') {throw 'Official VS2026 redistribution terms did not contain the expected redist grant.'}
+        if($bytes.Length -gt 2097152 -or $text -notmatch ('Visual Studio '+$target.compilerYear) -or $text -notmatch 'REDIST.TXT' -or $text -notmatch 'VC\\redist') {throw 'Official VS redistribution terms did not contain the selected profile redist grant.'}
         [IO.File]::WriteAllBytes($OutputPath,$bytes)
         Assert-NativeBuildTimeRemaining
-        return [ordered]@{url=$url;path=$OutputPath;size=$bytes.Length;sha256=(Get-FileHash $OutputPath -Algorithm SHA256).Hash.ToLowerInvariant()}
+        return Assert-VcRedistributionTerms $OutputPath $Architecture
     } finally {if($response){$response.Dispose()};$client.Dispose();$cancel.Dispose()}
 }
 
-function Install-AppLocalCrt($Plan,[string]$ProgramDirectory,[string]$TermsPath) {
+function Install-AppLocalCrt($Plan,[string]$ProgramDirectory,[string]$TermsPath,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     Assert-UnlinkedPath $ProgramDirectory;Assert-UnlinkedPath $TermsPath
-    if(-not(Test-Path -LiteralPath $ProgramDirectory -PathType Container) -or -not(Test-Path -LiteralPath $TermsPath -PathType Leaf) -or $Plan.architecture -cne 'arm64' -or @($Plan.files).Count -ne @(Get-CrtNames 'arm64').Count) {throw 'App-local CRT requires the complete preflight plan, program directory and preserved terms.'}
+    if($Architecture -ceq 'x64') {Assert-VcRedistributionTerms $TermsPath x64|Out-Null}
+    if(-not(Test-Path -LiteralPath $ProgramDirectory -PathType Container) -or -not(Test-Path -LiteralPath $TermsPath -PathType Leaf) -or $Plan.architecture -cne $Architecture -or @($Plan.files).Count -ne @(Get-CrtNames $Architecture).Count) {throw 'App-local CRT requires the complete preflight plan, program directory and preserved terms.'}
     $names=@($Plan.files|ForEach-Object {$_.name})
-    if((Compare-Object -CaseSensitive $names @(Get-CrtNames 'arm64'))) {throw 'CRT preflight plan changed its exact ARM64 eight-file family.'}
+    if((Compare-Object -CaseSensitive $names @(Get-CrtNames $Architecture))) {throw 'CRT preflight plan changed its exact native family.'}
     foreach($existing in Get-ChildItem -LiteralPath $ProgramDirectory -File) {
         if($existing.Name -match '^(?:concrt|msvcp|vcruntime|vccorlib|msvcr|msvcm)[0-9][a-z0-9_]*\.dll$' -and $existing.Name.ToLowerInvariant() -cnotin $names) {
-            throw "Unexpected existing ARM64 CRT family member: $($existing.Name)"
+            throw "Unexpected existing native CRT family member: $($existing.Name)"
         }
     }
     $readme=Join-Path (Split-Path $ProgramDirectory -Parent) 'share/readme'
-    $termsTarget=Join-Path $readme 'Microsoft-VC145-redistribution.html'
+    $termsTarget=Join-Path $readme ('Microsoft-'+$Plan.toolset.ToUpperInvariant().Replace('V','VC')+'-redistribution.html')
     Assert-UnlinkedPath $readme;Assert-UnlinkedPath $termsTarget
     $termsHash=(Get-FileHash $TermsPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if((Test-Path $termsTarget) -and (Get-FileHash $termsTarget -Algorithm SHA256).Hash.ToLowerInvariant() -cne $termsHash) {throw 'CRT redistribution terms destination collision.'}
@@ -1181,7 +1424,7 @@ function Install-AppLocalCrt($Plan,[string]$ProgramDirectory,[string]$TermsPath)
     foreach($file in $Plan.files) {
         $expected=Join-Path $Plan.sourceDirectory $file.name
         if($file.sourcePath -cne [IO.Path]::GetFullPath($expected)) {throw 'CRT source escaped the configured VS redist directory.'}
-        $actual=Assert-CrtFile $expected $Plan.minimumRuntimeVersion
+        $actual=Assert-CrtFile $expected $Plan.minimumRuntimeVersion $Architecture
         if($actual.sha256 -cne $file.sha256) {throw 'Authenticated CRT source changed after preflight.'}
         $destination=Join-Path $ProgramDirectory $file.name;Assert-UnlinkedPath $destination
         if((Test-Path -LiteralPath $destination) -and (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {throw "App-local CRT destination collision: $destination"}
@@ -1189,28 +1432,29 @@ function Install-AppLocalCrt($Plan,[string]$ProgramDirectory,[string]$TermsPath)
     }
     foreach($file in $checked) {
         if(-not $file.alreadyIdentical) {Copy-Item -LiteralPath $file.source.sourcePath -Destination $file.destination -ErrorAction Stop}
-        $copied=Assert-CrtFile $file.destination $Plan.minimumRuntimeVersion
+        $copied=Assert-CrtFile $file.destination $Plan.minimumRuntimeVersion $Architecture
         if($copied.sha256 -cne $file.source.sha256) {throw 'Copied app-local CRT bytes differ from authenticated source.'}
         $file.copiedSha256=$copied.sha256
     }
     New-Item -ItemType Directory -Path $readme -Force|Out-Null
     if(-not(Test-Path $termsTarget)) {Copy-Item -LiteralPath $TermsPath -Destination $termsTarget}
-    return [ordered]@{schemaVersion=1;architecture='arm64';toolset=$Plan.toolset;sourceDirectory=$Plan.sourceDirectory;programDirectory=$ProgramDirectory;files=$checked;redistributionTerms=@{path=$termsTarget;sha256=$termsHash}}
+    return [ordered]@{schemaVersion=1;architecture=$Architecture;toolset=$Plan.toolset;sourceDirectory=$Plan.sourceDirectory;programDirectory=$ProgramDirectory;files=$checked;redistributionTerms=@{path=$termsTarget;sha256=$termsHash}}
 }
 
-function Invoke-CrtImportAudit([string]$Python,[string]$Repo,[string]$Runtime,[string]$EvidenceDirectory) {
+function Invoke-CrtImportAudit([string]$Python,[string]$Repo,[string]$Runtime,[string]$EvidenceDirectory,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $helper=Join-Path $Repo 'suite/crt.py';$proofPath=Join-Path $EvidenceDirectory 'crt-import-closure.json'
     Assert-UnlinkedPath $helper;Assert-UnlinkedPath $proofPath
-    Invoke-LoggedCommand $Python @($helper,'--root',$Runtime,'--architecture','arm64','--output',$proofPath) $Repo (Join-Path $EvidenceDirectory 'crt-import-closure')|Out-Null
+    Invoke-LoggedCommand $Python @($helper,'--root',$Runtime,'--architecture',$Architecture,'--output',$proofPath) $Repo (Join-Path $EvidenceDirectory 'crt-import-closure')|Out-Null
     $proof=Get-Content -LiteralPath $proofPath -Raw|ConvertFrom-Json
-    if($proof.schemaVersion -ne 1 -or $proof.architecture -cne 'arm64' -or $proof.passed -ne $true -or
-       $proof.checkedPeCount -lt 1 -or @($proof.requiredCrtFiles).Count -ne 8 -or
-       (Compare-Object -CaseSensitive @($proof.requiredCrtFiles) @(Get-CrtNames 'arm64'))) {throw 'Native CRT normal/delay import closure was not proved.'}
+    if($proof.schemaVersion -ne 1 -or $proof.architecture -cne $Architecture -or $proof.passed -ne $true -or
+       $proof.checkedPeCount -lt 1 -or @($proof.requiredCrtFiles).Count -ne @(Get-CrtNames $Architecture).Count -or
+       (Compare-Object -CaseSensitive @($proof.requiredCrtFiles) @(Get-CrtNames $Architecture))) {throw 'Native CRT normal/delay import closure was not proved.'}
     return $proof
 }
 
-function Write-BaseProofScript([string]$Path) {
-@'
+function Write-BaseProofScript([string]$Path,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    $body=@'
 import ctypes, hashlib, json, os, pathlib, sys, traceback
 repo,runtime,output,work=map(pathlib.Path,sys.argv[1:])
 sys.path.insert(0,str(repo/'suite/e2e'))
@@ -1228,12 +1472,13 @@ def native(pid, retained_handle=None):
     try:
         process_machine,native_machine=ctypes.c_ushort(),ctypes.c_ushort()
         if not kernel.IsWow64Process2(handle,ctypes.byref(process_machine),ctypes.byref(native_machine)): raise ctypes.WinError(ctypes.get_last_error())
-        assert process_machine.value==0 and native_machine.value==0xaa64,'Observed Python/Office process is emulated or OS is not ARM64'
+        assert process_machine.value==0 and native_machine.value==NATIVE_MACHINE,'Observed Python/Office process is emulated or OS is not native'
         return dict(pid=pid,processMachine=process_machine.value,nativeMachine=native_machine.value)
     finally:
         if retained_handle is None: kernel.CloseHandle(handle)
 
-record=dict(schemaVersion=1,passed=False,guiVerified=False,independentReopenVerified=False,nativeProcesses=[])
+record=dict(schemaVersion=PROOF_VERSION,passed=False,guiVerified=False,independentReopenVerified=False,nativeProcesses=[])
+if PROOF_VERSION==2: record['retirement']=[]
 path=work/'native-firebird-proof.odb'
 try:
     assert not work.exists(),'Proof work directory must be fresh'
@@ -1269,13 +1514,24 @@ try:
             try: engine.close_document(document)
             finally: engine.cleanup()
             assert not engine.cleanup_errors,'Owned engine cleanup failed: '+repr(engine.cleanup_errors)
+            if PROOF_VERSION==2:
+                smoke.validate_cleanup_evidence(engine.cleanup_evidence)
+                handles_closed=(engine.process.handle is None and engine.process.job is None
+                    and engine._job_witness is not None and not engine._job_witness.members
+                    and not engine._job_witness.failed_members)
+                assert handles_closed,'Original owned process/job/retained handles did not close'
+                record['retirement'].append(dict(phase=phase,handlesClosed=handles_closed,cleanup=engine.cleanup_evidence))
+    if PROOF_VERSION==2:
+        hosts=record['nativeProcesses'][1:]
+        assert len({(host['pid'],host['creationTime']) for host in hosts})==2,'Base reopen reused the original process generation'
     record.update(passed=True,odb=str(path),odbSha256=hashlib.sha256(path.read_bytes()).hexdigest())
 except BaseException as exc:
     record.update(error=type(exc).__name__+': '+str(exc),traceback=traceback.format_exc())
 finally:
     output.write_text(json.dumps(record,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
 sys.exit(0 if record['passed'] else 1)
-'@|Set-Content -LiteralPath $Path -Encoding utf8NoBOM
+'@
+    [IO.File]::WriteAllText($Path,"NATIVE_MACHINE=$($target.nativeMachine)`nPROOF_VERSION=$($target.proofVersion)`n"+$body,[Text.UTF8Encoding]::new($false))
 }
 
 function Write-NativeSourceGate([string]$Path,[string]$RepoRoot,[string]$SourceRoot,[string]$FirebirdArchive,[string]$MddsArchive) {
@@ -1341,37 +1597,139 @@ function Assert-WinAccFocusSourcePatchReceipt($Proof,$Lock,[string]$CoreCommit,[
     }
 }
 
+function Get-NativeLongPath([string]$Path) {
+    Assert-UnlinkedPath $Path
+    if(-not ('NativeEnginePath' -as [type])) {
+        Add-Type @'
+using System.Runtime.InteropServices;
+using System.Text;
+public static class NativeEnginePath {
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern uint GetLongPathName(string path,StringBuilder buffer,uint length);
+}
+'@
+    }
+    $buffer=[Text.StringBuilder]::new(32768)
+    $length=[NativeEnginePath]::GetLongPathName([IO.Path]::GetFullPath($Path),$buffer,32768)
+    if($length -eq 0 -or $length -ge 32768) {throw 'Configured native path could not be resolved without short-name ambiguity.'}
+    return $buffer.ToString().TrimEnd('\','/')
+}
+
+function Assert-NativeConfiguredToolchain([string]$CompilerRoot,[Collections.IDictionary]$Configuration,$Preflight) {
+    if($Preflight.passed -ne $true -or $Preflight.architecture -cne 'x64' -or $Configuration.VCTOOLSET -cne 'v143' -or
+       $Configuration.VCVER -cnotin @('17.0','17.14') -or (Get-NativeLongPath $CompilerRoot) -ine (Get-NativeLongPath $Preflight.compiler.compilerRoot) -or
+       $Configuration.UCRTVERSION -cne $Preflight.sdk.version -or $Configuration.WINDOWS_SDK_LIB_SUBDIR -cne $Preflight.sdk.version -or
+       (Get-NativeLongPath $Configuration.UCRTSDKDIR) -ine (Get-NativeLongPath $Preflight.sdk.root) -or
+       (Get-NativeLongPath $Configuration.WINDOWS_SDK_HOME) -ine (Get-NativeLongPath $Preflight.sdk.root)) {throw 'Configured compiler/SDK differs from the native preflight selection.'}
+    foreach($name in @('CC','CXX','MSVC_CXX')) {
+        if(-not $Configuration[$name] -or (Get-NativeLongPath $Configuration[$name]) -ine (Get-NativeLongPath $Preflight.compiler.tools.cl.path)) {throw 'Configured C/C++ compiler differs from native preflight.'}
+    }
+    foreach($name in @('cl','link','lib')) {
+        $path=Join-Path $CompilerRoot ('bin/Hostx64/x64/'+$name+'.exe')
+        $actual=Get-ProductPeIdentity $path -Architecture x64
+        if($actual.sha256 -cne $Preflight.compiler.tools[$name].sha256 -or (Get-NativeCompilerFileVersion $path) -cne $Preflight.compiler.tools[$name].version) {throw 'Native compiler changed after preflight.'}
+    }
+    return [ordered]@{matched=$true;compilerRoot=(Get-NativeLongPath $CompilerRoot);toolset='v143';sdkRoot=(Get-NativeLongPath $Preflight.sdk.root);sdkVersion=$Preflight.sdk.version}
+}
+
+function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','winAccFocusOrder')}
+    if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
+       $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
+       $proof.recipeSha256 -cnotmatch '^[0-9a-f]{64}$' -or ($proof.hookOrder -join '/') -cne ($order -join '/') -or @($proof.armGuardedSources).Count -ne 13 -or
+       $proof.nativeBuildVerified -ne $false -or $proof.fullEngineQualified -ne $false -or $proof.acceptanceEligible -ne $false -or $proof.guiVerified -ne $false) {throw 'Source recipe is not bound to this actual source/policy run.'}
+    if($Architecture -ceq 'x64' -and (@($proof.armGuardedSources|Where-Object {$_.unchanged -ne $true -or $_.sha256 -cne $_.beforeSha256}).Count -or
+       $Receipt.sourceHooks.kind -cne 'native-windows-common-source-hooks' -or $Receipt.sourceHooks.architecture -cne 'x64')) {throw 'x64 source receipt applied ARM-only hooks.'}
+}
+
+function Assert-WinAccBinaryProof($Proof,[string]$RuntimeRoot,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $target=Get-NativeEngineTarget $Architecture
+    $path=Join-Path $RuntimeRoot 'program/winaccessibility.dll'
+    $actual=Get-ProductPeIdentity $path -Architecture $Architecture
+    $bytes=[IO.File]::ReadAllBytes($path);$offset=[BitConverter]::ToUInt32($bytes,60)
+    if(-not([BitConverter]::ToUInt16($bytes,[int]$offset+22) -band 0x2000)) {throw 'Installed WinAcc must be a native DLL.'}
+    if($Proof.path -cne 'program/winaccessibility.dll' -or $Proof.machine -ne $target.productMachine -or $Proof.role -cne $actual.role -or
+       $actual.role -cnotin @('nativeArm64','nativeX64') -or $Proof.size -ne $actual.size -or $Proof.sha256 -cne $actual.sha256 -or
+       $null -eq $Proof.imports.normal -or @($Proof.imports.normal).Count -eq 0 -or $null -eq $Proof.imports.delay) {throw 'Installed WinAcc binary identity/import proof is incomplete.'}
+    foreach($name in @($Proof.imports.normal)+@($Proof.imports.delay)) {if($name -cnotmatch '^[a-z0-9_.-]+\.dll$') {throw 'Installed WinAcc import name is invalid.'}}
+}
+
+function Get-WinAccBinaryProof([string]$Python,[string]$Repo,[string]$RuntimeRoot,[string]$EvidenceDirectory,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+    $pe=Get-ProductPeIdentity (Join-Path $RuntimeRoot 'program/winaccessibility.dll') -Architecture $Architecture
+    $code='import json,sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);from suite.pe_imports import read_pe_imports;print(json.dumps(read_pe_imports(Path(sys.argv[2]))))'
+    $result=Invoke-LoggedCommand $Python @('-c',$code,$Repo,$pe.path) $RuntimeRoot (Join-Path $EvidenceDirectory 'winacc-imports') -NativeEnvironment:($Architecture -ceq 'x64')
+    $pe.path='program/winaccessibility.dll';$pe.imports=Get-Content -LiteralPath $result.stdout -Raw|ConvertFrom-Json
+    Assert-WinAccBinaryProof $pe $RuntimeRoot $Architecture
+    return $pe
+}
+
+function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot) {
+    $target=Get-NativeEngineTarget x64
+    if($Receipt.schemaVersion -ne 2 -or $Receipt.architecture -cne 'x64' -or $Receipt.phase -ine 'Full' -or $Receipt.kind -cne 'native-office-engine-source-build' -or
+       $Receipt.passed -ne $false -or $Receipt.fullEngineQualified -ne $false -or $Receipt.acceptanceEligible -ne $false -or $Receipt.guiVerified -ne $false -or
+       $Receipt.nativePreflight.passed -ne $true -or $Receipt.configuredToolchain.matched -ne $true -or $Receipt.sourceRecipeChecksExecuted -ne $true -or
+       $Receipt.installedRuntimeStage.passed -ne $true -or $Receipt.externalSources.pythonSourceVerified -ne $true -or $Receipt.baseProof.passed -ne $true -or
+       $Receipt.baseProof.schemaVersion -ne 2 -or $Receipt.crtImportClosure.passed -ne $true -or $Receipt.crtImportClosure.architecture -cne 'x64' -or
+       @($Receipt.appLocalCrt.files).Count -ne @(Get-CrtNames x64).Count -or $Receipt.appLocalCrt.architecture -cne 'x64' -or
+       $Receipt.crtRedistributionTerms.url -cne $target.crtRedistributionUrl -or $Receipt.crtRedistributionTerms.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $Receipt.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $Receipt.sourceTree -cnotmatch '^[0-9a-f]{40}$' -or $Receipt.sourceRun -le 0 -or $Receipt.runAttempt -ne 1) {throw 'Normal x64 Full qualification prerequisites are incomplete.'}
+    Assert-NativeBuildHost $Receipt.host x64
+    Assert-NativeSourceRecipeBinding $Receipt x64
+    Assert-WinAccBinaryProof $Receipt.winAccBinary $RuntimeRoot x64
+    $binding=$Receipt.workflowBinding
+    if($binding.workflow -cne $target.workflow -or $binding.workflowRef -cne ('ATLKR/OpenGeul/'+$target.workflow+'@'+$target.ref) -or $binding.ref -cne $target.ref -or $binding.job -cne $target.job -or
+       $binding.sourceRun -ne $Receipt.sourceRun -or $binding.runAttempt -ne $Receipt.runAttempt -or $binding.sourceCommit -cne $Receipt.sourceCommit -or $binding.sourceTree -cne $Receipt.sourceTree) {throw 'x64 workflow/source/run binding differs.'}
+    foreach($relative in @('program/soffice.bin','program/python.exe','program/pyuno.pyd','program/ifbclient.dll','program/Engine12.dll','program/intl/fbintl.dll','program/winaccessibility.dll')) {
+        $path=Join-Path $RuntimeRoot $relative
+        $matches=@($Receipt.productInventory|Where-Object {$_.path -ceq $path})
+        $actual=Get-ProductPeIdentity $path -Architecture x64
+        if($matches.Count -ne 1 -or $matches[0].role -cne 'nativeX64' -or $matches[0].machine -ne 0x8664 -or $matches[0].sha256 -cne $actual.sha256 -or $matches[0].size -ne $actual.size) {throw 'Critical x64 inventory differs from the staged runtime.'}
+        if($relative -ceq 'program/winaccessibility.dll') {Assert-WinAccBinaryProof ([pscustomobject]@{path=$relative;machine=$matches[0].machine;role=$matches[0].role;size=$matches[0].size;sha256=$matches[0].sha256;imports=$matches[0].imports}) $RuntimeRoot x64}
+    }
+    foreach($pin in Get-PinnedPythonTemplates x64|Where-Object {$_.machine -ne 0x8664}) {
+        $path=Join-Path $RuntimeRoot $pin.path
+        $actual=Get-ProductPeIdentity $path $RuntimeRoot x64
+        if($actual.role -cne 'pythonLauncherTemplate' -or $actual.sha256 -cne $pin.sha256) {throw 'Actual x64 Python template family is incomplete.'}
+    }
+}
+
 function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols,[switch]$CalcDispatchDiagnostic,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
-    Get-NativeEngineTarget $Architecture|Out-Null
+    $nativeTarget=Get-NativeEngineTarget $Architecture
+    $nativeRole=if($Architecture -ceq 'arm64'){'nativeArm64'}else{'nativeX64'}
     if($Architecture -ceq 'x64' -and ($Phase -ine 'Full' -or $MutexSymbols -or $CalcDispatchDiagnostic)) {throw 'x64 supports normal Full only.'}
     if($Phase -ieq 'Full' -and -not $CalcDispatchDiagnostic) {Assert-NativeEngineEnvironment $Architecture}
-    if($Architecture -ceq 'x64') {throw 'x64 lifecycle awaits Task 3; qualification is unavailable.'}
-    $mode=Get-NativeEngineBuildMode $Phase -CalcDispatchDiagnostic:$CalcDispatchDiagnostic
+    $mode=Get-NativeEngineBuildMode $Phase -CalcDispatchDiagnostic:$CalcDispatchDiagnostic -Architecture $Architecture
     if($MutexSymbols -and $Phase -cne 'Full') {throw 'Plugin symbols require the full native source build.'}
     if($MutexSymbols) {Assert-MutexSymbolsEnvironment}
     $paths=New-BuildDirectories $WorkDirectory $OutputDirectory
     $work=$paths.work;$evidence=$paths.output
-    $source='';$manifest=$null
+    $source='';$manifest=$null;$zip=''
     $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
-    $receipt=[ordered]@{schemaVersion=1;kind=$mode.kind;phase=$Phase;architecture='arm64';status='failed';passed=$false;fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false;startedUtc=[DateTime]::UtcNow.ToString('o');stage='native-host';firebirdSourcePortChecksExecuted=$false;libreOfficeCheckTargetExecuted=$false}
+    $receipt=[ordered]@{schemaVersion=$nativeTarget.proofVersion;kind=$mode.kind;phase=$Phase;architecture=$Architecture;status='failed';passed=$false;fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false;startedUtc=[DateTime]::UtcNow.ToString('o');stage='native-host';firebirdSourcePortChecksExecuted=$false;libreOfficeCheckTargetExecuted=$false}
     $previousBudget=$script:NativeEngineBuildBudget
     try {
         $receipt.stage='build-time-budget'
         $script:NativeEngineBuildBudget=New-NativeBuildBudget $DeadlineUtc
         $receipt.buildBudget=$script:NativeEngineBuildBudget.record
         $receipt.stage='native-host';Assert-NativeBuildTimeRemaining
-        $receipt.host=Get-NativeBuildHost
+        $receipt.host=Get-NativeBuildHost $Architecture
         $receipt.stage='bind-actual-source-run';Assert-NativeBuildTimeRemaining
         $binding=Get-SourceRunBinding $repo (Join-Path $PSScriptRoot 'build-native-engine.ps1') (Join-Path $repo 'suite/engine-build/source-build.json') $evidence
         foreach($key in $binding.Keys) {$receipt[$key]=$binding[$key]}
+        if($Architecture -ceq 'x64') {$receipt.workflowBinding=[ordered]@{workflow=$nativeTarget.workflow;workflowRef=$env:GITHUB_WORKFLOW_REF;ref=$env:GITHUB_REF;job=$env:GITHUB_JOB;sourceRun=$receipt.sourceRun;runAttempt=$receipt.runAttempt;sourceCommit=$receipt.sourceCommit;sourceTree=$receipt.sourceTree}}
         if(-not $SourceLockPath) {$SourceLockPath=Join-Path $repo 'suite/config/runtime.lock.json'}
         $pin=Get-SourcePin $SourceLockPath;$receipt.sourcePin=$pin
         Copy-Item -LiteralPath $SourceLockPath -Destination (Join-Path $evidence 'input-runtime.lock.json')
         # Windows configure otherwise searches only the JavaSoft registry. Bind
         # actual native hosted tools before any large source downloads instead.
         $receipt.stage='installed-java-build-prerequisites';Assert-NativeBuildTimeRemaining
-        $receipt.javaTools=[ordered]@{jdk=(Resolve-NativeJdk $JdkHome);ant=(Resolve-Ant $AntHome)}
+        $receipt.javaTools=[ordered]@{jdk=(Resolve-NativeJdk $JdkHome $Architecture);ant=(Resolve-Ant $AntHome)}
         Write-BuildJson (Join-Path $evidence 'java-build-tools.json') $receipt.javaTools
+        if($Architecture -ceq 'x64') {
+            $receipt.stage='native-toolchain-preflight';Assert-NativeBuildTimeRemaining
+            $receipt.nativePreflight=Invoke-NativeX64Preflight $work $evidence
+            Write-BuildJson (Join-Path $evidence 'native-toolchain-preflight.json') $receipt.nativePreflight
+        }
         $downloads=Join-Path $work 'downloads';New-Item -ItemType Directory $downloads|Out-Null
         $receipt.stage='authenticated-downloads';Assert-NativeBuildTimeRemaining
         $receipt.pkgconfTool=Get-AuthenticatedWindowsPkgconf $downloads $evidence $work
@@ -1417,18 +1775,23 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         if(-not(Test-Path -LiteralPath (Join-Path $source 'configure.ac'))) {throw 'Pinned source root was not extracted.'}
         Copy-Item (Join-Path $source 'configure.ac') (Join-Path $evidence 'configure-pristine.ac')
         $sourceGate=Join-Path $commands 'source-gate.sh'
-        Write-NativeSourceGate $sourceGate $unixRepo $unixSource $unixFb $unixMdds
-        $receipt.stage='real-source-port-tests';Assert-NativeBuildTimeRemaining
-        Invoke-CygwinScript $bash $cygpath $sourceGate $work (Join-Path $evidence 'source-port-tests')|Out-Null
-        $receipt.firebirdSourcePortChecksExecuted=$true
-        $receipt.stage='install-authenticated-source-hooks';Assert-NativeBuildTimeRemaining
+        if($Architecture -ceq 'arm64') {
+            Write-NativeSourceGate $sourceGate $unixRepo $unixSource $unixFb $unixMdds
+            $receipt.stage='real-source-port-tests';Assert-NativeBuildTimeRemaining
+            Invoke-CygwinScript $bash $cygpath $sourceGate $work (Join-Path $evidence 'source-port-tests')|Out-Null
+            $receipt.firebirdSourcePortChecksExecuted=$true
+        }
         $python=(Get-Command python -ErrorAction Stop).Source
-        $hookResult=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/enable_firebird_arm64.py'),'--libreoffice-source',$source,'--evidence-directory',$evidence) $repo (Join-Path $evidence 'source-hooks')
-        $receipt.sourceHooks=Get-Content -LiteralPath $hookResult.stdout -Raw|ConvertFrom-Json
-        $receipt.stage='install-authenticated-winacc-focus-order';Assert-NativeBuildTimeRemaining
-        $focusHook=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/apply_winacc_focus_order.py'),'--libreoffice-source',$source,'--evidence-directory',$evidence,'--core-commit',$pin.coreCommit) $repo (Join-Path $evidence 'winacc-focus-order-source-hooks')
-        $receipt.winAccFocusOrderSourcePatch=Get-Content -LiteralPath $focusHook.stdout -Raw|ConvertFrom-Json
-        Assert-WinAccFocusSourcePatchReceipt $receipt.winAccFocusOrderSourcePatch $manifest.winAccFocusOrder $pin.coreCommit $evidence
+        $receipt.stage='real-source-recipe-tests';Assert-NativeBuildTimeRemaining
+        Invoke-LoggedCommand $python @('-m','unittest','discover','-s','suite/tests','-p','test_native_source_recipe.py','-v') $repo (Join-Path $evidence 'source-recipe-tests') -EnvironmentOverrides @{OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE=$source;OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE='1'} -NativeEnvironment:($Architecture -ceq 'x64')|Out-Null
+        $receipt.sourceRecipeChecksExecuted=$true
+        $receipt.stage='install-authenticated-source-hooks';Assert-NativeBuildTimeRemaining
+        $sourceEvidence=Join-Path $evidence 'source-recipe';New-Item -ItemType Directory $sourceEvidence|Out-Null
+        $hookResult=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/apply_native_source.py'),'--libreoffice-source',$source,'--evidence-directory',$sourceEvidence,'--architecture',$Architecture) $repo (Join-Path $evidence 'source-hooks') -NativeEnvironment:($Architecture -ceq 'x64')
+        $hooks=Get-Content -LiteralPath $hookResult.stdout -Raw|ConvertFrom-Json
+        $receipt.sourceHooks=$hooks.sourceHooks;$receipt.winAccFocusOrderSourcePatch=$hooks.winAccFocusOrderSourcePatch;$receipt.sourceRecipeProof=$hooks.sourceRecipeProof
+        Assert-NativeSourceRecipeBinding $receipt $Architecture
+        Assert-WinAccFocusSourcePatchReceipt $receipt.winAccFocusOrderSourcePatch $manifest.winAccFocusOrder $pin.coreCommit $sourceEvidence
         if($CalcDispatchDiagnostic) {
             $receipt.stage='install-authenticated-calc-dispatch-diagnostic';Assert-NativeBuildTimeRemaining
             $diagnostic=Join-Path $repo 'suite/engine-build/calc-dispatch-diagnostic'
@@ -1442,7 +1805,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                $receipt.calcDispatchSourceHooks.lockSha256 -cne (Get-FileHash -LiteralPath (Join-Path $evidence 'calc-dispatch-source-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()) {throw 'Calc dispatch source hooks did not authenticate the diagnostic.'}
             $receipt.sourceLockSha256=$receipt.calcDispatchSourceHooks.lockSha256
         }
-        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt $unixPkgconf -MutexSymbols:$MutexSymbols)
+        Write-BashScript (Join-Path $source 'autogen.input') @(Get-ConfigureArguments $unixDownloads $unixJdk $unixAnt $unixPkgconf -MutexSymbols:$MutexSymbols -Architecture $Architecture)
         Copy-Item (Join-Path $source 'autogen.input') (Join-Path $evidence 'autogen.input')
         $configure=Join-Path $commands 'configure.sh'
         Write-BashScript $configure @('set -euo pipefail','export PATH=/usr/local/bin:/usr/bin:/bin:$PATH',"cd $(Quote-Bash $unixSource)",'./autogen.sh')
@@ -1450,7 +1813,11 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         Invoke-CygwinScript $bash $cygpath $configure $work (Join-Path $evidence 'configure')|Out-Null
         $config=Join-Path $source 'config_host.mk'
         Copy-Item $config (Join-Path $evidence 'config_host.mk')
-        $receipt.configuration=Assert-GeneratedConfiguration $config
+        $receipt.configuration=Assert-GeneratedConfiguration $config $Architecture
+        if($Architecture -ceq 'x64') {
+            $receipt.configurationSha256=(Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant()
+            $receipt.configureArgumentsSha256=(Get-FileHash -LiteralPath (Join-Path $source 'autogen.input') -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
         if($MutexSymbols) {Assert-MutexSymbolsConfiguration $receipt.configuration}
         if(Test-Path (Join-Path $source 'config.log')) {Copy-Item (Join-Path $source 'config.log') (Join-Path $evidence 'config.log')}
         # Fail before any expensive compilation if this configured VS install
@@ -1458,12 +1825,21 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.stage='selected-toolchain-app-local-crt-preflight';Assert-NativeBuildTimeRemaining
         $compilerPath=Invoke-LoggedCommand $cygpath @('-w',$receipt.configuration.COMPATH) $work (Join-Path $evidence 'configured-msvc-root')
         $nativeCompilerRoot=(Get-Content -LiteralPath $compilerPath.stdout -Raw).Trim()
-        $receipt.crtPreflight=Get-AppLocalCrtPlan $nativeCompilerRoot $receipt.configuration.VCTOOLSET
+        if($Architecture -ceq 'x64') {
+            $nativeConfiguration=$receipt.configuration.Clone()
+            foreach($name in @('CC','CXX','MSVC_CXX','UCRTSDKDIR','WINDOWS_SDK_HOME')) {
+                if(-not $receipt.configuration[$name]) {throw "Configured native path is absent: $name"}
+                $converted=Invoke-LoggedCommand $cygpath @('-w',$receipt.configuration[$name]) $work (Join-Path $evidence ('configured-'+$name.ToLowerInvariant()))
+                $nativeConfiguration[$name]=(Get-Content -LiteralPath $converted.stdout -Raw).Trim()
+            }
+            $receipt.configuredToolchain=Assert-NativeConfiguredToolchain $nativeCompilerRoot $nativeConfiguration $receipt.nativePreflight
+            $receipt.crtPreflight=Get-AppLocalCrtPlan $nativeCompilerRoot $receipt.configuration.VCTOOLSET x64 $receipt.nativePreflight.compiler.minimumRuntimeVersion
+        } else {$receipt.crtPreflight=Get-AppLocalCrtPlan $nativeCompilerRoot $receipt.configuration.VCTOOLSET}
         Write-BuildJson (Join-Path $evidence 'app-local-crt-preflight.json') $receipt.crtPreflight
-        $receipt.nativeLibrarian=Get-NativeLibrarianPlan $nativeCompilerRoot
+        $receipt.nativeLibrarian=Get-NativeLibrarianPlan $nativeCompilerRoot $Architecture
         Write-BuildJson (Join-Path $evidence 'native-librarian.json') $receipt.nativeLibrarian
-        $crtTerms=Join-Path $evidence 'Microsoft-VC145-redistribution.html'
-        $receipt.crtRedistributionTerms=Save-VcRedistributionTerms $crtTerms
+        $crtTerms=Join-Path $evidence ('Microsoft-'+$nativeTarget.toolset.ToUpperInvariant().Replace('V','VC')+'-redistribution.html')
+        $receipt.crtRedistributionTerms=Save-VcRedistributionTerms $crtTerms $Architecture
         # Resolve the exact source download.lst variables with GNU make rather
         # than guessing version substitutions in Python/pip/bootstrap filenames.
         $receipt.stage='external-source-pins'
@@ -1487,21 +1863,21 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             if($target -eq 'firebird') {
                 $fbOutput=Join-Path $source 'workdir/UnpackedTarball/firebird/gen/Release/firebird'
                 $receipt.firebirdPe=@('bin/ifbclient.dll','plugins/Engine12.dll','intl/fbintl.dll')|ForEach-Object {
-                    $pe=Get-ProductPeIdentity (Join-Path $fbOutput $_)
-                    if($pe.role -ne 'nativeArm64') {throw 'Firebird engine/client/intl DLLs must be native ARM64.'}
+                    $pe=Get-ProductPeIdentity (Join-Path $fbOutput $_) -Architecture $Architecture
+                    if($pe.role -ne $nativeRole) {throw 'Firebird engine/client/intl DLLs must be native.'}
                     $pe
                 }
                 $isql=Join-Path $fbOutput 'bin/isql.exe'
                 $receipt.isql=[ordered]@{available=(Test-Path $isql);verified=$false}
                 if(Test-Path $isql) {
-                    $receipt.firebirdAppLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $fbOutput 'bin') $crtTerms
-                    $receipt.isql.pe=Get-ProductPeIdentity $isql
+                    $receipt.firebirdAppLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $fbOutput 'bin') $crtTerms $Architecture
+                    $receipt.isql.pe=Get-ProductPeIdentity $isql -Architecture $Architecture
                     $sql=Get-IsqlSql (Join-Path $work 'isql-proof.fdb')
                     $createSql=Join-Path $work 'isql-create.sql';$verifySql=Join-Path $work 'isql-verify.sql'
                     $sql.create|Set-Content $createSql -Encoding ascii;$sql.verify|Set-Content $verifySql -Encoding ascii
-                    $receipt.isql.icu=Get-IsqlIcuPlan $source $receipt.configuration
+                    $receipt.isql.icu=Get-IsqlIcuPlan $source $receipt.configuration $Architecture
                     Write-BuildJson (Join-Path $evidence 'isql-icu.json') $receipt.isql.icu
-                    $receipt.isql.plugins=Get-IsqlPluginPlan $fbOutput
+                    $receipt.isql.plugins=Get-IsqlPluginPlan $fbOutput $Architecture
                     Write-BuildJson (Join-Path $evidence 'isql-plugins.json') $receipt.isql.plugins
                     $isqlEnvironment=@{PATH=$receipt.isql.icu.directory+[IO.Path]::PathSeparator+$receipt.isql.plugins.directory+[IO.Path]::PathSeparator+$env:PATH;FIREBIRD=$fbOutput}
                     $receipt.isql.environment=[ordered]@{PATH=@{prepend=@($receipt.isql.icu.directory,$receipt.isql.plugins.directory);separator=[string][IO.Path]::PathSeparator;inheritParent=$true};FIREBIRD=$fbOutput;scope='isql-create and isql-reopen children only'}
@@ -1512,9 +1888,11 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             }
         }
         if($Phase -eq 'Full') {
-            $receipt.stage='admit-actual-mdds-headers';Assert-NativeBuildTimeRemaining
-            $receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality
-            if(-not $receipt.mddsHeaders.matchesExpected) {throw 'Actual effective MDDS headers differ from the proven native candidate.'}
+            if($Architecture -ceq 'arm64') {
+                $receipt.stage='admit-actual-mdds-headers';Assert-NativeBuildTimeRemaining
+                $receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality
+                if(-not $receipt.mddsHeaders.matchesExpected) {throw 'Actual effective MDDS headers differ from the proven native candidate.'}
+            }
             $receipt.stage='authenticate-all-downloaded-source-archives';Assert-NativeBuildTimeRemaining
             $receipt.externalSources=Write-ExternalSourceInventory $downloads $pinOutput.stdout (Join-Path $evidence 'external-source-inventory.json') $knownPins (Join-Path $source 'workdir/UnpackedTarball/python3') -RequirePython
             Copy-Item (Join-Path $source 'download.lst') (Join-Path $evidence 'authenticated-download.lst')
@@ -1532,32 +1910,41 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.runtimeBuildIdentity=Set-RuntimeBuildIdentity $instdir $archive $pin $receipt.sourceCommit $evidence $receipt.configuration $receipt.installedRuntimeStage
             Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
             $receipt.stage='stage-authenticated-native-app-local-crt';Assert-NativeBuildTimeRemaining
-            $receipt.appLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $instdir 'program') $crtTerms
+            $receipt.appLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $instdir 'program') $crtTerms $Architecture
             Write-BuildJson (Join-Path $evidence 'app-local-crt-installed.json') $receipt.appLocalCrt
             $receipt.stage='native-product-pe-audit';Assert-NativeBuildTimeRemaining
             foreach($relative in @('program/soffice.bin','program/python.exe','program/pyuno.pyd','program/ifbclient.dll','program/Engine12.dll','program/intl/fbintl.dll')) {
-                $critical=Get-ProductPeIdentity (Join-Path $instdir $relative)
-                if($critical.role -ne 'nativeArm64') {throw "Required native runtime output has wrong architecture: $relative"}
+                $critical=Get-ProductPeIdentity (Join-Path $instdir $relative) -Architecture $Architecture
+                if($critical.role -ne $nativeRole) {throw "Required native runtime output has wrong architecture: $relative"}
             }
             $inventory=@()
             foreach($file in Get-ChildItem -LiteralPath $instdir -File -Recurse) {
                 Assert-NativeBuildTimeRemaining
                 $stream=$file.OpenRead();try {$first=$stream.ReadByte();$second=$stream.ReadByte()} finally {$stream.Dispose()}
-                if(($first -eq 77 -and $second -eq 90) -or $file.Extension -in @('.exe','.dll','.pyd') -or $file.Name -eq 'soffice.bin') {$inventory+=Get-ProductPeIdentity $file.FullName $instdir}
+                if(($first -eq 77 -and $second -eq 90) -or $file.Extension -in @('.exe','.dll','.pyd') -or $file.Name -eq 'soffice.bin') {$inventory+=Get-ProductPeIdentity $file.FullName $instdir $Architecture}
             }
             if($inventory.Count -eq 0) {throw 'Native PE inventory is empty.'}
             Write-BuildJson (Join-Path $evidence 'native-pe-inventory.json') $inventory
             $receipt.productPeCount=$inventory.Count
-            $receipt.nativePeCount=@($inventory|Where-Object {$_.role -eq 'nativeArm64'}).Count
+            $receipt.nativePeCount=@($inventory|Where-Object {$_.role -eq $nativeRole}).Count
             $receipt.managedAnyCpuCount=@($inventory|Where-Object {$_.role -eq 'managedAnyCpu'}).Count
             $receipt.pinnedTemplateCount=@($inventory|Where-Object {$_.role -eq 'pythonLauncherTemplate'}).Count
             $receipt.stage='native-normal-delay-crt-import-closure';Assert-NativeBuildTimeRemaining
-            $receipt.crtImportClosure=Invoke-CrtImportAudit (Join-Path $instdir 'program/python.exe') $repo $instdir $evidence
+            $receipt.crtImportClosure=Invoke-CrtImportAudit (Join-Path $instdir 'program/python.exe') $repo $instdir $evidence $Architecture
+            if($Architecture -ceq 'x64') {
+                $receipt.productInventory=$inventory
+                $receipt.winAccBinary=Get-WinAccBinaryProof (Join-Path $instdir 'program/python.exe') $repo $instdir $evidence x64
+                $winAccInventory=@($inventory|Where-Object {$_.path -ceq (Join-Path $instdir 'program/winaccessibility.dll')})
+                if($winAccInventory.Count -ne 1) {throw 'WinAcc is absent from the final native inventory.'}
+                $winAccInventory[0].imports=$receipt.winAccBinary.imports
+                Write-BuildJson (Join-Path $evidence 'native-pe-inventory.json') $inventory
+                Confirm-FileIdentity (Join-Path $source $manifest.winAccFocusOrder.path) $manifest.winAccFocusOrder.afterBytes SHA256 $manifest.winAccFocusOrder.afterSha256|Out-Null
+            }
             $receipt.stage='actual-native-uno-base-persistence';Assert-NativeBuildTimeRemaining
-            $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe
+            $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe $Architecture
             $proof=Join-Path $evidence 'native-base-proof.json'
             Invoke-LoggedCommand (Join-Path $instdir 'program/python.exe') @($probe,$repo,$instdir,$proof,(Join-Path $work 'base-proof')) $instdir (Join-Path $evidence 'native-base-proof')|Out-Null
-            $receipt.baseProof=Assert-BaseProof $proof
+            $receipt.baseProof=Assert-BaseProof $proof $Architecture $instdir
             $receipt.stage='verify-effective-runtime-build-identity';Assert-NativeBuildTimeRemaining
             $receipt.runtimeBuildIdentity.finalVerification=Assert-RuntimeBuildIdentity $instdir $pin $receipt.runtimeBuildIdentity
             Write-BuildJson (Join-Path $evidence 'runtime-build-identity.json') $receipt.runtimeBuildIdentity
@@ -1572,6 +1959,11 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 Assert-NativeBuildTimeRemaining
             }
             if($CalcDispatchDiagnostic) {Write-CalcDispatchRuntimeMarker $instdir $receipt.sourceCommit $receipt.calcDispatchSourceHooks}
+            if($Architecture -ceq 'x64') {
+                if((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configurationSha256 -or
+                   (Get-FileHash -LiteralPath (Join-Path $source 'autogen.input') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configureArgumentsSha256) {throw 'Native configuration changed during compilation.'}
+                Assert-NativeX64Qualification $receipt $instdir
+            }
             $receipt.stage=if($CalcDispatchDiagnostic){'package-calc-dispatch-diagnostic'}else{'package-qualified-source-build'};Assert-NativeBuildTimeRemaining
             $zip=Join-Path $evidence $mode.archive
             if(Test-Path $zip) {throw 'Engine artifact already exists.'}
@@ -1584,24 +1976,48 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.fullEngineQualified=$mode.fullEngineQualified
         $receipt.acceptanceEligible=$mode.acceptanceEligible
         $receipt.passed=$true;$receipt.stage='complete'
-    } catch {$receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.acceptanceEligible=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString();throw}
+    } catch {
+        $receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.acceptanceEligible=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString()
+        if($Architecture -ceq 'x64' -and $zip -and (Test-Path -LiteralPath $zip)) {Remove-Item -LiteralPath $zip -ErrorAction Stop}
+        throw
+    }
     finally {
-        if($source -and (Test-Path -LiteralPath $source)) {
-            if($manifest -and -not $receipt.mddsHeaders) {
-                try {$receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality}
-                catch {$receipt.mddsHeaderRetentionError=$_.Exception.ToString()}
+        try {
+            if($source -and (Test-Path -LiteralPath $source)) {
+                if($Architecture -ceq 'arm64' -and $manifest -and -not $receipt.mddsHeaders) {
+                    try {$receipt.mddsHeaders=Save-ActualMddsHeaders $source $evidence $manifest.mddsEquality}
+                    catch {$receipt.mddsHeaderRetentionError=$_.Exception.ToString()}
+                }
+                foreach($name in @('config_host.mk','config.log','autogen.input')) {
+                    $candidate=Join-Path $source $name
+                    if(Test-Path -LiteralPath $candidate) {Copy-Item -LiteralPath $candidate -Destination (Join-Path $evidence $name) -Force}
+                }
+                $fbLog=Join-Path $source 'workdir/UnpackedTarball/firebird/build.log'
+                if(Test-Path -LiteralPath $fbLog) {Copy-Item -LiteralPath $fbLog -Destination (Join-Path $evidence 'firebird-build.log')}
             }
-            foreach($name in @('config_host.mk','config.log','autogen.input')) {
-                $candidate=Join-Path $source $name
-                if(Test-Path -LiteralPath $candidate) {Copy-Item -LiteralPath $candidate -Destination (Join-Path $evidence $name) -Force}
+            if($receipt.passed) {Assert-NativeBuildTimeRemaining}
+            $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
+            if($receipt.buildBudget) {$receipt.buildBudget.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}
+            # Synchronous retention/JSON I/O cannot be preempted. Recheck the
+            # original deadline on both sides; late I/O cannot qualify output.
+            if($receipt.passed) {Assert-NativeBuildTimeRemaining}
+            Write-BuildJson (Join-Path $evidence $mode.receipt) $receipt
+            if($receipt.passed) {Assert-NativeBuildTimeRemaining}
+        } catch {
+            $receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.acceptanceEligible=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString()
+            $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
+            if($receipt.buildBudget) {$receipt.buildBudget.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}
+            try {
+                if($zip -and (Test-Path -LiteralPath $zip)) {Remove-Item -LiteralPath $zip -ErrorAction Stop}
+            } finally {
+                # Failure evidence may use the finalization reserve, but never
+                # retains the successful proof written before a late expiry.
+                Write-BuildJson (Join-Path $evidence $mode.receipt) $receipt
             }
-            $fbLog=Join-Path $source 'workdir/UnpackedTarball/firebird/build.log'
-            if(Test-Path -LiteralPath $fbLog) {Copy-Item -LiteralPath $fbLog -Destination (Join-Path $evidence 'firebird-build.log')}
+            throw
+        } finally {
+            $script:NativeEngineBuildBudget=$previousBudget
         }
-        $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
-        if($receipt.buildBudget) {$receipt.buildBudget.elapsedSeconds=$script:NativeEngineBuildBudget.clock.Elapsed.TotalSeconds}
-        $script:NativeEngineBuildBudget=$previousBudget
-        Write-BuildJson (Join-Path $evidence $mode.receipt) $receipt
     }
 }
 
