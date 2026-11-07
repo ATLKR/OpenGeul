@@ -480,4 +480,268 @@ class NativeApartmentGuardTests(unittest.TestCase):
         self.assertEqual(native,['apartment','thread']);self.assertEqual(provider,[])
 
 
+class NativeSourceQualifiedPointV4Tests(unittest.TestCase):
+    fixture=NativeMenuPointProfileTests.fixture
+
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        from suite.tests.test_native_menu_source_admission import SourceMenuAdmissionTests
+        cls.gate=SourceMenuAdmissionTests(methodName='test_admits_real_validators_and_freezes_closed_binary_summary')
+        cls.gate.setUp()
+        cls.admission=cls.gate.admit()
+        cls.previous_source_module=sys.modules.get('native_menu_source_admission')
+        sys.modules['native_menu_source_admission']=cls.gate.implementation()
+
+    @classmethod
+    def tearDownClass(cls):
+        import sys
+        if cls.previous_source_module is None:sys.modules.pop('native_menu_source_admission',None)
+        else:sys.modules['native_menu_source_admission']=cls.previous_source_module
+        cls.gate.doCleanups()
+
+    def test_source_qualified_controller_has_separate_live_adapter_and_closed_validator(self):
+        owner=boundaries.OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
+        module=owner.fixture()[0]
+        for name in ('_begin_source_qualified_ia2_point_v4','_provider_local_point_v4'):
+            self.assertTrue(callable(getattr(module.NativeMenuProbe,name,None)),name)
+        self.assertTrue(callable(getattr(module,'_require_provider_point_v4',None)))
+
+    def source_fixture(self):
+        import native_menu_msaa_hit as helper
+        import test_native_menu_msaa_hit as metadata
+        module,probe,boundary,binding,state,lease,calls,pane=self.fixture()
+        self.assertTrue(callable(getattr(probe,'_provider_local_point_v4',None)))
+        sdk=metadata.Ia2DiagnosticCalls();sdk.identities.update({203:303,222:322})
+        platform=metadata.FakePlatform();platform.window_domain=lambda *args:1
+        source=helper.MsaaHitSourceV4(9,1,11,2,3,(4,5,6,7,8),20,21,(sdk,),10.,15.,30,31,40,(31,13),
+            self.admission,self.admission.admission_sha256)
+        worker=helper.run_source_qualified_ia2_point_v4(source,helper.MsaaHitScope(1,8,9,10,11,12,13,14,15),sdk,platform,15.)
+        self.assertEqual(worker['pointCandidate'],1)
+        packet=helper._record_v4(None,False);packet.update(worker)
+        packet.update(scopeId=1,nativeAttempted=1,nativeExit=1,threadClosed=1,processesClosed=1,
+            stageCode=13,controllerPid=500,threadId=44,threadBirth=1<<48,
+            threadIdentity=1,callbackIdentity=1,exitCodeObserved=1,nativeExitCode=0)
+        started=[]
+        def begin(fresh_refs,negative,scope_id,point,**kwargs):
+            started.append((fresh_refs,negative,scope_id,point,kwargs))
+            lease.scope=helper.MsaaHitScope(scope_id,88,200,77,100,55,56,*point)
+            packet['scopeId']=scope_id
+            return lease
+        def wait():state.waited=True;return copy.deepcopy(packet)
+        lease.wait=wait;probe._begin_source_qualified_ia2_point_v4=begin
+        return module,probe,boundary,binding,state,lease,pane,packet,started
+
+    def observe(self,fixture):
+        module,probe,boundary,binding,state,lease,pane,packet,started=fixture
+        return probe._provider_local_point_v4([50,70],probe.current_control.element_info._element,pane,
+            admission=self.admission)
+
+    def test_new_live_point_keeps_raw_false_and_canonical_zeros_and_joins_actual_source_digest(self):
+        f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+        result=self.observe(f)
+        self.assertEqual(result['schemaVersion'],4)
+        self.assertEqual(result['method'],'owned-popup-and-source-qualified-ia2-hit-v4')
+        self.assertEqual(result['finalPointVerified'],1)
+        self.assertEqual(result['sourceAdmissionSha256'],self.admission.admission_sha256)
+        self.assertEqual(result['primaryComparison']['rawMatchesTarget'],False)
+        self.assertEqual(tuple(result['provider'][k] for k in ('filePairEqual','targetPairEqual','hitMatchesTarget')),(0,0,0))
+        self.assertEqual((result['provider']['localKnown'],result['provider']['localMatch'],result['provider']['acceptanceEligible']),(0,0,0))
+        self.assertIs(started[0][4]['admission'],self.admission)
+        self.assertIsNot(started[0][0]['file'],probe._identity_refs['file'])
+        self.assertEqual((result['capturedAt'],result['effectiveDeadline'],probe.deadline),(1.,2.5,6.))
+        module._require_provider_point_v4(result,binding,77,'save',admission_sha256=self.admission.admission_sha256,now=1.)
+
+    def test_failed_pending_late_wrong_source_and_wrong_schema_start_no_post_queries(self):
+        for damage in ('pending','late','candidate','mode','positive','synthetic','extra','scope','negative','digest','exit','cleanup'):
+            with self.subTest(damage=damage):
+                f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+                post=[];counter=NS(count=0)
+                for name in ('_call','_uia_call','_popup_exposure'):
+                    original=getattr(probe,name)
+                    def guarded(*args,_original=original,**kwargs):
+                        if state.waited:counter.count+=1
+                        return _original(*args,**kwargs)
+                    setattr(probe,name,guarded)
+                probe._fresh_proof=lambda target:post.append(1)
+                if damage=='pending':lease.pending=True;packet['pending']=1
+                elif damage=='candidate':packet['pointCandidate']=0
+                elif damage=='mode':packet['workerSchemaVersion']=3
+                elif damage=='positive':packet['localKnown']=1
+                elif damage=='synthetic':packet['synthetic']=1
+                elif damage=='extra':packet['other']=0
+                elif damage=='scope':packet['scopeId']=2
+                elif damage=='negative':packet['negativeCount']=4
+                elif damage=='digest':packet['admissionDigest0']^=1
+                elif damage=='exit':packet['nativeExitCode']=1
+                elif damage=='cleanup':packet['workerCleanup']=0
+                def wait():
+                    if damage=='late':boundary.clock.now=2.5
+                    state.waited=True
+                    if damage=='scope':return dict(packet,scopeId=2)
+                    return copy.deepcopy(packet)
+                lease.wait=wait
+                with self.assertRaises(AssertionError):self.observe(f)
+                self.assertEqual((post,counter.count),([],0))
+                self.assertEqual(probe.deadline,6.)
+
+    def test_global_true_invalid_source_creator_and_expired_discovery_never_start_lease(self):
+        for damage in ('global','source','creator','discovery'):
+            with self.subTest(damage=damage):
+                f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+                admission=self.admission
+                if damage=='global':pane=probe.current_control.element_info._element
+                elif damage=='source':admission=NS(admission_sha256=self.admission.admission_sha256)
+                elif damage=='creator':probe._mta_snapshot=lambda:(999,True)
+                else:
+                    original=probe._fresh_proof_with_refs
+                    def fresh(target):
+                        result=original(target);boundary.clock.now=2.5;return result
+                    probe._fresh_proof_with_refs=fresh
+                with self.assertRaises((AssertionError,ValueError)):
+                    probe._provider_local_point_v4([50,70],probe.current_control.element_info._element,pane,admission=admission)
+                self.assertEqual(started,[]);self.assertEqual(probe.deadline,6.)
+
+    def test_five_direct_measurements_have_distinct_fresh_sources_and_one_original_action_deadline(self):
+        f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+        proofs=[]
+        for index in range(5):
+            state.waited=False;boundary.clock.now=1.+index*.6
+            proofs.append(self.observe(f));self.assertEqual(probe.deadline,6.)
+        self.assertEqual([p['sourceScopeId'] for p in proofs],[1,2,3,4,5])
+        self.assertEqual(len({id(row[0]) for row in started}),5)
+        self.assertEqual(len({id(row[0]['file']) for row in started}),5)
+        self.assertEqual([row[4]['action_deadline'] for row in started],[6.]*5)
+        for proof in proofs:self.assertEqual(proof['effectiveDeadline'],min(6.,proof['capturedAt']+1.5))
+        with self.assertRaises(AssertionError):
+            module._require_provider_point_v4(proofs[0],binding,77,'save',admission_sha256=self.admission.admission_sha256,now=3.4)
+        module._require_provider_point_v4(proofs[-1],binding,77,'save',admission_sha256=self.admission.admission_sha256,now=3.4)
+
+    def test_existing_pending_predecessor_blocks_every_new_measurement_before_provider_query(self):
+        f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+        probe._provider_pending=lambda:True;queries=[]
+        probe._require_provider_creator=lambda:queries.append(1)
+        with self.assertRaises(AssertionError):self.observe(f)
+        self.assertEqual((queries,started),([],[]))
+
+    def test_closed_replay_rejects_type_scope_geometry_raw_false_source_and_expiry_tampering(self):
+        f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+        original=self.observe(f)
+        mutations=(lambda p:p.update(schemaVersion=True),lambda p:p.update(extra=0),
+            lambda p:p.update(finalPointVerified=0),lambda p:p.update(sourceAdmissionSha256='0'*64),
+            lambda p:p.update(effectiveDeadline=3.),lambda p:p.update(capturedAt=0.),
+            lambda p:p['primaryComparison'].update(rawMatchesTarget=True),
+            lambda p:p['primaryComparison']['differentFrom'].update(file=True),
+            lambda p:p.update(targetRectangle=[0,0,1,1]),
+            lambda p:p['sourceScope'].update(engine_birth=201),
+            lambda p:p['provider'].update(pointCandidate=0),
+            lambda p:p['provider'].update(admissionDigest7=0))
+        for index,change in enumerate(mutations):
+            with self.subTest(case=index):
+                changed=copy.deepcopy(original);change(changed)
+                with self.assertRaises(AssertionError):
+                    module._require_provider_point_v4(changed,binding,77,'save',admission_sha256=self.admission.admission_sha256,now=1.)
+        with self.assertRaises(AssertionError):
+            module._require_provider_point_v4(original,binding,77,'save',admission_sha256=self.admission.admission_sha256,now=2.5)
+
+    def test_actual_adapter_uses_typed_source_four_exact_live_refs_and_only_the_new_entry(self):
+        import sys
+        from types import ModuleType
+        import native_menu_msaa_hit as helper
+        import test_native_menu_msaa_hit as metadata
+        f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+        probe._begin_source_qualified_ia2_point_v4=module.NativeMenuProbe._begin_source_qualified_ia2_point_v4.__get__(probe,type(probe))
+        sdk=metadata.sdk_fixture()
+        probe._uia_library=NS(IUIAutomation=sdk['client_interface'],IUIAutomationElement=sdk['element_interface'],
+            IUIAutomationLegacyIAccessiblePattern=sdk['legacy_interface'])
+        def ref(interface,value):return type('BorrowedV4',(C.c_void_p,),{'__com_interface__':interface})(value)
+        retained_file,fresh_file,retained_target,fresh_target,*negative=[ref(sdk['element_interface'],value) for value in range(501,508)]
+        probe.provider_client=ref(sdk['client_interface'],500)
+        probe._identity_refs={'file':retained_file,'target:save':retained_target}
+        refs={'file':fresh_file,'target:save':fresh_target}
+        comtypes=ModuleType('comtypes');comtypes.GUID=sdk['guid_type'];comtypes.HRESULT=sdk['hresult_type']
+        automation=ModuleType('comtypes.automation');automation.VARIANT=sdk['variant_type']
+        captured=[]
+        def begin(source,scope,binder,deadline,*,native_enabled=False):
+            captured.append((source,scope,binder,deadline,native_enabled));return lease
+        with patch.dict(sys.modules,{'comtypes':comtypes,'comtypes.automation':automation}), \
+                patch.object(module.C,'WINFUNCTYPE',C.CFUNCTYPE,create=True), \
+                patch.object(helper,'begin_source_qualified_ia2_point',side_effect=begin), \
+                patch.object(helper,'begin_ia2_diagnostic',side_effect=AssertionError('Mode3 cannot authorize mode4')), \
+                patch.object(helper,'begin_msaa_hit',side_effect=AssertionError('Old positive entry cannot authorize mode4')):
+            actual=probe._begin_source_qualified_ia2_point_v4(refs,negative,7,[50,70],admission=self.admission,
+                captured_at=1.,action_deadline=6.,exposure=dict(hwnd=99,threadId=9,ownerChain=[99,56]))
+        self.assertIs(actual,lease);source,scope,binder,deadline,enabled=captured[0]
+        self.assertIs(type(source),helper.MsaaHitSourceV4);self.assertTrue(binder.matches_source(source))
+        self.assertIs(source.retained_file,retained_file);self.assertIs(source.fresh_file,fresh_file)
+        self.assertIs(source.fresh_target,fresh_target);self.assertIs(source.retained_target,retained_target)
+        self.assertIs(source.admission,self.admission);self.assertIs(source.keepalive[0],probe)
+        self.assertIs(source.keepalive[1],refs);self.assertIs(source.keepalive[2],self.admission)
+        self.assertEqual(source.admission_sha256,self.admission.admission_sha256)
+        self.assertEqual((scope.scope_id,scope.engine_pid,scope.engine_birth,scope.shell_pid,scope.shell_birth,
+            scope.parent_hwnd,scope.child_hwnd,scope.x,scope.y),(7,88,200,77,100,55,56,50,70))
+        self.assertEqual((deadline,enabled),(6.,True))
+
+    def test_global_point_numbers_are_exact_integers_in_the_closed_v4_proof(self):
+        f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+        original=self.observe(f)
+        for key in ('kindCode','pid','nativeHwnd'):
+            with self.subTest(field=key):
+                changed=copy.deepcopy(original);changed['globalPoint'][key]=float(changed['globalPoint'][key])
+                with self.assertRaises(AssertionError):
+                    module._require_provider_point_v4(changed,binding,77,'save',admission_sha256=self.admission.admission_sha256,now=1.)
+
+    def global_handle_fixture(self,raw,popup):
+        f=self.source_fixture();module,probe,boundary,binding,state,lease,pane,packet,started=f
+        class Pane(boundary.Node):
+            @property
+            def CurrentControlType(self):return 50033
+            @property
+            def CurrentNativeWindowHandle(self):return raw
+        pane=Pane('popup')
+        original=probe._popup_exposure
+        def exposure(*args):
+            value=original(*args)
+            value.update(hwnd=popup,rootHwnd=popup,ownerChain=[popup,*value['ownerChain'][1:]])
+            return value
+        probe._popup_exposure=exposure
+        return module,probe,boundary,binding,state,lease,pane,packet,started
+
+    def test_signed_global_hwnd_preserves_raw_and_normalizes_exact_32bit_values(self):
+        for raw,normalized in ((-(1<<31),1<<31),(-(1<<31)+99,(1<<31)+99),(-1,(1<<32)-1),((1<<31)+99,(1<<31)+99)):
+            with self.subTest(raw_negative=raw<0):
+                f=self.global_handle_fixture(raw,normalized)
+                result=self.observe(f)
+                self.assertIn('nativeHwndRaw',result['globalPoint'])
+                self.assertEqual(result['globalPoint']['nativeHwndRaw'],raw)
+                self.assertEqual(result['globalPoint']['nativeHwnd'],normalized)
+                self.assertEqual(result['before']['hwnd'],normalized)
+                self.assertEqual(result['finalPointVerified'],1)
+
+    def test_invalid_global_hwnd_raw_value_stops_before_any_lease(self):
+        for raw,popup in ((True,1),(99.,99),(None,99),(0,99),((1<<32)+99,99),(-(1<<31)-1,(1<<31)-1),(-2147483549.,(1<<31)+99)):
+            with self.subTest(kind=type(raw).__name__):
+                f=self.global_handle_fixture(raw,popup)
+                with self.assertRaises(AssertionError):self.observe(f)
+                self.assertEqual(f[-1],[])
+                self.assertFalse(f[4].waited)
+
+    def test_closed_v4_replay_requires_exact_raw_type_range_and_normalized_hwnd_join(self):
+        f=self.global_handle_fixture(-(1<<31)+99,(1<<31)+99)
+        module,probe,boundary,binding,state,lease,pane,packet,started=f
+        original=self.observe(f)
+        changes=(lambda p:p['globalPoint'].pop('nativeHwndRaw'),
+            lambda p:p['globalPoint'].update(nativeHwndRaw=True),
+            lambda p:p['globalPoint'].update(nativeHwndRaw=float(-(1<<31)+99)),
+            lambda p:p['globalPoint'].update(nativeHwndRaw=-(1<<31)-1),
+            lambda p:p['globalPoint'].update(nativeHwndRaw=(1<<32)+99),
+            lambda p:p['globalPoint'].update(nativeHwndRaw=0),
+            lambda p:p['globalPoint'].update(nativeHwnd=(1<<31)+100))
+        for index,change in enumerate(changes):
+            with self.subTest(case=index):
+                changed=copy.deepcopy(original);change(changed)
+                with self.assertRaises(AssertionError):
+                    module._require_provider_point_v4(changed,binding,77,'save',admission_sha256=self.admission.admission_sha256,now=1.)
+
+
 if __name__=='__main__':unittest.main()

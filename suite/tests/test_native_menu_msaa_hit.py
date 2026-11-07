@@ -2316,4 +2316,561 @@ class Ia2DiagnosticV3Tests(unittest.TestCase):
                 self.helper._active=None  # Finished synthetic callback, no native thread or references.
 
 
+class SourceQualifiedIa2V4Tests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        repository=str(SOURCE.parents[2])
+        if repository not in sys.path:
+            sys.path.insert(0,repository)
+            cls.addClassCleanup(lambda:sys.path.remove(repository))
+        from suite.tests.test_native_menu_source_admission import SourceMenuAdmissionTests
+        fixture=SourceMenuAdmissionTests(methodName='test_admits_real_validators_and_freezes_closed_binary_summary')
+        fixture.setUp();cls.addClassCleanup(fixture.doCleanups)
+        cls.admitted=fixture.admit()
+        # The E2E script imports its neighbour directly; retain the exact actual
+        # gate type built by the package fixture rather than creating a second class.
+        from unittest.mock import patch
+        cls.admission_import=patch.dict(sys.modules,{
+            'native_menu_source_admission':sys.modules['suite.e2e.native_menu_source_admission']})
+        cls.admission_import.start();cls.addClassCleanup(cls.admission_import.stop)
+
+    def setUp(self):
+        self.helper=load_helper()
+        for name in ('MsaaHitSourceV4','SourceQualifiedIa2SdkAbi','worker_record_v4',
+                     'run_source_qualified_ia2_point_v4','begin_source_qualified_ia2_point',
+                     'SourceQualifiedIa2PointLease','_valid_v4_worker'):
+            self.assertTrue(callable(getattr(self.helper,name,None)),name)
+        self.sdk=Ia2DiagnosticCalls();self.platform=FakePlatform()
+        # Provider-local IA2 tuples agree while fresh target/hit COM wrappers do not.
+        self.sdk.identities[203]=333;self.sdk.identities[222]=341
+        self.platform.window_domain=lambda hwnd,source,scope:1 if hwnd==13 else 0
+        self.scope=self.helper.MsaaHitScope(7,8,9,10,11,12,13,14,15)
+
+    def source(self,**changes):
+        values=dict(client=9,retained_file=1,fresh_file=11,fresh_target=2,retained_target=3,
+            negative_refs=(4,5,6),shell_handle=20,engine_handle=21,keepalive=(self.sdk,self.admitted),
+            captured_at=10.,action_deadline=15.,document_hwnd=30,popup_hwnd=31,
+            popup_thread=40,owner_chain=(31,13),admission=self.admitted,
+            admission_sha256=self.admitted.admission_sha256)
+        values.update(changes)
+        return self.helper.MsaaHitSourceV4(**values)
+
+    def run_worker(self,source=None):
+        return self.helper.run_source_qualified_ia2_point_v4(
+            self.source() if source is None else source,self.scope,self.sdk,self.platform,15.)
+
+    def assert_non_accepting(self,result):
+        self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+        self.assertEqual(result['workerSchemaVersion'],4)
+        self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in result.values()))
+        self.assertNotIn('from_accessible',[key for key,_ in self.sdk.calls])
+        self.assertEqual(self.sdk.releases,list(reversed(self.sdk.owned_outputs)))
+
+    def test_source_qualified_point_has_distinct_live_source_worker_and_entry(self):
+        helper=load_helper()
+        for name in ('MsaaHitSourceV4','SourceQualifiedIa2SdkAbi','worker_record_v4',
+                     'run_source_qualified_ia2_point_v4','begin_source_qualified_ia2_point',
+                     'SourceQualifiedIa2PointLease','_valid_v4_worker'):
+            self.assertTrue(callable(getattr(helper,name,None)),name)
+
+    def test_closed_record_adds_only_candidate_source_and_eight_numeric_digest_words(self):
+        expected=set(self.helper.worker_record_v3())-{'diagnosticComplete'}
+        expected.update(('pointCandidate','sourceBound'))
+        expected.update('admissionDigest'+str(index) for index in range(8))
+        record=self.helper.worker_record_v4()
+        self.assertEqual(set(record),expected)
+        self.assertEqual(record['workerSchemaVersion'],4)
+        self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in record.values()))
+        self.assertEqual(record['pointCandidate'],0)
+        self.assertEqual(self.helper.worker_record_v3()['diagnosticComplete'],0)
+
+    def test_live_ia2_candidate_has_exact_original_refs_counts_and_no_canonical_relabel(self):
+        result=self.run_worker();self.assert_non_accepting(result)
+        self.assertEqual((result['pointCandidate'],result['sourceBound'],result['ia2Status']),(1,1,1))
+        self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(26,26))
+        self.assertEqual(len(self.sdk.calls),54)
+        counts=dict(compare=5,pattern=4,child_id=4,accessible=5,accessible_query=6,
+            control_type=4,hit_test=1,query=1,service_query=5,ia2_query=5,unique_id=7,window_handle=7)
+        for operation,count in counts.items():
+            self.assertEqual((result[operation+'Attempted'],result[operation+'Completed'],result[operation+'Hresult']),(count,count,0))
+        self.assertEqual([value for key,value in self.sdk.calls if key=='pattern'],[1,11,2,3])
+        self.assertEqual([value for key,value in self.sdk.calls if key=='accessible'],[101,111,102,103,101])
+        self.assertEqual((result['filePairEqual'],result['targetPairEqual'],result['hitMatchesTarget']),(0,0,0))
+        self.assertEqual((result['selfCount'],result['bindingCount'],result['ia2TupleCount']),(4,4,5))
+        self.assertEqual((result['uidZeroCount'],result['uidNegativeCount'],result['hwndDomainMask']),(0,5,2))
+        self.assertEqual((result['variantAttempted'],result['variantCleared'],self.platform.clears),(1,1,[401]))
+        for raw in (201,211,333,341,3201,3211,13,0xfffffff5):self.assertNotIn(raw,result.values())
+
+    def test_digest_words_come_only_from_actual_frozen_admission(self):
+        result=self.run_worker()
+        words=[int(self.admitted.admission_sha256[index:index+8],16) for index in range(0,64,8)]
+        self.assertEqual([result['admissionDigest'+str(index)] for index in range(8)],words)
+        self.assertTrue(self.helper._valid_v4_worker(result,3,self.admitted.admission_sha256))
+        self.assertFalse(self.helper._valid_v4_worker(result,3,'0'*64))
+        self.assertFalse(self.helper._valid_v4_worker(result,3,dict(self.admitted.summary())))
+
+    def test_actual_frozen_source_and_matching_digest_are_required_before_any_com_call(self):
+        from dataclasses import replace
+        invalid=(dict(admission=NS(admission_sha256=self.admitted.admission_sha256,
+                    summary=lambda:self.admitted.summary())),dict(admission=True),
+                 dict(admission_sha256='0'*64),dict(admission_sha256='A'*64),
+                 dict(admission_sha256=self.admitted.admission_sha256[:-1]))
+        for case,changes in enumerate(invalid):
+            with self.subTest(case=case):
+                self.setUp();source=replace(self.source(),**changes)
+                self.assertFalse(source.valid())
+                result=self.run_worker(source);self.assert_non_accepting(result)
+                self.assertEqual((result['pointCandidate'],len(self.sdk.calls)),(0,0))
+        source=self.source()
+        self.assertIs(source.admission,self.admitted)
+        with self.assertRaises((AttributeError,TypeError)):
+            source.admission_sha256='0'*64
+
+    def test_old_worker_and_saved_packets_cannot_become_mode_four_sources(self):
+        diagnostic=Ia2DiagnosticV3Tests(methodName='runTest');diagnostic.setUp()
+        for source in (diagnostic.source(),self.helper.worker_record_v3(),self.helper.worker_record_v2(),True):
+            self.setUp();result=self.run_worker(source)
+            self.assert_non_accepting(result)
+            self.assertEqual((result['pointCandidate'],len(self.sdk.calls)),(0,0))
+
+    def test_file_target_hit_and_repeated_original_identity_are_independent_requirements(self):
+        mutations=(('fresh-file',lambda s:s.tuples.update({3211:(-33,13)})),
+                   ('retained-target',lambda s:s.tuples.update({3203:(-44,13)})),
+                   ('hit-target',lambda s:s.tuples.update({3222:(-11,13)})),
+                   ('target-file-collision',lambda s:s.tuples.update({k:(-11,13) for k in (3202,3203,3222)})),
+                   ('original-repeat',lambda s:s.identities.update({221:331})),
+                   ('file-anchor',lambda s:s.recheck_changes.update({(3201,'unique_id'):-99})),
+                   ('target-anchor',lambda s:s.recheck_changes.update({(3202,'unique_id'):-99})))
+        for reason,mutate in mutations:
+            with self.subTest(reason=reason):
+                self.setUp();mutate(self.sdk);result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual(result['pointCandidate'],0)
+
+    def test_signed_nonzero_ids_are_allowed_but_zero_and_nonoriginal_child_domains_are_not(self):
+        for sign in (-1,1):
+            self.setUp()
+            self.sdk.tuples={key:(sign*abs(uid),hwnd) for key,(uid,hwnd) in self.sdk.tuples.items()}
+            result=self.run_worker();self.assertEqual(result['pointCandidate'],1)
+        self.setUp();self.sdk.tuples.update({3201:(0,13),3211:(0,13)})
+        result=self.run_worker();self.assertEqual(result['pointCandidate'],0)
+        for domain in (0,2,3,4,5):
+            with self.subTest(domain=domain):
+                self.setUp();self.platform.window_domain=lambda *args:domain
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual(result['pointCandidate'],0)
+
+    def test_uia_positive_and_every_negative_are_checked_before_msaa_extraction(self):
+        for reason in ('file','target','negative'):
+            self.setUp();original=self.sdk.call
+            def call(key,pointer,*args):
+                hr=original(key,pointer,*args)
+                if key=='compare' and ((reason=='file' and args[:2]==(1,11)) or
+                        (reason=='target' and args[:2]==(2,3))):args[-1]._obj.value=0
+                if key=='compare' and reason=='negative' and args[1]==4:args[-1]._obj.value=1
+                return hr
+            self.sdk.call=call;result=self.run_worker();self.assert_non_accepting(result)
+            self.assertEqual((result['pointCandidate'],result['patternAttempted']),(0,0))
+
+    def test_self_role_and_only_nonnull_dispatch_hit_shape_are_required(self):
+        for key,value in [('child',1),('child',-1),('kind',50033),('variant',0),('variant',3),('variant',13),('dispatch',0)]:
+            with self.subTest(kind=key,value=value):
+                self.setUp()
+                if key=='child':self.sdk.children[111]=value
+                elif key=='kind':self.sdk.types[11]=value
+                elif key=='variant':self.sdk.variant_type=value
+                else:self.sdk.variant_pointer=value
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual(result['pointCandidate'],0)
+                if key in ('variant','dispatch'):self.assertEqual(result['variantCleared'],1)
+
+    def test_each_failed_or_null_owned_output_is_released_without_admitting_later_calls(self):
+        self.run_worker();calls=list(self.sdk.calls)
+        outputs={'pattern','accessible','accessible_query','query','service_query','ia2_query'}
+        for ordinal,(key,_) in enumerate(calls,1):
+            if key not in outputs:continue
+            for failure in ('failed','sfalse','null','exception','noninteger'):
+                with self.subTest(ordinal=ordinal,failure=failure):
+                    self.setUp()
+                    if failure in ('failed','sfalse'):
+                        self.sdk.failure_at=ordinal;self.sdk.hresult=-2147467259 if failure=='failed' else 1
+                    else:setattr(self.sdk,{'null':'null_at','exception':'exception_at','noninteger':'noninteger_at'}[failure],ordinal)
+                    result=self.run_worker();self.assert_non_accepting(result)
+                    self.assertEqual((result['pointCandidate'],len(self.sdk.calls)),(0,ordinal))
+                    self.assertEqual(result['referencesAcquired'],len(self.sdk.owned_outputs))
+
+    def test_all_provider_hresult_failures_stop_at_the_failed_boundary(self):
+        for ordinal in range(1,55):
+            with self.subTest(ordinal=ordinal):
+                self.setUp();self.sdk.failure_at=ordinal;self.sdk.hresult=-2147467259
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual((result['pointCandidate'],len(self.sdk.calls)),(0,ordinal))
+
+    def test_deadline_and_process_loss_after_each_return_prevent_further_provider_work(self):
+        for ordinal in range(1,55):
+            for reason in ('deadline','process'):
+                with self.subTest(ordinal=ordinal,reason=reason):
+                    self.setUp()
+                    def after(key,number):
+                        if number==ordinal:
+                            if reason=='deadline':self.platform.now=11.5
+                            else:self.platform.owns=False
+                    self.sdk.after=after;result=self.run_worker();self.assert_non_accepting(result)
+                    self.assertEqual((result['pointCandidate'],len(self.sdk.calls)),(0,ordinal))
+
+    def test_every_native_guard_boundary_preserves_the_same_call_admission(self):
+        checks=[];self.platform.guard=lambda:checks.append(len(self.sdk.calls)) or True
+        result=self.run_worker();self.assertEqual(result['pointCandidate'],1)
+        for stop,expected in enumerate(checks,1):
+            with self.subTest(boundary=stop):
+                self.setUp();seen=[]
+                def guard():seen.append(1);return len(seen)<stop
+                self.platform.guard=guard;result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual((result['pointCandidate'],len(self.sdk.calls)),(0,expected))
+
+    def test_cleanup_error_or_late_cleanup_cannot_certify_the_live_candidate(self):
+        for failure in ('late','process','release','variant','dpi','uninitialize'):
+            with self.subTest(failure=failure):
+                self.setUp();original=self.sdk.call
+                if failure in ('late','process','release'):
+                    def call(key,pointer,*args):
+                        hr=original(key,pointer,*args)
+                        if key=='release':
+                            if failure=='late':self.platform.now=11.5
+                            elif failure=='process':self.platform.owns=False
+                            else:raise RuntimeError('Synthetic IA2 release failure')
+                        return hr
+                    self.sdk.call=call
+                elif failure=='variant':self.platform.clear_hr=-2147467259
+                elif failure=='dpi':self.platform.restore=False
+                else:self.platform.uninitialize=lambda:(_ for _ in ()).throw(RuntimeError('Synthetic cleanup failure'))
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual(result['pointCandidate'],0)
+
+    def test_each_discovery_age_consumes_original_action_time_without_reset(self):
+        for changes,now in ((dict(captured_at=8.),10.),(dict(action_deadline=10.5),10.5),
+                            (dict(captured_at=10.),11.5),(dict(captured_at=10.1),10.)):
+            with self.subTest(expired=int(now>=10.5)):
+                self.setUp();self.platform.now=now
+                result=self.run_worker(self.source(**changes));self.assert_non_accepting(result)
+                self.assertEqual((result['pointCandidate'],len(self.sdk.calls)),(0,0))
+
+    def test_aliased_outputs_keep_separate_reference_ownership_and_reverse_release(self):
+        self.sdk.patterns[11]=101
+        self.sdk.services[211]=self.sdk.services[201]
+        self.sdk.services[221]=self.sdk.services[201]
+        result=self.run_worker();self.assert_non_accepting(result)
+        self.assertEqual(result['pointCandidate'],1)
+        self.assertEqual((result['referencesAcquired'],len(self.sdk.releases)),(26,26))
+        self.assertEqual(self.sdk.releases.count(101),2)
+
+    def test_borrowed_sdk_refs_require_exact_interfaces_and_source_mode(self):
+        from dataclasses import replace
+        metadata=sdk_fixture();abi=self.helper.SourceQualifiedIa2SdkAbi(**metadata)
+        def ref(interface,value):return type('Borrowed',(C.c_void_p,),{'__com_interface__':interface})(value)
+        elements=[ref(metadata['element_interface'],number) for number in (1,11,2,3,4,5,6)]
+        source=self.source(client=ref(metadata['client_interface'],9),retained_file=elements[0],
+            fresh_file=elements[1],fresh_target=elements[2],retained_target=elements[3],negative_refs=tuple(elements[4:]))
+        self.assertTrue(abi.matches_source(source))
+        self.assertFalse(self.helper.Ia2SdkAbi(**metadata).matches_source(source))
+        for field in ('client','retained_file','fresh_file','fresh_target','retained_target'):
+            self.assertFalse(abi.matches_source(replace(source,**{field:C.c_void_p(99)})))
+        for value in ((),(elements[4],),[elements[4],elements[5]],(None,elements[4])):
+            self.assertFalse(abi.matches_source(replace(source,negative_refs=value)))
+        diagnostic=Ia2DiagnosticV3Tests(methodName='runTest');diagnostic.setUp()
+        self.assertFalse(abi.matches_source(diagnostic.source()))
+
+    def test_closed_worker_validator_rejects_schema_digest_count_and_positive_tampering(self):
+        valid=self.run_worker();self.assertEqual(valid['pointCandidate'],1)
+        changes=({'workerSchemaVersion':3},{'pointCandidate':True},{'sourceBound':2},
+            {'localKnown':1},{'localMatch':1},{'admissionDigest0':valid['admissionDigest0']^1},
+            {'referencesAcquired':25,'referencesReleased':25},
+            {'patternAttempted':3,'patternCompleted':3},{'uidZeroCount':1},{'hwndDomainMask':4})
+        for case,change in enumerate(changes):
+            with self.subTest(case=case):
+                self.assertFalse(self.helper._valid_v4_worker(dict(valid,**change),3,self.admitted.admission_sha256))
+        extra=dict(valid,unexpected=0);missing=dict(valid);missing.pop('sourceBound')
+        for record in (extra,missing,self.helper.worker_record_v3()):
+            self.assertFalse(self.helper._valid_v4_worker(record,3,self.admitted.admission_sha256))
+
+    def test_new_lease_requires_mode_four_and_old_begin_entries_never_admit_it(self):
+        source=self.source()
+        for version in (1,2):
+            kernel=FakeKernel();lease=self.helper.begin_msaa_hit(source,self.scope,self.sdk,15.,profile_version=version,_kernel=kernel)
+            self.assertEqual(lease.record['nativeAttempted'],0);self.assertIsNone(kernel.callback)
+        kernel=FakeKernel();lease=self.helper.begin_ia2_diagnostic(source,self.scope,self.sdk,15.,_kernel=kernel)
+        self.assertEqual(lease.record['nativeAttempted'],0);self.assertIsNone(kernel.callback)
+        diagnostic=Ia2DiagnosticV3Tests(methodName='runTest');diagnostic.setUp()
+        for old in (diagnostic.source(),self.helper.worker_record_v3()):
+            kernel=FakeKernel();lease=self.helper.begin_source_qualified_ia2_point(old,self.scope,self.sdk,15.,_kernel=kernel)
+            self.assertEqual(lease.record['nativeAttempted'],0);self.assertIsNone(kernel.callback)
+        with self.assertRaises(ValueError):
+            self.helper.begin_msaa_hit(source,self.scope,self.sdk,15.,profile_version=4,_kernel=FakeKernel())
+
+    def test_completed_native_lease_exposes_candidate_but_no_controller_or_acceptance_positive(self):
+        kernel=FakeKernel();kernel.worker=lambda *args:self.run_worker()
+        lease=self.helper.begin_source_qualified_ia2_point(self.source(),self.scope,self.sdk,15.,_kernel=kernel)
+        result=lease.wait()
+        self.assertEqual((result['schemaVersion'],result['workerSchemaVersion'],result['pointCandidate']),(4,4,1))
+        self.assertEqual((result['localKnown'],result['localMatch'],result['acceptanceEligible'],result['diagnosticOnly']),(0,0,0,0))
+        self.assertNotIn('finalPointVerified',result)
+        self.assertEqual((result['nativeExit'],result['threadClosed'],result['processesClosed'],result['workerCleanup'],result['pending']),(1,1,1,1,0))
+        self.assertIsNone(self.helper.pending_msaa_hit())
+
+    def test_lease_rejects_mode_three_or_forged_positive_packets_instead_of_coercing_them(self):
+        for damage in ('v3','digest','known','match','candidate','extra','count'):
+            with self.subTest(packet=damage):
+                self.setUp();valid=self.run_worker();kernel=FakeKernel()
+                def worker(*args):
+                    if damage=='v3':return self.helper.worker_record_v3()
+                    record=dict(valid)
+                    if damage=='digest':record['admissionDigest0']^=1
+                    elif damage=='known':record['localKnown']=1
+                    elif damage=='match':record['localMatch']=1
+                    elif damage=='candidate':record['pointCandidate']=True
+                    elif damage=='extra':record['unexpected']=0
+                    else:record.update(referencesAcquired=25,referencesReleased=25)
+                    return record
+                kernel.worker=worker
+                lease=self.helper.begin_source_qualified_ia2_point(self.source(),self.scope,self.sdk,15.,_kernel=kernel)
+                result=lease.wait()
+                self.assertEqual((result['workerException'],result['pointCandidate'],result['pending']),(1,0,1))
+                self.helper._active=None  # The synchronous fake callback returned; no native ownership exists.
+
+    def test_pending_or_late_retirement_keeps_original_context_and_blocks_all_modes(self):
+        kernel=FakeKernel();kernel.finished=False;kernel.worker=lambda *args:self.run_worker()
+        source=self.source();lease=self.helper.begin_source_qualified_ia2_point(source,self.scope,self.sdk,15.,_kernel=kernel)
+        result=lease.wait();self.assertEqual((result['pending'],result['pointCandidate']),(1,0))
+        self.assertIs(lease.source.admission,self.admitted)
+        self.assertIs(lease.source.keepalive[0],self.sdk)
+        other=self.helper.begin_source_qualified_ia2_point(self.source(),self.scope,self.sdk,15.,_kernel=FakeKernel())
+        self.assertEqual(other.record['stageCode'],2)
+        old=self.helper.MsaaHitSource(9,1,2,3,(4,5),20,21)
+        other=self.helper.begin_msaa_hit(old,self.scope,self.sdk,15.,_kernel=FakeKernel())
+        self.assertEqual(other.record['stageCode'],2)
+        kernel.finished=True;kernel.now=12.;result=lease.retire(20.)
+        self.assertEqual((result['pending'],result['pointCandidate'],result['localKnown'],result['localMatch']),(0,0,0,0))
+        self.assertIsNone(lease.source);self.assertIsNone(self.helper.pending_msaa_hit())
+
+    def test_expired_nonzero_exit_or_unknown_close_never_exposes_a_candidate(self):
+        for reason in ('late','process','exit','callback','close','retire'):
+            with self.subTest(reason=reason):
+                self.setUp();kernel=FakeKernel();kernel.worker=lambda *args:self.run_worker()
+                lease=self.helper.begin_source_qualified_ia2_point(self.source(),self.scope,self.sdk,15.,_kernel=kernel)
+                if reason=='late':kernel.now=11.5
+                elif reason=='process':kernel.identity_failure=True
+                elif reason=='exit':kernel.exit_code=86
+                elif reason=='callback':kernel.callback_identity_failure=True
+                elif reason=='close':kernel.close_failure=True
+                result=lease.retire(20.) if reason=='retire' else lease.wait()
+                self.assertEqual((result['pointCandidate'],result['localKnown'],result['localMatch']),(0,0,0))
+                if lease.pending:self.helper._active=None  # Finished fake callback only.
+
+    def test_begin_requires_original_action_deadline_and_actual_capture_age(self):
+        for deadline,changes in ((14.,{}),(15.,dict(captured_at=8.)),(15.,dict(captured_at=11.))):
+            kernel=FakeKernel();lease=self.helper.begin_source_qualified_ia2_point(self.source(**changes),self.scope,self.sdk,deadline,_kernel=kernel)
+            self.assertEqual(lease.record['nativeAttempted'],0)
+            self.assertEqual(kernel.duplicates,[]);self.assertIsNone(kernel.callback)
+
+    def test_new_kernel_dispatch_uses_only_live_four_worker(self):
+        from unittest.mock import patch
+        kernel=self.helper.SourceQualifiedIa2WindowsKernel.__new__(self.helper.SourceQualifiedIa2WindowsKernel);calls=[]
+        def run(*args):
+            self.assertIs(kernel._source_qualified_source.admission,self.admitted)
+            self.assertIs(kernel._source_qualified_scope,self.scope)
+            calls.append(4);return 4
+        with patch.object(self.helper,'run_source_qualified_ia2_point_v4',side_effect=run), \
+                patch.object(self.helper,'run_ia2_diagnostic',side_effect=AssertionError('Diagnostic packet promotion')), \
+                patch.object(self.helper,'run_canonical_hit',side_effect=AssertionError('Canonical fallback')):
+            self.assertEqual(kernel.worker(self.source(),self.scope,self.sdk,11.5),4)
+            self.assertIsNone(kernel._source_qualified_source);self.assertIsNone(kernel._source_qualified_scope)
+            diagnostic=Ia2DiagnosticV3Tests(methodName='runTest');diagnostic.setUp()
+            with self.assertRaises(ValueError):kernel.worker(diagnostic.source(),self.scope,self.sdk,11.5)
+        self.assertEqual(calls,[4])
+
+    def numeric_kernel(self):
+        old,state=Ia2DiagnosticV3Tests.numeric_kernel(self)
+        kernel=self.helper.SourceQualifiedIa2WindowsKernel.__new__(self.helper.SourceQualifiedIa2WindowsKernel)
+        kernel.__dict__.update(old.__dict__)
+        kernel._source_qualified_source=self.source(owner_chain=(31,33,13))
+        kernel._source_qualified_scope=self.scope
+        return kernel,state
+
+    def test_actual_four_guard_preserves_owned_window_process_and_physical_popup_conditions(self):
+        kernel,state=self.numeric_kernel();self.assertTrue(kernel.guard())
+        mutations=[lambda s:s.update(parent=99),lambda s:s.update(root=99),
+            lambda s:s['owners'].update({31:99}),lambda s:s.update(foreground=99),
+            lambda s:s.update(physical=13),lambda s:s.update(focus=99),
+            lambda s:s.update(focusRoot=99),lambda s:s.update(capture=99),lambda s:s.update(menu=99),
+            lambda s:s.update(visible=False),lambda s:s.update(enabled=False),
+            lambda s:s.update(iconic=True),lambda s:s.update(gui=False),
+            lambda s:s['processes'].update({31:(41,8)}),lambda s:s['processes'].update({13:(40,9)}),
+            lambda s:s['processes'].update({30:(50,8)}),lambda s:s['processes'].update({12:(50,8)}),
+            lambda s:s['processes'].update({32:(40,10)}),lambda s:s['processes'].pop(33),
+            lambda s:s['processes'].update({33:(40,99)})]
+        for case,mutate in enumerate(mutations):
+            with self.subTest(case=case):
+                kernel,state=self.numeric_kernel();mutate(state);self.assertFalse(kernel.guard())
+        kernel,state=self.numeric_kernel();kernel.check_process=lambda *args:False
+        self.assertFalse(kernel.guard())
+
+    def test_native_entry_stays_disabled_without_the_existing_controller_fence(self):
+        self.assertFalse(self.helper.NATIVE_LAUNCH_ENABLED)
+        lease=self.helper.begin_source_qualified_ia2_point(self.source(),self.scope,object(),15.,native_enabled=True)
+        self.assertEqual((lease.record['nativeAttempted'],lease.record['schemaVersion'],lease.record['pointCandidate']),(0,4,0))
+        self.assertIsNone(self.helper.pending_msaa_hit())
+
+    def context_kernel(self):
+        from types import MethodType
+        kernel=FakeKernel();platform=self.platform
+        for name in ('initialize','uninitialize','enter_dpi','physical_dpi','leave_dpi','clear_variant','window_domain'):
+            setattr(kernel,name,getattr(platform,name))
+        kernel.context_guard_calls=[]
+        def guard():
+            kernel.context_guard_calls.append(1)
+            self.assertIsNotNone(getattr(kernel,'_source_qualified_source',None),
+                'Collection cannot query the retired worker context')
+            return platform.guard()
+        kernel.guard=guard
+        kernel.worker=MethodType(self.helper.SourceQualifiedIa2WindowsKernel.worker,kernel)
+        return kernel
+
+    def weak_borrowed_source(self):
+        import weakref
+        class Borrowed(C.c_void_p):pass
+        class FreshOwner:pass
+        borrowed=Borrowed(2);owner=FreshOwner();owner.refs={'target':borrowed}
+        source=self.source(fresh_target=borrowed,keepalive=(self.sdk,self.admitted,owner))
+        original=self.sdk.call
+        def scalar(value):return value.value if isinstance(value,C.c_void_p) else value
+        def call(key,pointer,*args):
+            if key=='compare':args=(scalar(args[0]),scalar(args[1]),*args[2:])
+            return original(key,scalar(pointer),*args)
+        self.sdk.call=call
+        return source,(weakref.ref(source),weakref.ref(borrowed),weakref.ref(owner))
+
+    def test_completed_v4_kernel_drops_only_worker_context_and_releases_borrowed_scope_after_collection(self):
+        import gc
+        kernel=self.context_kernel();source,observed=self.weak_borrowed_source()
+        lease=self.helper.begin_source_qualified_ia2_point(source,self.scope,self.sdk,15.,_kernel=kernel)
+        del source
+        self.assertIsNotNone(observed[0]())  # The lease still owns the original borrowed source.
+        guard_count=len(kernel.context_guard_calls)
+        result=lease.wait();gc.collect()
+        self.assertEqual((result['pointCandidate'],result['referencesAcquired'],result['referencesReleased']),(1,26,26))
+        self.assertEqual(len(kernel.context_guard_calls),guard_count)
+        self.assertIsNone(lease.source);self.assertIsNone(self.helper.pending_msaa_hit())
+        for name in ('_source_qualified_source','_source_qualified_scope'):
+            with self.subTest(context=name):self.assertIsNone(getattr(kernel,name,None))
+        for index,reference in enumerate(observed):
+            with self.subTest(borrowedScope=index):self.assertIsNone(reference())
+
+    def test_running_v4_callback_retains_context_and_pending_lease_until_retirement(self):
+        import gc
+        import threading
+        entered=threading.Event();resume=threading.Event();threads=[]
+        kernel=self.context_kernel();kernel.finished=False
+        source,observed=self.weak_borrowed_source()
+        def after(key,ordinal):
+            if ordinal==1:
+                entered.set()
+                if not resume.wait(2):raise RuntimeError('Synthetic context callback deadline')
+        self.sdk.after=after
+        def start(callback):
+            kernel.callback=callback
+            def run():
+                try:callback()
+                finally:kernel.finished=True
+            thread=threading.Thread(target=run,daemon=True);threads.append(thread);thread.start()
+            return 301,44,55
+        kernel.start=start
+        lease=self.helper.begin_source_qualified_ia2_point(source,self.scope,self.sdk,15.,_kernel=kernel)
+        del source
+        try:
+            self.assertTrue(entered.wait(1))
+            result=lease.wait();self.assertEqual((result['pending'],result['pointCandidate']),(1,0))
+            self.assertIs(kernel._source_qualified_source,lease.source)
+            self.assertIs(kernel._source_qualified_scope,self.scope)
+            self.assertTrue(all(reference() is not None for reference in observed))
+        finally:
+            resume.set()
+            for thread in threads:thread.join(1)
+        self.assertFalse(threads[0].is_alive())
+        self.assertTrue(all(reference() is not None for reference in observed))  # Uncollected original lease.
+        kernel.now=12.;result=lease.retire(20.);gc.collect()
+        self.assertEqual((result['pending'],result['pointCandidate']),(0,0))
+        for name in ('_source_qualified_source','_source_qualified_scope'):
+            with self.subTest(context=name):self.assertIsNone(getattr(kernel,name,None))
+        for index,reference in enumerate(observed):
+            with self.subTest(borrowedScope=index):self.assertIsNone(reference())
+
+    def test_v4_worker_finally_drops_its_context_but_never_a_newer_nested_context(self):
+        from unittest.mock import patch
+        for replacement in (False,True):
+            for failure in (False,True):
+                with self.subTest(replacement=replacement,failure=failure):
+                    kernel=self.context_kernel();source=self.source()
+                    newer_source=self.source();newer_scope=self.helper.MsaaHitScope(8,8,9,10,11,12,13,14,15)
+                    def worker(*args):
+                        self.assertIs(kernel._source_qualified_source,source)
+                        self.assertIs(kernel._source_qualified_scope,self.scope)
+                        if replacement:
+                            kernel._source_qualified_source=newer_source;kernel._source_qualified_scope=newer_scope
+                        if failure:raise KeyboardInterrupt('Synthetic context worker failure')
+                        return {}
+                    with patch.object(self.helper,'run_source_qualified_ia2_point_v4',worker):
+                        if failure:
+                            with self.assertRaises(KeyboardInterrupt):kernel.worker(source,self.scope,self.sdk,11.5)
+                        else:self.assertEqual(kernel.worker(source,self.scope,self.sdk,11.5),{})
+                    self.assertIs(getattr(kernel,'_source_qualified_source',None),newer_source if replacement else None)
+                    self.assertIs(getattr(kernel,'_source_qualified_scope',None),newer_scope if replacement else None)
+
+
+class SourceAdmissionImportIdentityTests(unittest.TestCase):
+    def test_actual_bare_and_package_admissions_keep_their_own_class_seal_and_restore_mapping(self):
+        import time
+        from unittest.mock import patch
+        repository=str(SOURCE.parents[2])
+        with patch.object(sys,'path',[repository,*sys.path]):
+            from suite.tests.test_native_menu_source_admission import SourceMenuAdmissionTests
+            absent=object();original=sys.modules.get('native_menu_source_admission',absent)
+            spec=importlib.util.spec_from_file_location(
+                'native_menu_source_admission',SOURCE.with_name('native_menu_source_admission.py'))
+            bare=importlib.util.module_from_spec(spec)
+            with patch.dict(sys.modules,{'native_menu_source_admission':bare}):
+                spec.loader.exec_module(bare)
+                fixture=SourceMenuAdmissionTests(methodName='test_admits_real_validators_and_freezes_closed_binary_summary')
+                fixture.setUp();self.addCleanup(fixture.doCleanups)
+                with patch.object(bare,'_HARNESS_ROOT',fixture.trusted):
+                    bare_admitted=bare.admit_source_menu_runtime(fixture.root,architecture='arm64',
+                        engine_zip=fixture.archive,receipt=fixture.receipt,deadline=time.monotonic()+30)
+                helper=load_helper()
+                def source(admitted):
+                    return helper.MsaaHitSourceV4(client=9,retained_file=1,fresh_file=11,
+                        fresh_target=2,retained_target=3,negative_refs=(4,5,6),shell_handle=20,
+                        engine_handle=21,keepalive=(admitted,),captured_at=10.,action_deadline=15.,
+                        document_hwnd=30,popup_hwnd=31,popup_thread=40,owner_chain=(31,13),
+                        admission=admitted,admission_sha256=admitted.admission_sha256)
+                bare_source=source(bare_admitted)
+                self.assertTrue(type(bare_admitted) is bare.SourceMenuAdmission)
+                self.assertTrue(bare_admitted._seal is bare._ADMISSION_SEAL)
+                self.assertTrue(bare_source.valid())
+                package_admitted=fixture.admit()
+                package=sys.modules['suite.e2e.native_menu_source_admission']
+                package_source=source(package_admitted)
+                self.assertFalse(bare.SourceMenuAdmission is package.SourceMenuAdmission)
+                self.assertFalse(bare._ADMISSION_SEAL is package._ADMISSION_SEAL)
+                self.assertTrue(type(package_admitted) is package.SourceMenuAdmission)
+                self.assertTrue(package_admitted._seal is package._ADMISSION_SEAL)
+                self.assertFalse(package_source.valid())
+                with patch.dict(sys.modules,{'native_menu_source_admission':package}):
+                    self.assertTrue(sys.modules['native_menu_source_admission'] is package)
+                    self.assertFalse(bare_source.valid())
+                    self.assertTrue(package_source.valid())
+                self.assertTrue(sys.modules['native_menu_source_admission'] is bare)
+                self.assertTrue(bare_source.valid())
+                self.assertFalse(package_source.valid())
+            restored=sys.modules.get('native_menu_source_admission',absent)
+            self.assertTrue(restored is original)
+
+
 if __name__=='__main__':unittest.main()

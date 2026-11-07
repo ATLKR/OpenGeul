@@ -2023,3 +2023,180 @@ class NativeMenuProbe(NativeControlProbe):
         self.move(point,receipt)
         after=self.outside_snapshot(binding);assert after==before
         self.click(receipt)
+
+    def _begin_source_qualified_ia2_point_v4(self,fresh_refs,negative,scope_id,point,*,admission,captured_at,action_deadline,exposure):
+        """New typed source and entry; no existing packet or diagnostic is input."""
+        from native_menu_msaa_hit import (SourceQualifiedIa2SdkAbi,MsaaHitScope,MsaaHitSourceV4,
+            begin_source_qualified_ia2_point,_admission_words_v4)
+        assert getattr(self,'_native_identity_diagnostic',0)==0
+        assert type(fresh_refs) is dict and set(fresh_refs)==set(self._identity_refs)
+        digest=admission.admission_sha256;_admission_words_v4(admission,digest)
+        from comtypes import GUID,HRESULT
+        from comtypes.automation import VARIANT
+        library=self._uia_library;legacy=library.IUIAutomationLegacyIAccessiblePattern
+        method=next(item for item in vars(legacy)['_methods_'] if item.name=='GetIAccessible')
+        accessible=method.argtypes[0]._type_.__com_interface__
+        sdk=SourceQualifiedIa2SdkAbi(client_interface=library.IUIAutomation,element_interface=library.IUIAutomationElement,
+            legacy_interface=legacy,accessible_interface=accessible,guid_type=GUID,hresult_type=HRESULT,
+            variant_type=VARIANT,function_factory=C.WINFUNCTYPE)
+        scope=self._identity_scope;binding=scope['binding'];role=_target_role(self._active_target)
+        source=MsaaHitSourceV4(self.provider_client,self._identity_refs['file'],fresh_refs['file'],
+            fresh_refs[role],self._identity_refs[role],tuple(negative),self._point_source['shellHandle'],
+            self._point_source['engineHandle'],(self,fresh_refs,admission),captured_at,action_deadline,
+            binding['document'],exposure['hwnd'],exposure['threadId'],tuple(exposure['ownerChain']),admission,digest)
+        request=MsaaHitScope(scope_id,binding['officePid'],scope['officeCreationTime'],scope['shellPid'],
+            scope['shellCreationTime'],binding['parent'],binding['child'],*point)
+        return begin_source_qualified_ia2_point(source,request,sdk,action_deadline,native_enabled=True)
+
+    def _provider_local_point_v4(self,point,target,actual,*,admission):
+        """One new source-qualified measurement; Task3 owns explicit selection."""
+        from dataclasses import asdict
+        from native_menu_msaa_hit import _admission_words_v4
+        action_deadline=self.deadline
+        try:
+            assert not self._provider_pending(), 'A previous callback remains unretired'
+            assert getattr(self,'_native_identity_diagnostic',0)==0 and self._active_target!='file'
+            digest=admission.admission_sha256;_admission_words_v4(admission,digest)
+            creator=self._require_provider_creator();scope=self._identity_scope;binding=scope['binding']
+            _scope_anchor(scope,binding,scope['shellPid'])
+            assert scope['deadline']==action_deadline and self.clock()<action_deadline
+            role=_target_role(self._active_target);assert role in self._identity_refs
+            comparison=dict(rawMatchesTarget=self._same(target,actual),
+                targetEqualsRetained=self._same(target,self._identity_refs[role]),
+                hitEqualsRetained=self._same(actual,self._identity_refs[role]),
+                differentFrom={key:self._same(actual,ref) for key,ref in self._identity_refs.items() if key!=role})
+            assert comparison['rawMatchesTarget'] is comparison['hitEqualsRetained'] is False
+            assert comparison['targetEqualsRetained'] is True and all(value is False for value in comparison['differentFrom'].values())
+            global_point=dict(kindCode=self._uia_call(9,lambda:actual.CurrentControlType),
+                pid=self._uia_call(8,lambda:actual.CurrentProcessId),nativeHwndRaw=self._uia_call(7,lambda:actual.CurrentNativeWindowHandle))
+            assert all(type(value) is int for value in global_point.values())
+            raw=global_point['nativeHwndRaw'];assert -(1<<31)<=raw<1<<32
+            global_point['nativeHwnd']=raw&0xffffffff if raw<0 else raw
+            assert global_point['kindCode']==50033 and global_point['pid']==binding['officePid']
+            rectangle=self._chrome(target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
+            assert global_point['nativeHwnd']==before['hwnd']
+            captured_at=self.clock();effective=min(action_deadline,captured_at+1.5)
+            self.deadline=effective
+            source_fresh,fresh_refs=self._fresh_proof_with_refs(self._active_target)
+            assert self.clock()<effective
+            assert self._same(target,fresh_refs[role]), 'Current source-qualified target differs from fresh target'
+            roles=[key for key in self._identity_refs if key!=role]
+            negative=[self._identity_refs[key] for key in roles]+[actual]
+            sequence=getattr(self,'_point_sequence',0)+1;assert sequence<=32;self._point_sequence=sequence
+            lease=self._begin_source_qualified_ia2_point_v4(fresh_refs,negative,sequence,point,admission=admission,
+                captured_at=captured_at,action_deadline=action_deadline,exposure=before)
+            self._msaa_lease=lease
+            packet=lease.wait()
+            # No fresh provider read is admissible until original retirement is known.
+            assert lease.pending is False
+            provider=_source_qualified_packet_v4(packet,scope,creator,sequence,len(negative),digest)
+            assert self.clock()<effective, 'Source-qualified point source age expired'
+            self.interop['providerLocalResult']=provider
+            assert self._require_provider_creator()==creator
+            after=self._popup_exposure(binding,point,rectangle);assert before==after
+            fresh=self._fresh_proof(self._active_target)
+            assert self.clock()<effective
+            result=dict(schemaVersion=4,method='owned-popup-and-source-qualified-ia2-hit-v4',
+                scope=copy.deepcopy(scope),role=role,sourceScopeId=sequence,sourceScope=asdict(lease.scope),
+                negativeRoles=roles+['global-point'],provider=provider,before=before,after=after,
+                sourceFresh=source_fresh,fresh=fresh,creator=creator,globalPoint=global_point,
+                sourceAdmissionSha256=digest,capturedAt=captured_at,effectiveDeadline=effective,
+                finalPointVerified=1,targetRectangle=list(rectangle),primaryComparison=comparison)
+            _require_provider_point_v4(result,binding,scope['shellPid'],self._active_target,
+                admission_sha256=digest,now=self.clock())
+            return result
+        finally:self.deadline=action_deadline
+
+
+def _source_qualified_packet_v4(packet,scope,creator,scope_id,negative_count,admission_sha256):
+    """Validate the complete numeric capsule before any post-worker provider read."""
+    from native_menu_msaa_hit import _record_v4,worker_record_v4,_valid_v4_worker
+    assert type(packet) is dict and packet.keys()==_record_v4(None,False).keys()
+    assert all(type(value) is int and 0<=value<(1<<64 if key=='threadBirth' else 1<<32)
+        for key,value in packet.items())
+    assert packet['schemaVersion']==packet['workerSchemaVersion']==4
+    assert packet['scopeId']==scope_id and packet['stageCode']==13
+    assert packet['pointCandidate']==packet['sourceBound']==1
+    worker={key:packet[key] for key in worker_record_v4()}
+    assert _valid_v4_worker(worker,negative_count,admission_sha256)
+    ones=('providerLocalOnly','nativeAttempted','nativeExit','threadClosed','processesClosed',
+        'workerCleanup','threadIdentity','callbackIdentity','exitCodeObserved')
+    zeros=('diagnosticOnly','acceptanceEligible','globalHitSubstituted','synthetic','workerException',
+        'pending','localKnown','localMatch','nativeExitCode')
+    assert all(packet[key]==1 for key in ones) and all(packet[key]==0 for key in zeros)
+    for key in ('controllerPid','threadId','threadBirth'):_int(packet[key])
+    assert packet['controllerPid'] not in (scope['shellPid'],scope['binding']['officePid'])
+    assert packet['threadId']!=creator['threadId']
+    return copy.deepcopy(packet)
+
+
+def _require_provider_point_v4(proof,binding,shell_pid,target,*,admission_sha256,now):
+    """Replay only this new source-bound point; old global FALSE remains FALSE."""
+    from native_menu_msaa_hit import MsaaHitScope
+    assert target!='file'
+    expected=set(('schemaVersion method scope role sourceScopeId sourceScope negativeRoles provider '
+        'before after sourceFresh fresh creator globalPoint sourceAdmissionSha256 capturedAt '
+        'effectiveDeadline finalPointVerified targetRectangle primaryComparison').split())
+    assert type(proof) is dict and set(proof)==expected
+    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==4
+    assert proof['method']=='owned-popup-and-source-qualified-ia2-hit-v4'
+    assert type(proof['finalPointVerified']) is int and proof['finalPointVerified']==1
+    assert type(admission_sha256) is str and len(admission_sha256)==64
+    assert all(c in '0123456789abcdef' for c in admission_sha256)
+    assert proof['sourceAdmissionSha256']==admission_sha256
+    scope=proof['scope'];_scope_anchor(scope,binding,shell_pid);role=_target_role(target)
+    assert target in _scope_targets(scope) and proof['role']==role
+    captured,expiry=proof['capturedAt'],proof['effectiveDeadline']
+    assert all(type(value) in (int,float) and math.isfinite(value) for value in (captured,expiry,now))
+    assert scope['startedAt']<=captured<scope['deadline']
+    assert expiry==min(scope['deadline'],captured+1.5) and captured<=now<expiry
+    assert type(proof['sourceScopeId']) is int and 0<proof['sourceScopeId']<=32
+    for field in ('sourceFresh','fresh'):
+        _comparison_proof(proof[field],binding,shell_pid,target)
+        assert proof[field]['scope']==scope
+    roles=proof['sourceFresh']['roles'];assert proof['fresh']['roles']==roles
+    negatives=[name for name in roles if name!=role]
+    assert proof['negativeRoles']==negatives+['global-point']
+    primary=proof['primaryComparison']
+    assert type(primary) is dict and set(primary)=={'rawMatchesTarget','targetEqualsRetained','hitEqualsRetained','differentFrom'}
+    assert primary['rawMatchesTarget'] is primary['hitEqualsRetained'] is False
+    assert primary['targetEqualsRetained'] is True
+    assert type(primary['differentFrom']) is dict and set(primary['differentFrom'])==set(negatives)
+    assert all(value is False for value in primary['differentFrom'].values())
+    creator=proof['creator'];assert type(creator) is dict and set(creator)=={'threadId','mta','sameThread'}
+    _int(creator['threadId']);assert creator['threadId']<1<<32
+    assert creator['mta'] is creator['sameThread'] is True
+    _source_qualified_packet_v4(proof['provider'],scope,creator,proof['sourceScopeId'],len(negatives)+1,admission_sha256)
+    before=proof['before'];assert type(before) is dict and before==proof['after']
+    assert set(before)==set(('classCode hwnd pid threadId rootHwnd style extendedStyle rectangle point '
+        'ownerChain foreground ownershipBefore ownershipAfter').split())
+    assert before['classCode']==1 and before['ownershipBefore'] is before['ownershipAfter'] is True
+    for key in ('classCode','pid','threadId'):
+        _int(before[key]);assert before[key]<1<<32
+    for key in ('hwnd','rootHwnd','foreground'):
+        _int(before[key]);assert before[key]<1<<64
+    assert before['hwnd']==before['rootHwnd'] and before['pid']==binding['officePid']
+    owners=before['ownerChain'];assert type(owners) is list and 2<=len(owners)<=16
+    assert all(type(value) is int and 0<value<1<<64 for value in owners) and len(set(owners))==len(owners)
+    assert owners[0]==before['hwnd'] and owners[-1] in (binding['child'],binding['document'])
+    assert all(type(before[key]) is int and 0<=before[key]<1<<32 for key in ('style','extendedStyle'))
+    assert before['style']&0x80000000 and not before['style']&0x40000000 and before['extendedStyle']&0x80
+    assert before['foreground'] in (binding['document'],before['hwnd'])
+    rect=before['rectangle'];target_rect=proof['targetRectangle'];point=before['point']
+    assert all(type(row) is list for row in (rect,target_rect,point))
+    assert len(rect)==len(target_rect)==4 and len(point)==2
+    assert all(type(value) is int and -(1<<31)<=value<1<<31 for value in (*rect,*target_rect,*point))
+    assert rect[0]<=target_rect[0]<=point[0]<target_rect[2]<=rect[2]
+    assert rect[1]<=target_rect[1]<=point[1]<target_rect[3]<=rect[3]
+    source_scope=proof['sourceScope'];assert type(source_scope) is dict
+    assert source_scope==dict(scope_id=proof['sourceScopeId'],engine_pid=binding['officePid'],
+        engine_birth=scope['officeCreationTime'],shell_pid=shell_pid,shell_birth=scope['shellCreationTime'],
+        parent_hwnd=binding['parent'],child_hwnd=binding['child'],x=point[0],y=point[1])
+    assert MsaaHitScope(**source_scope).valid()
+    global_point=proof['globalPoint']
+    assert type(global_point) is dict and set(global_point)=={'kindCode','pid','nativeHwndRaw','nativeHwnd'}
+    assert all(type(value) is int for value in global_point.values())
+    raw=global_point['nativeHwndRaw'];assert -(1<<31)<=raw<1<<32
+    assert global_point['nativeHwnd']==(raw&0xffffffff if raw<0 else raw)
+    assert global_point==dict(kindCode=50033,pid=binding['officePid'],nativeHwndRaw=raw,nativeHwnd=before['hwnd'])
+    return proof
