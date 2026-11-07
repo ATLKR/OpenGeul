@@ -1598,6 +1598,108 @@ class InitialFocusStderrTests(unittest.TestCase):
         flow={};value=self.capture(flow_out=flow,**options)
         return value,flow
 
+    def counter_event(self,sequence=2,*,stage='prefix',**changes):
+        from test_initial_focus_final_counters import final_row,prefix_row
+        row=self.event(sequence=sequence);row.update(event='suite.initialEditorFocusFlow',stage=stage)
+        details=(prefix_row if stage=='prefix' else final_row)()
+        details.pop('sequence')
+        details.update(shellPid=77,shellCreationTime=100,officePid=88,officeCreationTime=200,
+            originalFormHwnd=11,originalPanelHwnd=12,originalChildHwnd=13,
+            shellThreadId=9,editorThreadId=10,managedThreadId=1)
+        details.update(changes);row['details']=details
+        return row
+
+    def capture_counters(self,**options):
+        self.assertIn('counter_out',self.smoke.capture_initial_focus_trace.__code__.co_varnames,
+            'Independent same-read numeric counter projection is missing')
+        flow={};counter={};old=self.capture(flow_out=flow,counter_out=counter,**options)
+        return old,flow,counter
+
+    def test_counter_final_same_read_preserves_old_and_observe_projections(self):
+        self.retire();self.write([self.event(),self.flow_event()])
+        old,flow=self.capture_flow(retired=True)
+        self.write([self.event(),self.flow_event(),self.counter_event(),
+            self.counter_event(3,stage='final',snapshotRevision=2)])
+        with patch.object(self.smoke.os,'read',wraps=os.read) as read:
+            current,observed,counter=self.capture_counters(retired=True)
+        self.assertEqual(read.call_count,1);self.assertEqual((current,observed),(old,flow))
+        self.assertEqual((counter['known'],counter['zeroCountsUsable'],counter['counterIntervalComplete']),(1,1,1))
+        self.assertEqual(counter['scope']['managedThreadId'],1)
+        self.assertNotIn('moduleCode',counter['scope']);self.assertEqual(counter['latest']['snapshotKindCode'],2)
+
+    def test_counter_prefix_retains_partial_counts_and_never_completes_after_cleanup(self):
+        self.write([self.event(),self.flow_event(),self.counter_event(activatedCount=3,appActiveCount=2)])
+        for retired in (False,True):
+            if retired:self.retire()
+            old,flow,counter=self.capture_counters(retired=retired)
+            self.assertTrue(old['known']);self.assertTrue(flow['known'])
+            self.assertEqual((counter['known'],counter['zeroCountsUsable'],counter['counterIntervalComplete']),(0,0,0))
+            self.assertEqual((counter['latest']['activatedCount'],counter['latest']['appActiveCount']),(3,2))
+
+    def test_counter_stage_code_scope_and_closed_fields_fail_only_counter(self):
+        self.write([self.event(),self.flow_event()]);old,flow=self.capture_flow()
+        mutations=(lambda r:r['details'].update(snapshotKindCode=2),
+            lambda r:r.update(stage='final'),lambda r:r['details'].update(snapshotKindCode=True),
+            lambda r:r.update(workerProcessId=100),lambda r:r.update(traceId='b'*32),
+            lambda r:r.update(managedThreadId=2),lambda r:r['details'].update(originalChildHwnd=99),
+            lambda r:r['details'].update(officeCreationTime=201),lambda r:r['details'].update(extra=0))
+        for change in mutations:
+            with self.subTest(mutation=mutations.index(change)):
+                row=self.counter_event();change(row);self.write([self.event(),self.flow_event(),row])
+                current,observed,counter=self.capture_counters()
+                self.assertEqual((current,observed),(old,flow));self.assertEqual(counter['zeroCountsUsable'],0)
+                self.assertEqual(counter['latest'],{})
+        malformed=b'{"event":"suite.initialEditorFocusFlow","component":"host","stage":"final",bad}\n'
+        self.write([self.event(),self.flow_event()],suffix=malformed)
+        current,observed,counter=self.capture_counters()
+        self.assertEqual((current,observed),(old,flow));self.assertEqual(counter['latest'],{})
+        # A malformed observe payload retains its original error while the
+        # separately authenticated final ledger remains independently usable.
+        observe=self.flow_event();observe['details']['extra']=0
+        self.retire();self.write([self.event(),observe,self.counter_event(stage='final')])
+        current,observed,counter=self.capture_counters(retired=True)
+        self.assertTrue(current['known']);self.assertFalse(observed['known']);self.assertEqual(counter['known'],1)
+
+    def test_counter_budget_does_not_revoke_fixed_old_or_flow_results(self):
+        self.write([self.event(),self.flow_event()]);old,flow=self.capture_flow()
+        self.write([self.event(),self.flow_event(),self.counter_event()]);now=[0.];decode=self.smoke.json.loads
+        def late_counter(raw,**options):
+            value=decode(raw,**options)
+            if value.get('stage')=='prefix':now[0]=2.
+            return value
+        with patch.object(self.smoke.time,'monotonic',side_effect=lambda:now[0]),patch.object(self.smoke.json,'loads',late_counter):
+            current,observed,counter=self.capture_counters()
+        self.assertEqual((current,observed),(old,flow));self.assertEqual(counter['zeroCountsUsable'],0)
+        self.assertEqual(counter['latest'],{});self.assertEqual(counter['errorCode'],10)
+
+    def test_counter_missing_or_unanchored_identity_never_bootstraps_itself(self):
+        self.write([self.event()]);old,_,counter=self.capture_counters()
+        self.assertTrue(old['known']);self.assertEqual(counter['latest'],{});self.assertEqual(counter['known'],0)
+        self.write([self.counter_event(stage='final')]);old,_,counter=self.capture_counters()
+        self.assertFalse(old['known']);self.assertEqual(counter['latest'],{})
+        self.write([self.event(),self.counter_event(stage='final')]);self.retire();counter={}
+        self.capture(retired=True,counter_out=counter)
+        self.assertEqual(counter['known'],1)
+        def numeric(value):
+            if type(value)is dict:return all(numeric(v) for v in value.values())
+            if type(value)is list:return all(numeric(v) for v in value)
+            return type(value)is int
+        self.assertTrue(numeric(counter))
+
+    def test_counter_caller_preserves_prefix_when_failed_cleanup_skips_after_capture(self):
+        self.write([self.event(),self.counter_event(activatedCount=2)])
+        boundary=Session(fail='open-escape',cleanup=False);opening=copy.deepcopy(self.record)
+        def open_session(record):boundary.open(record);record.update(copy.deepcopy(opening))
+        self.session.open=open_session
+        for name in ('ready','gesture','screenshot','view_roundtrip','hwp_launcher','finish','cleanup'):
+            setattr(self.session,name,getattr(boundary,name))
+        record=self.smoke.run_case(self.folder,self.folder,self.folder,'writer',session_factory=lambda *args:self.session)
+        self.assertIn('initialFocusCounters',record,'Caller did not retain the same-read counter projection')
+        before=record['initialFocusCounters'];after=record['initialFocusCountersAfterRetirement']
+        self.assertEqual(before['latest']['activatedCount'],2);self.assertEqual(before['known'],0)
+        self.assertEqual(after['errorCode'],12);self.assertEqual(after['zeroCountsUsable'],0)
+        self.assertFalse(record['cleanupConfirmed']);self.assertEqual(record['errorType'],'AssertionError')
+
     def test_flow_reuses_one_read_and_preserves_the_original_projection(self):
         self.write([self.event()]);original=self.capture()
         self.write([self.flow_event(),self.event(),self.flow_event(2,phase=2,group=1,

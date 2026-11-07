@@ -572,6 +572,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('workspace', 'suite', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--source-qualified-menu',choices=('x64','arm64'))
     args = parser.parse_args(argv)
     workspace, suite, output = (path.absolute() for path in (args.workspace, args.suite, args.output))
     original._plain(workspace); original._plain(suite)
@@ -584,7 +585,13 @@ def main(argv=None):
     _require(diagnostics != output and diagnostics not in output.parents,
         'Menu verification output must not mutate its verified archive root')
     try:
-        result = verify_native_menu_archive_completeness(workspace, suite)
+        if args.source_qualified_menu is None:
+            result = verify_native_menu_archive_completeness(workspace, suite)
+        else:
+            import time
+            from native_menu_source_selection import prepare_source_menu_runtime
+            prepared=prepare_source_menu_runtime(suite,args.source_qualified_menu,deadline=time.monotonic()+150)
+            result=verify_source_qualified_native_menu_archive_completeness(workspace,suite,admission=prepared.admission)
     except (ValueError, OSError, AssertionError) as exc:
         result = dict(schemaVersion=1, kind='native-menu-archive-generation-completeness',
             success=False, acceptanceEligible=False, errorType=type(exc).__name__)

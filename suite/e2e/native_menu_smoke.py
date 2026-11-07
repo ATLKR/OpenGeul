@@ -39,6 +39,72 @@ def _initial_focus_retired_unknown(code, *, attempted=True, retirement_confirmed
     return value
 
 
+def _initial_focus_counters_unknown(code):
+    return dict(schemaVersion=2,known=0,counterIntervalComplete=0,zeroCountsUsable=0,
+        acceptanceEligible=0,eventCompletenessUnknown=1,errorCode=code,scope={},latest={})
+
+
+def _initial_focus_counters(lines,original,*,trace,worker,managed,retirement_confirmed,budget):
+    """Counter authority comes only from the same retained, framed original read.
+
+    Parser codes1..7 are unchanged. Collector-only unknown codes:8 envelope or
+    stage/kind mismatch,9 retained context/framing unavailable,10 budget,11 error,
+    12 after-retirement capture not attempted. No missing marker proves zero use.
+    """
+    code=9
+    try:
+        budget()
+        assert original['known'] is True and type(managed) is int and type(worker) is int and type(trace) is str
+        assert type(retirement_confirmed) is bool
+        scope=original['scope'];identity={key:value for key,value in scope.items() if key!='moduleCode'}
+        identity['managedThreadId']=managed
+        prefix=b'{"event":"suite.initialEditorFocusFlow","component":"host",'
+        observe=prefix+b'"stage":"observe",'
+        rows=[]
+        def unique(pairs):
+            value={}
+            for key,item in pairs:
+                if key in value:raise ValueError()
+                value[key]=item
+            return value
+        def invalid_constant(value):raise ValueError()
+        def integer(value,maximum,minimum=0):
+            if type(value) is not int or not minimum<=value<=maximum:raise ValueError()
+            return value
+        for line in lines:
+            budget()
+            if not line.startswith(prefix) or line.startswith(observe):continue
+            code=8
+            value=json.loads(line.decode('utf-8'),object_pairs_hook=unique,parse_constant=invalid_constant)
+            assert type(value) is dict and set(value)==set('event component stage sequence utc processId managedThreadId workerProcessId traceId details'.split())
+            assert value['event']=='suite.initialEditorFocusFlow' and value['component']=='host'
+            assert type(value['utc']) is str and re.fullmatch(r'\d{4}-\d\d-\d\dT[0-9:.]+(?:Z|[+-]\d\d:\d\d)',value['utc'])
+            assert integer(value['processId'],0xffffffff,1)==scope['shellPid']
+            assert integer(value['managedThreadId'],0x7fffffff,1)==managed
+            assert integer(value['workerProcessId'],0x7fffffff,1)==worker
+            assert type(value['traceId']) is str and value['traceId']==trace
+            if value['stage']=='observe':continue
+            assert value['stage'] in ('prefix','final')
+            details=value['details'];assert type(details) is dict
+            assert all(type(item) is int for item in details.values())
+            assert type(details.get('snapshotKindCode')) is int
+            assert details['snapshotKindCode']==(1 if value['stage']=='prefix' else 2)
+            sequence=integer(value['sequence'],128,1)
+            assert 'sequence' not in details
+            rows.append(dict(sequence=sequence,**details));assert len(rows)<=128
+        budget()
+        code=11
+        from initial_focus_final_counters import parse_initial_focus_final_counters
+        result=parse_initial_focus_final_counters(rows,retained_identity=identity,
+            retirement_confirmed=retirement_confirmed)
+        budget()
+        return result
+    except TimeoutError:
+        return _initial_focus_counters_unknown(10)
+    except Exception:
+        return _initial_focus_counters_unknown(code)
+
+
 def _initial_focus_flow(lines, original, *, trace, worker, managed, budget):
     """Parse only the separate numeric observer; never revoke original evidence."""
     code=1
@@ -71,6 +137,9 @@ def _initial_focus_flow(lines, original, *, trace, worker, managed, budget):
         for line in lines:
             budget()
             if not line.startswith(prefix):continue
+            # These canonical stages own an independent closed counter schema.
+            # Their malformed details cannot revoke the fixed observe projection.
+            if line.startswith((prefix+b'"stage":"prefix",',prefix+b'"stage":"final",')):continue
             code=3
             value=json.loads(line.decode('utf-8'),object_pairs_hook=unique,parse_constant=invalid_constant)
             keys(value,'event component stage sequence utc processId managedThreadId workerProcessId traceId details')
@@ -125,7 +194,7 @@ def _initial_focus_flow(lines, original, *, trace, worker, managed, budget):
         return unknown(code)
 
 
-def capture_initial_focus_trace(session, record, *, retired=False, expected_identity=None, flow_out=None):
+def capture_initial_focus_trace(session, record, *, retired=False, expected_identity=None, flow_out=None,counter_out=None):
     """One bounded, numeric-only read of this launch's existing C# stderr.
 
     Unknown codes: 1=owner context, 2=path, 3=bound, 4=unstable/read,
@@ -139,6 +208,8 @@ def capture_initial_focus_trace(session, record, *, retired=False, expected_iden
     code = 1
     if type(flow_out) is dict:
         flow_out.clear();flow_out.update(_initial_focus_retired_unknown(1) if retired is True else _initial_focus_unknown(1))
+    if type(counter_out) is dict:
+        counter_out.clear();counter_out.update(_initial_focus_counters_unknown(9))
     retirement_confirmed = False
     deadline = time.monotonic() + 1
     def budget():
@@ -375,6 +446,13 @@ def capture_initial_focus_trace(session, record, *, retired=False, expected_iden
             except Exception:
                 flow=_initial_focus_unknown(3)
             flow_out.clear();flow_out.update(flow)
+        if type(counter_out) is dict:
+            try:
+                counter=_initial_focus_counters(lines,value,trace=trace,worker=worker,managed=initial_managed,
+                    retirement_confirmed=retirement_confirmed,budget=budget)
+            except Exception:
+                counter=_initial_focus_counters_unknown(11)
+            counter_out.clear();counter_out.update(counter)
         return value
     except TimeoutError:
         return unknown(10)
@@ -1100,7 +1178,8 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession,
         nativeMenuVerified=False, cleanupConfirmed=False, cleanClose=False,
         hwpLauncherCompleted=False, nativeHwpMenuLaunchExecuted=False,
         initialFocusTraceAfterRetirement=_initial_focus_retired_unknown(12,attempted=False),
-        initialFocusFlowAfterRetirement=_initial_focus_retired_unknown(12,attempted=False))
+        initialFocusFlowAfterRetirement=_initial_focus_retired_unknown(12,attempted=False),
+        initialFocusCountersAfterRetirement=_initial_focus_counters_unknown(12))
     started = time.monotonic()
     session = None
     try:
@@ -1166,11 +1245,13 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession,
     finally:
         if session is not None:
             flow=_initial_focus_unknown(1)
+            counter=_initial_focus_counters_unknown(9)
             try:
-                record['initialFocusTrace'] = capture_initial_focus_trace(session, record,flow_out=flow)
+                record['initialFocusTrace'] = capture_initial_focus_trace(session, record,flow_out=flow,counter_out=counter)
             except Exception:
                 record['initialFocusTrace'] = _initial_focus_unknown(11)
             record['initialFocusFlow']=flow
+            record['initialFocusCounters']=counter
             expected_retirement_identity=None
             try:
                 original=session._opening_focus_identity
@@ -1183,12 +1264,14 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession,
                 record['cleanupErrorType'] = type(exc).__name__
             if record['cleanupConfirmed']:
                 flow=_initial_focus_retired_unknown(1)
+                counter=_initial_focus_counters_unknown(9)
                 try:
                     record['initialFocusTraceAfterRetirement'] = capture_initial_focus_trace(session,record,
-                        retired=True,expected_identity=expected_retirement_identity,flow_out=flow)
+                        retired=True,expected_identity=expected_retirement_identity,flow_out=flow,counter_out=counter)
                 except Exception:
                     record['initialFocusTraceAfterRetirement'] = _initial_focus_retired_unknown(11)
                 record['initialFocusFlowAfterRetirement']=flow
+                record['initialFocusCountersAfterRetirement']=counter
         if not record['cleanupConfirmed']:
             record['success'] = False
         if record.get('diagnosticProfile')==3:

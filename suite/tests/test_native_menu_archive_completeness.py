@@ -27,6 +27,55 @@ CORE_COMMANDS = ['new-hwp', 'home', 'new', 'open', 'save', 'saveAs', 'close']
 
 
 class SourceQualifiedMenuArchiveTests(unittest.TestCase):
+    def test_source_cli_prepares_one_fresh_actual_gate_and_calls_the_source_entry(self):
+        legacy,old_admission=self.fixture();module=legacy.implementation()
+        import inspect
+        self.assertIn('--source-qualified-menu',inspect.getsource(module.main))
+        import native_menu_source_selection as selected
+        import native_menu_source_admission as gate
+        target=legacy.root/'source-cli.json'
+        args=['--workspace',str(legacy.root),'--suite',str(legacy.suite),'--output',str(target),
+            '--source-qualified-menu','arm64']
+        with patch.object(selected,'prepare_source_menu_runtime',wraps=selected.prepare_source_menu_runtime) as prepare, \
+                patch.object(module,'verify_source_qualified_native_menu_archive_completeness',
+                    wraps=module.verify_source_qualified_native_menu_archive_completeness) as verify, \
+                patch.object(module,'verify_native_menu_archive_completeness',side_effect=AssertionError('No fallback')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(module.main(args),0)
+        prepare.assert_called_once();verify.assert_called_once()
+        supplied=verify.call_args.kwargs['admission']
+        self.assertIs(type(supplied),gate.SourceMenuAdmission);self.assertIsNot(supplied,old_admission)
+        self.assertEqual(prepare.call_args.args,(legacy.suite,'arm64'))
+        value=json.loads(target.read_text());self.assertEqual(value['nativePointProfileVersion'],4)
+        self.assertFalse(value['acceptanceEligible'])
+
+    def test_source_cli_gate_failure_closes_failure_without_default_replay(self):
+        legacy,_=self.fixture();module=legacy.implementation()
+        import inspect
+        self.assertIn('--source-qualified-menu',inspect.getsource(module.main))
+        import native_menu_source_selection as selected
+        target=legacy.root/'source-denied.json'
+        args=['--workspace',str(legacy.root),'--suite',str(legacy.suite),'--output',str(target),
+            '--source-qualified-menu','arm64']
+        with patch.object(selected,'prepare_source_menu_runtime',side_effect=ValueError('synthetic invalid Full')), \
+                patch.object(module,'verify_native_menu_archive_completeness') as fallback, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(module.main(args),1)
+        fallback.assert_not_called();value=json.loads(target.read_text())
+        self.assertFalse(value['success']);self.assertNotIn('sourceMenuAdmission',value)
+
+    def test_archive_default_never_prepares_source_and_invalid_architecture_is_rejected(self):
+        legacy=NativeMenuArchiveCompletenessTests(methodName='runTest');legacy.setUp();self.addCleanup(legacy.doCleanups)
+        module=legacy.implementation()
+        import inspect
+        self.assertIn('--source-qualified-menu',inspect.getsource(module.main))
+        import native_menu_source_selection as selected
+        args=['--workspace',str(legacy.root),'--suite',str(legacy.suite),'--output',str(legacy.root/'legacy-cli.json')]
+        with patch.object(selected,'prepare_source_menu_runtime',side_effect=AssertionError('Default must skip Gate')), \
+                contextlib.redirect_stdout(io.StringIO()):self.assertEqual(module.main(args),0)
+        with contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            module.main(args+['--source-qualified-menu','auto'])
+
     def local_action(self,legacy,admission,*,row_index=-1,ledger_index=-2,operation='save'):
         from test_native_menu_point_profile import source_qualified_action_fixture
         row=legacy.report['tests'][row_index];origin=row['nativeMenuActions'][ledger_index]
