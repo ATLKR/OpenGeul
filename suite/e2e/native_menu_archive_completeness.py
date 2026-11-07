@@ -15,10 +15,11 @@ import sys
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from suite.e2e import native_archive_completeness as original
-from suite.e2e.native_menu_smoke import CORE_COMMANDS, MODULES, VIEW_MODULES, require_hwp_launcher_receipt, require_native_point_preflight
+from suite.e2e.native_menu_smoke import CORE_COMMANDS, GESTURES, MODULES, VIEW_MODULES, require_hwp_launcher_receipt, require_native_point_preflight
 
 REPORT = '.work/suite-native-menu/results.json'
 ROOT = '.work/suite-native-menu/worker-diagnostics'
+POINT_METHOD_V2 = 'owned-popup-and-msaa-canonical-hit-v2'
 
 
 def _require(condition, message):
@@ -29,6 +30,166 @@ def _require(condition, message):
 def _key(row):
     return (original._positive(row.get('pid')), original._positive(row.get('creationTime')),
             original._image(row.get('image')))
+
+
+def _nodes(value):
+    pending=[value];count=0
+    while pending:
+        item=pending.pop();count+=1
+        _require(count<=1_000_000, 'Original menu action tree exceeds its finite bound')
+        yield item
+        if type(item) is dict:pending.extend(item.values())
+        elif type(item) is list:pending.extend(item)
+
+
+def _action_bytes(action):
+    return json.dumps(action,ensure_ascii=False,allow_nan=False,sort_keys=True,
+        separators=(',',':')).encode()
+
+
+def _action_profiles(action):
+    from owned_native_menu import _require_provider_point_v2
+    points=[];snapshots=[];results=[]
+    for item in _nodes(action):
+        if type(item) is not dict:continue
+        point=item.get('targetPointProof')
+        if type(point) is dict and 'providerLocalProof' in point:snapshots.append((point,item))
+        if 'providerLocalProof' in item:
+            proof=item['providerLocalProof']
+            _require(item.get('pointMethod')==POINT_METHOD_V2 and type(proof) is dict
+                and type(proof.get('schemaVersion')) is int and proof['schemaVersion']==2
+                and proof.get('method')==POINT_METHOD_V2,
+                'Original menu point proof is not the declared canonical profile')
+            provider=proof.get('provider')
+            _require(type(provider) is dict and type(provider.get('schemaVersion')) is int
+                and provider['schemaVersion']==2 and type(provider.get('workerSchemaVersion')) is int
+                and provider['workerSchemaVersion']==2,
+                'Original canonical point worker profile differs')
+            points.append(item)
+        elif item.get('pointMethod') not in (None,'global-uia'):
+            raise ValueError('Original menu local point proof is missing or unknown')
+        if 'providerLocalResult' in item:
+            result=item['providerLocalResult']
+            _require(type(result) is dict and type(result.get('schemaVersion')) is int
+                and result['schemaVersion']==2 and type(result.get('workerSchemaVersion')) is int
+                and result['workerSchemaVersion']==2,
+                'Original menu worker observation mixes profiles')
+            results.append(result)
+    replayed=set()
+    for point,snapshot in snapshots:
+        identity=snapshot.get('identityProof')
+        _require(snapshot.get('binding')==action['binding']
+            and type(identity) is dict and identity.get('scope')==action.get('elementIdentityScope'),
+            'Retained native point snapshot belongs to another action scope')
+        role=point['providerLocalProof'].get('role')
+        _require(type(role) is str and role.startswith('target:'),
+            'Original canonical point does not name an exact command')
+        _require_provider_point_v2(point,snapshot,role[len('target:'):])
+        replayed.add(_action_bytes(point))
+    for pointer in action['pointers']:
+        for hit,snapshot in zip(pointer.get('hits',[]),pointer.get('snapshots',[])[1:]):
+            if 'providerLocalProof' in hit:
+                _require_provider_point_v2(hit,snapshot,pointer['target'])
+                replayed.add(_action_bytes(hit))
+    _require(all(_action_bytes(point) in replayed for point in points),
+        'Original canonical point has no replayed action snapshot or hit')
+    providers={}
+    for point in points:
+        proof=point['providerLocalProof'];scope_id=proof['sourceScopeId']
+        packet=_action_bytes(proof['provider'])
+        _require(scope_id not in providers or providers[scope_id]==packet,
+            'One original menu scope describes different worker packets')
+        providers[scope_id]=packet
+    if providers:
+        interop=action.get('uiaInterop')
+        _require(type(interop) is dict and 'providerLocalResult' in interop,
+            'Original menu final worker diagnostic path is missing')
+        latest=providers[max(providers)]
+        _require(_action_bytes(interop['providerLocalResult'])==latest
+            and all(_action_bytes(result)==latest for result in results),
+            'Original menu worker diagnostic packet is not its final replayed point proof')
+    else:_require(not results, 'A global-only menu action retained a local worker packet')
+
+
+def _menu_actions(row,shell,attachment,generation,suite):
+    from owned_native_menu import require_native_menu_action
+    document=attachment['hwnd'];ledger=row.get('nativeMenuActions')
+    # The producer's original content-free journal admits at most 128 entries.
+    _require(type(ledger) is list and 0<len(ledger)<=128,
+        'Original native menu action ledger is missing or unbounded')
+    binding=dict(document=document,parent=attachment['parent'],child=attachment['child'],officePid=attachment['officePid'])
+    activation=next(item['originalProcess'] for item in row['windowActivations']
+        if type(item) is dict and item.get('suiteHwnd')==document)
+    members={};previous=None
+    try:
+        for ledger_index,action in enumerate(ledger):
+            require_native_menu_action(action,shell,document)
+            _require(action['binding']==binding and _key(action['originalEngine'])==_key(generation),
+                'Original native action belongs to another attachment or engine generation')
+            actor=action['originalProcess']
+            _require((actor['pid'],actor['creationTime'],actor['handleValue'])==
+                (shell,activation['creationTime'],activation['handleValue'])
+                and original._image(actor['image'])==original._image(str(suite/'OpenGeul.Office.exe')),
+                'Original native action belongs to another retained shell')
+            _require(previous is None or previous<=action['startedAt'],
+                'Original native action ledger order changed')
+            previous=action['finishedAt'];encoded=_action_bytes(action)
+            _require(encoded not in members, 'Duplicate original native action ledger entry')
+            members[encoded]=ledger_index
+            _action_profiles(action)
+        previous_slot=-1;used=set()
+        def slot(action,command,gesture):
+            nonlocal previous_slot
+            require_native_menu_action(action,shell,document,command)
+            _require(action['gesture'] is gesture, 'Original native plan slot signature changed')
+            encoded=_action_bytes(action)
+            _require(encoded in members, 'Original native plan slot has no ledger entry')
+            index=members[encoded]
+            _require(index>previous_slot, 'Original native plan slots reused or reordered ledger entries')
+            previous_slot=index;used.add(index)
+        def finish_command(command):
+            _require(previous_slot+1<len(ledger), 'Original native finish menu action is missing')
+            slot(ledger[previous_slot+1],command,False)
+        gestures=row.get('gestures')
+        _require(type(gestures) is list and len(gestures)==len(GESTURES),
+            'Original fixed native gestures are missing')
+        for index,(step,command) in enumerate(zip(gestures,GESTURES)):
+            _require(type(step) is dict and type(step.get('index')) is int and step['index']==index
+                and step.get('gesture')==command, 'Original fixed native gesture order changed')
+            wrapper=step.get('receipt')
+            _require(type(wrapper) is dict and wrapper.get('success') is True
+                and wrapper.get('gesture')==command,
+                'Original fixed native gesture receipt is incomplete')
+            action=wrapper.get('receipt')
+            slot(action,command,True)
+        module=row['module']
+        if module in VIEW_MODULES:
+            view=row['nativeViewRoundtrip']
+            for action in view['previewActions']:slot(action,'printPreview',False)
+            for action in view['coreCommands']:slot(action,'core-commands',True)
+        if module=='writer':
+            slot(row['nativeHwpLauncher']['menuAction'],'new-hwp',False)
+            finish_command('home')
+        elif module=='calc':
+            finish_command('exit')
+            wrapper=row.get('postExitCancelMenu')
+            _require(type(wrapper) is dict and wrapper.get('gesture')=='open-escape'
+                and wrapper.get('success') is True, 'Original Calc cancel menu finish receipt is missing')
+            slot(wrapper.get('receipt'),'open-escape',True)
+        elif module=='base':
+            slot(row['baseSaveMenuAction'],'save',False)
+            finish_command('exit')
+        elif module in ('draw','math'):finish_command('close')
+        _require(len(used)==len(ledger), 'Original native action ledger differs from the complete source plan')
+        nested={key:value for key,value in row.items() if key!='nativeMenuActions'}
+        for action in _nodes(nested):
+            if type(action) is dict and action.get('kind')=='owned-native-menu-action':
+                require_native_menu_action(action,shell,document)
+                _require(_action_bytes(action) in members,
+                    'Nested native action differs from the original flat ledger')
+                _action_profiles(action)
+    except (AssertionError,KeyError,TypeError,OverflowError,RecursionError):
+        raise ValueError('Original native menu action receipt is incomplete, foreign or changed') from None
 
 
 def _view_case(row, module):
@@ -82,7 +243,7 @@ def _expected(workspace, suite):
     report = original._json(raw)
     _require(type(report.get('schemaVersion')) is int and report['schemaVersion'] == 1
         and report.get('kind') == 'native-menu-gesture-matrix', 'Wrong original menu report')
-    _require(type(report.get('nativePointProfileVersion')) is int and report['nativePointProfileVersion']==1,
+    _require(type(report.get('nativePointProfileVersion')) is int and report['nativePointProfileVersion']==2,
         'Original native menu controller profile is missing')
     try:require_native_point_preflight(report['nativePointPreflight'])
     except (AssertionError,KeyError,TypeError,ValueError):
@@ -133,6 +294,7 @@ def _expected(workspace, suite):
                 and 'nativeHwpLauncher' not in row, 'Unplanned native HWP launcher case')
         key = _key(generation)
         _require(key not in expected, 'Duplicate original native menu engine generation')
+        _menu_actions(row,shell,attachment,generation,suite)
         expected[key] = dict(scope='suite-native-menu', case=row['case'], slot=0,
             suiteShellPid=shell, root=ROOT, **generation)
     descriptor = dict(path=REPORT, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())

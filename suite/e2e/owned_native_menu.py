@@ -163,6 +163,8 @@ def _element_anchor(row,proof,binding,shell_pid):
 def _hit_identity(hit,snapshot,target):
     if hit.get('pointMethod')=='owned-popup-and-msaa-hit':
         _require_provider_point(hit,snapshot,target);return
+    if hit.get('pointMethod')=='owned-popup-and-msaa-canonical-hit-v2':
+        _require_provider_point_v2(hit,snapshot,target);return
     if 'identityProof' not in snapshot:return
     proof=hit['identityProof'];scope=snapshot['identityProof']['scope'];role=_target_role(target)
     assert proof['scope']==scope and proof['role']==role
@@ -174,7 +176,7 @@ def _hit_identity(hit,snapshot,target):
 
 def _require_point(hit,snapshot,target):
     method=hit.get('pointMethod','global-uia')
-    assert method in ('global-uia','owned-popup-and-msaa-hit'), 'Unknown native point proof method'
+    assert method in ('global-uia','owned-popup-and-msaa-hit','owned-popup-and-msaa-canonical-hit-v2'), 'Unknown native point proof method'
     if method=='global-uia':assert hit['withinControl'] is hit['uiaMatches'] is True, 'Native menu point is obstructed'
     _hit_identity(hit,snapshot,target)
 
@@ -231,6 +233,88 @@ def _require_provider_point(hit,snapshot,target):
     assert proof['globalPoint']==dict(kindCode=50033,pid=binding['officePid'],nativeHwnd=popup['hwnd'])
     _comparison_proof(proof['fresh'],binding,scope['shellPid'],target)
     assert proof['fresh']['scope']==scope
+
+
+def _require_provider_point_v2(hit,snapshot,target):
+    """Replay exact native object/SELF hit identity; never rewrite global FALSE."""
+    from native_menu_msaa_hit import _record,worker_record_v2,MsaaHitScope
+    assert target!='file' and 'identityProof' in snapshot and hit['uiaMatches'] is False
+    scope=snapshot['identityProof']['scope'];binding=scope['binding'];role=_target_role(target)
+    original=hit['identityProof'];roles=snapshot['identityProof']['roles']
+    negatives=[name for name in roles if name!=role]
+    assert original['scope']==scope and original['role']==role
+    assert original['targetEqualsRetained'] is True and original['hitEqualsRetained'] is False
+    assert type(original['differentFrom']) is dict and set(original['differentFrom'])==set(negatives)
+    assert all(value is False for value in original['differentFrom'].values())
+    proof=hit['providerLocalProof']
+    assert type(proof) is dict and set(proof)==set(('schemaVersion method scope role sourceScopeId '
+        'sourceScope negativeRoles provider before after sourceFresh fresh creator globalPoint').split())
+    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==2
+    assert proof['method']=='owned-popup-and-msaa-canonical-hit-v2' and proof['scope']==scope and proof['role']==role
+    assert proof['negativeRoles']==negatives+['global-point']
+    assert type(proof['sourceScopeId']) is int and 0<proof['sourceScopeId']<=32
+    creator=proof['creator'];assert type(creator) is dict and set(creator)=={'threadId','mta','sameThread'}
+    _int(creator['threadId']);assert creator['threadId']<2**32
+    assert creator['mta'] is creator['sameThread'] is True
+    provider=proof['provider'];expected=_record(None,False,profile_version=2)
+    assert type(provider) is dict and provider.keys()==expected.keys()
+    assert all(type(value) is int and 0<=value<2**64 for value in provider.values())
+    assert all(provider[key]<2**32 for key in worker_record_v2())
+    assert provider['schemaVersion']==provider['workerSchemaVersion']==2
+    assert provider['scopeId']==proof['sourceScopeId'] and provider['stageCode']==13
+    ones=('diagnosticOnly','providerLocalOnly','nativeAttempted','nativeExit','threadClosed',
+        'processesClosed','localKnown','localMatch','workerCleanup','workerMta','comInitialized',
+        'comUninitialized','dpiEntered','dpiRestored','processBefore','processAfter','variantAttempted',
+        'variantCleared','physicalDpiVerified','threadIdentity','callbackIdentity','exitCodeObserved',
+        'canonicalStatus','filePairEqual','fileOriginalRepeatEqual','targetPairEqual',
+        'targetDifferentFromFile','hitMatchesTarget','fileUiPositive','targetUiPositive')
+    zeros=('acceptanceEligible','globalHitSubstituted','synthetic','workerException','pending',
+        'variantCleanupHresult','cleanupError','nativeExitCode')
+    assert all(provider[key]==1 for key in ones) and all(provider[key]==0 for key in zeros)
+    for key in ('controllerPid','threadId','threadBirth'):_int(provider[key])
+    assert provider['controllerPid']<2**32 and provider['threadId']<2**32
+    assert provider['workerStage']==8 and provider['threadId']!=creator['threadId']
+    assert provider['controllerPid'] not in (scope['shellPid'],binding['officePid'])
+    assert provider['bindingCount']==provider['selfCount']==4 and provider['variantType']==9
+    assert provider['referencesAcquired']==provider['referencesReleased']==16
+    count=len(negatives)+1
+    assert 2<=count<=16
+    assert provider['negativeCount']==provider['negativeRejected']==count
+    calls=dict(pattern=4,child_id=4,accessible=5,accessible_query=6,control_type=4,
+        hit_test=1,query=1,compare=2+count)
+    for name,number in calls.items():
+        assert provider[name+'Attempted']==provider[name+'Completed']==number and provider[name+'Hresult']==0
+    before=proof['before'];assert type(before) is dict and before==proof['after']
+    assert set(before)==set(('classCode hwnd pid threadId rootHwnd style extendedStyle rectangle '
+        'point ownerChain foreground ownershipBefore ownershipAfter').split())
+    source_scope=proof['sourceScope'];assert type(source_scope) is dict
+    assert source_scope==dict(scope_id=proof['sourceScopeId'],engine_pid=binding['officePid'],
+        engine_birth=scope['officeCreationTime'],shell_pid=scope['shellPid'],shell_birth=scope['shellCreationTime'],
+        parent_hwnd=binding['parent'],child_hwnd=binding['child'],x=hit['point'][0],y=hit['point'][1])
+    assert MsaaHitScope(**source_scope).valid()
+    popup=snapshot['popup'];assert popup is not None
+    for key in ('classCode','pid','threadId'):
+        _int(before[key]);assert before[key]<2**32
+    for key in ('hwnd','rootHwnd','foreground'):
+        _int(before[key]);assert before[key]<2**64
+    assert before['classCode']==1 and before['ownershipBefore'] is before['ownershipAfter'] is True
+    assert before['hwnd']==before['rootHwnd']==hit['hitHwnd']==hit['rootHwnd']==popup['hwnd']
+    assert before['pid']==hit['pid']==binding['officePid'] and before['threadId']==popup['threadId']
+    owners=before['ownerChain'];assert type(owners) is list and 2<=len(owners)<=16
+    assert all(type(n) is int and n>0 for n in owners) and len(set(owners))==len(owners)
+    assert owners==popup['ownerChain'] and owners[0]==popup['hwnd'] and owners[-1] in (binding['child'],binding['document'])
+    assert all(type(before[key]) is int and 0<=before[key]<2**32 for key in ('style','extendedStyle'))
+    assert before['style']&0x80000000 and not before['style']&0x40000000 and before['extendedStyle']&0x80
+    assert before['foreground'] in (binding['document'],popup['hwnd']) and before['point']==hit['point']
+    rect=before['rectangle'];target_rect=snapshot['control']['rectangle'];point=hit['point']
+    assert len(rect)==len(target_rect)==4 and len(point)==2
+    assert all(type(n) is int for n in (*rect,*target_rect,*point))
+    assert rect[0]<=target_rect[0]<=point[0]<target_rect[2]<=rect[2]
+    assert rect[1]<=target_rect[1]<=point[1]<target_rect[3]<=rect[3]
+    assert proof['globalPoint']==dict(kindCode=50033,pid=binding['officePid'],nativeHwnd=popup['hwnd'])
+    for field in ('sourceFresh','fresh'):
+        fresh=proof[field];_comparison_proof(fresh,binding,scope['shellPid'],target)
+        assert fresh['scope']==scope and fresh['roles']==roles
 
 
 def _keyboard_recipient(snapshot,binding,shell_pid,*,menu_scope=None):
@@ -448,10 +532,16 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
     try:
         budget()
         profile=getattr(process,'opengeul_native_menu_point_profile',False) is True
+        version=getattr(process,'opengeul_native_menu_point_profile_version',1) if profile else 1
+        assert type(version) is int and version in (1,2), 'Unknown native point profile version'
         if profile:
             from native_menu_msaa_hit import pending_msaa_hit
             assert pending_msaa_hit() is None, 'An original native provider callback is still unretired'
-        if probe is None:probe=NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}),native_point_profile=profile)
+        if probe is None:probe=NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}),
+            native_point_profile=profile,native_point_profile_version=version)
+        elif profile:
+            assert getattr(probe,'_native_point_profile_version',1)==version, 'Native point profile changed before admission'
+            if version==2:assert getattr(probe,'_native_point_profile',False) is True
         assert native_menu_active(api,process,document), 'Native-only document menu is not ready'
         suite=Path(process.opengeul_suite_root).resolve()
         shell=probe.process_snapshot(process)
@@ -841,8 +931,11 @@ class NativeMenuProbe(NativeControlProbe):
     # CUIAutomation8 is the documented Windows 8+ IUIAutomation2 implementation.
     # A private client avoids changing pywinauto's shared UIA singleton settings.
     CLIENT='{e22ad333-b25f-460c-83d0-0581107395c9}'
-    def __init__(self,deadline,clock,*,interop=None,native_point_profile=False,**libraries):
+    def __init__(self,deadline,clock,*,interop=None,native_point_profile=False,native_point_profile_version=1,**libraries):
         assert type(native_point_profile) is bool
+        assert type(native_point_profile_version) is int and native_point_profile_version in (1,2)
+        assert native_point_profile_version==1 or native_point_profile
+        self._native_point_profile_version=native_point_profile_version
         self._native_point_profile=self._physical_file_refresh=native_point_profile
         self._provider_creator=None;self._msaa_lease=None
         self.provider_client=None
@@ -1035,7 +1128,7 @@ class NativeMenuProbe(NativeControlProbe):
         assert owned()==before, 'Original File window generation changed'
         observation['ownershipAfter']=True
         return fresh
-    def _fresh_proof(self,target):
+    def _fresh_proof_with_refs(self,target):
         assert self._identity_scope is not None and target in _scope_targets(self._identity_scope)
         fresh=self._fresh_base()
         if 'contrast-edit' not in self._identity_refs:
@@ -1050,7 +1143,9 @@ class NativeMenuProbe(NativeControlProbe):
         negative=[[left,right,self._same(fresh[left],fresh[right])] for index,left in enumerate(roles) for right in roles[index+1:]]
         proof=dict(scope=copy.deepcopy(self._identity_scope),roles=roles,positive=positive,negative=negative)
         _comparison_proof(proof,self._identity_scope['binding'],self._identity_scope['shellPid'],target)
-        return proof
+        return proof,fresh
+    def _fresh_proof(self,target):
+        return self._fresh_proof_with_refs(target)[0]
     def _provider_timeout(self):
         remaining=self.deadline-self.clock()
         # Connection and transaction timeouts can both be consumed by a request.
@@ -1173,8 +1268,16 @@ class NativeMenuProbe(NativeControlProbe):
         original=self._provider_creator;thread,mta=self._mta_snapshot()
         assert original and original['mta'] is mta is True and original['threadId']==thread
         return dict(original,sameThread=True)
-    def _begin_point_lease(self,file,target,negative,scope_id,point):
-        from native_menu_msaa_hit import SdkAbi,MsaaHitScope,MsaaHitSource,begin_msaa_hit
+    def _begin_point_lease(self,file,target,negative,scope_id,point,*,fresh_refs=None):
+        version=getattr(self,'_native_point_profile_version',1)
+        assert type(version) is int and version in (1,2)
+        assert getattr(self,'_native_point_profile',False) is True
+        role=_target_role(self._active_target)
+        if version==2:
+            assert type(fresh_refs) is dict and set(fresh_refs)==set(self._identity_refs)
+            assert file is self._identity_refs['file'] and target is fresh_refs[role]
+        else:assert fresh_refs is None
+        from native_menu_msaa_hit import SdkAbi,MsaaHitScope,MsaaHitSource,MsaaHitSourceV2,begin_msaa_hit
         from comtypes import GUID,HRESULT
         from comtypes.automation import VARIANT
         library=self._uia_library;legacy=library.IUIAutomationLegacyIAccessiblePattern
@@ -1183,15 +1286,22 @@ class NativeMenuProbe(NativeControlProbe):
         sdk=SdkAbi(client_interface=library.IUIAutomation,element_interface=library.IUIAutomationElement,
             legacy_interface=legacy,accessible_interface=accessible,guid_type=GUID,hresult_type=HRESULT,
             variant_type=VARIANT,function_factory=C.WINFUNCTYPE)
-        scope=self._identity_scope;binding=scope['binding'];role=_target_role(self._active_target)
-        source=MsaaHitSource(self.provider_client,file,target,self._identity_refs[role],tuple(negative),
-            self._point_source['shellHandle'],self._point_source['engineHandle'],keepalive=(self,))
+        scope=self._identity_scope;binding=scope['binding']
+        if version==2:
+            source=MsaaHitSourceV2(self.provider_client,file,fresh_refs['file'],fresh_refs[role],
+                self._identity_refs[role],tuple(negative),self._point_source['shellHandle'],
+                self._point_source['engineHandle'],keepalive=(self,fresh_refs))
+        else:
+            source=MsaaHitSource(self.provider_client,file,target,self._identity_refs[role],tuple(negative),
+                self._point_source['shellHandle'],self._point_source['engineHandle'],keepalive=(self,))
         request=MsaaHitScope(scope_id,binding['officePid'],scope['officeCreationTime'],scope['shellPid'],
             scope['shellCreationTime'],binding['parent'],binding['child'],*point)
-        return begin_msaa_hit(source,request,sdk,self.deadline,native_enabled=True)
+        return begin_msaa_hit(source,request,sdk,self.deadline,native_enabled=True,profile_version=version)
     def _provider_local_point(self,point,target,actual):
         from dataclasses import asdict
         assert getattr(self,'_native_point_profile',False) is True and self._active_target!='file'
+        version=getattr(self,'_native_point_profile_version',1)
+        assert type(version) is int and version in (1,2)
         creator=self._require_provider_creator();scope=self._identity_scope;binding=scope['binding']
         role=_target_role(self._active_target)
         global_point=dict(kindCode=self._uia_call(9,lambda:actual.CurrentControlType),
@@ -1199,23 +1309,36 @@ class NativeMenuProbe(NativeControlProbe):
         assert global_point['kindCode']==50033 and global_point['pid']==binding['officePid']
         rectangle=self._chrome(target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
         assert global_point['nativeHwnd']==before['hwnd']
+        source_fresh=fresh_refs=None
+        if version==2:
+            source_fresh,fresh_refs=self._fresh_proof_with_refs(self._active_target)
+            assert self._same(target,fresh_refs[role]), 'Current native target differs from independently fresh target'
         roles=[key for key in self._identity_refs if key!=role]
         negative=[self._identity_refs[key] for key in roles]+[actual]
         sequence=getattr(self,'_point_sequence',0)+1;assert sequence<=32;self._point_sequence=sequence
-        lease=self._begin_point_lease(self.file_element,target,negative,sequence,point)
+        if version==2:
+            lease=self._begin_point_lease(self._identity_refs['file'],fresh_refs[role],negative,sequence,point,fresh_refs=fresh_refs)
+        else:lease=self._begin_point_lease(self.file_element,target,negative,sequence,point)
         self._msaa_lease=lease
         provider=lease.wait()
         self.interop['providerLocalResult']=provider
         assert not lease.pending, 'The native menu provider call is unretired'
+        if version==2:
+            from native_menu_msaa_hit import _record
+            assert type(provider) is dict and provider.keys()==_record(None,False,profile_version=2).keys()
+            assert type(provider.get('schemaVersion')) is int and provider['schemaVersion']==2
+            assert type(provider.get('workerSchemaVersion')) is int and provider['workerSchemaVersion']==2
         assert provider['localKnown']==provider['localMatch']==1, 'The native menu provider point is unknown'
         assert provider['nativeExit']==provider['threadClosed']==provider['processesClosed']==provider['workerCleanup']==1
         assert provider['stageCode']==13 and self.clock()<self.deadline
         assert self._require_provider_creator()==creator
         after=self._popup_exposure(binding,point,rectangle);assert before==after
         fresh=self._fresh_proof(self._active_target)
-        return dict(schemaVersion=1,method='owned-popup-and-msaa-hit',scope=copy.deepcopy(scope),role=role,
+        result=dict(schemaVersion=version,method='owned-popup-and-msaa-hit' if version==1 else 'owned-popup-and-msaa-canonical-hit-v2',scope=copy.deepcopy(scope),role=role,
             sourceScopeId=sequence,sourceScope=asdict(lease.scope),negativeRoles=roles+['global-point'],
             provider=provider,before=before,after=after,fresh=fresh,creator=creator,globalPoint=global_point)
+        if version==2:result['sourceFresh']=source_fresh
+        return result
     def _popup_exposure(self,binding,point,target_rect):
         """The exact pinned VCL popup at a physical point, not target identity.
 
@@ -1304,7 +1427,9 @@ class NativeMenuProbe(NativeControlProbe):
                 if (getattr(self,'_native_point_profile',False) and self._active_target!='file' and
                         match is False and proof['targetEqualsRetained'] is True and proof['hitEqualsRetained'] is False and
                         all(value is False for value in proof['differentFrom'].values())):
-                    result['pointMethod']='owned-popup-and-msaa-hit'
+                    version=getattr(self,'_native_point_profile_version',1)
+                    assert type(version) is int and version in (1,2)
+                    result['pointMethod']='owned-popup-and-msaa-hit' if version==1 else 'owned-popup-and-msaa-canonical-hit-v2'
                     result['providerLocalProof']=self._provider_local_point(point,target,actual)
                 else:assert result['identityProof']['targetEqualsRetained'] is result['identityProof']['hitEqualsRetained'] is True
                 observation['stageCode']=10
@@ -1624,7 +1749,7 @@ class NativeMenuProbe(NativeControlProbe):
         if target!='file':
             hit=self.point_snapshot(doc,point,self.current_control);popup=self.window_snapshot(hit['rootHwnd'])
             popup['ownerChain']=self._owners(popup['hwnd'],binding)
-            if hit.get('pointMethod')=='owned-popup-and-msaa-hit':target_point=hit
+            if hit.get('pointMethod') in ('owned-popup-and-msaa-hit','owned-popup-and-msaa-canonical-hit-v2'):target_point=hit
         attachment=self.attachment_snapshot(binding);document=self.window_snapshot(doc)
         thread=attachment['windows']['child']['threadId'];gui=self.native_focus(thread)
         permitted={0,child}

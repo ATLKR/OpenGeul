@@ -387,10 +387,15 @@ class WindowsSession:
         self.hwnd = self.parent = self.child = self.office_pid = 0
         self.home_hwnd = 0
         self.native_point_profile = False
+        self.native_point_profile_version = 1
 
     def open(self, record):
         entry_deadline = time.monotonic() + 150
         assert os.name == 'nt' and __debug__, 'Actual Windows GUI with assertions is required'
+        profile=getattr(self,'native_point_profile',False)
+        profile_version=getattr(self,'native_point_profile_version',1)
+        assert type(profile) is bool and type(profile_version) is int and profile_version in (1,2)
+        assert profile or profile_version==1, 'A native point profile requires explicit opt-in'
         import windows_smoke as native
         import startup_smoke as startup
         import owned_native_menu as menu
@@ -398,8 +403,9 @@ class WindowsSession:
         self.native, self.menu, self.desktop = native, menu, Desktop
         self.process = native.launch_suite(native.new_document_command(self.suite, self.module),
             self.suite, self.output, record['case'])
-        if getattr(self,'native_point_profile',False):
+        if profile:
             self.process.opengeul_native_menu_point_profile = True
+            self.process.opengeul_native_menu_point_profile_version = profile_version
         self.api = native.Windows()
         self.hwnd, self.parent, self.child, self.office_pid = native.verified_attachment(
             self.api, self.process, self.module)
@@ -1094,7 +1100,7 @@ def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, poin
         missingModules=[module for module in MODULES if module not in counts],
         failedModules=[row['module'] for row in records if not row['success']],
         externalAcceptanceGates=list(EXTERNAL_GATES), tests=records)
-    report.update(nativePointProfileVersion=1 if point_preflight is not None else 0,
+    report.update(nativePointProfileVersion=2 if point_preflight is not None else 0,
         nativePointPreflight=point_preflight)
     with (output / 'results.json').open('x', encoding='utf-8') as stream:
         json.dump(report, stream, ensure_ascii=False, allow_nan=False, indent=2)
@@ -1139,6 +1145,7 @@ def _run_point_profile(suite, fixtures, output, *, setup=None):
         def factory(*args):
             session = WindowsSession(*args)
             session.native_point_profile = True
+            session.native_point_profile_version = 2
             return session
         return 0 if run_modules(suite, fixtures, output, session_factory=factory,point_preflight=boundary)['success'] else 1
     except BaseException as exc:

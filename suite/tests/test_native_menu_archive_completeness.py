@@ -45,11 +45,19 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
             row.update(viewRoundtripCompleted=module in VIEW_MODULES,
                        viewPhysicalVerified=module in VIEW_MODULES,
                        hwpLauncherCompleted=module=='writer', nativeHwpMenuLaunchExecuted=module=='writer')
+            row['nativeMenuActions']=[]
+            row['gestures']=[dict(index=index,gesture=gesture,
+                receipt=dict(gesture=gesture,success=True,
+                    receipt=self.action(row,gesture,gesture=True)))
+                for index,gesture in enumerate(('open-escape','open-outside','keyboard-escape','open-escape'))]
             if module in VIEW_MODULES:
+                preview_first=self.action(row,'printPreview')
+                preview_second=self.action(row,'printPreview')
+                core_first=self.action(row,'core-commands',gesture=True)
+                core_second=self.action(row,'core-commands',gesture=True)
                 row['nativeViewRoundtrip'] = dict(kind='native-view-roundtrip', module=module,
                     success=True, originalHomeSurvived=True,
-                    previewActions=[dict(kind='owned-native-menu-action', success=True,
-                        command='printPreview', gesture=False) for _ in range(2)],
+                    previewActions=[preview_first,preview_second],
                     observations=[dict(kind='owned-native-view-observation', success=True,
                         module=module, preview=preview, menuVisible=visible,
                         statusRpcProved=True, statusSequenceVersion=1,
@@ -57,39 +65,115 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
                         for preview, visible in ((True, True), (False, True), (False, False), (False, True))],
                     fullscreenActions=[dict(kind='owned-native-fullscreen-toggle', success=True,
                         module=module, focusReturned=True) for _ in range(2)],
-                    coreCommands=[dict(kind='owned-native-menu-action', success=True,
-                        command='core-commands', gesture=True, coreCommandsVerified=True,
-                        coreCommands=list(CORE_COMMANDS), focusReturned=True) for _ in range(2)])
+                    coreCommands=[core_first,core_second])
+            if module=='calc':
+                self.action(row,'exit')
+                row['postExitCancelMenu']=dict(gesture='open-escape',success=True,
+                    receipt=self.action(row,'open-escape',gesture=True))
+                row['nativeExitCancelVerified']=True
+            elif module=='base':
+                row['baseSaveMenuAction']=self.action(row,'save')
+                self.action(row,'exit');row['nativeExitVerified']=True
+            elif module in ('draw','math'):
+                self.action(row,'close');row['nativeCloseVerified']=True
             rows.append(row)
         rows[0]['originalHomeHwnd']=70000
         rows[0]['nativeHwpLauncher']=self.hwp_receipt(rows[0])
+        self.action(rows[0],'home');rows[0]['nativeHomeVerified']=True
         self.report = dict(schemaVersion=1, kind='native-menu-gesture-matrix', success=True,
             actualWindowsExecuted=True, nativeMenuVerified=True, scenarioSuccess=True,
             acceptanceEligible=False, expectedCaseCount=6, completedCaseCount=6,
             viewPhysicalVerified=True, viewPhysicalExpectedCaseCount=2, viewPhysicalVerifiedCaseCount=2,
             nativeHwpMenuLaunchExecuted=True, passedCaseCount=6, missingModules=[], failedModules=[], tests=rows)
-        self.report.update(nativePointProfileVersion=1,nativePointPreflight=preflight())
+        self.report.update(nativePointProfileVersion=2,nativePointPreflight=preflight())
         self.save_report()
         for index, entry in enumerate(self.base.expected):
             self.base.archive(entry, index)
 
-    def hwp_receipt(self,row):
+    def action(self,row,command,*,gesture=False):
         from test_owned_native_menu import OwnedNativeMenuTests
         helper=OwnedNativeMenuTests();self.addCleanup(helper.doCleanups)
         menu,api,process,record,clock,probe=helper.fixture()
+        clock.now=1.+10*len(row['nativeMenuActions'])
         process.opengeul_suite_root=self.suite
         probe.shell['image']=str(self.suite/'OpenGeul.Office.exe')
         probe.engine['image']=str(self.suite/'Office/program/soffice.bin')
-        action=menu.click_native_menu_action(api,process,11,record,'new-hwp',probe=probe,clock=clock)
+        run=menu.inspect_native_menu if gesture else menu.click_native_menu_action
+        action=run(api,process,11,record,command,probe=probe,clock=clock)
+        action=self.remap_action(action,row)
+        menu.require_native_menu_action(action,row['shellPid'],row['windowHwnd'],command)
+        row['nativeMenuActions'].append(copy.deepcopy(action))
+        return action
+
+    def remap_action(self,action,row):
+        old_root=str(Path(action['originalProcess']['image']).parent)
         shell=row['windowActivations'][0]['originalProcess'];generation=row['nativeArchiveGeneration']
         replacements={77:row['shellPid'],88:row['officePid'],11:row['windowHwnd'],55:row['parentHwnd'],
             56:row['childHwnd'],99:row['windowHwnd']+10000,8:shell['handleValue'],100:shell['creationTime'],200:generation['creationTime']}
-        def remap(value):
-            if type(value) is int:return replacements.get(value,value)
-            if type(value) is list:return [remap(item) for item in value]
-            if type(value) is dict:return {key:remap(item) for key,item in value.items()}
+        identity_fields={'pid','shellPid','officePid','documentHwnd','document','parent','child',
+            'hwnd','nativeHwnd','hitHwnd','rootHwnd','focusPid','focusHwnd','focusRootHwnd','activeHwnd',
+            'captureHwnd','menuOwnerHwnd','foreground','handleValue','engineHandleValue',
+            'creationTime','shellCreationTime','officeCreationTime','engine_pid','shell_pid',
+            'engine_birth','shell_birth','parent_hwnd','child_hwnd'}
+        def remap(value,field=None):
+            if type(value) is int:return replacements.get(value,value) if field in identity_fields else value
+            if type(value) is list:
+                return [replacements.get(item,item) for item in value] if field=='ownerChain' else [remap(item) for item in value]
+            if type(value) is dict:return {key:remap(item,key) for key,item in value.items()}
+            if type(value) is str and (value==old_root or value.startswith((old_root+'/',old_root+'\\'))):
+                return str(self.suite)+value[len(old_root):]
             return value
-        action=remap(action);menu.require_native_menu_action(action,row['shellPid'],row['windowHwnd'],'new-hwp')
+        return remap(action)
+
+    def canonical_gesture(self):
+        from test_owned_native_menu import canonical_action_fixture
+        menu,action=canonical_action_fixture(self,operation='open-escape',gesture=True)
+        row=self.report['tests'][0]
+        action=json.loads(json.dumps(self.remap_action(action,row)))
+        menu.require_native_menu_action(action,row['shellPid'],row['windowHwnd'],'open-escape')
+        providers=[]
+        for path in self.provider_paths(action):
+            point=action
+            for key in path:point=point[key]
+            providers.append(point['providerLocalProof']['provider'])
+        last=max(providers,key=lambda packet:packet['scopeId'])
+        action.setdefault('uiaInterop',{})['providerLocalResult']=copy.deepcopy(last)
+        row['nativeMenuActions'][0]=copy.deepcopy(action)
+        row['gestures'][0]['receipt']['receipt']=copy.deepcopy(action)
+        self.save_report()
+        return action
+
+    def provider_paths(self,action):
+        pending=[(action,())];paths=[]
+        while pending:
+            value,path=pending.pop()
+            if type(value) is dict:
+                if 'providerLocalProof' in value:paths.append(path)
+                pending.extend((item,path+(key,)) for key,item in value.items())
+            elif type(value) is list:pending.extend((item,path+(index,)) for index,item in enumerate(value))
+        return paths
+
+    def replace_first_gesture(self,action):
+        row=self.report['tests'][0]
+        row['nativeMenuActions'][0]=copy.deepcopy(action)
+        row['gestures'][0]['receipt']['receipt']=copy.deepcopy(action)
+        self.save_report()
+
+    def multiple_scope_action(self):
+        from test_owned_native_menu import canonical_action_fixture
+        _,action=canonical_action_fixture(self,operation='save',gesture=False)
+        action=json.loads(json.dumps(action));packets=[]
+        for path in self.provider_paths(action):
+            point=action
+            for key in path:point=point[key]
+            packets.append(point['providerLocalProof']['provider'])
+        self.assertGreater(len({packet['scopeId'] for packet in packets}),1)
+        action.setdefault('uiaInterop',{})['providerLocalResult']=copy.deepcopy(max(packets,key=lambda packet:packet['scopeId']))
+        return action
+
+    def hwp_receipt(self,row):
+        action=self.action(row,'new-hwp')
+        shell=row['windowActivations'][0]['originalProcess']
         def stamp(n):return dict(low=n,high=0,fileTime=n)
         executable=str(self.suite/'HWP/OpenGeul.exe');born=200000+row['shellPid'];pid=500000+row['shellPid'];handle=600000+pid
         new=dict(pid=pid,parentPid=row['shellPid'],executable=executable,creationFileTime=born)
@@ -155,6 +239,256 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
         for key in ('nativePointProfileVersion','nativePointPreflight'):
             self.report=copy.deepcopy(original);self.report.pop(key);self.save_report()
             with self.assertRaises(ValueError):self.verify()
+
+    def test_current_gate_rejects_legacy_or_relabelled_controller_profile(self):
+        for version in (0,1,True,'2',3):
+            with self.subTest(version=version):
+                self.report['nativePointProfileVersion']=version;self.save_report()
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_summary_success_cannot_replace_the_flat_original_action_ledger(self):
+        original=copy.deepcopy(self.report)
+        for value in (None,[],[dict(kind='owned-native-menu-action',success=True)]):
+            with self.subTest(missing=value is None):
+                self.report=copy.deepcopy(original)
+                if value is None:self.report['tests'][0].pop('nativeMenuActions')
+                else:self.report['tests'][0]['nativeMenuActions']=value
+                self.save_report()
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_fixed_gesture_receipts_cannot_be_missing_reordered_or_relabelled(self):
+        original=copy.deepcopy(self.report)
+        for mutation in ('missing','short','reverse','index','summary'):
+            with self.subTest(mutation=mutation):
+                self.report=copy.deepcopy(original);row=self.report['tests'][0]
+                if mutation=='missing':row.pop('gestures')
+                elif mutation=='short':row['gestures'].pop()
+                elif mutation=='reverse':row['gestures'].reverse()
+                elif mutation=='index':row['gestures'][0]['index']=1
+                else:row['gestures'][0]['receipt']['receipt']=dict(kind='owned-native-menu-action',success=True)
+                self.save_report()
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_nested_action_must_equal_one_original_flat_ledger_entry(self):
+        original=copy.deepcopy(self.report)
+        for mutation in ('orphan','divergent','duplicate','reorder','foreign-generation'):
+            with self.subTest(mutation=mutation):
+                self.report=copy.deepcopy(original);row=self.report['tests'][0]
+                if mutation=='orphan':row['nativeMenuActions'].pop(0)
+                elif mutation=='divergent':row['gestures'][0]['receipt']['receipt']['inputVerified']=False
+                elif mutation=='duplicate':row['nativeMenuActions'].append(copy.deepcopy(row['nativeMenuActions'][0]))
+                elif mutation=='reorder':row['nativeMenuActions'].reverse()
+                else:row['nativeMenuActions'][0]['originalEngine']['creationTime']+=1
+                self.save_report()
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_current_archive_replays_a_complete_canonical_point_without_promoting_global_false(self):
+        action=self.canonical_gesture();paths=self.provider_paths(action)
+        self.assertGreater(len(paths),0)
+        for path in paths:
+            point=action
+            for key in path:point=point[key]
+            self.assertIs(point['uiaMatches'],False)
+            self.assertEqual(point['pointMethod'],'owned-popup-and-msaa-canonical-hit-v2')
+            self.assertEqual(point['providerLocalProof']['provider']['workerSchemaVersion'],2)
+        self.assertIs(self.verify()['success'],True)
+
+    def test_every_nested_canonical_positive_flag_is_replayed_beyond_matching_summary_and_ledger(self):
+        action=self.canonical_gesture();self.verify()
+        flags=('filePairEqual','fileOriginalRepeatEqual','targetPairEqual','targetDifferentFromFile',
+            'hitMatchesTarget','fileUiPositive','targetUiPositive','localKnown','localMatch','workerCleanup',
+            'nativeExit','threadClosed','processesClosed','threadIdentity','callbackIdentity','physicalDpiVerified')
+        for path in self.provider_paths(action):
+            for flag in flags:
+                with self.subTest(path=path,flag=flag):
+                    changed=copy.deepcopy(action);point=changed
+                    for key in path:point=point[key]
+                    point['providerLocalProof']['provider'][flag]=0
+                    self.replace_first_gesture(changed)
+                    with self.assertRaises(ValueError):self.verify()
+
+    def test_canonical_versions_scope_creator_counts_popup_and_staleness_cannot_be_relabelled(self):
+        action=self.canonical_gesture();self.verify();path=self.provider_paths(action)[0]
+        changes=[(('pointMethod',),'owned-popup-and-msaa-hit'),(('uiaMatches',),True),
+            (('providerLocalProof','schemaVersion'),1),
+            (('providerLocalProof','method'),'owned-popup-and-msaa-hit'),
+            (('providerLocalProof','provider','schemaVersion'),1),
+            (('providerLocalProof','provider','workerSchemaVersion'),1),
+            (('providerLocalProof','provider','canonicalStatus'),0),
+            (('providerLocalProof','provider','workerStage'),7),
+            (('providerLocalProof','provider','bindingCount'),3),
+            (('providerLocalProof','provider','selfCount'),3),
+            (('providerLocalProof','provider','referencesAcquired'),15),
+            (('providerLocalProof','provider','referencesReleased'),15),
+            (('providerLocalProof','provider','negativeRejected'),0),
+            (('providerLocalProof','provider','pending'),1),
+            (('providerLocalProof','provider','synthetic'),1),
+            (('providerLocalProof','creator','sameThread'),False),
+            (('providerLocalProof','sourceScope','engine_pid'),999),
+            (('providerLocalProof','globalPoint','kindCode'),50011),
+            (('providerLocalProof','before','ownershipAfter'),False),
+            (('providerLocalProof','sourceFresh','scope','deadline'),999),
+            (('providerLocalProof','fresh','positive','file'),False)]
+        for keys,value in changes:
+            with self.subTest(keys=keys):
+                changed=copy.deepcopy(action);point=changed
+                for key in path:point=point[key]
+                target=point
+                for key in keys[:-1]:target=target[key]
+                target[keys[-1]]=value
+                self.replace_first_gesture(changed)
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_matching_view_action_success_summaries_do_not_hide_invalid_actual_receipts(self):
+        original=copy.deepcopy(self.report)
+        for field,key in (('previewActions','pointers'),('coreCommands','coreSnapshots')):
+            with self.subTest(field=field):
+                self.report=copy.deepcopy(original);row=self.report['tests'][0]
+                action=row['nativeViewRoundtrip'][field][0]
+                original_bytes=json.dumps(action,sort_keys=True)
+                index=next(i for i,item in enumerate(row['nativeMenuActions'])
+                    if json.dumps(item,sort_keys=True)==original_bytes)
+                action[key]=[] if key=='pointers' else {}
+                row['nativeMenuActions'][index]=copy.deepcopy(action);self.save_report()
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_worker_diagnostic_packet_must_equal_an_actual_replayed_point_provider(self):
+        action=self.canonical_gesture();self.verify()
+        for key,value in (('localMatch',0),('canonicalStatus',0),('scopeId',999),
+                ('referencesReleased',15),('nativeExit',0),('extraFlag',1)):
+            with self.subTest(key=key):
+                changed=copy.deepcopy(action)
+                changed['uiaInterop']['providerLocalResult'][key]=value
+                self.replace_first_gesture(changed)
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_retained_point_snapshot_with_missing_identity_is_a_controlled_archive_failure(self):
+        action=self.canonical_gesture()
+        snapshot=action['menuObservation']['snapshot']
+        self.assertIn('providerLocalProof',snapshot['targetPointProof'])
+        snapshot['identityProof']=None
+        self.replace_first_gesture(action)
+        with self.assertRaises(ValueError):self.verify()
+
+    def test_canonical_worker_packet_requires_the_original_path_and_latest_scope(self):
+        action=self.multiple_scope_action();check=self.implementation()._action_profiles;check(action);packets=[]
+        for path in self.provider_paths(action):
+            point=action
+            for key in path:point=point[key]
+            packets.append(point['providerLocalProof']['provider'])
+        older=min(packets,key=lambda packet:packet['scopeId'])
+        for mutation in ('missing-path','older','nested-only','extra-older'):
+            with self.subTest(mutation=mutation):
+                changed=copy.deepcopy(action)
+                if mutation=='missing-path':changed['uiaInterop'].pop('providerLocalResult')
+                elif mutation=='older':changed['uiaInterop']['providerLocalResult']=copy.deepcopy(older)
+                elif mutation=='nested-only':
+                    packet=changed['uiaInterop'].pop('providerLocalResult')
+                    changed['otherDiagnostic']=dict(providerLocalResult=packet)
+                else:changed['otherDiagnostic']=dict(providerLocalResult=copy.deepcopy(older))
+                with self.assertRaises(ValueError):check(changed)
+
+    def test_the_same_local_scope_cannot_describe_two_different_worker_packets(self):
+        action=self.multiple_scope_action();paths=self.provider_paths(action)
+        points=[]
+        for path in paths:
+            point=action
+            for key in path:point=point[key]
+            points.append(point)
+        first=min(points,key=lambda point:point['providerLocalProof']['sourceScopeId'])
+        second=max(points,key=lambda point:point['providerLocalProof']['sourceScopeId'])
+        scope=first['providerLocalProof']['sourceScopeId']
+        second['providerLocalProof']['sourceScopeId']=scope
+        second['providerLocalProof']['sourceScope']['scope_id']=scope
+        second['providerLocalProof']['provider']['scopeId']=scope
+        second['providerLocalProof']['provider']['threadBirth']+=1
+        packets=[point['providerLocalProof']['provider'] for point in points]
+        action['uiaInterop']['providerLocalResult']=copy.deepcopy(max(packets,key=lambda packet:packet['scopeId']))
+        with self.assertRaises(ValueError):self.implementation()._action_profiles(action)
+
+    def test_a_global_only_action_cannot_retain_a_local_worker_packet(self):
+        action=self.canonical_gesture();packet=copy.deepcopy(action['uiaInterop']['providerLocalResult'])
+        row=self.report['tests'][1];changed=copy.deepcopy(row['nativeMenuActions'][0])
+        self.assertEqual(self.provider_paths(changed),[])
+        changed.setdefault('uiaInterop',{})['providerLocalResult']=packet
+        row['nativeMenuActions'][0]=copy.deepcopy(changed)
+        row['gestures'][0]['receipt']['receipt']=copy.deepcopy(changed)
+        self.save_report()
+        with self.assertRaises(ValueError):self.verify()
+
+    def retime_action(self,action,start):
+        delta=start-action['startedAt']
+        def change(value,field=None):
+            if field in ('startedAt','deadline','finishedAt'):return value+delta
+            if type(value) is dict:return {key:change(item,key) for key,item in value.items()}
+            if type(value) is list:return [change(item) for item in value]
+            return value
+        return change(action)
+
+    def test_each_fixed_repeated_gesture_slot_needs_a_distinct_increasing_ledger_entry(self):
+        original=copy.deepcopy(self.report)
+        for mutation in ('reuse-delete','swap'):
+            with self.subTest(mutation=mutation):
+                self.report=copy.deepcopy(original);row=self.report['tests'][0]
+                first=row['gestures'][0]['receipt']['receipt'];last=row['gestures'][3]['receipt']['receipt']
+                if mutation=='reuse-delete':
+                    row['gestures'][3]['receipt']['receipt']=copy.deepcopy(first)
+                    row['nativeMenuActions'].pop(3)
+                else:
+                    row['gestures'][0]['receipt']['receipt'],row['gestures'][3]['receipt']['receipt']=last,first
+                self.save_report()
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_preview_and_core_slots_cannot_reuse_delete_or_exchange_the_original_actions(self):
+        original=copy.deepcopy(self.report)
+        for field,offset in (('previewActions',4),('coreCommands',6)):
+            for mutation in ('reuse-delete','swap'):
+                with self.subTest(field=field,mutation=mutation):
+                    self.report=copy.deepcopy(original);row=self.report['tests'][0]
+                    items=row['nativeViewRoundtrip'][field]
+                    if mutation=='reuse-delete':
+                        items[1]=copy.deepcopy(items[0]);row['nativeMenuActions'].pop(offset+1)
+                    else:items[0],items[1]=items[1],items[0]
+                    self.save_report()
+                    with self.assertRaises(ValueError):self.verify()
+
+    def test_native_preview_must_finish_both_actions_before_the_first_core_slot(self):
+        row=self.report['tests'][0];view=row['nativeViewRoundtrip']
+        preview=view['previewActions'][1];core=view['coreCommands'][0]
+        early=self.retime_action(core,preview['startedAt']);late=self.retime_action(preview,core['startedAt'])
+        view['coreCommands'][0]=copy.deepcopy(early);view['previewActions'][1]=copy.deepcopy(late)
+        row['nativeMenuActions'][5:7]=[copy.deepcopy(early),copy.deepcopy(late)]
+        self.save_report()
+        with self.assertRaises(ValueError):self.verify()
+
+    def test_source_finish_slots_are_not_dropped_or_reordered_after_the_fixed_prefix(self):
+        self.assertEqual({row['module']:len(row['nativeMenuActions']) for row in self.report['tests']},
+            dict(writer=10,calc=10,impress=4,draw=5,math=5,base=6))
+        self.verify();original=copy.deepcopy(self.report)
+        for module in ('writer','calc','draw','math','base'):
+            with self.subTest(module=module,mutation='missing-finish'):
+                self.report=copy.deepcopy(original);row=next(item for item in self.report['tests'] if item['module']==module)
+                row['nativeMenuActions'].pop(8 if module=='calc' else -1)
+                self.save_report()
+                with self.assertRaises(ValueError):self.verify()
+        for module in ('writer','base'):
+            with self.subTest(module=module,mutation='reverse-finish'):
+                self.report=copy.deepcopy(original);row=next(item for item in self.report['tests'] if item['module']==module)
+                first,last=row['nativeMenuActions'][-2:]
+                early=self.retime_action(last,first['startedAt']);late=self.retime_action(first,last['startedAt'])
+                row['nativeMenuActions'][-2:]=[copy.deepcopy(early),copy.deepcopy(late)]
+                if module=='writer':row['nativeHwpLauncher']['menuAction']=copy.deepcopy(late)
+                else:row['baseSaveMenuAction']=copy.deepcopy(late)
+                self.save_report()
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_cancel_menu_finish_slot_and_unplanned_extra_action_cannot_hide_in_the_ledger(self):
+        original=copy.deepcopy(self.report);row=self.report['tests'][1]
+        row['postExitCancelMenu']['receipt']=copy.deepcopy(row['gestures'][0]['receipt']['receipt'])
+        row['nativeMenuActions'].pop();self.save_report()
+        with self.assertRaises(ValueError):self.verify()
+        self.report=copy.deepcopy(original);self.action(self.report['tests'][2],'close');self.save_report()
+        with self.assertRaises(ValueError):self.verify()
 
     def test_legacy_success_report_without_physical_view_cases_is_rejected(self):
         for key in ('viewPhysicalVerified', 'viewPhysicalExpectedCaseCount',

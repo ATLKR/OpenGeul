@@ -1329,6 +1329,346 @@ class OriginalRepeatTests(unittest.TestCase):
                     self.assertEqual(len(self.sdk.releases),9)
 
 
+class CanonicalCalls:
+    Guid=WorkerGuid;Variant=Variant
+    def __init__(self):
+        self.calls=[];self.releases=[];self.patterns={1:101,11:111,2:102,3:103}
+        self.accessibles={101:201,111:211,102:202,103:203}
+        self.identities={201:301,211:301,202:302,203:302,221:301,222:302}
+        self.children={};self.types={};self.failure_at=0;self.hresult=0
+        self.variant_type=9;self.variant_pointer=401;self.repeat_count=0
+        self.false_positive=False;self.true_negative=False
+    def call(self,key,pointer,*args):
+        pointer=pointer.value if isinstance(pointer,C.c_void_p) else pointer
+        if key=='release':self.releases.append(pointer);return 0
+        self.calls.append((key,pointer))
+        if key=='pattern':
+            assert args[0]==10018
+            assert C.string_at(args[1],16)==uuid.UUID('828055ad-355b-4435-86d5-3b51c14a9b1b').bytes_le
+            args[2]._obj.value=self.patterns[pointer]
+        elif key=='child_id':args[0]._obj.value=self.children.get(pointer,0)
+        elif key=='accessible':
+            if pointer==101:self.repeat_count+=1
+            args[0]._obj.value=221 if pointer==101 and self.repeat_count>1 else self.accessibles[pointer]
+        elif key=='accessible_query':
+            assert C.string_at(args[0],16)==uuid.UUID('00000000-0000-0000-c000-000000000046').bytes_le
+            args[1]._obj.value=self.identities[pointer]
+        elif key=='control_type':args[0]._obj.value=self.types.get(pointer,50011)
+        elif key=='hit_test':
+            assert pointer==201 and args[:2]==(14,15)
+            args[2]._obj.vt=self.variant_type;args[2]._obj._.c_void_p=self.variant_pointer
+        elif key=='query':
+            assert pointer==401 and C.string_at(args[0],16)==uuid.UUID('618736e0-3c3d-11cf-810c-00aa00389b71').bytes_le
+            args[1]._obj.value=222
+        elif key=='compare':
+            first,second=args[:2]
+            args[2]._obj.value=int(not self.false_positive if (first,second) in ((1,11),(2,3)) else self.true_negative)
+        else:raise AssertionError('Unexpected canonical API; inverse calls are forbidden')
+        return self.hresult if len(self.calls)==self.failure_at else 0
+
+
+class CanonicalV2Tests(unittest.TestCase):
+    def setUp(self):
+        self.helper=load_helper();self.assertTrue(hasattr(self.helper,'MsaaHitSourceV2'))
+        self.sdk=CanonicalCalls();self.platform=FakePlatform()
+        self.source=self.helper.MsaaHitSourceV2(9,1,11,2,3,(4,5,6),20,21,(self.sdk,))
+        self.scope=self.helper.MsaaHitScope(7,8,9,10,11,12,13,14,15)
+    def run_worker(self):return self.helper.run_canonical_hit(self.source,self.scope,self.sdk,self.platform,15.)
+    def assert_unknown(self,result):
+        self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+        self.assertNotIn('from_accessible',[key for key,_ in self.sdk.calls])
+        self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
+
+    def test_positive_binds_four_distinct_elements_then_hits_exact_target_with_sixteen_owned_refs(self):
+        result=self.run_worker()
+        self.assertEqual((result['localKnown'],result['localMatch'],result['canonicalStatus'],result['workerSchemaVersion']),(1,1,1,2))
+        counts={'pattern':4,'child_id':4,'accessible':5,'accessible_query':6,'control_type':4,'hit_test':1,'query':1,'compare':5}
+        for name,count in counts.items():
+            self.assertEqual((result[name+'Attempted'],result[name+'Completed'],result[name+'Hresult']),(count,count,0))
+        self.assertEqual(len(self.sdk.calls),30)
+        self.assertEqual([pointer for key,pointer in self.sdk.calls if key=='pattern'],[1,11,2,3])
+        self.assertEqual([pointer for key,pointer in self.sdk.calls if key=='accessible'],[101,111,102,103,101])
+        self.assertEqual(self.sdk.releases,[302,222,301,221,302,203,103,302,202,102,301,211,111,301,201,101])
+        self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(16,16))
+        self.assertEqual((result['bindingCount'],result['selfCount'],result['negativeCount'],result['negativeRejected']),(4,4,3,3))
+        for key in ('filePairEqual','fileOriginalRepeatEqual','targetPairEqual','targetDifferentFromFile','hitMatchesTarget','fileUiPositive','targetUiPositive','workerCleanup'):
+            self.assertEqual(result[key],1)
+        self.assertEqual(self.platform.clears,[401]);self.assertEqual(self.platform.uninitializes,1)
+        self.assertTrue(all(type(v) is int and 0<=v<=0xffffffff for v in result.values()))
+        self.assertNotIn('fileRoundTrip',result);self.assertNotIn('falseShadowStatus',result)
+
+    def test_every_pair_repeat_and_hit_mismatch_is_unknown_without_inverse_fallback(self):
+        for pointer,value in ((211,311),(221,321),(203,303),(202,301),(222,301)):
+            with self.subTest(binding=pointer):
+                self.setUp();self.sdk.identities[pointer]=value;result=self.run_worker();self.assert_unknown(result)
+                self.assertEqual(result['canonicalStatus'],7)
+        for field in ('false_positive','true_negative'):
+            with self.subTest(comparison=field):
+                self.setUp();setattr(self.sdk,field,True);self.assert_unknown(self.run_worker())
+        self.setUp();self.sdk.identities.update({202:301,203:301})
+        result=self.run_worker();self.assert_unknown(result)
+        self.assertEqual((result['targetPairEqual'],result['targetDifferentFromFile'],result['hit_testAttempted']),(1,0,0))
+
+    def test_all_four_child_self_and_menuitem_roles_are_mandatory(self):
+        for pointer in (101,111,102,103):
+            for child in (-1,1):
+                with self.subTest(pattern=pointer,child=child):
+                    self.setUp();self.sdk.children[pointer]=child;result=self.run_worker();self.assert_unknown(result)
+                    self.assertEqual(result['canonicalStatus'],5)
+        for pointer in (1,11,2,3):
+            with self.subTest(element=pointer):
+                self.setUp();self.sdk.types[pointer]=50010;result=self.run_worker();self.assert_unknown(result)
+                self.assertEqual(result['canonicalStatus'],5)
+
+    def test_only_dispatch_nonnull_hit_shape_can_reach_exact_target_query(self):
+        for kind,pointer in ((0,0),(3,401),(9,0),(8,401)):
+            with self.subTest(kind=kind,pointer=pointer):
+                self.setUp();self.sdk.variant_type=kind;self.sdk.variant_pointer=pointer
+                result=self.run_worker();self.assert_unknown(result)
+                self.assertEqual(result['queryAttempted'],0);self.assertEqual(result['variantCleared'],1)
+
+    def test_failed_hresult_at_every_call_releases_all_written_refs_and_variant(self):
+        for ordinal in range(1,31):
+            for hresult in (-2147467259,1):
+                with self.subTest(call=ordinal,hresult=hresult):
+                    self.setUp();self.sdk.failure_at=ordinal;self.sdk.hresult=hresult
+                    result=self.run_worker();self.assert_unknown(result)
+                    self.assertEqual(len(self.sdk.calls),ordinal);self.assertEqual(result['canonicalStatus'],4)
+                    self.assertEqual(result['variantAttempted'],result['variantCleared'])
+
+    def test_null_out_at_each_owned_acquisition_stops_and_never_releases_borrowed_refs(self):
+        for ordinal in (1,3,4,6,8,9,11,13,14,16,18,19,21,22,24,25):
+            with self.subTest(call=ordinal):
+                self.setUp();original=self.sdk.call
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if key!='release' and len(self.sdk.calls)==ordinal:args[-1]._obj.value=None
+                    return hr
+                self.sdk.call=call;result=self.run_worker();self.assert_unknown(result)
+                self.assertEqual(len(self.sdk.calls),ordinal);self.assertEqual(result['canonicalStatus'],5)
+                self.assertFalse(set(self.sdk.releases)&{1,11,2,3,4,5,6,9,20,21,401})
+
+    def test_process_and_clock_guard_before_and_after_every_call_admit_no_later_work(self):
+        # Worker entry guard1, every call before/after2..61, final guard62.
+        for boundary in range(1,63):
+            for failure in ('process','deadline'):
+                with self.subTest(boundary=boundary,failure=failure):
+                    self.setUp();checks=[]
+                    def guard():
+                        checks.append(1)
+                        if len(checks)==boundary and failure=='deadline':self.platform.now=15.
+                        return failure!='process' or len(checks)<boundary
+                    self.platform.guard=guard;result=self.run_worker();self.assert_unknown(result)
+                    self.assertEqual(result['canonicalStatus'],3 if failure=='process' else 2)
+                    self.assertEqual(len(self.sdk.calls),min(30,max(0,(boundary-1)//2)))
+
+    def test_cleanup_failure_or_late_release_never_certifies_canonical_success(self):
+        for failure in ('release','late','variant','dpi','uninitialize'):
+            with self.subTest(cleanup=failure):
+                self.setUp();original=self.sdk.call
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if key=='release' and failure=='release':raise RuntimeError('Synthetic release failure')
+                    if key=='release' and failure=='late':self.platform.now=15.
+                    return hr
+                self.sdk.call=call
+                if failure=='variant':self.platform.clear_hr=-2147467259
+                if failure=='dpi':self.platform.restore=False
+                if failure=='uninitialize':self.platform.uninitialize=lambda:(_ for _ in ()).throw(RuntimeError('Synthetic COM cleanup'))
+                result=self.run_worker();self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+                self.assertEqual(len(self.sdk.releases),16)
+                self.assertEqual(result['canonicalStatus'],2 if failure=='late' else 8)
+
+    def test_closed_source_and_explicit_modes_reject_before_any_native_work(self):
+        self.assertTrue(self.source.valid())
+        for mode in (0,3,True,False,2.,'2',None):
+            with self.subTest(mode=mode):
+                kernel=FakeKernel()
+                with self.assertRaises(ValueError):self.helper.begin_msaa_hit(self.source,self.scope,self.sdk,15.,profile_version=mode,_kernel=kernel)
+                self.assertEqual(kernel.duplicates,[]);self.assertIsNone(kernel.callback)
+        for source,mode in ((self.source,1),(self.helper.MsaaHitSource(9,1,2,3,(4,5),20,21),2)):
+            kernel=FakeKernel();lease=self.helper.begin_msaa_hit(source,self.scope,self.sdk,15.,profile_version=mode,_kernel=kernel)
+            self.assertEqual(lease.record['stageCode'],3);self.assertEqual(kernel.duplicates,[])
+
+    def test_wrong_native_source_mode_is_rejected_before_windows_kernel_construction(self):
+        from unittest.mock import patch
+        initialized=[];v1=self.helper.MsaaHitSource(9,1,2,3,(4,5),20,21)
+        with patch.object(self.helper,'NATIVE_LAUNCH_ENABLED',True), \
+                patch.object(self.helper,'WindowsKernel',side_effect=lambda:initialized.append(1) or FakeKernel()):
+            for source,mode in ((self.source,1),(v1,2)):
+                result=self.helper.begin_msaa_hit(source,self.scope,self.sdk,15.,native_enabled=True,profile_version=mode)
+                self.assertEqual(result.record['stageCode'],3)
+        self.assertEqual(initialized,[])
+
+    def test_native_dispatch_and_closed_v2_lease_keep_v1_worker_and_registry_separate(self):
+        kernel=FakeKernel();platform=self.platform;platform.clock=kernel.clock
+        kernel.worker=lambda source,scope,sdk,deadline:self.helper.run_canonical_hit(source,scope,sdk,platform,deadline)
+        lease=self.helper.begin_msaa_hit(self.source,self.scope,self.sdk,15.,profile_version=2,_kernel=kernel)
+        result=lease.wait()
+        self.assertEqual((result['schemaVersion'],result['workerSchemaVersion'],result['stageCode'],result['localMatch']),(2,2,13,1))
+        self.assertEqual(set(result),set(self.helper._record(None,False,profile_version=2)))
+        self.assertIsNone(self.helper.pending_msaa_hit())
+        kernel=FakeKernel();kernel.finished=False
+        v1=self.helper.MsaaHitSource(9,1,2,3,(4,5),20,21)
+        first=self.helper.begin_msaa_hit(v1,self.scope,self.sdk,15.,_kernel=kernel)
+        second=self.helper.begin_msaa_hit(self.source,self.scope,self.sdk,15.,profile_version=2,_kernel=FakeKernel())
+        self.assertEqual(second.record['stageCode'],2);self.assertIs(self.helper.pending_msaa_hit(),first)
+        kernel.finished=True;first.retire(20.)
+        self.assertIsNone(self.helper.pending_msaa_hit())
+
+    def test_v2_sdk_checks_every_borrowed_element_and_closed_source_shape_without_com(self):
+        from dataclasses import replace
+        metadata=sdk_fixture();abi=self.helper.SdkAbi(**metadata)
+        def ref(interface,value):return type('Borrowed',(C.c_void_p,),{'__com_interface__':interface})(value)
+        client=ref(metadata['client_interface'],9)
+        elements=[ref(metadata['element_interface'],n) for n in (1,11,2,3,4,5,6)]
+        source=self.helper.MsaaHitSourceV2(client,*elements[:4],tuple(elements[4:]),20,21,(self.sdk,))
+        self.assertTrue(abi.matches_source(source))
+        for field in ('client','retained_file','fresh_file','fresh_target','retained_target'):
+            for value in (None,C.c_void_p(123)):
+                with self.subTest(field=field,typed=value is not None):self.assertFalse(abi.matches_source(replace(source,**{field:value})))
+        for value in ((elements[4],C.c_void_p(123)),(elements[4],None),[],(),(elements[4],)):
+            self.assertFalse(abi.matches_source(replace(source,negative_refs=value)))
+        for change in ({'keepalive':()},{'keepalive':(None,)},{'shell_handle':True},{'engine_handle':0}):
+            self.assertFalse(replace(source,**change).valid())
+
+    def test_actual_kernel_dispatch_selects_before_worker_and_rejects_unknown_source(self):
+        from unittest.mock import patch
+        calls=[];kernel=self.helper.WindowsKernel.__new__(self.helper.WindowsKernel)
+        v1=self.helper.MsaaHitSource(9,1,2,3,(4,5),20,21)
+        with patch.object(self.helper,'run_local_hit',side_effect=lambda *args:calls.append(1) or 1), \
+                patch.object(self.helper,'run_canonical_hit',side_effect=lambda *args:calls.append(2) or 2):
+            self.assertEqual(kernel.worker(self.source,self.scope,self.sdk,15.),2)
+            self.assertEqual(kernel.worker(v1,self.scope,self.sdk,15.),1)
+            with self.assertRaises(ValueError):kernel.worker(object(),self.scope,self.sdk,15.)
+        self.assertEqual(calls,[2,1])
+
+    def test_v2_worker_closed_record_rejects_added_missing_and_non_uint_fields(self):
+        for damage in ('extra','missing','bool','negative','wide'):
+            with self.subTest(packet=damage):
+                self.setUp();kernel=FakeKernel()
+                def worker(*args):
+                    record=self.helper.worker_record_v2()
+                    if damage=='extra':record['unexpected']=0
+                    elif damage=='missing':record.pop('filePairEqual')
+                    else:record['filePairEqual']={'bool':True,'negative':-1,'wide':2**32}[damage]
+                    return record
+                kernel.worker=worker
+                lease=self.helper.begin_msaa_hit(self.source,self.scope,self.sdk,15.,profile_version=2,_kernel=kernel)
+                result=lease.wait()
+                self.assertEqual((result['schemaVersion'],result['workerException'],result['pending'],result['localMatch']),(2,1,1,0))
+                self.assertIs(lease.source,self.source)
+                self.helper._active=None  # Synthetic completed callback; no native refs existed.
+
+    def test_aliased_pattern_and_accessible_acquisitions_are_never_deduplicated(self):
+        self.sdk.patterns[11]=101;result=self.run_worker()
+        self.assertEqual((result['localMatch'],result['referencesAcquired'],result['referencesReleased']),(1,16,16))
+        self.assertEqual(self.sdk.releases,[302,222,301,221,302,203,103,302,202,102,301,221,101,301,201,101])
+
+    def test_malformed_or_exceptional_com_returns_still_release_written_owned_outputs(self):
+        for ordinal in range(1,31):
+            for failure in ('noninteger','exception'):
+                with self.subTest(call=ordinal,failure=failure):
+                    self.setUp();original=self.sdk.call
+                    def call(key,pointer,*args):
+                        hr=original(key,pointer,*args)
+                        if key!='release' and len(self.sdk.calls)==ordinal:
+                            if failure=='exception':raise KeyboardInterrupt('Synthetic canonical API failure')
+                            return True
+                        return hr
+                    self.sdk.call=call;result=self.run_worker();self.assert_unknown(result)
+                    self.assertEqual((result['canonicalStatus'],result['workerCleanup'],result['cleanupError']),(6,0,1))
+                    self.assertEqual(len(self.sdk.calls),ordinal)
+                    self.assertEqual(result['variantAttempted'],result['variantCleared'])
+
+    def test_expired_entry_or_initialization_cannot_admit_dpi_or_provider_work(self):
+        for phase in ('entry','initialize'):
+            with self.subTest(phase=phase):
+                self.setUp();events=[];initialize=self.platform.initialize
+                def init():
+                    events.append('initialize')
+                    if phase=='initialize':self.platform.now=15.
+                    return initialize()
+                self.platform.initialize=init
+                self.platform.enter_dpi=lambda:events.append('dpi') or 88
+                if phase=='entry':self.platform.now=15.
+                result=self.run_worker();self.assert_unknown(result)
+                self.assertEqual(events,[] if phase=='entry' else ['initialize'])
+
+    def test_deadline_after_each_local_phase_never_admits_a_later_phase(self):
+        for phase,expected in (('apartment',['initialize','apartment']),
+                ('dpi',['initialize','apartment','dpi']),
+                ('physical',['initialize','apartment','dpi','physical'])):
+            with self.subTest(phase=phase):
+                self.setUp();events=[]
+                def step(name,value):
+                    events.append(name)
+                    if name==phase:self.platform.now=15.
+                    return value
+                self.platform.initialize=lambda:step('initialize',0)
+                self.platform.apartment=lambda:step('apartment',True)
+                self.platform.enter_dpi=lambda:step('dpi',88)
+                self.platform.physical_dpi=lambda:step('physical',True)
+                self.platform.guard=lambda:step('guard',True)
+                result=self.run_worker();self.assert_unknown(result)
+                self.assertEqual(events,expected);self.assertEqual(result['canonicalStatus'],2)
+
+    def test_late_or_untrusted_v2_collection_clears_match_and_never_relabels_mode_one(self):
+        for failure in ('late','retire','process','exit','callback','packet'):
+            with self.subTest(collection=failure):
+                self.setUp();kernel=FakeKernel();self.platform.clock=kernel.clock
+                kernel.worker=lambda source,scope,sdk,deadline:self.helper.run_canonical_hit(source,scope,sdk,self.platform,deadline)
+                if failure=='packet':kernel.worker=lambda *args:dict(sdk_fixture_worker(),schemaVersion=2)
+                lease=self.helper.begin_msaa_hit(self.source,self.scope,self.sdk,15.,profile_version=2,_kernel=kernel)
+                if failure=='late':kernel.now=16.
+                if failure=='process':kernel.check_process=lambda *args:False
+                if failure=='exit':kernel.exit_code=7
+                if failure=='callback':kernel.callback_identity_failure=True
+                result=lease.retire(20.) if failure=='retire' else lease.wait()
+                self.assertEqual((result['schemaVersion'],result['localKnown'],result['localMatch']),(2,0,0))
+                self.assertNotEqual(result['stageCode'],13)
+                if failure=='packet':self.assertEqual((result['workerException'],result['pending']),(1,1))
+
+    def test_inflight_hit_holds_source_sdk_and_all_owned_refs_until_callback_exit(self):
+        import threading
+        for ordinal,count in ((23,14),(25,16)):
+            with self.subTest(call=ordinal):
+                self.setUp();entered=threading.Event();release=threading.Event();kernel=FakeKernel()
+                kernel.finished=False;self.platform.clock=kernel.clock;original=self.sdk.call;threads=[]
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if key!='release' and len(self.sdk.calls)==ordinal:
+                        entered.set()
+                        if not release.wait(2):raise RuntimeError('Synthetic canonical callback wait')
+                    return hr
+                self.sdk.call=call
+                def start(callback):
+                    def entry():
+                        try:callback()
+                        finally:kernel.finished=True
+                    thread=threading.Thread(target=entry,daemon=True);threads.append(thread);thread.start()
+                    return 301,44,55
+                kernel.start=start
+                kernel.worker=lambda source,scope,sdk,deadline:self.helper.run_canonical_hit(source,scope,sdk,self.platform,deadline)
+                lease=self.helper.begin_msaa_hit(self.source,self.scope,self.sdk,15.,profile_version=2,_kernel=kernel)
+                try:
+                    self.assertTrue(entered.wait(1));self.assertEqual(self.sdk.releases,[])
+                    kernel.now=16.;result=lease.wait()
+                    self.assertEqual((result['pending'],result['localKnown']),(1,0))
+                    self.assertIs(lease.source,self.source);self.assertIs(lease.sdk,self.sdk)
+                    self.assertEqual(kernel.closed,[])
+                    v1=self.helper.MsaaHitSource(9,1,2,3,(4,5),20,21)
+                    self.assertEqual(self.helper.begin_msaa_hit(v1,self.scope,self.sdk,17.,_kernel=FakeKernel()).record['stageCode'],2)
+                finally:
+                    release.set()
+                    for thread in threads:thread.join(1)
+                self.assertFalse(threads[0].is_alive());result=lease.retire(20.)
+                self.assertEqual((result['pending'],result['localKnown'],result['localMatch'],result['canonicalStatus']),(0,0,0,2))
+                self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(count,count))
+                self.assertEqual((result['nativeExit'],result['workerCleanup'],result['variantCleared']),(1,1,1))
+                self.assertIsNone(lease.source);self.assertIsNone(lease.sdk)
+
+
 class RawCallTests(unittest.TestCase):
     def test_control_type_raw_binding_writes_signed_int32_and_returns_plain_numeric_hresult(self):
         helper=load_helper();abi=helper.SdkAbi(**sdk_fixture());observed=[]

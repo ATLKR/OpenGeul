@@ -158,6 +158,10 @@ class SdkAbi:
                     and any(_iid(base,expected) for base in interface.__mro__)
                     and bool(C.cast(value,C.c_void_p).value))
             except (AttributeError,TypeError,ValueError):return False
+        if type(source) is MsaaHitSourceV2:
+            return (source.valid() and matches(source.client,'client') and all(matches(value,'element')
+                for value in (source.retained_file,source.fresh_file,source.fresh_target,
+                    source.retained_target,*source.negative_refs)))
         return (isinstance(source,MsaaHitSource) and matches(source.client,'client')
             and all(matches(value,'element') for value in
                 (source.file,source.fresh_target,source.retained_target,*source.negative_refs)))
@@ -400,6 +404,136 @@ def run_local_hit(source,scope,sdk,platform,deadline):
     return record
 
 
+_V2_OPERATIONS=('pattern','child_id','accessible','accessible_query','control_type','hit_test','query','compare')
+
+
+def worker_record_v2():
+    record=dict(workerSchemaVersion=2,localKnown=0,localMatch=0,workerCleanup=0,workerStage=0,
+        workerMta=0,comInitialized=0,comUninitialized=0,dpiEntered=0,dpiRestored=0,
+        physicalDpiVerified=0,processBefore=0,processAfter=0,referencesAcquired=0,
+        referencesReleased=0,variantAttempted=0,variantCleared=0,variantCleanupHresult=0,
+        variantType=0,cleanupError=0,canonicalStatus=0,bindingCount=0,selfCount=0,
+        filePairEqual=0,fileOriginalRepeatEqual=0,targetPairEqual=0,targetDifferentFromFile=0,
+        hitMatchesTarget=0,fileUiPositive=0,targetUiPositive=0,negativeCount=0,negativeRejected=0)
+    for name in _V2_OPERATIONS:record.update({name+'Attempted':0,name+'Completed':0,name+'Hresult':0})
+    return record
+
+
+def run_canonical_hit(source,scope,sdk,platform,deadline):
+    """A separate native object/SELF target proof, never an inverse retry.
+
+    Four exact UIA bindings, a retained-File repeat and the actual hit must agree
+    while all canonical references are held. The original absolute deadline
+    bounds admission, not synchronous COM/Release duration. No input is sent.
+    """
+    record=worker_record_v2();refs=[];variant=None;token=0;initialized=False;matched=False
+    def budget():
+        if type(deadline) not in (int,float) or not math.isfinite(deadline) or platform.clock()>=deadline:
+            record['canonicalStatus']=2;raise _Stop()
+    def check():
+        budget()
+        if not platform.guard():record['canonicalStatus']=3;raise _Stop()
+        budget()
+    def require(value,code=7):
+        if not value:record['canonicalStatus']=code;raise _Stop()
+    def call(key,pointer,*arguments):
+        check();record[key+'Attempted']+=1
+        hr=sdk.call(key,pointer,*arguments)
+        if type(hr) is not int:raise TypeError()
+        record[key+'Completed']+=1;record[key+'Hresult']=hr&0xffffffff
+        check();require(hr==0,4)
+    def out(key,pointer,*arguments):
+        value=C.c_void_p()
+        try:call(key,pointer,*arguments,C.byref(value))
+        finally:
+            if value.value:refs.append(value.value);record['referencesAcquired']+=1
+        require(bool(value.value),5)
+        return value.value
+    def same(first,second):
+        value=C.c_int32();call('compare',source.client,first,second,C.byref(value))
+        return bool(value.value)
+    try:
+        record['workerStage']=1
+        require(type(source) is MsaaHitSourceV2 and source.valid(),5)
+        require(isinstance(scope,MsaaHitScope) and scope.valid(),5)
+        budget()
+        hr=platform.initialize()
+        if type(hr) is not int:raise TypeError()
+        require(hr in (0,1),4);initialized=True;record['comInitialized']=1
+        budget()
+        require(platform.apartment(),5);budget();record['workerMta']=1;record['workerStage']=2
+        token=platform.enter_dpi();require(bool(token),5);record['dpiEntered']=1;budget()
+        require(platform.physical_dpi(),5);budget();record['physicalDpiVerified']=1
+        check();record['processBefore']=1;record['workerStage']=3
+        legacy_iid=sdk.Guid('{'+_IIDS['legacy']+'}');unknown_iid=sdk.Guid('{'+_IIDS['unknown']+'}')
+        bindings=[];record['workerStage']=4
+        for element in (source.retained_file,source.fresh_file,source.fresh_target,source.retained_target):
+            pattern=out('pattern',element,10018,C.byref(legacy_iid))
+            child=C.c_int32(-1);call('child_id',pattern,C.byref(child));require(child.value==0,5)
+            record['selfCount']+=1
+            accessible=out('accessible',pattern)
+            identity=out('accessible_query',accessible,C.byref(unknown_iid))
+            kind=C.c_int32();call('control_type',element,C.byref(kind));require(kind.value==50011,5)
+            bindings.append((pattern,accessible,identity));record['bindingCount']+=1
+        record['workerStage']=5
+        original,_,fresh_target,retained_target=bindings
+        require(original[2]==bindings[1][2]);record['filePairEqual']=1
+        repeated=out('accessible',original[0]);repeated_identity=out('accessible_query',repeated,C.byref(unknown_iid))
+        require(repeated_identity==original[2]);record['fileOriginalRepeatEqual']=1
+        require(fresh_target[2]==retained_target[2]);record['targetPairEqual']=1
+        require(fresh_target[2]!=original[2]);record['targetDifferentFromFile']=1
+        record['workerStage']=6
+        variant=sdk.Variant();record['variantAttempted']=1
+        call('hit_test',original[1],scope.x,scope.y,C.byref(variant));record['variantType']=int(variant.vt)
+        require(variant.vt==9 and bool(variant._.c_void_p),5)
+        accessible_iid=sdk.Guid('{'+_IIDS['accessible']+'}')
+        hit=out('query',C.c_void_p(variant._.c_void_p),C.byref(accessible_iid))
+        hit_identity=out('accessible_query',hit,C.byref(unknown_iid))
+        require(hit_identity==fresh_target[2]);record['hitMatchesTarget']=1
+        record['workerStage']=7
+        require(same(source.retained_file,source.fresh_file));record['fileUiPositive']=1
+        require(same(source.fresh_target,source.retained_target));record['targetUiPositive']=1
+        for negative in source.negative_refs:
+            record['negativeCount']+=1;require(not same(source.fresh_target,negative));record['negativeRejected']+=1
+        check();record['processAfter']=1;matched=True
+    except _Stop:pass
+    except BaseException:
+        record['canonicalStatus']=6;record['cleanupError']=1
+    finally:
+        cleanup_failed=False
+        if variant is not None:
+            try:
+                hr=platform.clear_variant(variant)
+                if type(hr) is not int:raise TypeError()
+                record['variantCleanupHresult']=hr&0xffffffff;record['variantCleared']=int(hr==0)
+                if hr!=0:cleanup_failed=True
+            except BaseException:cleanup_failed=True
+        for pointer in reversed(refs):
+            try:
+                result=sdk.call('release',C.c_void_p(pointer))
+                if type(result) is not int or not 0<=result<=0xffffffff:raise TypeError()
+                record['referencesReleased']+=1
+            except BaseException:cleanup_failed=True
+        refs.clear()
+        if token:
+            try:record['dpiRestored']=int(bool(platform.leave_dpi(token)))
+            except BaseException:cleanup_failed=True
+            if not record['dpiRestored']:cleanup_failed=True
+        if initialized:
+            try:platform.uninitialize();record['comUninitialized']=1
+            except BaseException:cleanup_failed=True
+        if cleanup_failed:record['cleanupError']=1;record['canonicalStatus']=8
+        clean=(not record['cleanupError'] and record['referencesAcquired']==record['referencesReleased']
+            and (not record['variantAttempted'] or record['variantCleared'])
+            and (not initialized or record['comUninitialized']) and (not token or record['dpiRestored']))
+        record['workerCleanup']=int(clean)
+        try:
+            if platform.clock()>=deadline:record['canonicalStatus']=2
+            elif matched and clean:record.update(canonicalStatus=1,workerStage=8,localKnown=1,localMatch=1)
+        except BaseException:record.update(canonicalStatus=6,cleanupError=1,workerCleanup=0)
+    return record
+
+
 @dataclass(frozen=True)
 class MsaaHitScope:
     scope_id:int
@@ -441,6 +575,27 @@ class MsaaHitSource:
                 for value in (self.shell_handle,self.engine_handle)))
 
 
+@dataclass(frozen=True)
+class MsaaHitSourceV2:
+    client:object
+    retained_file:object
+    fresh_file:object
+    fresh_target:object
+    retained_target:object
+    negative_refs:tuple
+    shell_handle:int
+    engine_handle:int
+    keepalive:tuple
+
+    def valid(self):
+        return (all(value is not None for value in (self.client,self.retained_file,self.fresh_file,
+                    self.fresh_target,self.retained_target))
+            and type(self.negative_refs) is tuple and 2<=len(self.negative_refs)<=16
+            and all(value is not None for value in self.negative_refs)
+            and type(self.keepalive) is tuple and bool(self.keepalive) and all(value is not None for value in self.keepalive)
+            and all(type(value) is int and value>0 for value in (self.shell_handle,self.engine_handle)))
+
+
 # Unresolved foreign callbacks require the controller's separately reviewed
 # fail-stop finalization fence. Do not enable as part of standalone helper work.
 NATIVE_LAUNCH_ENABLED=False
@@ -478,8 +633,9 @@ def pending_msaa_hit():
     return _active
 
 
-def _record(scope,synthetic):
-    return dict(worker_record(),schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,
+def _record(scope,synthetic,*,profile_version=1):
+    if type(profile_version) is not int or profile_version not in (1,2):raise ValueError('Unknown native point profile')
+    return dict(worker_record() if profile_version==1 else worker_record_v2(),schemaVersion=profile_version,diagnosticOnly=1,acceptanceEligible=0,
         providerLocalOnly=1,globalHitSubstituted=0,synthetic=int(synthetic),
         scopeId=scope.scope_id if isinstance(scope,MsaaHitScope) and scope.valid() else 0,
         stageCode=0,nativeAttempted=0,nativeExit=0,threadClosed=0,processesClosed=0,
@@ -488,7 +644,7 @@ def _record(scope,synthetic):
         localKnown=0,localMatch=0,workerCleanup=0,workerException=0,pending=0)
 
 
-def begin_msaa_hit(source,scope,sdk,deadline,*,native_enabled=False,_kernel=None):
+def begin_msaa_hit(source,scope,sdk,deadline,*,native_enabled=False,profile_version=1,_kernel=None):
     """One pending capsule, source-owned duplicate process HANDLEs, no input.
 
     The private kernel hook is synthetic-test-only. Production startup remains
@@ -497,10 +653,14 @@ def begin_msaa_hit(source,scope,sdk,deadline,*,native_enabled=False,_kernel=None
     prove the original popup exposure, live scope and fresh target after return.
     """
     global _active
-    lease=MsaaHitLease(source,scope,sdk,deadline,_kernel)
+    if type(profile_version) is not int or profile_version not in (1,2):raise ValueError('Unknown native point profile')
+    lease=MsaaHitLease(source,scope,sdk,deadline,_kernel,profile_version=profile_version)
     synthetic=_kernel is not None and getattr(_kernel,'synthetic',False) is True
     if not synthetic and (native_enabled is not True or not NATIVE_LAUNCH_ENABLED):
         lease.record['stageCode']=1
+        return lease
+    if not (isinstance(source,MsaaHitSource) if profile_version==1 else type(source) is MsaaHitSourceV2):
+        lease.record['stageCode']=3
         return lease
     if not _reserve(lease):
         lease.record['stageCode']=2
@@ -548,9 +708,11 @@ def begin_msaa_hit(source,scope,sdk,deadline,*,native_enabled=False,_kernel=None
 
 
 class MsaaHitLease:
-    def __init__(self,source,scope,sdk,deadline,kernel):
+    def __init__(self,source,scope,sdk,deadline,kernel,*,profile_version=1):
         self.source=source;self.scope=scope;self.sdk=sdk;self.deadline=deadline;self.kernel=kernel
-        self.record=_record(scope,getattr(kernel,'synthetic',False))
+        self.record=_record(scope,getattr(kernel,'synthetic',False),profile_version=profile_version)
+        self._profile_version=profile_version
+        self._status_key='falseShadowStatus' if profile_version==1 else 'canonicalStatus'
         self.process_handles=[];self.thread=0;self.tid=0;self.birth=0
         self.worker=None;self._late=False;self._retired=False;self._worker_exception=False
         self._cleanup_unknown=False
@@ -560,8 +722,12 @@ class MsaaHitLease:
     @property
     def pending(self):return _active is self
 
+    @property
+    def profile_version(self):return self._profile_version
+
     def valid(self):
-        return (isinstance(self.source,MsaaHitSource) and self.source.valid()
+        source_type=isinstance(self.source,MsaaHitSource) if self.profile_version==1 else type(self.source) is MsaaHitSourceV2
+        return (source_type and self.source.valid()
             and isinstance(self.scope,MsaaHitScope) and self.scope.valid()
             and type(self.deadline) in (int,float) and math.isfinite(self.deadline)
             and self.kernel.clock()<self.deadline<=self.kernel.clock()+5)
@@ -570,7 +736,8 @@ class MsaaHitLease:
         # The callback normal-return boundary must encompass BaseException.
         try:
             result=self.runner()
-            if (type(result) is dict and result.keys()==worker_record().keys()
+            expected=worker_record() if self.profile_version==1 else worker_record_v2()
+            if (type(result) is dict and result.keys()==expected.keys()
                     and all(type(value) is int and 0<=value<=0xffffffff for value in result.values())):
                 self.worker=dict(result)
             else:self._worker_exception=True
@@ -654,12 +821,12 @@ class MsaaHitLease:
                     and clean and not self.record['workerException']):
                 self.record.update(worker);self.record['stageCode']=13
             else:self.record['stageCode']=11 if self._late or self.kernel.clock()>=self.deadline else 9
-            if (self._late or self.kernel.clock()>=self.deadline) and self.record['falseShadowStatus']==1:
-                self.record['falseShadowStatus']=2 if self.kernel.clock()>=self.deadline else 0
+            if (self._late or self.kernel.clock()>=self.deadline) and self.record[self._status_key]==1:
+                self.record[self._status_key]=2 if self.kernel.clock()>=self.deadline else 0
             self._clear()
             if self.kernel.clock()>=self.deadline:
                 self._late=True;self.record.update(localKnown=0,localMatch=0,stageCode=11)
-                if self.record['falseShadowStatus']==1:self.record['falseShadowStatus']=2
+                if self.record[self._status_key]==1:self.record[self._status_key]=2
         except BaseException:
             if self._closing_handle:self._unknown_handles.add(self._closing_handle)
             self.record['stageCode']=10
@@ -670,10 +837,10 @@ class MsaaHitLease:
         self._late=True;self.record['pending']=1
         self.record['localKnown']=self.record['localMatch']=0
         # Retain bits; containment alone cannot establish deadline expiry.
-        if self.record['falseShadowStatus']==1:
-            self.record['falseShadowStatus']=0
+        if self.record[self._status_key]==1:
+            self.record[self._status_key]=0
             try:
-                if self.kernel.clock()>=self.deadline:self.record['falseShadowStatus']=2
+                if self.kernel.clock()>=self.deadline:self.record[self._status_key]=2
             except BaseException:pass
         return dict(self.record)
 
@@ -910,5 +1077,8 @@ class WindowsKernel:
         clear.argtypes=(C.POINTER(type(value)),);clear.restype=C.c_int32
         return clear(C.byref(value))
 
-    def worker(self,source,scope,sdk,deadline):return run_local_hit(source,scope,sdk,self,deadline)
+    def worker(self,source,scope,sdk,deadline):
+        if type(source) is MsaaHitSourceV2:return run_canonical_hit(source,scope,sdk,self,deadline)
+        if isinstance(source,MsaaHitSource):return run_local_hit(source,scope,sdk,self,deadline)
+        raise ValueError('Unknown native point source')
     def boundary_worker(self):return run_native_boundary(self)

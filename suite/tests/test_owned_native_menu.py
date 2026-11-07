@@ -1918,3 +1918,72 @@ class OwnedNativeMenuTests(unittest.TestCase):
         m=self.feature()
         for text,expected in (('열기(~O)...','열기…'),('다른 이름으로 저장(A)…','다른 이름으로 저장…'),('파일(F)','파일')):
             with self.subTest(text=text):self.assertEqual(m._label(text),expected)
+
+
+def canonical_action_fixture(owner,*,operation='save',gesture=False):
+    """Full owned action with synthetic v2 points, never actual Windows proof."""
+    import test_native_menu_point_proof as receipts
+    policy=OwnedNativeMenuTests(methodName='runTest');owner.addCleanup(policy.doCleanups)
+    module,api,process,record,clock,boundary=policy.real_chrome_fixture()
+    call=module.inspect_native_menu if gesture else module.click_native_menu_action
+    value=call(api,process,11,record,operation,probe=boundary.probe,clock=clock)
+    sequence=0
+    def local(snapshot,target,hit=None):
+        nonlocal sequence
+        sequence+=1
+        return receipts.canonical_provider_point(snapshot,target=target,hit=hit,scope_id=sequence)
+    for item in value['pointers']:
+        target=item['target']
+        if target in ('file','outside'):continue
+        for index,hit in enumerate(item['hits']):
+            item['hits'][index]=local(item['snapshots'][index+1],target,hit)
+        for snapshot in item['snapshots']:
+            snapshot['targetPointProof']=local(snapshot,target)
+    for key in value['keys']:
+        snapshot=key['before'];identity=snapshot.get('control',{}).get('identity')
+        if identity is not None and identity['role'].startswith('target:'):
+            target=identity['role'][len('target:'):];snapshot['targetPointProof']=local(snapshot,target)
+    for target,snapshot in value.get('coreSnapshots',{}).items():
+        if target!='file':snapshot['targetPointProof']=local(snapshot,target)
+    if 'disabledSnapshot' in value:
+        target=operation[len('disabled-'):]
+        value['disabledSnapshot']['targetPointProof']=local(value['disabledSnapshot'],target)
+    module.require_native_menu_action(value,77,11,operation)
+    return module,value
+
+
+class NativeMenuPointModeTests(unittest.TestCase):
+    def owner(self):
+        owner=OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups);return owner
+
+    def test_constructor_mode_two_requires_explicit_opt_in_before_any_provider_work(self):
+        import inspect
+        owner=self.owner();m,a,p,r,c,b,calls,(user,kernel,dwm),context=owner.lazy_provider_boundary()
+        self.assertIn('native_point_profile_version',inspect.signature(m.NativeMenuProbe).parameters)
+        with context:
+            with self.assertRaises(AssertionError):
+                m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm,native_point_profile_version=2)
+            probe=m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm,
+                native_point_profile=True,native_point_profile_version=2)
+            self.assertEqual(probe._native_point_profile_version,2);self.assertEqual(calls,[])
+            probe.close_provider()
+
+    def test_unknown_or_noninteger_constructor_modes_cannot_initialize_provider(self):
+        owner=self.owner();m,a,p,r,c,b,calls,(user,kernel,dwm),context=owner.lazy_provider_boundary()
+        import inspect
+        self.assertIn('native_point_profile_version',inspect.signature(m.NativeMenuProbe).parameters)
+        with context:
+            for version in (0,3,True,False,'2',None):
+                with self.subTest(version=version),self.assertRaises(AssertionError):
+                    m.NativeMenuProbe(c()+5,c,user=user,kernel=kernel,dwm=dwm,
+                        native_point_profile=True,native_point_profile_version=version)
+            self.assertEqual(calls,[])
+
+    def test_invalid_process_profile_stops_before_any_pointer_or_keyboard_input(self):
+        for version in (0,3,True,'2',None):
+            with self.subTest(version=version):
+                owner=self.owner();m,a,p,r,c,b=owner.real_chrome_fixture()
+                p.opengeul_native_menu_point_profile=True;p.opengeul_native_menu_point_profile_version=version
+                with self.assertRaises(AssertionError):m.inspect_native_menu(a,p,11,r,'open-escape',probe=b.probe,clock=c)
+                self.assertEqual(r['nativeMenuActions'][-1]['pointers'],[])
+                self.assertEqual(r['nativeMenuActions'][-1]['keys'],[])

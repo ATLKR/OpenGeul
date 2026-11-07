@@ -5,6 +5,48 @@ import unittest
 import test_owned_native_menu as boundaries
 
 
+def canonical_provider_point(snapshot,*,target,hit=None,scope_id=1):
+    """A complete synthetic mode-2 point from an actual owned-menu snapshot."""
+    scope=copy.deepcopy(snapshot['identityProof']['scope']);binding=scope['binding']
+    role='target:'+target;roles=list(snapshot['identityProof']['roles'])
+    negatives=[name for name in roles if name!=role]+['global-point']
+    rect=snapshot['control']['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
+    popup=snapshot['popup'];pid=binding['officePid'];hwnd=popup['hwnd']
+    provider=dict(schemaVersion=2,workerSchemaVersion=2,diagnosticOnly=1,acceptanceEligible=0,
+        providerLocalOnly=1,globalHitSubstituted=0,synthetic=0,scopeId=scope_id,stageCode=13,
+        nativeAttempted=1,nativeExit=1,threadClosed=1,processesClosed=1,localKnown=1,localMatch=1,
+        workerCleanup=1,workerException=0,pending=0,workerMta=1,comInitialized=1,
+        comUninitialized=1,dpiEntered=1,dpiRestored=1,physicalDpiVerified=1,
+        processBefore=1,processAfter=1,referencesAcquired=16,referencesReleased=16,
+        variantAttempted=1,variantCleared=1,variantCleanupHresult=0,variantType=9,cleanupError=0,
+        canonicalStatus=1,bindingCount=4,selfCount=4,filePairEqual=1,fileOriginalRepeatEqual=1,
+        targetPairEqual=1,targetDifferentFromFile=1,hitMatchesTarget=1,fileUiPositive=1,
+        targetUiPositive=1,negativeCount=len(negatives),negativeRejected=len(negatives),workerStage=8,
+        controllerPid=33,threadId=124,threadBirth=300,threadIdentity=1,callbackIdentity=1,
+        exitCodeObserved=1,nativeExitCode=0)
+    counts=dict(pattern=4,child_id=4,accessible=5,accessible_query=6,control_type=4,
+        hit_test=1,query=1,compare=2+len(negatives))
+    for name,count in counts.items():
+        provider.update({name+'Attempted':count,name+'Completed':count,name+'Hresult':0})
+    exposed=dict(classCode=1,hwnd=hwnd,pid=pid,threadId=popup['threadId'],rootHwnd=hwnd,
+        style=0x80000000,extendedStyle=0x80,rectangle=[0,45,258,1000],point=point,
+        ownerChain=copy.deepcopy(popup['ownerChain']),foreground=binding['document'],
+        ownershipBefore=True,ownershipAfter=True)
+    proof=dict(schemaVersion=2,method='owned-popup-and-msaa-canonical-hit-v2',scope=scope,
+        role=role,sourceScopeId=scope_id,negativeRoles=negatives,provider=provider,before=exposed,
+        after=copy.deepcopy(exposed),sourceFresh=copy.deepcopy(snapshot['identityProof']),
+        fresh=copy.deepcopy(snapshot['identityProof']),creator=dict(threadId=123,mta=True,sameThread=True),
+        globalPoint=dict(kindCode=50033,pid=pid,nativeHwnd=hwnd),sourceScope=dict(scope_id=scope_id,
+            engine_pid=pid,engine_birth=scope['officeCreationTime'],shell_pid=scope['shellPid'],
+            shell_birth=scope['shellCreationTime'],parent_hwnd=binding['parent'],child_hwnd=binding['child'],
+            x=point[0],y=point[1]))
+    result=copy.deepcopy(hit) if hit is not None else dict(point=point,hitHwnd=hwnd,pid=pid,rootHwnd=hwnd)
+    result.update(pointMethod=proof['method'],providerLocalProof=proof,uiaMatches=False,withinControl=False,
+        identityProof=dict(scope=copy.deepcopy(scope),role=role,targetEqualsRetained=True,
+            hitEqualsRetained=False,differentFrom={name:False for name in roles if name!=role}))
+    return result
+
+
 class NativeMenuPointProofTests(unittest.TestCase):
     def fixture(self):
         owner=boundaries.OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
@@ -104,6 +146,106 @@ class NativeMenuPointProofTests(unittest.TestCase):
                 elif damage=='missing':del hit['providerLocalProof']
                 with self.assertRaises((AssertionError,KeyError)):
                     module._require_point(hit,snapshot,'file' if damage=='file-target' else 'save')
+
+
+class NativeMenuCanonicalPointProofTests(unittest.TestCase):
+    def fixture(self):
+        previous=NativeMenuPointProofTests(methodName='runTest');self.addCleanup(previous.doCleanups)
+        module,value,snapshot,hit=previous.fixture()
+        return module,value,snapshot,canonical_provider_point(snapshot,target='save',hit=hit)
+
+    def test_complete_v2_proof_replays_without_changing_global_false(self):
+        module,value,snapshot,hit=self.fixture();module._require_point(hit,snapshot,'save')
+        self.assertFalse(hit['uiaMatches']);self.assertFalse(hit['identityProof']['hitEqualsRetained'])
+        self.assertNotIn('fileRoundTrip',hit['providerLocalProof']['provider'])
+
+    def test_closed_v2_packet_rejects_extra_missing_noninteger_or_relabelled_v1(self):
+        for damage in ('extra','missing','bool','negative','v1'):
+            with self.subTest(damage=damage):
+                module,value,snapshot,hit=self.fixture();provider=hit['providerLocalProof']['provider']
+                if damage=='extra':provider['unreviewed']=1
+                elif damage=='missing':del provider['fileOriginalRepeatEqual']
+                elif damage=='bool':provider['filePairEqual']=True
+                elif damage=='negative':provider['canonicalStatus']=-1
+                else:
+                    old=NativeMenuPointProofTests(methodName='runTest');self.addCleanup(old.doCleanups)
+                    provider=old.fixture()[3]['providerLocalProof']['provider'];provider['schemaVersion']=2
+                    hit['providerLocalProof']['provider']=provider
+                with self.assertRaises((AssertionError,KeyError)):module._require_point(hit,snapshot,'save')
+
+    def test_every_native_pair_positive_cleanup_and_original_budget_predicate_is_required(self):
+        flags=('bindingCount','selfCount','filePairEqual','fileOriginalRepeatEqual','targetPairEqual',
+            'targetDifferentFromFile','hitMatchesTarget','fileUiPositive','targetUiPositive','canonicalStatus',
+            'nativeExit','workerCleanup','variantCleared','threadClosed','processesClosed','localKnown',
+            'physicalDpiVerified','threadIdentity','callbackIdentity','exitCodeObserved')
+        for field in flags:
+            with self.subTest(field=field):
+                module,value,snapshot,hit=self.fixture();hit['providerLocalProof']['provider'][field]=0
+                with self.assertRaises(AssertionError):module._require_point(hit,snapshot,'save')
+        for field,value in (('pending',1),('synthetic',1),('workerException',1),('nativeExitCode',1),
+                ('stageCode',11),('workerStage',7),('variantType',3),('referencesReleased',15),
+                ('referencesAcquired',17),('workerSchemaVersion',1),('globalHitSubstituted',1)):
+            with self.subTest(field=field):
+                module,record,snapshot,hit=self.fixture();hit['providerLocalProof']['provider'][field]=value
+                with self.assertRaises(AssertionError):module._require_point(hit,snapshot,'save')
+
+    def test_all_exact_operation_counts_and_hresult_are_replayed(self):
+        for name in ('pattern','child_id','accessible','accessible_query','control_type','hit_test','query','compare'):
+            for suffix in ('Attempted','Completed','Hresult'):
+                with self.subTest(operation=name,suffix=suffix):
+                    module,value,snapshot,hit=self.fixture();provider=hit['providerLocalProof']['provider']
+                    provider[name+suffix]+=1
+                    with self.assertRaises(AssertionError):module._require_point(hit,snapshot,'save')
+
+    def test_source_fresh_post_fresh_creator_and_popup_remain_joined_to_original_scope(self):
+        for damage in ('sourceFresh','fresh','scope','source-scope','source-point','creator','role',
+                'negative','negative-count','popup','source-extra','outer-extra','schema','method'):
+            with self.subTest(damage=damage):
+                module,value,snapshot,hit=self.fixture();proof=hit['providerLocalProof']
+                if damage in ('sourceFresh','fresh'):proof[damage]['positive']['file']=False
+                elif damage=='scope':proof['scope']['startedAt']+=.01
+                elif damage=='source-scope':proof['sourceScope']['engine_birth']+=1
+                elif damage=='source-point':proof['sourceScope']['x']+=1
+                elif damage=='creator':proof['creator']['sameThread']=False
+                elif damage=='role':proof['role']='target:open'
+                elif damage=='negative':proof['negativeRoles'].pop()
+                elif damage=='negative-count':proof['provider']['negativeRejected']-=1
+                elif damage=='popup':proof['after']['threadId']+=1
+                elif damage=='source-extra':proof['sourceScope']['other']=1
+                elif damage=='outer-extra':proof['other']=1
+                elif damage=='schema':proof['schemaVersion']=1
+                else:proof['method']='owned-popup-and-msaa-hit'
+                with self.assertRaises((AssertionError,KeyError)):module._require_point(hit,snapshot,'save')
+
+    def test_global_true_file_target_or_wrong_method_never_becomes_v2_point(self):
+        for damage in ('global-true','file','unknown','v1-method'):
+            with self.subTest(damage=damage):
+                module,value,snapshot,hit=self.fixture()
+                if damage=='global-true':hit['uiaMatches']=True
+                elif damage=='unknown':hit['pointMethod']='unreviewed-canonical'
+                elif damage=='v1-method':hit['pointMethod']='owned-popup-and-msaa-hit'
+                with self.assertRaises((AssertionError,KeyError)):module._require_point(hit,snapshot,'file' if damage=='file' else 'save')
+
+    def test_snapshot_and_full_action_replay_reject_corrupted_v2_positive(self):
+        module,value,snapshot,hit=self.fixture();snapshot['targetPointProof']=hit
+        module._validate(snapshot,value['binding'],77,'save')
+        hit['providerLocalProof']['provider']['hitMatchesTarget']=0
+        with self.assertRaises(AssertionError):module._validate(snapshot,value['binding'],77,'save')
+        module,action=boundaries.canonical_action_fixture(self)
+        module.require_native_menu_action(action,77,11,'save')
+        action['pointers'][-1]['hits'][1]['providerLocalProof']['provider']['targetPairEqual']=0
+        with self.assertRaises(AssertionError):module.require_native_menu_action(action,77,11,'save')
+
+    def test_v2_native_numbers_cannot_be_boolean_float_or_outside_original_scope_domain(self):
+        for damage in ('class-bool','pid-float','thread-bool','source-bool','source-float'):
+            with self.subTest(damage=damage):
+                module,value,snapshot,hit=self.fixture();proof=hit['providerLocalProof']
+                if damage=='class-bool':proof['before']['classCode']=True;proof['after']=copy.deepcopy(proof['before'])
+                elif damage=='pid-float':proof['before']['pid']=float(proof['before']['pid']);proof['after']=copy.deepcopy(proof['before'])
+                elif damage=='thread-bool':proof['before']['threadId']=True;proof['after']=copy.deepcopy(proof['before'])
+                elif damage=='source-bool':proof['sourceScope']['scope_id']=True
+                else:proof['sourceScope']['engine_birth']=float(proof['sourceScope']['engine_birth'])
+                with self.assertRaises(AssertionError):module._require_point(hit,snapshot,'save')
 
 
 if __name__=='__main__':unittest.main()

@@ -94,6 +94,53 @@ class NativeMenuSmokeTests(unittest.TestCase):
         return self.smoke.run_case(Path('/synthetic/suite'), Path('/synthetic/fixtures'),
             Path('/synthetic/output'), module, session_factory=lambda *args: session)
 
+    def test_dedicated_cli_selects_profile_two_without_changing_the_native_preflight_schema(self):
+        from test_native_menu_point_cli import preflight
+        output=Path(self.enterContext(tempfile.TemporaryDirectory()))
+        boundary=preflight();events=[]
+        helper=SimpleNamespace(verify_native_thread_boundary=lambda deadline:boundary)
+        setup=lambda:(SimpleNamespace(finish=lambda:events.append('fence')),helper)
+        def modules(suite,fixtures,folder,*,session_factory,point_preflight):
+            self.assertEqual(point_preflight['schemaVersion'],1)
+            session=session_factory(suite,fixtures,folder,'writer')
+            self.assertIs(session.native_point_profile,True)
+            self.assertEqual(getattr(session,'native_point_profile_version',None),2)
+            events.append('modules');return dict(success=True)
+        with patch.object(self.smoke,'run_modules',side_effect=modules):
+            self.assertEqual(self.smoke._run_point_profile(Path('/suite'),Path('/fixtures'),output,setup=setup),0)
+        self.assertEqual(events,['modules','fence'])
+        default=self.smoke.WindowsSession(Path('/suite'),Path('/fixtures'),output,'writer')
+        self.assertIs(default.native_point_profile,False)
+        self.assertEqual(getattr(default,'native_point_profile_version',None),1)
+
+    def test_actual_open_copies_only_the_explicit_profile_before_attachment(self):
+        import windows_smoke
+        class StopAtAttachment(Exception):pass
+        for enabled,version in ((False,1),(True,1),(True,2)):
+            with self.subTest(enabled=enabled,version=version):
+                process=SimpleNamespace()
+                session=self.smoke.WindowsSession(Path('/suite'),Path('/fixtures'),Path('/output'),'writer')
+                session.native_point_profile=enabled;session.native_point_profile_version=version
+                with patch.object(self.smoke.os,'name','nt'), \
+                        patch.dict(sys.modules,{'pywinauto':SimpleNamespace(Desktop=object)}), \
+                        patch.object(windows_smoke,'new_document_command',return_value=['synthetic-launch']), \
+                        patch.object(windows_smoke,'launch_suite',return_value=process), \
+                        patch.object(windows_smoke,'Windows',return_value=object()), \
+                        patch.object(windows_smoke,'verified_attachment',side_effect=StopAtAttachment):
+                    with self.assertRaises(StopAtAttachment):session.open(dict(case='native-menu-writer'))
+                self.assertEqual(getattr(process,'opengeul_native_menu_point_profile',False),enabled)
+                self.assertEqual(getattr(process,'opengeul_native_menu_point_profile_version',None),version if enabled else None)
+
+    def test_report_declares_profile_two_only_with_the_existing_preflight(self):
+        from test_native_menu_point_cli import preflight
+        for boundary,expected in ((None,0),(preflight(),2)):
+            with self.subTest(profile=expected),tempfile.TemporaryDirectory() as folder, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                report=self.smoke.run_modules(Path('/suite'),Path('/fixtures'),Path(folder),
+                    session_factory=lambda *args:Session(),point_preflight=boundary)
+                self.assertEqual(report['nativePointProfileVersion'],expected)
+                self.assertIs(report['acceptanceEligible'],False)
+
     def test_writer_requires_native_hwp_launcher_before_finish_without_certifying_synthetic_input(self):
         session=Session();record=self.run_case(session)
         self.assertIn('hwp-launcher',session.calls)
