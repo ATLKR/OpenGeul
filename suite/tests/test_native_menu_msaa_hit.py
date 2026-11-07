@@ -180,6 +180,24 @@ class MetadataTests(unittest.TestCase):
         abi=self.build()
         self.assertEqual(abi.slots['release'],2)
 
+    def test_accessible_iunknown_prefix_is_validated_independently_of_element(self):
+        import copy
+        for damage in ('query-guid','query-out','query-flags','release-width'):
+            with self.subTest(damage=damage):
+                self.sdk=sdk_fixture();accessible=self.sdk['accessible_interface']
+                dispatch,unknown=accessible.__bases__[0],accessible.__bases__[0].__bases__[0]
+                prefix=type('AccessibleUnknown',(),dict(_iid_=unknown._iid_,
+                    _methods_=copy.deepcopy(unknown._methods_)))
+                dispatch=type('AccessibleDispatch',(prefix,),dict(_iid_=dispatch._iid_,_methods_=dispatch._methods_))
+                self.sdk['accessible_interface']=type('Accessible',(dispatch,),dict(
+                    _iid_=accessible._iid_,_methods_=accessible._methods_))
+                query,_,release=prefix._methods_
+                if damage=='query-guid':query.argtypes=(Guid,C.POINTER(C.c_void_p))
+                elif damage=='query-out':query.argtypes=(C.POINTER(Guid),C.c_void_p)
+                elif damage=='query-flags':query.paramflags=((1,'iid'),(10,'out'))
+                else:release.restype=C.c_uint64
+                with self.assertRaises(ValueError):self.build()
+
     def test_custom_c_void_com_pointer_interface_is_checked(self):
         self.build()
         item=self.sdk['legacy_interface']._methods_[1]
@@ -279,7 +297,7 @@ class FakeKernel:
     def close(self,handle):
         self.closed.append(handle)
         return not self.close_failure
-    def worker(self,source,scope,sdk):
+    def worker(self,source,scope,sdk,deadline):
         if self.worker_failure:raise RuntimeError('Synthetic worker failure')
         return sdk_fixture_worker()
     def boundary_worker(self):return load_helper().run_native_boundary(FakePlatform())
@@ -315,6 +333,133 @@ class LeaseTests(unittest.TestCase):
         self.assertEqual(sorted(self.kernel.closed),[120,121,301])
         self.assertNotIn(20,self.kernel.closed);self.assertNotIn(21,self.kernel.closed)
         self.assertFalse(lease.pending)
+
+    def test_worker_receives_original_absolute_deadline(self):
+        observed=[]
+        def worker(*args):observed.append(args);return sdk_fixture_worker()
+        self.kernel.worker=worker;lease=self.begin(14.25);lease.wait()
+        self.assertEqual(len(observed[0]),4)
+        self.assertEqual(observed[0][-1],14.25)
+
+    def test_closed_worker_schema_rejects_extra_missing_negative_and_noninteger_values(self):
+        for damage in ('extra','missing','negative','bool','wide'):
+            with self.subTest(damage=damage):
+                def worker(*args):
+                    result=sdk_fixture_worker()
+                    if damage=='extra':result['rawPointer']=123
+                    elif damage=='missing':result.pop('falseShadowStatus',None)
+                    else:result['falseShadowChildBits']={'negative':-1,'bool':True,'wide':2**32}[damage]
+                    return result
+                self.kernel=FakeKernel();self.kernel.worker=worker;lease=self.begin();result=lease.wait()
+                self.assertEqual(result['workerException'],1)
+                self.assertEqual(result['localKnown'],0)
+                self.helper._active=None
+
+    def test_inflight_shadow_keeps_same_address_acquisitions_source_sdk_and_handles_until_exit(self):
+        import threading
+        entered=threading.Event();release=threading.Event();sdk=FakeCalls();sdk.wrong_file=True
+        platform=FakePlatform();platform.clock=self.kernel.clock;original=sdk.call
+        def call(key,pointer,*args):
+            hr=original(key,pointer,*args)
+            if key=='accessible_query' and sdk.calls.count(key)==2:
+                entered.set()
+                if not release.wait(2):raise RuntimeError('Synthetic wait exhausted')
+            return hr
+        sdk.call=call;self.kernel.finished=False;threads=[]
+        def start(callback):
+            def entry():
+                try:callback()
+                finally:self.kernel.finished=True
+            thread=threading.Thread(target=entry,daemon=True);threads.append(thread);thread.start()
+            return (301,44,55)
+        self.kernel.start=start
+        self.kernel.worker=lambda source,scope,owned_sdk,deadline:self.helper.run_local_hit(
+            source,scope,owned_sdk,platform,deadline)
+        lease=self.helper.begin_msaa_hit(self.source,self.scope,sdk,15.,_kernel=self.kernel)
+        try:
+            self.assertTrue(entered.wait(1));self.assertEqual(sdk.releases,[])
+            self.kernel.now=16.
+            result=lease.wait();self.assertEqual((result['pending'],result['localKnown']),(1,0))
+            self.assertEqual(self.kernel.closed,[]);self.assertIs(lease.source,self.source);self.assertIs(lease.sdk,sdk)
+            self.assertEqual(self.begin().wait()['stageCode'],2)
+            self.assertEqual(len(self.kernel.duplicates),2)
+        finally:
+            release.set()
+            for thread in threads:thread.join(1)
+        self.assertFalse(threads[0].is_alive())
+        result=lease.retire(20.)
+        self.assertEqual((result['pending'],result['localKnown'],result['localMatch']),(0,0,0))
+        self.assertEqual(result['falseShadowStatus'],2)
+        self.assertEqual(sdk.releases,[301,301,202,201,103,102,101])
+        self.assertEqual(sorted(self.kernel.closed),[120,121,301])
+        self.assertIsNone(lease.source);self.assertIsNone(lease.sdk)
+
+    def test_retirement_or_late_collection_downgrades_completed_shadow_status(self):
+        for late in ('retire','collection','clear'):
+            with self.subTest(late=late):
+                self.kernel=FakeKernel()
+                self.kernel.worker=lambda *args:dict(sdk_fixture_worker(),falseShadowStarted=1,
+                    falseShadowStatus=1,falseShadowIdentityObserved=1,falseShadowCanonicalEqual=1,
+                    localKnown=0,localMatch=0)
+                lease=self.begin()
+                if late=='collection':self.kernel.now=16.
+                if late=='clear':
+                    original=lease._clear
+                    def clear():original();self.kernel.now=16.
+                    lease._clear=clear
+                result=lease.retire(20.) if late=='retire' else lease.wait()
+                self.assertEqual((result['falseShadowStatus'],result['falseShadowCanonicalEqual']),(0 if late=='retire' else 2,1))
+                self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+
+    def test_unknown_retirement_cannot_keep_completed_shadow_status(self):
+        self.kernel.worker=lambda *args:dict(sdk_fixture_worker(),falseShadowStarted=1,
+            falseShadowStatus=1,falseShadowIdentityObserved=1,falseShadowCanonicalEqual=1,
+            localKnown=0,localMatch=0)
+        lease=self.begin();self.kernel.close_failure=True;result=lease.wait()
+        self.assertEqual((result['pending'],result['falseShadowStatus']),(1,0))
+        self.assertEqual(result['falseShadowCanonicalEqual'],1)
+        self.assertIs(lease.source,self.source)
+        self.kernel.close_failure=False
+        self.assertEqual(lease.retire(20.)['localKnown'],0)
+
+    def test_expired_collection_with_failed_handle_close_keeps_expiry_status_and_source(self):
+        for close_target in ('thread','process'):
+            with self.subTest(close_target=close_target):
+                self.kernel=FakeKernel()
+                self.kernel.worker=lambda *args:dict(sdk_fixture_worker(),falseShadowStarted=1,
+                    falseShadowStatus=1,falseShadowIdentityObserved=1,falseShadowCanonicalEqual=1,
+                    localKnown=0,localMatch=0)
+                lease=self.begin();sdk=lease.sdk;original=self.kernel.close
+                self.kernel.now=16.
+                self.kernel.close=lambda handle:False if (handle==301)==(close_target=='thread') else original(handle)
+                try:
+                    result=lease.wait()
+                    self.assertEqual((result['pending'],result['stageCode'],result['falseShadowStatus']),(1,10,2))
+                    self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+                    self.assertEqual((result['falseShadowIdentityObserved'],result['falseShadowCanonicalEqual']),(1,1))
+                    self.assertIs(lease.source,self.source);self.assertIs(lease.sdk,sdk)
+                    self.assertEqual(self.begin().wait()['stageCode'],2)
+                finally:
+                    self.kernel.close=original
+                    retired=lease.retire(20.)
+                self.assertEqual((retired['pending'],retired['localKnown'],retired['localMatch']),(0,0,0))
+
+    def test_clock_failure_during_pending_downgrade_returns_incomplete_and_keeps_source(self):
+        self.kernel.worker=lambda *args:dict(sdk_fixture_worker(),falseShadowStarted=1,
+            falseShadowStatus=1,falseShadowIdentityObserved=1,falseShadowCanonicalEqual=1,
+            localKnown=0,localMatch=0)
+        lease=self.begin();clock=self.kernel.clock;close=self.kernel.close;sdk=lease.sdk
+        def failed_clock():raise KeyboardInterrupt('Synthetic clock failure')
+        def failed_close(handle):self.kernel.clock=failed_clock;return False
+        self.kernel.close=failed_close
+        try:
+            result=lease.wait()
+            self.assertEqual((result['pending'],result['falseShadowStatus']),(1,0))
+            self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+            self.assertIs(lease.source,self.source);self.assertIs(lease.sdk,sdk)
+        finally:
+            self.kernel.clock=clock;self.kernel.close=close
+        self.assertEqual(lease.retire(20.)['localKnown'],0)
 
     def test_sta_or_expired_deadline_does_not_duplicate_or_start(self):
         for reason in ('sta','expired'):
@@ -480,6 +625,8 @@ class FakePlatform:
     def __init__(self):
         self.mta=True;self.dpi=True;self.restore=True;self.com_hr=0
         self.owns=True;self.clears=[];self.uninitializes=0;self.clear_hr=0
+        self.now=10.
+    def clock(self):return self.now
     def initialize(self):return self.com_hr
     def apartment(self):return self.mta
     def uninitialize(self):self.uninitializes+=1
@@ -499,6 +646,7 @@ class FakeCalls:
         self.releases=[];self.calls=[];self.fail={};self.child=0;self.variant_type=9
         self.wrong_file=False;self.wrong_target=False;self.negative_true=False
         self.release_throws=False
+        self.shadow_child=0;self.canonical=(301,301)
     def call(self,key,pointer,*args):
         self.calls.append(key)
         pointer=pointer.value if isinstance(pointer,C.c_void_p) else pointer
@@ -506,9 +654,10 @@ class FakeCalls:
             self.releases.append(pointer)
             if self.release_throws:raise RuntimeError('Synthetic release failure')
             return 0
-        if key=='pattern':args[2]._obj.value=101
-        elif key=='child_id':args[0]._obj.value=self.child
-        elif key=='accessible':args[0]._obj.value=102
+        if key=='pattern':args[2]._obj.value=201 if pointer==103 else 101
+        elif key=='child_id':args[0]._obj.value=self.shadow_child if pointer==201 else self.child
+        elif key=='accessible':args[0]._obj.value=202 if pointer==201 else 102
+        elif key=='accessible_query':args[1]._obj.value=self.canonical[int(pointer==202)]
         elif key=='from_accessible':args[2]._obj.value=103 if args[0]==102 else 105
         elif key=='query':args[1]._obj.value=104
         elif key=='hit_test':
@@ -529,7 +678,7 @@ class WorkerTests(unittest.TestCase):
         self.source=self.helper.MsaaHitSource(client=9,file=1,fresh_target=2,
             retained_target=3,negative_refs=(4,5),shell_handle=20,engine_handle=21)
         self.scope=self.helper.MsaaHitScope(7,8,9,10,11,12,13,14,15)
-    def run_worker(self):return self.helper.run_local_hit(self.source,self.scope,self.sdk,self.platform)
+    def run_worker(self):return self.helper.run_local_hit(self.source,self.scope,self.sdk,self.platform,15.)
 
     def test_first_file_compare_records_encoding_without_restricting_bool_truth(self):
         fields=('firstCompareRawObserved','firstCompareRawBits','firstCompareIsZeroOrOne')
@@ -548,7 +697,7 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
                 if raw==0:
                     self.assertEqual(result['compareAttempted'],1);self.assertEqual(result['hit_testAttempted'],0)
-                    self.assertEqual(result['referencesReleased'],3)
+                    self.assertEqual(result['referencesReleased'],7)
 
     def test_first_file_compare_is_not_overwritten_by_later_target_or_negative_comparisons(self):
         for wrong_target in (False,True):
@@ -709,6 +858,204 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result['localMatch'],0);self.assertEqual(result['workerCleanup'],0)
 
 
+class FalseShadowTests(unittest.TestCase):
+    setUp=WorkerTests.setUp
+    run_worker=WorkerTests.run_worker
+
+    def prepare(self):
+        self.sdk=FakeCalls();self.platform=FakePlatform();self.sdk.wrong_file=True
+
+    def assert_primary_false(self,result):
+        self.assertEqual(tuple(result[key] for key in ('workerStage','fileRoundTrip',
+            'localKnown','localMatch','hit_testAttempted','variantAttempted')),(4,0,0,0,0,0))
+        self.assertEqual(tuple(result[key] for key in ('compareAttempted','compareCompleted',
+            'compareHresult','firstCompareRawObserved','firstCompareRawBits')),(1,1,0,1,0))
+        self.assertEqual((result['patternAttempted'],result['child_idAttempted'],
+            result['accessibleAttempted'],result['queryAttempted']),(1,1,1,0))
+
+    def test_false_roundtrip_adds_exact_five_calls_and_keeps_failed_primary_guard(self):
+        self.prepare();result=self.run_worker();self.assert_primary_false(result)
+        self.assertEqual(tuple(result.get(key) for key in ('falseShadowVersion',
+            'falseShadowStarted','falseShadowStatus','falseShadowStep','falseShadowAttempted',
+            'falseShadowCompleted','falseShadowLastHresult')),(1,1,1,5,5,5,0))
+        self.assertEqual(self.sdk.calls[:10],['pattern','child_id','accessible','from_accessible',
+            'compare','pattern','child_id','accessible','accessible_query','accessible_query'])
+        self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7,7))
+        self.assertEqual(self.sdk.releases,[301,301,202,201,103,102,101])
+        self.assertEqual((result['falseShadowGuardBefore'],result['falseShadowGuardAfter']),(1,1))
+
+    def test_shadow_queries_exact_msaa_pair_with_unknown_iid_without_exporting_addresses(self):
+        self.prepare();self.sdk.canonical=(0x123456789abc,0x123456789abc)
+        original=self.sdk.call;queries=[]
+        def call(key,pointer,*args):
+            if key=='pattern' and pointer==103:
+                self.assertEqual(args[0],10018)
+                self.assertEqual(C.string_at(args[1],16),uuid.UUID('828055ad-355b-4435-86d5-3b51c14a9b1b').bytes_le)
+            if key=='accessible_query':
+                self.assertEqual(C.string_at(args[0],16),uuid.UUID('00000000-0000-0000-c000-000000000046').bytes_le)
+                self.assertEqual(self.sdk.releases,[]);queries.append(pointer)
+            return original(key,pointer,*args)
+        self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+        self.assertEqual(queries,[102,202])
+        self.assertEqual(result['falseShadowCanonicalEqual'],1)
+        self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in result.values()))
+        self.assertNotIn(0x123456789abc,result.values())
+        self.assertEqual(self.sdk.releases[:2],[0x123456789abc,0x123456789abc])
+
+    def test_canonical_identity_and_signed_child_are_observations_only(self):
+        for canonical,child,want in (((301,301),0,(1,1)),((301,302),0,(0,1)),
+                ((301,301),-1,(1,0)),((301,302),7,(0,0))):
+            with self.subTest(canonicalEqual=want[0],childEqual=want[1]):
+                self.prepare();self.sdk.canonical=canonical;self.sdk.shadow_child=child
+                result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual(result.get('falseShadowIdentityObserved'),1)
+                self.assertEqual((result['falseShadowCanonicalEqual'],result['falseShadowChildEqual']),want)
+                self.assertEqual((result['falseShadowChildObserved'],result['falseShadowChildBits']),(1,child&0xffffffff))
+                self.assertEqual(result['workerCleanup'],1)
+
+    def test_true_noncanonical_true_failed_compare_and_earlier_failure_do_not_start_shadow(self):
+        for reason in ('true','noncanonical','compare-failed','earlier-failed'):
+            with self.subTest(reason=reason):
+                self.sdk=FakeCalls();self.platform=FakePlatform();original=self.sdk.call
+                if reason=='compare-failed':self.sdk.fail['compare']=-2147467259
+                if reason=='earlier-failed':self.sdk.fail['accessible']=-2147467259
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if reason=='noncanonical' and key=='compare' and args[1] in (1,2,3):args[2]._obj.value=-1
+                    return hr
+                self.sdk.call=call;result=self.run_worker()
+                self.assertEqual((result.get('falseShadowStarted'),result.get('falseShadowStatus')),(0,0))
+                self.assertNotIn('accessible_query',self.sdk.calls)
+
+    def test_each_shadow_hresult_null_and_exception_registers_every_nonnull_output(self):
+        for step in range(1,6):
+            for failure in ('hresult','exception','null'):
+                if failure=='null' and step==2:continue
+                with self.subTest(step=step,failure=failure):
+                    self.prepare();original=self.sdk.call;seen=[]
+                    def call(key,pointer,*args):
+                        hr=original(key,pointer,*args)
+                        if key!='release' and len(self.sdk.calls)>5:
+                            seen.append(key)
+                            if len(seen)==step:
+                                if failure=='exception':raise KeyboardInterrupt('Synthetic private exception')
+                                if failure=='null':args[-1]._obj.value=None
+                                else:return -2147467259
+                        return hr
+                    self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                    self.assertEqual(result.get('falseShadowStatus'),{'hresult':4,'null':5,'exception':6}[failure])
+                    self.assertEqual(result['falseShadowStep'],step)
+                    self.assertEqual(result['falseShadowAttempted'],step)
+                    self.assertEqual(result['falseShadowCompleted'],step-int(failure=='exception'))
+                    self.assertEqual(result['falseShadowIdentityObserved'],0)
+                    acquired=3+sum(index!=2 for index in range(1,step+1))-int(failure=='null')
+                    self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(acquired,acquired))
+                    self.assertEqual(self.sdk.releases,list(reversed([101,102,103]+
+                        [value for index,value in ((1,201),(3,202),(4,301),(5,301))
+                            if index<=step and not (failure=='null' and index==step)])))
+                    self.assertEqual(result['workerCleanup'],int(failure!='exception'))
+                    self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in result.values()))
+                    self.assertNotIn('Synthetic private',str(result))
+
+    def test_original_deadline_stops_call_admission_at_entry_or_after_each_call(self):
+        for cutoff in range(6):
+            with self.subTest(cutoff=cutoff):
+                self.prepare();original=self.sdk.call
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if key!='release' and len(self.sdk.calls)==5+cutoff:self.platform.now=15.
+                    return hr
+                self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual(result.get('falseShadowStatus'),2)
+                self.assertEqual((result['falseShadowAttempted'],result['falseShadowCompleted']),(cutoff,cutoff))
+                self.assertEqual(result['falseShadowIdentityObserved'],0)
+                self.assertEqual(result['workerCleanup'],1)
+
+    def test_process_guard_at_every_admission_and_return_stops_further_calls(self):
+        # Initial worker guard is call 1; shadow entry is 2, then before/after
+        # each of five calls, and the final observation guard is call 13.
+        for cutoff in range(2,14):
+            with self.subTest(guard=cutoff):
+                self.prepare();checks=[]
+                def guard():checks.append(1);return len(checks)<cutoff
+                self.platform.guard=guard;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual(result.get('falseShadowStatus'),3)
+                self.assertEqual(result['falseShadowAttempted'],min(5,max(0,(cutoff-2)//2)))
+                self.assertEqual(result['falseShadowGuardAfter'],0)
+                self.assertEqual(result['workerCleanup'],1)
+
+    def test_cleanup_failure_never_promotes_even_canonical_agreement(self):
+        self.prepare();self.sdk.release_throws=True;result=self.run_worker();self.assert_primary_false(result)
+        self.assertEqual(result.get('falseShadowCanonicalEqual'),1)
+        self.assertEqual((result['cleanupError'],result['workerCleanup']),(1,0))
+
+    def test_time_expiring_in_guard_prevents_each_call_and_final_completion(self):
+        for cutoff in (2,3,5,7,9,11,13):
+            with self.subTest(guard=cutoff):
+                self.prepare();checks=[]
+                def guard():
+                    checks.append(1)
+                    if len(checks)==cutoff:self.platform.now=15.
+                    return True
+                self.platform.guard=guard;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual(result['falseShadowStatus'],2)
+                self.assertEqual(result['falseShadowAttempted'],min(5,max(0,(cutoff-2)//2)))
+                self.assertEqual(result['falseShadowGuardAfter'],0)
+
+    def test_cleanup_returning_after_deadline_retains_bits_but_never_completed_status(self):
+        self.prepare();original=self.sdk.call
+        def call(key,pointer,*args):
+            hr=original(key,pointer,*args)
+            if key=='release':self.platform.now=15.
+            return hr
+        self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+        self.assertEqual(result['falseShadowStatus'],2)
+        self.assertEqual((result['falseShadowIdentityObserved'],result['falseShadowCanonicalEqual']),(1,1))
+        self.assertEqual(result['workerCleanup'],1)
+
+    def test_shadow_noninteger_hresult_is_unobserved_exception_with_owned_output_cleanup(self):
+        for malformed in (None,True,False):
+            with self.subTest(kind=type(malformed).__name__):
+                self.prepare();original=self.sdk.call
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    return malformed if key=='pattern' and pointer==103 else hr
+                self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual((result['falseShadowStatus'],result['falseShadowAttempted'],
+                    result['falseShadowCompleted']),(6,1,0))
+                self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(4,4))
+                self.assertEqual((result['cleanupError'],result['workerCleanup']),(1,0))
+
+    def test_canonical_agreement_still_fails_actual_caller_before_save_input(self):
+        import test_owned_native_menu as boundaries
+        self.prepare();provider=self.run_worker()
+        self.assertEqual((provider['falseShadowCanonicalEqual'],provider['falseShadowChildEqual']),(1,1))
+        owner=boundaries.OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
+        module,api,process,record,clock,boundary=owner.real_chrome_fixture();probe=boundary.probe
+        original=probe.point_snapshot;exposures=[];fresh=[]
+        probe._native_point_profile=True
+        probe._require_provider_creator=lambda:dict(threadId=123,mta=True,sameThread=True)
+        probe._popup_exposure=lambda *args:exposures.append(1) or dict(hwnd=99)
+        probe._begin_point_lease=lambda *args:NS(wait=lambda:provider,pending=False)
+        original_fresh=probe._fresh_proof
+        def fresh_proof(*args):
+            if exposures:fresh.append(1)
+            return original_fresh(*args)
+        probe._fresh_proof=fresh_proof
+        actual=NS(CurrentControlType=50033,CurrentProcessId=88,CurrentNativeWindowHandle=99)
+        def point(scope,coordinates,control):
+            target=control.element_info._element
+            if target.key=='file':return original(scope,coordinates,control)
+            return probe._provider_local_point(coordinates,target,actual)
+        probe.point_snapshot=point
+        with self.assertRaisesRegex(AssertionError,'native menu provider point is unknown'):
+            module.click_native_menu_action(api,process,11,record,'save',probe=probe,clock=clock)
+        self.assertEqual([row for row in boundary.native.calls if isinstance(row,tuple) and row[0]=='click'],[('click','file')])
+        self.assertEqual(exposures,[1]);self.assertEqual(fresh,[])
+        self.assertIs(probe.interop['providerLocalResult'],provider)
+        self.assertFalse(record['nativeMenuActions'][-1]['success'])
+
+
 class RawCallTests(unittest.TestCase):
     def test_native_duplicate_stays_unacknowledged_until_lease_adopts_it(self):
         helper=load_helper();kernel=helper.WindowsKernel.__new__(helper.WindowsKernel)
@@ -812,6 +1159,8 @@ class WindowsMetadataTests(unittest.TestCase):
             accessible_interface=accessible,guid_type=GUID,hresult_type=HRESULT,
             variant_type=VARIANT,function_factory=C.WINFUNCTYPE)
         self.assertEqual(abi.slots['hit_test'],24)
+        self.assertEqual(abi.slots['accessible_query'],0)
+        self.assertEqual(abi.slots['accessible_release'],2)
 
 
 @unittest.skipUnless(os.name=='nt','Actual Windows CLSIDFromString parser only; no input')

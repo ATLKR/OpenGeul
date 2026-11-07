@@ -93,6 +93,11 @@ class SdkAbi:
         self._use('query',element_interface,'QueryInterface',
             (out(guid),out(void)),None)
         self._use('release',element_interface,'Release',(),None,unsigned=True)
+        # Validate the actual IAccessible prefix independently before its QI.
+        # Every owned ref also has this validated IUnknown Release ABI.
+        self._use('accessible_query',accessible_interface,'QueryInterface',
+            (out(guid),out(void)),None)
+        self._use('accessible_release',accessible_interface,'Release',(),None,unsigned=True)
         self._use('pattern',element_interface,'GetCurrentPatternAs',
             (scalar,out(guid),out(void)),(1,1,10))
         self._use('child_id',legacy_interface,'_get_CurrentChildId',(out(scalar),),(10,))
@@ -172,6 +177,11 @@ def worker_record():
         variantType=0,childIdZero=0,fileRoundTrip=0,firstCompareRawObserved=0,
         firstCompareRawBits=0,firstCompareIsZeroOrOne=0,targetFreshPositive=0,
         targetRetainedPositive=0,negativeCount=0,negativeRejected=0,cleanupError=0)
+    result.update(falseShadowVersion=1,falseShadowStarted=0,falseShadowStatus=0,
+        falseShadowStep=0,falseShadowAttempted=0,falseShadowCompleted=0,falseShadowLastHresult=0,
+        falseShadowChildObserved=0,falseShadowChildBits=0,falseShadowIdentityObserved=0,
+        falseShadowCanonicalEqual=0,falseShadowChildEqual=0,
+        falseShadowGuardBefore=0,falseShadowGuardAfter=0)
     for name in _OPERATIONS:
         result.update({name+'Attempted':0,name+'Completed':0,name+'Hresult':0})
     return result
@@ -180,7 +190,7 @@ def worker_record():
 class _Stop(Exception):pass
 
 
-def run_local_hit(source,scope,sdk,platform):
+def run_local_hit(source,scope,sdk,platform,deadline):
     """Worker-only typed COM calls, explicit new-ref and VARIANT cleanup.
 
     Never accesses names, values, document text or VARIANT conversion properties.
@@ -213,6 +223,55 @@ def run_local_hit(source,scope,sdk,platform):
         # BOOL32 uses every nonzero encoding as TRUE; the field above records
         # encoding only and never qualifies the comparison or its cleanup.
         return bool(raw)
+    def false_shadow(round_trip,accessible,child_id,pattern_iid):
+        # Diagnostic only: canonical COM object + child cannot override UIA FALSE.
+        # This bounds new-call admission, not synchronous COM/Release duration.
+        record['falseShadowStarted']=1
+        def check():
+            if (type(deadline) not in (int,float) or not math.isfinite(deadline)
+                    or platform.clock()>=deadline):
+                record['falseShadowStatus']=2;raise _Stop()
+            if not platform.guard():
+                record['falseShadowStatus']=3;raise _Stop()
+            if platform.clock()>=deadline:
+                record['falseShadowStatus']=2;raise _Stop()
+        def shadow_call(step,key,pointer,*arguments):
+            check()
+            record['falseShadowStep']=step;record['falseShadowAttempted']+=1
+            hr=sdk.call(key,pointer,*arguments)
+            if type(hr) is not int:raise TypeError()
+            record['falseShadowCompleted']+=1;record['falseShadowLastHresult']=hr&0xffffffff
+            check()
+            if hr!=0:
+                record['falseShadowStatus']=4;raise _Stop()
+        def shadow_out(step,key,pointer,*arguments):
+            value=C.c_void_p()
+            try:shadow_call(step,key,pointer,*arguments,C.byref(value))
+            finally:
+                if value.value:
+                    refs.append(value.value);record['referencesAcquired']+=1
+            if not value.value:
+                record['falseShadowStatus']=5;raise _Stop()
+            return value.value
+        try:
+            check();record['falseShadowGuardBefore']=1
+            legacy=shadow_out(1,'pattern',round_trip,10018,C.byref(pattern_iid))
+            child=C.c_int32()
+            shadow_call(2,'child_id',legacy,C.byref(child))
+            record.update(falseShadowChildObserved=1,falseShadowChildBits=child.value&0xffffffff)
+            projected=shadow_out(3,'accessible',legacy)
+            iid=sdk.Guid('{'+_IIDS['unknown']+'}')
+            original_identity=shadow_out(4,'accessible_query',accessible,C.byref(iid))
+            projected_identity=shadow_out(5,'accessible_query',projected,C.byref(iid))
+            # Hold both QI acquisitions simultaneously; equal addresses still
+            # own two references and must each be released in reverse order.
+            record.update(falseShadowIdentityObserved=1,
+                falseShadowCanonicalEqual=int(original_identity==projected_identity),
+                falseShadowChildEqual=int(child_id==child.value))
+            check();record.update(falseShadowGuardAfter=1,falseShadowStatus=1)
+        except _Stop:raise
+        except BaseException:
+            record['falseShadowStatus']=6;raise
     try:
         record['workerStage']=1
         hr=platform.initialize()
@@ -237,7 +296,9 @@ def run_local_hit(source,scope,sdk,platform):
         record['childIdZero']=1;record['workerStage']=4
         accessible=out('accessible',legacy)
         file_round_trip=out('from_accessible',source.client,accessible,0)
-        if not same(file_round_trip,source.file):raise _Stop()
+        if not same(file_round_trip,source.file):
+            false_shadow(file_round_trip,accessible,child.value,pattern_iid)
+            raise _Stop()
         record['fileRoundTrip']=1;record['workerStage']=5
         variant=sdk.Variant();record['variantAttempted']=1
         call('hit_test',accessible,scope.x,scope.y,C.byref(variant))
@@ -290,6 +351,8 @@ def run_local_hit(source,scope,sdk,platform):
             and (not initialized or record['comUninitialized'])
             and (not token or record['dpiRestored']))
         record['workerCleanup']=int(clean)
+        if record['falseShadowStatus']==1 and platform.clock()>=deadline:
+            record['falseShadowStatus']=2
         if matched and clean:record.update(localKnown=1,localMatch=1,workerStage=8)
     return record
 
@@ -449,7 +512,7 @@ class MsaaHitLease:
         self.worker=None;self._late=False;self._retired=False;self._worker_exception=False
         self._cleanup_unknown=False
         self._unknown_handles=set();self._closed_handles=set();self._closing_handle=0
-        self.runner=lambda:self.kernel.worker(self.source,self.scope,self.sdk)
+        self.runner=lambda:self.kernel.worker(self.source,self.scope,self.sdk,self.deadline)
 
     @property
     def pending(self):return _active is self
@@ -548,9 +611,12 @@ class MsaaHitLease:
                     and clean and not self.record['workerException']):
                 self.record.update(worker);self.record['stageCode']=13
             else:self.record['stageCode']=11 if self._late or self.kernel.clock()>=self.deadline else 9
+            if (self._late or self.kernel.clock()>=self.deadline) and self.record['falseShadowStatus']==1:
+                self.record['falseShadowStatus']=2 if self.kernel.clock()>=self.deadline else 0
             self._clear()
             if self.kernel.clock()>=self.deadline:
                 self._late=True;self.record.update(localKnown=0,localMatch=0,stageCode=11)
+                if self.record['falseShadowStatus']==1:self.record['falseShadowStatus']=2
         except BaseException:
             if self._closing_handle:self._unknown_handles.add(self._closing_handle)
             self.record['stageCode']=10
@@ -560,6 +626,12 @@ class MsaaHitLease:
     def _unknown(self):
         self._late=True;self.record['pending']=1
         self.record['localKnown']=self.record['localMatch']=0
+        # Retain bits; containment alone cannot establish deadline expiry.
+        if self.record['falseShadowStatus']==1:
+            self.record['falseShadowStatus']=0
+            try:
+                if self.kernel.clock()>=self.deadline:self.record['falseShadowStatus']=2
+            except BaseException:pass
         return dict(self.record)
 
     def wait(self):return self._collect(self.deadline,False)
@@ -795,5 +867,5 @@ class WindowsKernel:
         clear.argtypes=(C.POINTER(type(value)),);clear.restype=C.c_int32
         return clear(C.byref(value))
 
-    def worker(self,source,scope,sdk):return run_local_hit(source,scope,sdk,self)
+    def worker(self,source,scope,sdk,deadline):return run_local_hit(source,scope,sdk,self,deadline)
     def boundary_worker(self):return run_native_boundary(self)
