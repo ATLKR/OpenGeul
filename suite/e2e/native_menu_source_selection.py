@@ -98,10 +98,10 @@ def _payload_epoch(suite, deadline):
         info = _ordinary(parent, deadline, directory=True)
         # Sibling evidence/cache writes outside the payload do not change it.
         result.append(_FileEpoch(str(parent), gate._stat_identity(info)[:3]))
-    pending = [(suite, 0, None)]
+    pending = [(suite, 0, None, '')]
     aliases, file_count, entry_count = set(), 0, 0
     while pending:
-        path, depth, previous = pending.pop()
+        path, depth, previous, name = pending.pop()
         info = _ordinary(path, deadline)
         identity = gate._stat_identity(info)
         if previous is not None:
@@ -115,7 +115,6 @@ def _payload_epoch(suite, deadline):
         if path == suite and not directory:
             raise ValueError('Source menu payload root is not a directory')
         if path != suite:
-            name = path.relative_to(suite).as_posix()
             try:
                 gate.payload._name(name)
                 gate.payload._layout(name, directory=directory)
@@ -137,8 +136,9 @@ def _payload_epoch(suite, deadline):
                             raise ValueError('Source menu payload directory exceeds its entry bound')
             except OSError:
                 raise ValueError('Source menu payload directory scan failed') from None
-            pending.append((path, depth, identity))
-            pending.extend((path/name, depth+1, None) for name in reversed(sorted(names)))
+            pending.append((path, depth, identity, name))
+            pending.extend((path/child_name, depth+1, None,
+                name+'/'+child_name if name else child_name) for child_name in reversed(sorted(names)))
         else:
             file_count += 1
             if file_count > _MAX_FILES:

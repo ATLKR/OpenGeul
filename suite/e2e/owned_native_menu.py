@@ -777,6 +777,8 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             import numeric_notice
             value['numericFailure']=numeric_notice.capture_failure_code(exc)
         except BaseException:value['numericFailureCaptureFailed']=1
+        try:value['numericFailureFrames']=numeric_notice.capture_failure_frames(exc)
+        except BaseException:value['numericFailureFramesCaptureFailed']=1
         try:
             observer=getattr(probe,'observe_failure_context',None)
             if observer and not diagnostic and getattr(process,'opengeul_source_menu_selection',None) is None and getattr(probe,'source_selection',None) is None:observer(value.get('binding'))

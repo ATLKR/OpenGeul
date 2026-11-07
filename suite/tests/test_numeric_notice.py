@@ -194,7 +194,7 @@ class NumericNoticeTests(unittest.TestCase):
                 self.assertNotIn('PRIVATE',stream.getvalue());self.assertNotIn('C:/',stream.getvalue())
 
     def test_native_menu_source_appends_one_id_and_captures_its_actual_guard_leaf(self):
-        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[37:],(('owned_native_menu.py',38),))
+        self.assertEqual(tuple(self.n.SOURCE_FILES.items())[37:38],(('owned_native_menu.py',38),))
         from owned_native_menu import _editor
         try:_editor(dict(binding={},attachmentValid=True),dict(document=11),77)
         except AssertionError as primary:
