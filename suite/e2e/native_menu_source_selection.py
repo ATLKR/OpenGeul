@@ -202,11 +202,139 @@ def _require_selection(selection):
     _require_prepared(selection.prepared)
 
 
+_EPOCH_SEAL = object()
+_EPOCH_FIELDS = ('schemaVersion','branchCode','comparisonStatusCode','baselineCount',
+    'currentCount','countsKnown','addedCount','removedCount','changedCount',
+    'orderChanged','structureChanged','sampleTruncated')
+_EPOCH_ROW_FIELDS = ('changeCode','roleCode','baselineOrdinal','fieldMask')
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _EpochObservation:
+    prepared: object
+    exception: object
+    values: tuple
+    rows: tuple
+    seal: object
+
+    def __repr__(self):
+        return '<source-epoch-observation>'
+
+
+def _epoch_entries(prepared, branch, epoch):
+    if branch == 1:
+        root = str(prepared.admission.suite_root)
+        for row in epoch:
+            role = 1 if len(row.identity)==3 else 2 if row.path==root else 3 if stat.S_ISDIR(row.identity[2]) else 4
+            yield row.path, role, row.identity
+    else:
+        for index, row in enumerate(epoch):
+            for ordinal, identity in enumerate(row.state.ancestors):
+                yield (index,1,ordinal), 21+index, identity
+            yield (index,0,str(row.path)), 11+index, row.state.file
+
+
+def _epoch_difference(prepared, branch, current, deadline):
+    """Pure comparison of retained metadata; never resolve or inspect a path."""
+    before = prepared.payload_epoch if branch==1 else prepared.input_epoch
+    baseline_count = len(before) if branch==1 else sum(len(row.state.ancestors)+1 for row in before)
+    current_count = len(current) if branch==1 else sum(len(row.state.ancestors)+1 for row in current)
+    def incomplete(status):
+        return (1,branch,status,baseline_count,current_count,0,0,0,0,0,int(status==3),0), ()
+    def expired():
+        now = time.monotonic()
+        return type(now) not in (int,float) or not math.isfinite(now) or now>=deadline
+    records = []
+    for epoch in (before,current):
+        result, order = {}, []
+        for ordinal, (key,role,identity) in enumerate(_epoch_entries(prepared,branch,epoch),1):
+            if expired():return incomplete(2)
+            if (key in result or len(identity) not in (3,6)
+                    or any(type(value) is not int for value in identity)):
+                return incomplete(3)
+            result[key] = (ordinal,role,identity)
+            order.append(key)
+        records.append((result,order))
+    baseline, old_order = records[0];actual, new_order = records[1]
+    added = removed = changed = structure = 0
+    rows = []
+    def sample(code,role,ordinal,mask):
+        if len(rows)<16:rows.append((code,role,ordinal,mask))
+    for key in old_order:
+        if expired():return incomplete(2)
+        ordinal,role,identity = baseline[key]
+        if key not in actual:
+            removed += 1;sample(2,role,ordinal,0)
+        elif identity != actual[key][2]:
+            other = actual[key][2]
+            structure |= int(len(identity)!=len(other))
+            mask = sum(1<<i for i,(left,right) in enumerate(zip(identity,other)) if left!=right)
+            changed += 1;sample(3,role,ordinal,mask)
+    for key in new_order:
+        if expired():return incomplete(2)
+        if key not in baseline:
+            added += 1;sample(1,actual[key][1],0,0)
+    old_shared = [key for key in old_order if key in actual]
+    new_shared = [key for key in new_order if key in baseline]
+    if branch==2:
+        structure |= int(len(before)!=len(current) or any(left.limit!=right.limit
+            or len(left.state.ancestors)!=len(right.state.ancestors)
+            for left,right in zip(before,current)))
+    if expired():return incomplete(2)
+    values = (1,branch,1,baseline_count,current_count,1,added,removed,changed,
+        int(old_shared!=new_shared),structure,int(added+removed+changed>len(rows)))
+    return values, tuple(rows)
+
+
+def _source_epoch_exception(prepared, branch, current, deadline):
+    failure = ValueError('Source menu epoch changed; an explicit new preparation is required')
+    try:
+        _require_prepared(prepared)
+        values, rows = _epoch_difference(prepared,branch,current,deadline)
+        failure._source_epoch_observation = _EpochObservation(prepared,failure,values,rows,_EPOCH_SEAL)
+    except Exception:
+        # Observation is optional; it can never replace the original refusal.
+        pass
+    return failure
+
+
+def _source_epoch_failure_summary(failure, prepared):
+    """Export only this exact exception's closed numeric observation."""
+    try:
+        _require_prepared(prepared)
+        observation = getattr(failure,'_source_epoch_observation',None)
+        if (type(failure) is not ValueError or type(observation) is not _EpochObservation
+                or observation.seal is not _EPOCH_SEAL or observation.prepared is not prepared
+                or observation.exception is not failure):return None
+        values,rows = observation.values,observation.rows
+        if (type(values) is not tuple or len(values)!=len(_EPOCH_FIELDS)
+                or any(type(value) is not int or value<0 for value in values)
+                or type(rows) is not tuple or len(rows)>16):return None
+        value = dict(zip(_EPOCH_FIELDS,values))
+        if (value['schemaVersion']!=1 or value['branchCode'] not in (1,2)
+                or value['comparisonStatusCode'] not in (1,2,3)
+                or any(value[key] not in (0,1) for key in ('countsKnown','orderChanged','structureChanged','sampleTruncated'))
+                or value['countsKnown']!=int(value['comparisonStatusCode']==1)):
+            return None
+        for row in rows:
+            if (type(row) is not tuple or len(row)!=4 or any(type(item) is not int for item in row)
+                    or row[0] not in (1,2,3) or row[1] not in (1,2,3,4,11,12,13,21,22,23)
+                    or not 0<=row[2]<=value['baselineCount'] or not 0<=row[3]<=63
+                    or (row[2]==0)!=(row[0]==1) or row[0] in (1,2) and row[3]!=0):return None
+        value['rows'] = [dict(zip(_EPOCH_ROW_FIELDS,row)) for row in rows]
+        return value
+    except Exception:
+        return None
+
+
 def _unchanged_epochs(prepared, deadline):
     admission = prepared.admission
-    if (_payload_epoch(admission.suite_root, deadline) != prepared.payload_epoch
-            or _input_epoch(admission.architecture, deadline) != prepared.input_epoch):
-        raise ValueError('Source menu epoch changed; an explicit new preparation is required')
+    current = _payload_epoch(admission.suite_root, deadline)
+    if current != prepared.payload_epoch:
+        raise _source_epoch_exception(prepared,1,current,deadline)
+    current = _input_epoch(admission.architecture, deadline)
+    if current != prepared.input_epoch:
+        raise _source_epoch_exception(prepared,2,current,deadline)
 
 
 def _anchors(admission, payload_epoch, input_epoch, deadline):

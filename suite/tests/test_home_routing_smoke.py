@@ -398,6 +398,77 @@ class HomeRoutingContracts(unittest.TestCase):
             try:self.api.require_case_result(record,case.suite,source_admission=admission)
             except (AssertionError,ValueError):self.fail('Home case replay lost the actual Gate before nested v4 replay')
 
+    def source_epoch_failure_fixture(self):
+        """Keep actual preparation/epoch guards; the fixture owns every changed byte."""
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        selected=SourceMenuSelectionTests();selected.setUp();self.addCleanup(selected.doCleanups)
+        prepared=selected.prepared()
+        target=selected.suite/'worker/session.py'
+        ordinal=next(index for index,row in enumerate(prepared.payload_epoch,1) if row.path==str(target))
+        target.write_bytes(target.read_bytes()+b'\n')
+        return selected,prepared,ordinal
+
+    def test_source_epoch_prelaunch_failure_records_numeric_summary_and_keeps_original_rejection(self):
+        selected,prepared,ordinal=self.source_epoch_failure_fixture()
+        (selected.output/'fixtures').mkdir();(selected.output/'diagnostics').mkdir()
+        spec=next(row for row in self.api.build_plan() if row['case']=='tile-calc')
+        case=self.api.HomeCase(selected.suite,selected.output,spec,{}, {},dict(spec),source_prepared=prepared)
+        captured=[];written=[];popen=[];stopped=[]
+        def failure(output,name,record,exc):
+            captured.append(exc);record.update(success=False,errorType=type(exc).__name__)
+        def forbidden(*args,**options):
+            popen.append(1);self.fail('The actual source rejection crossed the Popen boundary')
+        with patch.object(self.api.native,'capture_failure',side_effect=failure), \
+                patch.object(self.api.native,'write_result',side_effect=lambda out,name,record:written.append(record)), \
+                patch.object(self.api.native.subprocess,'Popen',side_effect=forbidden), \
+                patch.object(self.api.native,'stop_owned_test_process',side_effect=lambda *args:stopped.append(1)):
+            result=case.run()
+        self.assertEqual(len(captured),1);self.assertIs(type(captured[0]),ValueError)
+        self.assertEqual(captured[0].args,('Source menu epoch changed; an explicit new preparation is required',))
+        self.assertFalse(result['success']);self.assertFalse(result['cleanClose']);self.assertFalse(result['forcedCleanup'])
+        self.assertEqual(result['stage'],'launch-owned-home');self.assertIsNone(case.process)
+        self.assertEqual((popen,stopped),([],[]));self.assertEqual(len(written),1)
+        self.assertIn('sourceEpochFailure',result)
+        summary=result['sourceEpochFailure']
+        self.assertEqual(summary['schemaVersion'],1);self.assertEqual(summary['branchCode'],1)
+        self.assertEqual(summary['countsKnown'],1);self.assertGreaterEqual(summary['changedCount'],1)
+        changed=[row for row in summary['rows'] if row['baselineOrdinal']==ordinal]
+        self.assertEqual(len(changed),1)
+        self.assertEqual((changed[0]['changeCode'],changed[0]['roleCode']),(3,4))
+        self.assertEqual(changed[0]['fieldMask']&8,8)
+
+    def test_source_epoch_observation_requires_the_exact_prelaunch_source_failure(self):
+        from types import SimpleNamespace
+        from test_native_menu_source_selection import SourceMenuSelectionTests
+        selected,prepared,_=self.source_epoch_failure_fixture()
+        try:selected.implementation()._unchanged_epochs(prepared,self.api.time.monotonic()+30)
+        except ValueError as exc:original=exc
+        else:self.fail('The actual changed source epoch was accepted')
+        other=SourceMenuSelectionTests();other.setUp();self.addCleanup(other.doCleanups)
+        other_prepared=other.prepared()
+        cases=[('default',None,'launch-owned-home',None,original),
+            ('wrong-stage',prepared,'await-original-home',None,original),
+            ('postlaunch',prepared,'launch-owned-home',SimpleNamespace(poll=lambda:0),original),
+            ('other-prepared',other_prepared,'launch-owned-home',None,original),
+            ('unknown-error',prepared,'launch-owned-home',None,ValueError(*original.args))]
+        for label,source,stage,process,error in cases:
+            with self.subTest(case=label):
+                case=object.__new__(self.api.HomeCase);case.output=selected.output
+                case.record=dict(case='tile-calc',success=False,cleanClose=False,forcedCleanup=False)
+                case.frames=[];case.hwp_bounds=[];case.process=process;case.source_prepared=source
+                def start():
+                    case.record['stage']=stage
+                    raise error
+                case.start=start;case.execute=lambda:self.fail('A rejected launch reached execution')
+                captured=[]
+                def failure(output,name,record,exc):
+                    captured.append(exc);record.update(success=False,errorType=type(exc).__name__)
+                with patch.object(self.api.native,'capture_failure',side_effect=failure), \
+                        patch.object(self.api.native,'write_result'),patch.object(self.api.native,'stop_owned_test_process'):
+                    result=case.run()
+                self.assertFalse(result['success']);self.assertTrue(captured[0] is error)
+                self.assertNotIn('sourceEpochFailure',result)
+
     def document_picker_fixture(self,root):
         from test_base_save_readiness import NativeBoundary
         from test_writer_model_barrier import original_shell_fixture

@@ -446,5 +446,117 @@ class SourceMenuSelectionTests(unittest.TestCase):
         self.assertEqual(built, [])
 
 
+class SourceEpochNumericObservationTests(unittest.TestCase):
+    def setUp(self):
+        self.owner = SourceMenuSelectionTests(methodName='test_prepares_actual_bare_gate_context_and_freezes_contexts')
+        self.owner.setUp()
+        self.addCleanup(self.owner.doCleanups)
+        self.api = self.owner.implementation()
+        self.prepared = self.owner.prepared()
+
+    def summary(self, error, prepared=None):
+        reader = getattr(self.api, '_source_epoch_failure_summary', None)
+        self.assertTrue(callable(reader), 'Numeric epoch failure reader is missing')
+        return reader(error, self.prepared if prepared is None else prepared)
+
+    def payload_failure(self, current, *, clock=None):
+        with patch.object(self.api, '_payload_epoch', return_value=tuple(current)) as read, \
+                patch.object(self.api, '_input_epoch', side_effect=AssertionError('Payload mismatch must short circuit')):
+            context = patch.object(self.api.time, 'monotonic', return_value=clock) if clock is not None else patch.object(self.api, '_pending_zero', wraps=self.api._pending_zero)
+            with context, self.assertRaises(ValueError) as caught:
+                self.api._unchanged_epochs(self.prepared, 1.0 if clock is not None else time.monotonic()+5)
+        self.assertEqual(read.call_count, 1)
+        self.assertIs(type(caught.exception), ValueError)
+        self.assertEqual(caught.exception.args, ('Source menu epoch changed; an explicit new preparation is required',))
+        return caught.exception
+
+    def test_payload_six_fields_and_ancestor_masks_preserve_the_original_refusal(self):
+        baseline = self.prepared.payload_epoch
+        index = next(i for i, row in enumerate(baseline) if len(row.identity)==6 and not row.identity[2] & 0o040000)
+        for field, mask in enumerate((1,2,4,8,16,32)):
+            current = list(baseline);values = list(current[index].identity);values[field] += 1
+            current[index] = self.api._FileEpoch(current[index].path, tuple(values))
+            with self.subTest(field=field):
+                summary = self.summary(self.payload_failure(current))
+                self.assertEqual((summary['branchCode'],summary['countsKnown'],summary['changedCount']), (1,1,1))
+                self.assertEqual(summary['rows'], [dict(changeCode=3,roleCode=4,baselineOrdinal=index+1,fieldMask=mask)])
+        current = list(baseline);values = list(current[0].identity);values[2] += 1
+        current[0] = self.api._FileEpoch(current[0].path, tuple(values))
+        self.assertEqual(self.summary(self.payload_failure(current))['rows'], [dict(changeCode=3,roleCode=1,baselineOrdinal=1,fieldMask=4)])
+
+    def test_input_leaf_and_ancestor_changes_are_not_hidden_by_equal_payload(self):
+        from dataclasses import replace
+        baseline = self.prepared.input_epoch
+        for ancestor in (False,True):
+            current = list(baseline);state = current[1].state
+            if ancestor:
+                ancestors = list(state.ancestors);values = list(ancestors[0]);values[1] += 1;ancestors[0] = tuple(values)
+                state = replace(state, ancestors=tuple(ancestors));role, mask = 22,2
+            else:
+                values = list(state.file);values[4] += 1;state = replace(state,file=tuple(values));role,mask = 12,16
+            current[1] = replace(current[1],state=state)
+            with self.subTest(ancestor=ancestor), patch.object(self.api,'_payload_epoch',return_value=self.prepared.payload_epoch) as payload, patch.object(self.api,'_input_epoch',return_value=tuple(current)) as inputs, self.assertRaises(ValueError) as caught:
+                self.api._unchanged_epochs(self.prepared,time.monotonic()+5)
+            summary = self.summary(caught.exception)
+            self.assertEqual((payload.call_count,inputs.call_count,summary['branchCode'],summary['changedCount']),(1,1,2,1))
+            self.assertEqual((summary['rows'][0]['roleCode'],summary['rows'][0]['fieldMask']),(role,mask))
+
+    def test_added_removed_order_and_bounded_samples_are_distinguished(self):
+        baseline = self.prepared.payload_epoch
+        extra = [self.api._FileEpoch(str(self.owner.suite/('new-'+str(i))), (1,2,0o100644,3,4,5)) for i in range(20)]
+        summary = self.summary(self.payload_failure(list(baseline)+extra))
+        self.assertEqual((summary['addedCount'],summary['removedCount'],summary['sampleTruncated'],len(summary['rows'])),(20,0,1,16))
+        self.assertTrue(all(row==dict(changeCode=1,roleCode=4,baselineOrdinal=0,fieldMask=0) for row in summary['rows']))
+        summary = self.summary(self.payload_failure(baseline[1:]))
+        self.assertEqual((summary['removedCount'],summary['rows'][0]['baselineOrdinal']),(1,1))
+        current = list(baseline);current[0],current[1] = current[1],current[0]
+        summary = self.summary(self.payload_failure(current))
+        self.assertEqual((summary['orderChanged'],summary['addedCount'],summary['removedCount'],summary['changedCount']),(1,0,0,0))
+
+    def test_comparison_deadline_never_replaces_or_renews_the_epoch_rejection(self):
+        current = list(self.prepared.payload_epoch);current.reverse()
+        summary = self.summary(self.payload_failure(current,clock=2.0))
+        self.assertEqual((summary['comparisonStatusCode'],summary['countsKnown'],summary['rows']),(2,0,[]))
+
+    def test_carrier_is_bound_to_exact_exception_and_actual_prepared_and_has_constant_repr(self):
+        import copy
+        current = list(self.prepared.payload_epoch);current.reverse();error = self.payload_failure(current)
+        summary = self.summary(error)
+        self.assertEqual(summary['schemaVersion'],1)
+        self.assertIsNone(self.summary(copy.copy(error)))
+        self.assertIsNone(self.summary(ValueError(*error.args)))
+        other = self.owner.prepared()
+        self.assertIsNone(self.summary(error,other))
+        self.assertIsNone(self.summary(error,object()))
+        carrier = getattr(error,'_source_epoch_observation',None)
+        self.assertEqual(repr(carrier),'<source-epoch-observation>')
+        summary['rows'].append(dict(changeCode=1,roleCode=4,baselineOrdinal=0,fieldMask=0))
+        self.assertEqual(self.summary(error)['rows'],[])
+
+    def test_epoch_read_error_is_preserved_without_fabricating_a_difference(self):
+        failure = OSError('Synthetic epoch read failure')
+        with patch.object(self.api,'_payload_epoch',side_effect=failure), patch.object(self.api,'_input_epoch',side_effect=AssertionError('No later reads')), self.assertRaises(OSError) as caught:
+            self.api._unchanged_epochs(self.prepared,time.monotonic()+5)
+        self.assertIs(caught.exception,failure)
+        self.assertIsNone(self.summary(failure))
+
+    def test_input_ancestor_structure_is_numeric_and_never_reads_files_again(self):
+        from dataclasses import replace
+        current = list(self.prepared.input_epoch)
+        current[1] = replace(current[1],state=replace(current[1].state,ancestors=current[1].state.ancestors[:-1]))
+        with patch.object(self.api,'_payload_epoch',return_value=self.prepared.payload_epoch), \
+                patch.object(self.api,'_input_epoch',return_value=tuple(current)), \
+                patch.object(Path,'stat',side_effect=AssertionError('No diagnostic stat')), \
+                patch.object(Path,'lstat',side_effect=AssertionError('No diagnostic lstat')), \
+                patch.object(gate,'_hash_file',side_effect=AssertionError('No diagnostic hash')), \
+                self.assertRaises(ValueError) as caught:
+            self.api._unchanged_epochs(self.prepared,time.monotonic()+5)
+        summary = self.summary(caught.exception)
+        self.assertEqual((summary['branchCode'],summary['structureChanged'],summary['removedCount']),(2,1,1))
+        self.assertEqual((summary['rows'][0]['changeCode'],summary['rows'][0]['roleCode']),(2,22))
+        self.assertEqual(set(summary),{'schemaVersion','branchCode','comparisonStatusCode','baselineCount','currentCount','countsKnown','addedCount','removedCount','changedCount','orderChanged','structureChanged','sampleTruncated','rows'})
+        self.assertTrue(all(type(value) is int for key,value in summary.items() if key!='rows'))
+
+
 if __name__ == '__main__':
     unittest.main()

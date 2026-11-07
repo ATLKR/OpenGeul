@@ -778,7 +778,16 @@ class HomeCase:
     def run(self):
         try:
             self.start();self.execute();self.record['success']=True
-        except BaseException as exc:native.capture_failure(self.output,self.record['case'],self.record,exc)
+        except BaseException as exc:
+            prepared=getattr(self,'source_prepared',None)
+            if (prepared is not None and getattr(self,'process',None) is None
+                    and self.record.get('stage')=='launch-owned-home'):
+                try:
+                    from native_menu_source_selection import _source_epoch_failure_summary
+                    summary=_source_epoch_failure_summary(exc,prepared)
+                    if summary is not None:self.record['sourceEpochFailure']=summary
+                except BaseException:pass
+            native.capture_failure(self.output,self.record['case'],self.record,exc)
         finally:
             for bound in [frame['bound'] for frame in self.frames]+self.hwp_bounds:
                 try:
