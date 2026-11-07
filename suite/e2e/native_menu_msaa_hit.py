@@ -185,7 +185,10 @@ def worker_record():
         falseShadowGuardBefore=0,falseShadowGuardAfter=0,
         falseShadowOriginalControlTypeObserved=0,falseShadowOriginalControlType=0,
         falseShadowOriginalControlTypeHresult=0,falseShadowRoundTripControlTypeObserved=0,
-        falseShadowRoundTripControlType=0,falseShadowRoundTripControlTypeHresult=0)
+        falseShadowRoundTripControlType=0,falseShadowRoundTripControlTypeHresult=0,
+        falseShadowOriginalRepeatAttempted=0,falseShadowOriginalRepeatCompleted=0,
+        falseShadowOriginalRepeatLastHresult=0,falseShadowOriginalRepeatObserved=0,
+        falseShadowOriginalRepeatCanonicalEqual=0)
     for name in _OPERATIONS:
         result.update({name+'Attempted':0,name+'Completed':0,name+'Hresult':0})
     return result
@@ -227,7 +230,7 @@ def run_local_hit(source,scope,sdk,platform,deadline):
         # BOOL32 uses every nonzero encoding as TRUE; the field above records
         # encoding only and never qualifies the comparison or its cleanup.
         return bool(raw)
-    def false_shadow(round_trip,accessible,child_id,pattern_iid):
+    def false_shadow(round_trip,accessible,child_id,pattern_iid,original_pattern):
         # Diagnostic only: canonical COM object + child cannot override UIA FALSE.
         # This bounds new-call admission, not synchronous COM/Release duration.
         record['falseShadowStarted']=1
@@ -268,6 +271,23 @@ def run_local_hit(source,scope,sdk,platform,deadline):
             if hr!=0:
                 record['falseShadowStatus']=4;raise _Stop()
             record[prefix]=value.value&0xffffffff;record[prefix+'Observed']=1
+        def repeat_out(key,pointer,*arguments):
+            check();value=C.c_void_p()
+            record['falseShadowOriginalRepeatAttempted']+=1
+            try:
+                hr=sdk.call(key,pointer,*arguments,C.byref(value))
+                if type(hr) is not int:raise TypeError()
+                record['falseShadowOriginalRepeatCompleted']+=1
+                record['falseShadowOriginalRepeatLastHresult']=hr&0xffffffff
+                check()
+                if hr!=0:
+                    record['falseShadowStatus']=4;raise _Stop()
+            finally:
+                if value.value:
+                    refs.append(value.value);record['referencesAcquired']+=1
+            if not value.value:
+                record['falseShadowStatus']=5;raise _Stop()
+            return value.value
         try:
             check();record['falseShadowGuardBefore']=1
             legacy=shadow_out(1,'pattern',round_trip,10018,C.byref(pattern_iid))
@@ -285,6 +305,12 @@ def run_local_hit(source,scope,sdk,platform,deadline):
                 falseShadowChildEqual=int(child_id==child.value))
             control_type('Original',source.file)
             control_type('RoundTrip',round_trip)
+            repeated=repeat_out('accessible',original_pattern)
+            repeated_identity=repeat_out('accessible_query',repeated,C.byref(iid))
+            # Historical extraction observation only. Complete/trusted data also
+            # requires global shadow status, guards, cleanup and lease retirement.
+            record.update(falseShadowOriginalRepeatObserved=1,
+                falseShadowOriginalRepeatCanonicalEqual=int(original_identity==repeated_identity))
             check();record.update(falseShadowGuardAfter=1,falseShadowStatus=1)
         except _Stop:raise
         except BaseException:
@@ -314,7 +340,7 @@ def run_local_hit(source,scope,sdk,platform,deadline):
         accessible=out('accessible',legacy)
         file_round_trip=out('from_accessible',source.client,accessible,0)
         if not same(file_round_trip,source.file):
-            false_shadow(file_round_trip,accessible,child.value,pattern_iid)
+            false_shadow(file_round_trip,accessible,child.value,pattern_iid,legacy)
             raise _Stop()
         record['fileRoundTrip']=1;record['workerStage']=5
         variant=sdk.Variant();record['variantAttempted']=1

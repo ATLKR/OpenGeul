@@ -380,13 +380,22 @@ class LeaseTests(unittest.TestCase):
         self.assertEqual(result['falseShadowOriginalControlType'],50011)
         self.assertEqual(result['falseShadowRoundTripControlTypeObserved'],0)
 
-    def exercise_inflight_shadow(self,blocked_key):
+    def test_inflight_original_repeat_keeps_both_acquisitions_and_retains_false_after_exit(self):
+        for key,releases in [('accessible',[203,301,301,202,201,103,102,101]),
+                ('accessible_query',[301,203,301,301,202,201,103,102,101])]:
+            with self.subTest(call=key):
+                self.setUp()
+                result=self.exercise_inflight_shadow(key,ordinal=3,expected_releases=releases)
+                self.assertEqual(result.get('falseShadowOriginalRepeatAttempted'),1 if key=='accessible' else 2)
+                self.assertEqual(result.get('falseShadowOriginalRepeatObserved'),0)
+
+    def exercise_inflight_shadow(self,blocked_key,ordinal=2,expected_releases=None):
         import threading
         entered=threading.Event();release=threading.Event();sdk=FakeCalls();sdk.wrong_file=True
         platform=FakePlatform();platform.clock=self.kernel.clock;original=sdk.call
         def call(key,pointer,*args):
             hr=original(key,pointer,*args)
-            if key==blocked_key and sdk.calls.count(key)==2:
+            if key==blocked_key and sdk.calls.count(key)==ordinal:
                 entered.set()
                 if not release.wait(2):raise RuntimeError('Synthetic wait exhausted')
             return hr
@@ -415,7 +424,7 @@ class LeaseTests(unittest.TestCase):
         result=lease.retire(20.)
         self.assertEqual((result['pending'],result['localKnown'],result['localMatch']),(0,0,0))
         self.assertEqual(result['falseShadowStatus'],2)
-        self.assertEqual(sdk.releases,[301,301,202,201,103,102,101])
+        self.assertEqual(sdk.releases,expected_releases if expected_releases is not None else [301,301,202,201,103,102,101])
         self.assertEqual(sorted(self.kernel.closed),[120,121,301])
         self.assertIsNone(lease.source);self.assertIsNone(lease.sdk)
         return result
@@ -426,6 +435,7 @@ class LeaseTests(unittest.TestCase):
                 self.kernel=FakeKernel()
                 self.kernel.worker=lambda *args:dict(sdk_fixture_worker(),falseShadowStarted=1,
                     falseShadowStatus=1,falseShadowIdentityObserved=1,falseShadowCanonicalEqual=1,
+                    falseShadowOriginalRepeatObserved=1,falseShadowOriginalRepeatCanonicalEqual=1,
                     localKnown=0,localMatch=0)
                 lease=self.begin()
                 if late=='collection':self.kernel.now=16.
@@ -435,14 +445,17 @@ class LeaseTests(unittest.TestCase):
                     lease._clear=clear
                 result=lease.retire(20.) if late=='retire' else lease.wait()
                 self.assertEqual((result['falseShadowStatus'],result['falseShadowCanonicalEqual']),(0 if late=='retire' else 2,1))
+                self.assertEqual((result['falseShadowOriginalRepeatObserved'],result['falseShadowOriginalRepeatCanonicalEqual']),(1,1))
                 self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
 
     def test_unknown_retirement_cannot_keep_completed_shadow_status(self):
         self.kernel.worker=lambda *args:dict(sdk_fixture_worker(),falseShadowStarted=1,
             falseShadowStatus=1,falseShadowIdentityObserved=1,falseShadowCanonicalEqual=1,
+            falseShadowOriginalRepeatObserved=1,falseShadowOriginalRepeatCanonicalEqual=1,
             localKnown=0,localMatch=0)
         lease=self.begin();self.kernel.close_failure=True;result=lease.wait()
         self.assertEqual((result['pending'],result['falseShadowStatus']),(1,0))
+        self.assertEqual((result['falseShadowOriginalRepeatObserved'],result['falseShadowOriginalRepeatCanonicalEqual']),(1,1))
         self.assertEqual(result['falseShadowCanonicalEqual'],1)
         self.assertIs(lease.source,self.source)
         self.kernel.close_failure=False
@@ -673,6 +686,7 @@ class FakeCalls:
         self.wrong_file=False;self.wrong_target=False;self.negative_true=False
         self.release_throws=False
         self.shadow_child=0;self.canonical=(301,301);self.control_types=(50011,50011)
+        self.repeat_accessible=203;self.repeat_canonical=301
     def call(self,key,pointer,*args):
         self.calls.append(key)
         pointer=pointer.value if isinstance(pointer,C.c_void_p) else pointer
@@ -682,8 +696,10 @@ class FakeCalls:
             return 0
         if key=='pattern':args[2]._obj.value=201 if pointer==103 else 101
         elif key=='child_id':args[0]._obj.value=self.shadow_child if pointer==201 else self.child
-        elif key=='accessible':args[0]._obj.value=202 if pointer==201 else 102
-        elif key=='accessible_query':args[1]._obj.value=self.canonical[int(pointer==202)]
+        elif key=='accessible':
+            args[0]._obj.value=202 if pointer==201 else self.repeat_accessible if self.calls.count(key)>1 else 102
+        elif key=='accessible_query':
+            args[1]._obj.value=self.repeat_canonical if pointer==203 else self.canonical[int(pointer==202)]
         elif key=='control_type':args[0]._obj.value=self.control_types[int(pointer==103)]
         elif key=='from_accessible':args[2]._obj.value=103 if args[0]==102 else 105
         elif key=='query':args[1]._obj.value=104
@@ -724,7 +740,7 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(result['referencesAcquired'],result['referencesReleased'])
                 if raw==0:
                     self.assertEqual(result['compareAttempted'],1);self.assertEqual(result['hit_testAttempted'],0)
-                    self.assertEqual(result['referencesReleased'],7)
+                    self.assertEqual(result['referencesReleased'],9)
 
     def test_first_file_compare_is_not_overwritten_by_later_target_or_negative_comparisons(self):
         for wrong_target in (False,True):
@@ -900,7 +916,7 @@ class FalseShadowTests(unittest.TestCase):
         self.assertEqual((result['patternAttempted'],result['child_idAttempted'],
             result['accessibleAttempted'],result['queryAttempted']),(1,1,1,0))
 
-    def test_false_roundtrip_keeps_five_identity_calls_and_two_scalar_calls_separate_from_primary(self):
+    def test_false_roundtrip_keeps_five_identity_calls_separate_from_scalar_and_original_repeat_calls(self):
         self.prepare();result=self.run_worker();self.assert_primary_false(result)
         self.assertEqual(tuple(result.get(key) for key in ('falseShadowVersion',
             'falseShadowStarted','falseShadowStatus','falseShadowStep','falseShadowAttempted',
@@ -908,8 +924,9 @@ class FalseShadowTests(unittest.TestCase):
         self.assertEqual(self.sdk.calls[:10],['pattern','child_id','accessible','from_accessible',
             'compare','pattern','child_id','accessible','accessible_query','accessible_query'])
         self.assertEqual(self.sdk.calls[10:12],['control_type','control_type'])
-        self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7,7))
-        self.assertEqual(self.sdk.releases,[301,301,202,201,103,102,101])
+        self.assertEqual(self.sdk.calls[12:14],['accessible','accessible_query'])
+        self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(9,9))
+        self.assertEqual(self.sdk.releases,[301,203,301,301,202,201,103,102,101])
         self.assertEqual((result['falseShadowGuardBefore'],result['falseShadowGuardAfter']),(1,1))
 
     def test_shadow_queries_exact_msaa_pair_with_unknown_iid_without_exporting_addresses(self):
@@ -924,11 +941,11 @@ class FalseShadowTests(unittest.TestCase):
                 self.assertEqual(self.sdk.releases,[]);queries.append(pointer)
             return original(key,pointer,*args)
         self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
-        self.assertEqual(queries,[102,202])
+        self.assertEqual(queries,[102,202,203])
         self.assertEqual(result['falseShadowCanonicalEqual'],1)
         self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in result.values()))
         self.assertNotIn(0x123456789abc,result.values())
-        self.assertEqual(self.sdk.releases[:2],[0x123456789abc,0x123456789abc])
+        self.assertEqual(self.sdk.releases[2:4],[0x123456789abc,0x123456789abc])
 
     def test_canonical_identity_and_signed_child_are_observations_only(self):
         for canonical,child,want in (((301,301),0,(1,1)),((301,302),0,(0,1)),
@@ -1001,8 +1018,8 @@ class FalseShadowTests(unittest.TestCase):
 
     def test_process_guard_at_every_admission_and_return_stops_further_calls(self):
         # Initial worker guard is 1; shadow entry is 2, then before/after
-        # five identity and two scalar calls; final observations use guard 17.
-        for cutoff in range(2,18):
+        # five identity, two scalar and two repeat calls; final guard is 21.
+        for cutoff in range(2,22):
             with self.subTest(guard=cutoff):
                 self.prepare();checks=[]
                 def guard():checks.append(1);return len(checks)<cutoff
@@ -1018,7 +1035,7 @@ class FalseShadowTests(unittest.TestCase):
         self.assertEqual((result['cleanupError'],result['workerCleanup']),(1,0))
 
     def test_time_expiring_in_guard_prevents_each_call_and_final_completion(self):
-        for cutoff in (2,3,5,7,9,11,13,15,17):
+        for cutoff in (2,3,5,7,9,11,13,15,17,19,21):
             with self.subTest(guard=cutoff):
                 self.prepare();checks=[]
                 def guard():
@@ -1110,8 +1127,8 @@ class ControlTypeTests(unittest.TestCase):
                 self.assertEqual(self.sdk.calls[10:12],['control_type','control_type'])
                 self.assertEqual((result['falseShadowAttempted'],result['falseShadowCompleted'],
                     result['falseShadowStep'],result['falseShadowStatus']),(5,5,5,1))
-                self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7,7))
-                self.assertEqual(self.sdk.releases,[301,301,202,201,103,102,101])
+                self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(9,9))
+                self.assertEqual(self.sdk.releases,[301,203,301,301,202,201,103,102,101])
                 self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in result.values()))
 
     def test_untriggered_failed_compare_and_early_shadow_failure_leave_control_types_unknown(self):
@@ -1179,6 +1196,137 @@ class ControlTypeTests(unittest.TestCase):
                     self.assertEqual(self.sdk.calls.count('control_type'),min(2,(cutoff-12)//2))
                     self.assertEqual(result['falseShadowGuardAfter'],0)
                     self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7,7))
+
+
+class OriginalRepeatTests(unittest.TestCase):
+    setUp=WorkerTests.setUp
+    run_worker=WorkerTests.run_worker
+    prepare=FalseShadowTests.prepare
+    assert_primary_false=FalseShadowTests.assert_primary_false
+    prefix='falseShadowOriginalRepeat'
+
+    def test_repeat_uses_original_pattern_and_live_canonical_reference_without_promoting_false(self):
+        for repeated,want in ((301,1),(302,0),(0x123456789abc,0)):
+            with self.subTest(equal=want):
+                self.prepare();self.sdk.canonical=(301,302);self.sdk.repeat_canonical=repeated
+                original=self.sdk.call;inputs=[]
+                def call(key,pointer,*args):
+                    if (key=='accessible' and self.sdk.calls.count(key)==2 or
+                            key=='accessible_query' and self.sdk.calls.count(key)==2):
+                        self.assertEqual(self.sdk.releases,[]);inputs.append((key,pointer))
+                        if key=='accessible_query':
+                            self.assertEqual(C.string_at(args[0],16),uuid.UUID('00000000-0000-0000-c000-000000000046').bytes_le)
+                    return original(key,pointer,*args)
+                self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual(inputs,[('accessible',101),('accessible_query',203)])
+                self.assertEqual(tuple(result.get(self.prefix+suffix) for suffix in
+                    ('Attempted','Completed','LastHresult','Observed','CanonicalEqual')),(2,2,0,1,want))
+                self.assertEqual(self.sdk.calls[12:14],['accessible','accessible_query'])
+                self.assertEqual((result['falseShadowAttempted'],result['falseShadowCompleted'],
+                    result['falseShadowStep'],result['falseShadowStatus']),(5,5,5,1))
+                self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(9,9))
+                self.assertEqual(self.sdk.releases,[repeated,203,302,301,202,201,103,102,101])
+                self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in result.values()))
+                self.assertNotIn(0x123456789abc,result.values())
+
+    def test_aliased_accessible_and_unknown_outputs_still_own_separate_references(self):
+        self.prepare();self.sdk.repeat_accessible=102;result=self.run_worker();self.assert_primary_false(result)
+        self.assertEqual(result.get(self.prefix+'CanonicalEqual'),1)
+        self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(9,9))
+        self.assertEqual(self.sdk.releases,[301,102,301,301,202,201,103,102,101])
+
+    def test_untriggered_failed_compare_or_earlier_shadow_failure_never_repeats_original_pattern(self):
+        for reason in ('true','noncanonical','compare','primary','shadow','scalar'):
+            with self.subTest(reason=reason):
+                self.prepare();original=self.sdk.call
+                if reason in ('true','noncanonical'):self.sdk.wrong_file=False
+                elif reason=='compare':self.sdk.fail['compare']=-2147467259
+                elif reason=='primary':self.sdk.fail['accessible']=-2147467259
+                elif reason=='shadow':self.sdk.fail['accessible_query']=-2147467259
+                elif reason=='scalar':self.sdk.fail['control_type']=-2147467259
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if reason=='noncanonical' and key=='compare' and args[1] in (1,2,3):args[2]._obj.value=-1
+                    return hr
+                self.sdk.call=call;result=self.run_worker()
+                self.assertEqual(tuple(result.get(self.prefix+suffix) for suffix in
+                    ('Attempted','Completed','LastHresult','Observed','CanonicalEqual')),(0,0,0,0,0))
+                self.assertLess(self.sdk.calls.count('accessible'),3)
+
+    def test_each_repeat_failure_registers_nonnull_outputs_without_observing_equality(self):
+        for ordinal in (1,2):
+            for failure in ('hresult','s-false','null','exception','noninteger'):
+                with self.subTest(ordinal=ordinal,failure=failure):
+                    self.prepare();original=self.sdk.call
+                    def call(key,pointer,*args):
+                        hr=original(key,pointer,*args)
+                        selected=(key=='accessible' and self.sdk.calls.count(key)==3 or
+                            key=='accessible_query' and self.sdk.calls.count(key)==3)
+                        if selected and (key=='accessible')==(ordinal==1):
+                            if failure=='exception':raise KeyboardInterrupt('Synthetic repeat failure')
+                            if failure=='null':args[-1]._obj.value=None
+                            else:return {'hresult':-2147467259,'s-false':1,'noninteger':True}[failure]
+                        return hr
+                    self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                    self.assertEqual(result.get(self.prefix+'Attempted'),ordinal)
+                    self.assertEqual(result.get(self.prefix+'Completed'),ordinal-int(failure in ('exception','noninteger')))
+                    self.assertEqual(result.get(self.prefix+'LastHresult'),{'hresult':0x80004005,'s-false':1}.get(failure,0))
+                    self.assertEqual((result.get(self.prefix+'Observed'),result.get(self.prefix+'CanonicalEqual')),(0,0))
+                    self.assertEqual(result['falseShadowStatus'],{'hresult':4,'s-false':4,'null':5,'exception':6,'noninteger':6}[failure])
+                    acquired=[101,102,103,201,202,301,301]+[203,301][:ordinal]
+                    if failure=='null':acquired.pop()
+                    self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(len(acquired),len(acquired)))
+                    self.assertEqual(self.sdk.releases,list(reversed(acquired)))
+                    self.assertEqual(result['workerCleanup'],int(failure not in ('exception','noninteger')))
+
+    def test_new_pair_obeys_original_process_and_clock_guards_at_each_boundary(self):
+        for cutoff in range(17,22):
+            for reason in ('process','deadline'):
+                with self.subTest(cutoff=cutoff,reason=reason):
+                    self.prepare();checks=[]
+                    def guard():
+                        checks.append(1)
+                        if reason=='deadline' and len(checks)==cutoff:self.platform.now=15.
+                        return reason!='process' or len(checks)<cutoff
+                    self.platform.guard=guard;result=self.run_worker();self.assert_primary_false(result)
+                    calls=min(2,(cutoff-16)//2)
+                    self.assertEqual((result.get(self.prefix+'Attempted'),result.get(self.prefix+'Completed')),(calls,calls))
+                    self.assertEqual(result.get(self.prefix+'Observed'),int(cutoff==21))
+                    self.assertEqual(result['falseShadowStatus'],3 if reason=='process' else 2)
+                    self.assertEqual(result['falseShadowGuardAfter'],0)
+                    self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7+calls,7+calls))
+
+    def test_late_repeat_call_output_is_released_without_observing_equality(self):
+        for ordinal in (1,2):
+            with self.subTest(ordinal=ordinal):
+                self.prepare();original=self.sdk.call
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if (key=='accessible' and self.sdk.calls.count(key)==3 and ordinal==1 or
+                            key=='accessible_query' and self.sdk.calls.count(key)==3 and ordinal==2):self.platform.now=15.
+                    return hr
+                self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual((result.get(self.prefix+'Attempted'),result.get(self.prefix+'Completed')),(ordinal,ordinal))
+                self.assertEqual(result.get(self.prefix+'Observed'),0)
+                self.assertEqual(result['falseShadowStatus'],2);self.assertEqual(result['workerCleanup'],1)
+                self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(7+ordinal,7+ordinal))
+
+    def test_repeat_equality_bits_survive_late_cleanup_but_never_certify_completion(self):
+        for failure in ('expired','cleanup'):
+            with self.subTest(failure=failure):
+                self.prepare();original=self.sdk.call
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if key=='release' and failure=='expired':self.platform.now=15.
+                    if key=='release' and failure=='cleanup':raise RuntimeError('Synthetic cleanup failure')
+                    return hr
+                self.sdk.call=call;result=self.run_worker();self.assert_primary_false(result)
+                self.assertEqual((result.get(self.prefix+'Observed'),result.get(self.prefix+'CanonicalEqual')),(1,1))
+                self.assertFalse(result['falseShadowStatus']==1 and result['workerCleanup']==1)
+                self.assertEqual(result['workerCleanup'],int(failure!='cleanup'))
+                if failure=='cleanup':
+                    self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(9,0))
+                    self.assertEqual(len(self.sdk.releases),9)
 
 
 class RawCallTests(unittest.TestCase):
