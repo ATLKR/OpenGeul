@@ -8,6 +8,8 @@ be hard-preempted. New streaming reads also check the original absolute deadline
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
+import ctypes as C
 import hashlib
 import json
 import math
@@ -131,19 +133,151 @@ def _stream(reader, *, size: int, deadline: float, collect: bool = False) -> tup
     return result.hexdigest(), b''.join(blocks)
 
 
+class _WindowsFileIdInfo(C.Structure):
+    _fields_ = [('VolumeSerialNumber', C.c_uint64), ('FileId', C.c_ubyte*16)]
+
+
+class _WindowsFileBasicInfo(C.Structure):
+    _fields_ = [('CreationTime', C.c_int64), ('LastAccessTime', C.c_int64),
+        ('LastWriteTime', C.c_int64), ('ChangeTime', C.c_int64), ('FileAttributes', C.c_uint32)]
+
+
+class _WindowsFileStandardInfo(C.Structure):
+    _fields_ = [('AllocationSize', C.c_int64), ('EndOfFile', C.c_int64),
+        ('NumberOfLinks', C.c_uint32), ('DeletePending', C.c_ubyte), ('Directory', C.c_ubyte)]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _WindowsFileIdentity:
+    size: int
+    token: tuple
+
+
+class _WindowsFileApi:
+    """Private fixed Win32 ABI; native identities never enter public summaries."""
+    def __init__(self, *, _kernel=None, _get_osfhandle=None):
+        if _kernel is None:
+            _kernel = C.WinDLL('kernel32', use_last_error=True)
+        if _get_osfhandle is None:
+            import msvcrt
+            _get_osfhandle = msvcrt.get_osfhandle
+        self.kernel, self.get_osfhandle = _kernel, _get_osfhandle
+        for name, arguments, result in (
+            ('CreateFileW', [C.c_wchar_p,C.c_uint32,C.c_uint32,C.c_void_p,C.c_uint32,C.c_uint32,C.c_void_p], C.c_void_p),
+            ('GetFileInformationByHandleEx', [C.c_void_p,C.c_int32,C.c_void_p,C.c_uint32], C.c_int32),
+            ('GetFileType', [C.c_void_p], C.c_uint32),
+            ('CloseHandle', [C.c_void_p], C.c_int32)):
+            function = getattr(self.kernel, name)
+            function.argtypes, function.restype = arguments, result
+        if sys.byteorder != 'little' or tuple(C.sizeof(kind) for kind in (_WindowsFileIdInfo, _WindowsFileBasicInfo,
+                _WindowsFileStandardInfo)) != (24,40,24):
+            raise ValueError('Source menu native file ABI is unsupported')
+
+    @staticmethod
+    def _handle(value):
+        if type(value) is not int or C.c_void_p(value).value in (None,C.c_void_p(-1).value):
+            raise ValueError('Source menu native file handle is unavailable')
+        return value
+
+    def open_path(self, path):
+        # Owned read-data/read-attributes anchor participates in read sharing;
+        # inspect the final component itself rather than following a reparse point.
+        # Sharing does not prevent every metadata edit: identities are rechecked.
+        return self._handle(self.kernel.CreateFileW(str(path),0x81,1,None,3,0x00200000,None))
+
+    def borrowed_handle(self, fd):
+        # Python owns this FD/HANDLE; it must never be passed to CloseHandle here.
+        return self._handle(self.get_osfhandle(fd))
+
+    def identity(self, handle, deadline):
+        _deadline(deadline)
+        kind = self.kernel.GetFileType(handle)
+        _deadline(deadline)
+        if type(kind) is not int or kind != 1:
+            raise ValueError('Source menu native file is not a disk file')
+        values = []
+        for code, structure in ((18,_WindowsFileIdInfo),(0,_WindowsFileBasicInfo),(1,_WindowsFileStandardInfo)):
+            _deadline(deadline)
+            value = structure()
+            result = self.kernel.GetFileInformationByHandleEx(handle,code,C.byref(value),C.sizeof(value))
+            _deadline(deadline)
+            if type(result) is not int or result == 0:
+                raise ValueError('Source menu native file information is unavailable')
+            values.append(value)
+        file_id, basic, standard = values
+        if (not any(file_id.FileId) or basic.FileAttributes & (0x400|0x10)
+                or standard.DeletePending or standard.Directory or standard.NumberOfLinks == 0
+                or standard.EndOfFile <= 0 or standard.AllocationSize < 0):
+            raise ValueError('Source menu native file is linked, retiring or not regular')
+        # FILE_BASIC_INFO.ChangeTime observes metadata changes separately from
+        # creation and write time. Reading may update LastAccessTime; it is not
+        # part of the existing path identity either.
+        return _WindowsFileIdentity(standard.EndOfFile, (file_id.VolumeSerialNumber, bytes(file_id.FileId),
+            basic.CreationTime,basic.LastWriteTime,basic.ChangeTime,basic.FileAttributes,
+            standard.AllocationSize,standard.EndOfFile,standard.NumberOfLinks,
+            standard.DeletePending,standard.Directory,kind))
+
+    def close(self, handle):
+        if not self.kernel.CloseHandle(handle):
+            raise ValueError('Source menu native file anchor closure is unconfirmed')
+
+
+def _windows_file_api():
+    return _WindowsFileApi() if os.name == 'nt' else None
+
+
+@contextmanager
+def _opened_file(path, *, deadline, limit):
+    path = _absolute(path)
+    api, owned = _windows_file_api(), None
+    try:
+        if api is not None:
+            _deadline(deadline)
+            owned = api.open_path(path)
+            # Register ownership before any post-call deadline rejection.
+            _deadline(deadline)
+            original = api.identity(owned, deadline)
+        # Keep every original path stat/ancestor field. Acquire it while the
+        # native anchor is retained, then join the actual reader to that anchor.
+        before = _file_state(path, deadline, limit=limit)
+        if api is not None and (before.file[0] != original.token[0]
+                or before.file[1] != int.from_bytes(original.token[1], 'little')
+                or before.file[3] != original.size):
+            # CPython's Windows stat projects the full volume/file identifier.
+            # Keep the full 128-bit projection: no legacy truncation fallback.
+            raise ValueError('Source menu native anchor differs from the original path identity')
+        with path.open('rb') as reader:
+            if api is None:
+                if _stat_identity(os.fstat(reader.fileno())) != before.file:
+                    raise ValueError('Source menu opened file identity differs')
+            else:
+                borrowed = api.borrowed_handle(reader.fileno())
+                if api.identity(borrowed, deadline) != original or original.size != before.file[3]:
+                    raise ValueError('Source menu native opened file identity differs')
+            _deadline(deadline)
+            yield reader, before
+            _deadline(deadline)
+            if api is None:
+                if _stat_identity(os.fstat(reader.fileno())) != before.file:
+                    raise ValueError('Source menu opened file changed during verification')
+            elif api.identity(borrowed, deadline) != original:
+                raise ValueError('Source menu native opened file changed during verification')
+        if api is not None and api.identity(owned, deadline) != original:
+            raise ValueError('Source menu native file anchor changed during verification')
+        _unchanged(path, before, deadline, limit=limit)
+    finally:
+        if owned is not None:
+            api.close(owned)
+    _deadline(deadline)
+
+
 def _hash_file(path: Path, *, deadline: float, limit: int,
                collect: bool = False) -> tuple[str, bytes, _FileState]:
-    before = _file_state(path, deadline, limit=limit)
     try:
-        with path.open('rb') as reader:
-            if _stat_identity(os.fstat(reader.fileno())) != before.file:
-                raise ValueError('Source menu opened file identity differs')
+        with _opened_file(path, deadline=deadline, limit=limit) as (reader, before):
             digest, data = _stream(reader, size=before.file[3], deadline=deadline, collect=collect)
-            if _stat_identity(os.fstat(reader.fileno())) != before.file:
-                raise ValueError('Source menu opened file changed during verification')
     except OSError:
         raise ValueError('Source menu identity read failed') from None
-    _unchanged(path, before, deadline, limit=limit)
     return digest, data, before
 
 
@@ -168,11 +302,8 @@ class _ProviderMember:
 def _hash_provider_members(archive: Path, *, deadline: float) -> tuple[_ProviderMember, ...]:
     """Hash exact provider members without extracting or trusting a path alias."""
     archive = _absolute(archive)
-    before = _file_state(archive, deadline, limit=_MAX_ARCHIVE_BYTES)
     try:
-        with archive.open('rb') as raw:
-            if _stat_identity(os.fstat(raw.fileno())) != before.file:
-                raise ValueError('Source menu opened ZIP identity differs')
+        with _opened_file(archive, deadline=deadline, limit=_MAX_ARCHIVE_BYTES) as (raw, before):
             with zipfile.ZipFile(raw) as source:
                 members = source.infolist()
                 if not members or len(members) > _MAX_MEMBERS:
@@ -218,11 +349,8 @@ def _hash_provider_members(archive: Path, *, deadline: float) -> tuple[_Provider
                     with source.open(member) as reader:
                         digest, _ = _stream(reader, size=member.file_size, deadline=deadline)
                     result.append(_ProviderMember(role, name, member.file_size, digest))
-            if _stat_identity(os.fstat(raw.fileno())) != before.file:
-                raise ValueError('Source menu opened ZIP changed during verification')
     except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
         raise ValueError('Source menu ZIP read failed') from None
-    _unchanged(archive, before, deadline, limit=_MAX_ARCHIVE_BYTES)
     return tuple(result)
 
 

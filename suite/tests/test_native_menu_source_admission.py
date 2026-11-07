@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import ctypes as C
 from dataclasses import FrozenInstanceError
 import importlib
 import io
@@ -17,6 +18,7 @@ import time
 import unittest
 import warnings
 from unittest.mock import patch
+from types import SimpleNamespace
 import zipfile
 
 # The fixture is also imported by E2E helper tests run from suite/tests.
@@ -431,6 +433,244 @@ class X64SourceMenuAdmissionTests(PayloadFixture):
             admitted.verify_provider_files(time.monotonic()+1)
         self.assertEqual(admitted.summary()['architecture'], 0x8664)
         self.assertEqual([item['role'] for item in admitted.summary()['providers']], [1, 2])
+
+
+class _SdkFunction:
+    def __init__(self, callback): self.callback = callback
+    def __call__(self, *args): return self.callback(*args)
+
+
+class _WindowsFileSdk:
+    """Synthetic SDK buffers, never actual HANDLE/file-ID observations."""
+    def __init__(self, module, size):
+        self.module = module
+        self.values = dict(volume=3, file_id=bytes(range(16)), creation=100,
+            write=200, change=300, attributes=128, allocation=4096,
+            size=size, links=1, delete=0, directory=0, file_type=1)
+        self.closed, self.opens, self.queries = [], [], []
+        self.open_result, self.close_result, self.query_result = 900, 1, 1
+        self.on_query = None
+        self.reader_fd = None
+        self.CreateFileW = _SdkFunction(self.open)
+        self.GetFileInformationByHandleEx = _SdkFunction(self.query)
+        self.GetFileType = _SdkFunction(lambda handle: self.values['file_type'])
+        self.CloseHandle = _SdkFunction(self.close)
+
+    def open(self, *args):
+        self.opens.append(args)
+        return self.open_result
+
+    def close(self, handle):
+        self.closed.append(handle)
+        return self.close_result
+
+    def borrowed(self, fd):
+        self.reader_fd = fd
+        return 700
+
+    def query(self, handle, kind, output, size):
+        self.queries.append((handle, kind))
+        values = dict(self.values)
+        if self.on_query is not None:
+            self.on_query(handle, kind, values)
+        if not self.query_result: return 0
+        if kind == 18:
+            record=C.cast(output,C.POINTER(self.module._WindowsFileIdInfo)).contents
+            record.VolumeSerialNumber=values['volume'];record.FileId[:]=values['file_id']
+        elif kind == 0:
+            record=C.cast(output,C.POINTER(self.module._WindowsFileBasicInfo)).contents
+            record.CreationTime=values['creation'];record.LastAccessTime=999
+            record.LastWriteTime=values['write'];record.ChangeTime=values['change']
+            record.FileAttributes=values['attributes']
+        elif kind == 1:
+            record=C.cast(output,C.POINTER(self.module._WindowsFileStandardInfo)).contents
+            record.AllocationSize=values['allocation'];record.EndOfFile=values['size']
+            record.NumberOfLinks=values['links'];record.DeletePending=values['delete'];record.Directory=values['directory']
+        else:
+            raise AssertionError('Unexpected SDK information class')
+        return 1
+
+
+class WindowsOpenedFileIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.module=importlib.import_module('suite.e2e.native_menu_source_admission')
+        self.folder=Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path=self.folder/'provider.exe';self.raw=b'bounded synthetic provider bytes'
+        self.path.write_bytes(self.raw)
+        self.sdk=_WindowsFileSdk(self.module,len(self.raw))
+        info=self.path.stat()
+        self.sdk.values.update(volume=info.st_dev,file_id=info.st_ino.to_bytes(16,'little'))
+
+    def windows(self):
+        return patch.object(self.module,'_windows_file_api',create=True,
+            side_effect=lambda:self.module._WindowsFileApi(_kernel=self.sdk,_get_osfhandle=self.sdk.borrowed))
+
+    def read(self, **kwargs):
+        return self.module._hash_file(self.path,deadline=time.monotonic()+2,limit=1024,**kwargs)
+
+    def test_windows_path_ctime_and_executable_mode_can_differ_from_fstat(self):
+        original=os.fstat
+        def different(fd):
+            info=original(fd)
+            return SimpleNamespace(**{key:getattr(info,key) for key in
+                ('st_dev','st_ino','st_size','st_mtime_ns')},
+                st_mode=info.st_mode^stat.S_IXUSR,st_ctime_ns=info.st_ctime_ns+1)
+        with self.windows(),patch.object(os,'fstat',different):
+            actual,data,_=self.read(collect=True)
+        self.assertEqual((actual,data),(digest(self.raw),self.raw))
+        self.assertEqual(self.sdk.closed,[900])
+        self.assertEqual(self.sdk.opens[0][1:3],(0x81,1))
+        self.assertEqual(self.sdk.opens[0][4:6],(3,0x00200000))
+        self.assertNotIn(700,self.sdk.closed)
+        with self.assertRaises(OSError):os.fstat(self.sdk.reader_fd)
+
+    def test_linux_still_requires_the_entire_original_fstat_tuple(self):
+        original=os.fstat
+        def different(fd):
+            info=original(fd)
+            return SimpleNamespace(**{key:getattr(info,key) for key in
+                ('st_dev','st_ino','st_mode','st_size','st_mtime_ns')},st_ctime_ns=info.st_ctime_ns+1)
+        with patch.object(self.module,'_windows_file_api',return_value=None),patch.object(os,'fstat',different),self.assertRaises(ValueError):
+            self.read()
+
+    def test_windows_sdk_structures_have_fixed_width_layout(self):
+        self.assertEqual([C.sizeof(kind) for kind in (self.module._WindowsFileIdInfo,
+            self.module._WindowsFileBasicInfo,self.module._WindowsFileStandardInfo)],[24,40,24])
+        self.assertEqual(self.module._WindowsFileStandardInfo.DeletePending.offset,20)
+        self.assertEqual(self.module._WindowsFileStandardInfo.Directory.offset,21)
+
+    def test_native_sdk_query_and_open_errors_fail_closed_without_borrowed_close(self):
+        for kind in (0,1,18):
+            def reject(handle,current,values):
+                if current==kind:raise OSError('Synthetic query failure')
+            self.sdk.on_query=reject
+            with self.windows(),self.assertRaises(ValueError):self.read()
+            self.assertEqual(self.sdk.closed.pop(),900)
+        self.sdk.on_query=None;self.sdk.query_result=0
+        with self.windows(),self.assertRaises(ValueError):self.read()
+        self.assertEqual(self.sdk.closed.pop(),900)
+        self.sdk.query_result=1;self.sdk.open_result=C.c_void_p(-1).value
+        with self.windows(),self.assertRaises(ValueError):self.read()
+        self.assertEqual(self.sdk.closed,[])
+
+    def test_actual_reader_must_match_anchor_volume_fileid_and_generation(self):
+        for key,value in (('volume',4),('file_id',b'x'*16),('creation',101),('write',201),
+                          ('change',301),('size',1),('allocation',8192),('links',2)):
+            def change(handle,kind,values):
+                if handle==700:values[key]=value
+            self.sdk.on_query=change
+            with self.subTest(field=key),self.windows(),self.assertRaises(ValueError):self.read()
+        self.assertTrue(all(handle==900 for handle in self.sdk.closed))
+
+    def test_reparse_directory_delete_and_non_disk_are_rejected(self):
+        for key,value in (('attributes',0x400),('attributes',0x10),('directory',1),('delete',1),('file_type',3)):
+            old=self.sdk.values[key];self.sdk.values[key]=value
+            with self.subTest(field=key),self.windows(),self.assertRaises(ValueError):self.read()
+            self.sdk.values[key]=old
+        self.assertTrue(all(handle==900 for handle in self.sdk.closed))
+
+    def test_native_generation_change_after_stream_is_rejected(self):
+        stream=self.module._stream
+        def change(*args,**kwargs):
+            result=stream(*args,**kwargs);self.sdk.values['change']+=1;return result
+        with self.windows(),patch.object(self.module,'_stream',change),self.assertRaises(ValueError):self.read()
+        self.assertEqual(self.sdk.closed,[900])
+
+    def test_native_anchor_must_join_the_original_full_path_file_id(self):
+        before=self.module._file_state(self.path,time.monotonic()+2,limit=1024)
+        for index in (0,1):
+            changed=list(before.file);changed[index]+=1
+            other=self.module._FileState(tuple(changed),before.ancestors)
+            with self.subTest(field=index),self.windows(),patch.object(self.module,'_file_state',return_value=other),self.assertRaises(ValueError):
+                self.read()
+        self.assertTrue(all(handle==900 for handle in self.sdk.closed))
+
+    def test_full_128bit_path_projection_is_not_truncated(self):
+        before=self.module._file_state(self.path,time.monotonic()+2,limit=1024)
+        identifier=(1<<100)+before.file[1]
+        self.sdk.values['file_id']=identifier.to_bytes(16,'little')
+        changed=list(before.file);changed[1]=identifier
+        state=self.module._FileState(tuple(changed),before.ancestors)
+        with self.windows(),patch.object(self.module,'_file_state',return_value=state):
+            actual,_,_=self.read()
+        self.assertEqual(actual,digest(self.raw))
+
+    def test_original_path_mode_and_both_times_remain_strict_after_stream(self):
+        state=self.module._file_state
+        for index in (2,4,5):
+            calls=[0]
+            def changed(*args,**kwargs):
+                value=state(*args,**kwargs);calls[0]+=1
+                if calls[0]>1:
+                    fields=list(value.file);fields[index]+=1
+                    return self.module._FileState(tuple(fields),value.ancestors)
+                return value
+            with self.subTest(field=index),self.windows(),patch.object(self.module,'_file_state',changed),self.assertRaises(ValueError):self.read()
+
+    def test_path_replacement_after_read_never_matches_the_retained_anchor(self):
+        stream=self.module._stream
+        def replace(*args,**kwargs):
+            result=stream(*args,**kwargs)
+            self.path.rename(self.folder/'retained-original')
+            self.path.write_bytes(self.raw)
+            return result
+        with self.windows(),patch.object(self.module,'_stream',replace),self.assertRaises(ValueError):self.read()
+        self.assertEqual(self.sdk.closed,[900])
+
+    def test_missing_or_invalid_borrowed_handle_never_closes_python_handle(self):
+        for value in (-1,0,None):
+            with self.subTest(kind=type(value).__name__),self.windows(),patch.object(self.sdk,'borrowed',return_value=value),self.assertRaises(ValueError):self.read()
+        with self.windows(),patch.object(self.sdk,'borrowed',side_effect=OSError('Synthetic closed FD')),self.assertRaises(ValueError):self.read()
+        self.assertEqual(self.sdk.closed,[900]*4)
+
+    def test_deadline_after_open_or_close_is_not_silently_renewed(self):
+        now=[0.0];opened=self.sdk.CreateFileW.callback;closed=self.sdk.CloseHandle.callback
+        def late_open(*args):
+            result=opened(*args);now[0]=2.0;return result
+        self.sdk.CreateFileW.callback=late_open
+        with self.windows(),patch.object(self.module.time,'monotonic',lambda:now[0]),self.assertRaises(ValueError):
+            self.module._hash_file(self.path,deadline=1.0,limit=1024)
+        self.assertEqual(self.sdk.closed,[900])
+        now[0]=0.0;self.sdk.CreateFileW.callback=opened
+        def late_close(*args):
+            result=closed(*args);now[0]=2.0;return result
+        self.sdk.CloseHandle.callback=late_close
+        with self.windows(),patch.object(self.module.time,'monotonic',lambda:now[0]),self.assertRaises(ValueError):
+            self.module._hash_file(self.path,deadline=1.0,limit=1024)
+        self.assertEqual(self.sdk.closed,[900,900])
+
+    def test_owned_anchor_is_closed_if_python_open_or_stream_fails(self):
+        open_file=Path.open
+        def fail(path,*args,**kwargs):
+            if path==self.path:raise OSError('Synthetic read failure')
+            return open_file(path,*args,**kwargs)
+        with self.windows(),patch.object(Path,'open',fail),self.assertRaises(ValueError):self.read()
+        with self.windows(),patch.object(self.module,'_stream',side_effect=ValueError('Synthetic stream failure')),self.assertRaises(ValueError):self.read()
+        self.assertEqual(self.sdk.closed,[900,900])
+
+    def test_sdk_deadline_expiry_closes_owned_anchor_without_renewal(self):
+        now=[0.0]
+        def expire(handle,kind,values):now[0]=2.0
+        self.sdk.on_query=expire
+        with self.windows(),patch.object(self.module.time,'monotonic',lambda:now[0]),self.assertRaises(ValueError):
+            self.module._hash_file(self.path,deadline=1.0,limit=1024)
+        self.assertEqual(self.sdk.closed,[900])
+
+    def test_native_close_failure_is_unknown_not_a_success(self):
+        self.sdk.close_result=0
+        with self.windows(),self.assertRaises(ValueError):self.read()
+        self.assertEqual(self.sdk.closed,[900])
+
+    def test_zip_members_use_the_same_opened_handle_join(self):
+        archive=self.folder/'providers.zip'
+        with zipfile.ZipFile(archive,'w') as stream:
+            for name in PROVIDERS:stream.writestr(name,self.raw)
+        self.sdk.values['size']=archive.stat().st_size
+        info=archive.stat();self.sdk.values.update(volume=info.st_dev,file_id=info.st_ino.to_bytes(16,'little'))
+        with self.windows():
+            result=self.module._hash_provider_members(archive,deadline=time.monotonic()+2)
+        self.assertEqual([item.sha256 for item in result],[digest(self.raw)]*2)
+        self.assertEqual(self.sdk.closed,[900])
 
 
 if __name__ == '__main__':
