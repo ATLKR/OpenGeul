@@ -1235,23 +1235,41 @@ function Assert-PythonTemplateAdmission([string]$RelativePath,[int]$Machine,[str
     return $pins[0]
 }
 
-function Get-ProductPeIdentity([string]$Path,[string]$RuntimeRoot='',[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+function Get-ProductPeIdentity([string]$Path,[string]$RuntimeRoot='',[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[Collections.IDictionary]$FailureObservation=$null) {
     $target=Get-NativeEngineTarget $Architecture
     Assert-UnlinkedPath $Path
+    if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('file-read-failed')}
     $data=[IO.File]::ReadAllBytes($Path)
+    if($null -ne $FailureObservation) {
+        $FailureObservation.byteCount=$data.Length;$FailureObservation.observedMask=$FailureObservation.observedMask -bor 1
+        try {
+            $FailureObservation.sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($data)).ToLowerInvariant()
+            $FailureObservation.observedMask=$FailureObservation.observedMask -bor 2
+        } catch {}
+        $FailureObservation.rejectReasons=@('invalid-dos-header')
+    }
     if($data.Length -lt 64 -or $data[0] -ne 77 -or $data[1] -ne 90) {throw "Invalid PE: $Path"}
     $offset=[BitConverter]::ToUInt32($data,60)
+    if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('invalid-pe-header')}
     if($offset -lt 64 -or $offset -gt 1048576 -or $offset+26 -gt $data.Length -or [BitConverter]::ToUInt32($data,[int]$offset) -ne 17744) {throw "Invalid PE headers: $Path"}
     $machine=[BitConverter]::ToUInt16($data,[int]$offset+4)
+    if($null -ne $FailureObservation) {$FailureObservation.machine=[int]$machine;$FailureObservation.observedMask=$FailureObservation.observedMask -bor 4}
     $magic=[BitConverter]::ToUInt16($data,[int]$offset+24)
+    if($null -ne $FailureObservation) {$FailureObservation.optionalMagic=[int]$magic;$FailureObservation.observedMask=$FailureObservation.observedMask -bor 8;$FailureObservation.rejectReasons=@('file-hash-failed')}
     $hash=(Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
     $role=if($Architecture -ceq 'arm64'){'nativeArm64'}else{'nativeX64'}
     if($machine -ne $target.productMachine -or $magic -ne 0x20b) {
         $role=''
+        if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('optional-header-read-failed')}
         $optional=[int]$offset+24;$optionalSize=[BitConverter]::ToUInt16($data,[int]$offset+20)
         $characteristics=[BitConverter]::ToUInt16($data,[int]$offset+22)
+        if($null -ne $FailureObservation) {
+            $FailureObservation.optionalSize=[int]$optionalSize;$FailureObservation.characteristics=[int]$characteristics
+            $FailureObservation.observedMask=$FailureObservation.observedMask -bor 48;$FailureObservation.rejectReasons=@('unadmitted-foreign-pe')
+        }
         if($machine -eq 0x14c -and $magic -eq 0x10b -and [IO.Path]::GetExtension($Path) -ieq '.dll' -and ($characteristics -band 0x2000) -and $optionalSize -ge 216 -and $optional+$optionalSize -le $data.Length -and [BitConverter]::ToUInt32($data,$optional+92) -ge 15) {
             $sections=[BitConverter]::ToUInt16($data,[int]$offset+6)
+            if($null -ne $FailureObservation) {$FailureObservation.sectionCount=[int]$sections;$FailureObservation.observedMask=$FailureObservation.observedMask -bor 64;$FailureObservation.rejectReasons=@('invalid-managed-sections')}
             $sectionTable=$optional+$optionalSize
             if($sections -lt 1 -or $sections -gt 96 -or $sectionTable+$sections*40 -gt $data.Length) {throw 'Invalid managed PE sections.'}
             $mapRva={param([uint32]$Rva,[uint32]$Length)
@@ -1259,27 +1277,98 @@ function Get-ProductPeIdentity([string]$Path,[string]$RuntimeRoot='',[ValidateSe
                     $entry=$sectionTable+$i*40;$start=[BitConverter]::ToUInt32($data,$entry+12);$rawSize=[BitConverter]::ToUInt32($data,$entry+16);$raw=[BitConverter]::ToUInt32($data,$entry+20)
                     if($Rva -ge $start -and [long]$Rva+$Length -le [long]$start+$rawSize -and [long]$raw+$rawSize -le $data.Length) {return [byte[]]$data[([int]($raw+$Rva-$start))..([int]($raw+$Rva-$start+$Length-1))]}
                 }
+                if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('managed-rva-outside-section')}
                 throw 'Managed PE RVA is outside its actual section data.'
             }
             $clrRva=[BitConverter]::ToUInt32($data,$optional+208);$clrSize=[BitConverter]::ToUInt32($data,$optional+212)
+            if($null -ne $FailureObservation) {
+                $FailureObservation.clrRva=[long]$clrRva;$FailureObservation.clrSize=[long]$clrSize
+                $FailureObservation.observedMask=$FailureObservation.observedMask -bor 384;$FailureObservation.rejectReasons=@('invalid-clr-directory')
+            }
             if($clrRva -eq 0 -or $clrSize -lt 72) {throw 'x86 DLL is not an IL-only AnyCPU assembly.'}
             [byte[]]$clr=&$mapRva $clrRva 72
             $cb=[BitConverter]::ToUInt32($clr,0);$flags=[BitConverter]::ToUInt32($clr,16);$metadataSize=[BitConverter]::ToUInt32($clr,12)
-            if($cb -lt 72 -or $cb -gt $clrSize -or -not($flags -band 1) -or ($flags -band (2 -bor 16 -bor 0x20000)) -or $metadataSize -lt 16) {throw 'Managed DLL requires a foreign native architecture.'}
+            if($null -ne $FailureObservation) {
+                $FailureObservation.cb=[long]$cb;$FailureObservation.clrFlags=[long]$flags;$FailureObservation.metadataSize=[long]$metadataSize
+                $FailureObservation.observedMask=$FailureObservation.observedMask -bor 3584
+            }
+            if($cb -lt 72 -or $cb -gt $clrSize -or -not($flags -band 1) -or ($flags -band (2 -bor 16 -bor 0x20000)) -or $metadataSize -lt 16) {
+                if($null -ne $FailureObservation) {
+                    $FailureObservation.rejectReasons=@(
+                        if($cb -lt 72) {'clr-cb-too-small'}
+                        if($cb -gt $clrSize) {'clr-cb-exceeds-directory'}
+                        if(-not($flags -band 1)) {'clr-ilonly-absent'}
+                        if($flags -band 2) {'clr-32bit-required'}
+                        if($flags -band 16) {'clr-native-entrypoint'}
+                        if($flags -band 0x20000) {'clr-32bit-preferred'}
+                        if($metadataSize -lt 16) {'clr-metadata-too-small'}
+                    )
+                }
+                throw 'Managed DLL requires a foreign native architecture.'
+            }
+            if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('native-clr-directories')}
             if(@($clr[40..71]|Where-Object {$_ -ne 0}).Count -ne 0) {throw 'Managed DLL contains native-bearing CLR directories.'}
-            [byte[]]$metadata=&$mapRva ([BitConverter]::ToUInt32($clr,8)) $metadataSize
+            $metadataRva=[BitConverter]::ToUInt32($clr,8)
+            if($null -ne $FailureObservation) {$FailureObservation.metadataRva=[long]$metadataRva;$FailureObservation.observedMask=$FailureObservation.observedMask -bor 4096}
+            [byte[]]$metadata=&$mapRva $metadataRva $metadataSize
+            if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('invalid-managed-metadata-signature')}
             if([BitConverter]::ToUInt32($metadata,0) -ne 0x424a5342) {throw 'Managed assembly metadata signature is invalid.'}
             $role='managedAnyCpu'
         }
         if(-not $role -and $RuntimeRoot) {
             $relative=[IO.Path]::GetRelativePath($RuntimeRoot,$Path).Replace('\','/')
+            if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('unadmitted-python-template')}
             $pin=Assert-PythonTemplateAdmission $relative $machine $hash $Architecture
+            if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('invalid-template-optional-magic')}
             if(($machine -eq 0x14c -and $magic -ne 0x10b) -or ($machine -in @(0x8664,0xaa64) -and $magic -ne 0x20b)) {throw 'Pinned template optional-header architecture changed.'}
             $role=$pin.role
         }
-        if(-not $role) {throw "Product PE is not native $Architecture or verified AnyCPU: $Path (machine $machine)"}
+        if(-not $role) {
+            if($null -ne $FailureObservation) {$FailureObservation.rejectReasons=@('unadmitted-foreign-pe')}
+            throw "Product PE is not native $Architecture or verified AnyCPU: $Path (machine $machine)"
+        }
     }
     return [ordered]@{path=$Path;machine=[int]$machine;role=$role;sha256=$hash;size=$data.Length}
+}
+
+function Save-ProductPeFailure([string]$RelativePath,[string]$EvidenceDirectory,[string]$Architecture,[Collections.IDictionary]$Observation) {
+    try {
+        $proof=[ordered]@{schemaVersion=1;kind='native-product-pe-failure';architecture=$Architecture;passed=$false;
+            fullEngineQualified=$false;acceptanceEligible=$false;path=$RelativePath;pathBinding='lexical-unlinked-product-child';
+            hashSource='parsed-byte-buffer';observedMask=[int]$Observation.observedMask;rejectReasons=@($Observation.rejectReasons)}
+        $bits=[ordered]@{byteCount=1;sha256=2;machine=4;optionalMagic=8;optionalSize=16;characteristics=32;sectionCount=64;
+            clrRva=128;clrSize=256;cb=512;clrFlags=1024;metadataSize=2048;metadataRva=4096}
+        foreach($name in $bits.Keys) {$proof[$name]=if($Observation.observedMask -band $bits[$name]){$Observation[$name]}else{$null}}
+        $bytes=[Text.UTF8Encoding]::new($false,$true).GetBytes(($proof|ConvertTo-Json -Depth 4)+"`n")
+        if($bytes.Length -gt 8192) {return}
+        Write-NewIdentityBytes (Join-Path $EvidenceDirectory 'native-product-pe-failure.json') $bytes
+    } catch {}
+}
+
+function Get-AuditedProductPeIdentity([string]$Path,[string]$RuntimeRoot,[string]$EvidenceDirectory,
+                                    [ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[switch]$RequireNative) {
+    $observation=$null
+    try {
+        $root=[IO.Path]::GetFullPath($RuntimeRoot);$full=[IO.Path]::GetFullPath($Path)
+        Assert-UnlinkedPath $root;Assert-UnlinkedPath $full
+        if(-not(Test-Path -LiteralPath $root -PathType Container) -or -not(Test-Path -LiteralPath $full -PathType Leaf)) {throw 'Invalid product file binding.'}
+        $relative=[IO.Path]::GetRelativePath($root,$full).Replace('\','/')
+        if([IO.Path]::IsPathRooted($relative) -or $relative.Length -gt 1024 -or $relative -match '[\x00-\x1f\x7f:]' -or
+           @($relative.Split('/')|Where-Object {$_ -in @('','.','..')}).Count) {throw 'Invalid product relative path.'}
+        $observation=@{observedMask=0;rejectReasons=@('pe-identity-unavailable')}
+    } catch {}
+    try {
+        $identity=if($RequireNative) {Get-ProductPeIdentity $Path -Architecture $Architecture -FailureObservation $observation}
+                  else {Get-ProductPeIdentity $Path $RuntimeRoot $Architecture -FailureObservation $observation}
+        if($RequireNative -and $identity.role -ne $(if($Architecture -ceq 'arm64'){'nativeArm64'}else{'nativeX64'})) {
+            if($null -ne $observation) {$observation.rejectReasons=@('required-native-role-mismatch')}
+            throw "Required native runtime output has wrong architecture: $relative"
+        }
+        return $identity
+    } catch {
+        if($null -ne $observation) {Save-ProductPeFailure $relative $EvidenceDirectory $Architecture $observation}
+        throw
+    }
 }
 
 function Quote-Bash([string]$Value) {return "'"+$Value.Replace("'","'\''")+"'"}
@@ -2467,14 +2556,13 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             Write-BuildJson (Join-Path $evidence 'app-local-crt-installed.json') $receipt.appLocalCrt
             $receipt.stage='native-product-pe-audit';Assert-NativeBuildTimeRemaining
             foreach($relative in @('program/soffice.bin','program/python.exe','program/pyuno.pyd','program/ifbclient.dll','program/Engine12.dll','program/intl/fbintl.dll')) {
-                $critical=Get-ProductPeIdentity (Join-Path $instdir $relative) -Architecture $Architecture
-                if($critical.role -ne $nativeRole) {throw "Required native runtime output has wrong architecture: $relative"}
+                $critical=Get-AuditedProductPeIdentity (Join-Path $instdir $relative) $instdir $evidence $Architecture -RequireNative
             }
             $inventory=@()
             foreach($file in Get-ChildItem -LiteralPath $instdir -File -Recurse) {
                 Assert-NativeBuildTimeRemaining
                 $stream=$file.OpenRead();try {$first=$stream.ReadByte();$second=$stream.ReadByte()} finally {$stream.Dispose()}
-                if(($first -eq 77 -and $second -eq 90) -or $file.Extension -in @('.exe','.dll','.pyd') -or $file.Name -eq 'soffice.bin') {$inventory+=Get-ProductPeIdentity $file.FullName $instdir $Architecture}
+                if(($first -eq 77 -and $second -eq 90) -or $file.Extension -in @('.exe','.dll','.pyd') -or $file.Name -eq 'soffice.bin') {$inventory+=Get-AuditedProductPeIdentity $file.FullName $instdir $evidence $Architecture}
             }
             if($inventory.Count -eq 0) {throw 'Native PE inventory is empty.'}
             Write-BuildJson (Join-Path $evidence 'native-pe-inventory.json') $inventory

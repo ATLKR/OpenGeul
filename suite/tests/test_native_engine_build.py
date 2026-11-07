@@ -1485,6 +1485,128 @@ $receipt.cygwinSetup|ConvertTo-Json -Compress
             bad=bytearray(data);struct.pack_into('<I',bad,offset,value);path.write_bytes(bad)
             self.rejected(f"Get-ProductPeIdentity {quote(path)}")
 
+    def managed_pe_bytes(self):
+        data=bytearray(1024);data[:2]=b'MZ';struct.pack_into('<I',data,60,128);data[128:132]=b'PE\0\0'
+        struct.pack_into('<H',data,132,0x14c);struct.pack_into('<H',data,134,1);struct.pack_into('<H',data,148,224);struct.pack_into('<H',data,150,0x2000)
+        opt=152;struct.pack_into('<H',data,opt,0x10b);struct.pack_into('<I',data,opt+92,16);struct.pack_into('<II',data,opt+96+14*8,0x2000,72)
+        section=opt+224;struct.pack_into('<IIII',data,section+8,512,0x2000,512,512)
+        struct.pack_into('<I',data,512,72);struct.pack_into('<III',data,520,0x2080,32,1);data[640:644]=b'BSJB'
+        return data
+
+    def test_product_pe_failure_receipt_observes_actual_clr_reject_predicates(self):
+        import hashlib
+        runtime=self.root/'runtime';(runtime/'program').mkdir(parents=True)
+        path=runtime/'program/한글 managed.dll'
+        cases=[('cb-small',512,71,'clr-cb-too-small'),('cb-large',512,73,'clr-cb-exceeds-directory'),
+               ('ilonly',528,0,'clr-ilonly-absent'),('required',528,3,'clr-32bit-required'),
+               ('entrypoint',528,17,'clr-native-entrypoint'),('preferred',528,0x20001,'clr-32bit-preferred'),
+               ('metadata',524,15,'clr-metadata-too-small')]
+        for name,offset,value,reason in cases:
+            with self.subTest(name=name):
+                data=self.managed_pe_bytes();struct.pack_into('<I',data,offset,value);path.write_bytes(data)
+                evidence=self.root/name;evidence.mkdir()
+                self.ps(f"try {{ Get-AuditedProductPeIdentity {quote(path)} {quote(runtime)} {quote(evidence)} x64|Out-Null;throw 'Unexpected acceptance' }} catch {{ if($_.Exception.Message -cne 'Managed DLL requires a foreign native architecture.'){{throw}} }}")
+                proof=json.loads((evidence/'native-product-pe-failure.json').read_text())
+                self.assertEqual('native-product-pe-failure',proof['kind']);self.assertFalse(proof['passed'])
+                self.assertEqual('program/한글 managed.dll',proof['path']);self.assertEqual([reason],proof['rejectReasons'])
+                self.assertEqual(4095,proof['observedMask'])
+                self.assertEqual(len(data),proof['byteCount']);self.assertEqual(hashlib.sha256(data).hexdigest(),proof['sha256'])
+                expected={'machine':0x14c,'optionalMagic':0x10b,'optionalSize':224,'characteristics':0x2000,
+                          'sectionCount':1,'clrRva':0x2000,'clrSize':72,'cb':struct.unpack_from('<I',data,512)[0],
+                          'clrFlags':struct.unpack_from('<I',data,528)[0],'metadataSize':struct.unpack_from('<I',data,524)[0]}
+                for field,number in expected.items():self.assertEqual(number,proof[field],field)
+                self.assertIsNone(proof['metadataRva']);self.assertNotIn(str(self.root),json.dumps(proof))
+
+    def test_product_pe_failure_receipt_mask_distinguishes_unread_headers(self):
+        import hashlib
+        runtime=self.root/'runtime';runtime.mkdir();path=runtime/'broken.dll';path.write_bytes(b'MZ')
+        evidence=self.root/'evidence';evidence.mkdir()
+        self.rejected(f"Get-AuditedProductPeIdentity {quote(path)} {quote(runtime)} {quote(evidence)} x64")
+        proof=json.loads((evidence/'native-product-pe-failure.json').read_text())
+        self.assertEqual(3,proof['observedMask']);self.assertEqual(2,proof['byteCount'])
+        self.assertEqual(hashlib.sha256(b'MZ').hexdigest(),proof['sha256'])
+        self.assertEqual(['invalid-dos-header'],proof['rejectReasons'])
+        for field in ['machine','optionalMagic','optionalSize','characteristics','sectionCount','clrRva','clrSize','cb','clrFlags','metadataSize','metadataRva']:
+            self.assertIsNone(proof[field],field)
+
+    def test_product_pe_failure_receipt_preserves_managed_rejection_boundaries(self):
+        runtime=self.root/'runtime';runtime.mkdir();path=runtime/'managed.dll'
+        cases=[('sections',134,'H',0,127,'invalid-managed-sections','Invalid managed PE sections.'),
+               ('clr-absent',360,'I',0,511,'invalid-clr-directory','x86 DLL is not an IL-only AnyCPU assembly.'),
+               ('clr-short',364,'I',71,511,'invalid-clr-directory','x86 DLL is not an IL-only AnyCPU assembly.'),
+               ('clr-rva',360,'I',0x3000,511,'managed-rva-outside-section','Managed PE RVA is outside its actual section data.'),
+               ('native-directory',552,'I',1,4095,'native-clr-directories','Managed DLL contains native-bearing CLR directories.'),
+               ('metadata-rva',520,'I',0x3000,8191,'managed-rva-outside-section','Managed PE RVA is outside its actual section data.'),
+               ('metadata-signature',640,'I',0,8191,'invalid-managed-metadata-signature','Managed assembly metadata signature is invalid.')]
+        for name,offset,fmt,value,mask,reason,message in cases:
+            with self.subTest(name=name):
+                data=self.managed_pe_bytes();struct.pack_into('<'+fmt,data,offset,value);path.write_bytes(data)
+                evidence=self.root/name;evidence.mkdir()
+                self.ps(f"try {{ Get-AuditedProductPeIdentity {quote(path)} {quote(runtime)} {quote(evidence)} x64|Out-Null;throw 'Unexpected acceptance' }} catch {{ if($_.Exception.Message -cne {quote(message)}){{throw}} }}")
+                proof=json.loads((evidence/'native-product-pe-failure.json').read_text())
+                self.assertEqual(mask,proof['observedMask']);self.assertEqual([reason],proof['rejectReasons'])
+
+    def test_product_pe_audit_binds_only_unlinked_runtime_children(self):
+        runtime=self.root/'runtime';runtime.mkdir();sibling=self.root/'runtime-other';sibling.mkdir()
+        outside=sibling/'managed.dll';outside.write_bytes(self.managed_pe_bytes())
+        evidence=self.root/'evidence';evidence.mkdir()
+        proof=json.loads(self.ps(f"Get-AuditedProductPeIdentity {quote(outside)} {quote(runtime)} {quote(evidence)} x64|ConvertTo-Json -Compress"))
+        self.assertEqual('managedAnyCpu',proof['role']);self.assertEqual([],list(evidence.iterdir()))
+        bad=self.managed_pe_bytes();struct.pack_into('<I',bad,528,3);outside.write_bytes(bad)
+        self.rejected(f"Get-AuditedProductPeIdentity {quote(outside)} {quote(runtime)} {quote(evidence)} x64")
+        linked=runtime/'linked.dll';linked.symlink_to(outside)
+        self.rejected(f"Get-AuditedProductPeIdentity {quote(linked)} {quote(runtime)} {quote(evidence)} x64")
+        self.rejected(f"Get-AuditedProductPeIdentity {quote(runtime)} {quote(runtime)} {quote(evidence)} x64")
+        self.assertEqual([],list(evidence.iterdir()))
+
+    def test_product_pe_failure_write_cannot_replace_original_exception_or_receipt(self):
+        runtime=self.root/'runtime';runtime.mkdir();path=runtime/'managed.dll'
+        data=self.managed_pe_bytes();struct.pack_into('<I',data,528,3);path.write_bytes(data)
+        evidence=self.root/'evidence';evidence.mkdir();receipt=evidence/'native-product-pe-failure.json'
+        receipt.write_bytes(b'original failure evidence')
+        call=f"try {{ Get-AuditedProductPeIdentity {quote(path)} {quote(runtime)} {quote(evidence)} x64|Out-Null;throw 'Unexpected acceptance' }} catch {{ if($_.Exception.Message -cne 'Managed DLL requires a foreign native architecture.'){{throw}} }}"
+        self.ps(call);self.assertEqual(b'original failure evidence',receipt.read_bytes())
+        self.ps("function Write-NewIdentityBytes {throw 'Synthetic evidence write failure'};"+call)
+        self.assertEqual(b'original failure evidence',receipt.read_bytes())
+
+    def test_product_pe_audit_success_preserves_identity_and_required_native_rejection(self):
+        runtime=self.root/'runtime';runtime.mkdir();path=runtime/'managed.dll';path.write_bytes(self.managed_pe_bytes())
+        evidence=self.root/'evidence';evidence.mkdir()
+        proof=json.loads(self.ps(f"Get-AuditedProductPeIdentity {quote(path)} {quote(runtime)} {quote(evidence)} x64|ConvertTo-Json -Compress"))
+        original=json.loads(self.ps(f"Get-ProductPeIdentity {quote(path)} {quote(runtime)} x64|ConvertTo-Json -Compress"))
+        self.assertEqual(original,proof);self.assertEqual([],list(evidence.iterdir()))
+        self.ps(f"try {{ Get-AuditedProductPeIdentity {quote(path)} {quote(runtime)} {quote(evidence)} x64 -RequireNative|Out-Null;throw 'Unexpected acceptance' }} catch {{ if($_.Exception.Message -cne 'Required native runtime output has wrong architecture: managed.dll'){{throw}} }}")
+        failure=json.loads((evidence/'native-product-pe-failure.json').read_text())
+        self.assertEqual(['required-native-role-mismatch'],failure['rejectReasons'])
+
+    def test_product_pe_audit_skips_unsafe_receipt_paths_without_changing_parser_verdict(self):
+        runtime=self.root/'runtime';runtime.mkdir();parent=runtime
+        for number in range(14):parent=parent/(str(number)+'a'*78);parent.mkdir()
+        path=parent/'managed.dll';path.write_bytes(self.managed_pe_bytes())
+        evidence=self.root/'evidence';evidence.mkdir()
+        proof=json.loads(self.ps(f"Get-AuditedProductPeIdentity {quote(path)} {quote(runtime)} {quote(evidence)} x64|ConvertTo-Json -Compress"))
+        self.assertEqual('managedAnyCpu',proof['role']);self.assertEqual([],list(evidence.iterdir()))
+        bad=self.managed_pe_bytes();struct.pack_into('<I',bad,528,3);path.write_bytes(bad)
+        self.ps(f"try {{ Get-AuditedProductPeIdentity {quote(path)} {quote(runtime)} {quote(evidence)} x64|Out-Null;throw 'Unexpected acceptance' }} catch {{ if($_.Exception.Message -cne 'Managed DLL requires a foreign native architecture.'){{throw}} }}")
+        self.assertEqual([],list(evidence.iterdir()))
+        ordinary=runtime/'managed.dll';ordinary.write_bytes(bad)
+        self.rejected(f"Get-ProductPeIdentity {quote(ordinary)} {quote(runtime)} x64")
+        self.assertEqual([],list(evidence.iterdir()))
+
+    def test_actual_product_audit_caller_records_failure_after_required_native_files(self):
+        runtime=self.root/'runtime';(runtime/'program/intl').mkdir(parents=True)
+        native=bytearray(512);native[:2]=b'MZ';struct.pack_into('<I',native,60,128);native[128:132]=b'PE\0\0'
+        struct.pack_into('<H',native,132,0x8664);struct.pack_into('<H',native,148,240);struct.pack_into('<H',native,152,0x20b)
+        for name in ['soffice.bin','python.exe','pyuno.pyd','ifbclient.dll','Engine12.dll','intl/fbintl.dll']:
+            (runtime/'program'/name).write_bytes(native)
+        bad=self.managed_pe_bytes();struct.pack_into('<I',bad,528,3);(runtime/'program/rejected.dll').write_bytes(bad)
+        evidence=self.root/'evidence';evidence.mkdir()
+        block=SOURCE.read_text().split("$receipt.stage='native-product-pe-audit';",1)[1].split('if($inventory.Count -eq 0)',1)[0]
+        self.ps(f"$instdir={quote(runtime)};$evidence={quote(evidence)};$Architecture='x64';$nativeRole='nativeX64';function Assert-NativeBuildTimeRemaining {{}};try {{\n"+block+"\nthrow 'Unexpected acceptance' } catch {if($_.Exception.Message -cne 'Managed DLL requires a foreign native architecture.'){throw}}")
+        proof=json.loads((evidence/'native-product-pe-failure.json').read_text())
+        self.assertEqual('program/rejected.dll',proof['path']);self.assertEqual(3,proof['clrFlags'])
+        self.assertEqual(['clr-32bit-required'],proof['rejectReasons'])
+
     def test_only_exact_authenticated_python_template_metadata_is_admitted(self):
         raw=self.ps("@(Get-PinnedPythonTemplates)|ConvertTo-Json -Compress")
         pins=json.loads(raw)
