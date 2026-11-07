@@ -289,23 +289,74 @@ def _source_x64_prerequisites(proof: dict) -> None:
         raise ValueError('Native source receipt finished outside its original workflow deadline')
 
 
+def _source_x64_plan(manifest: dict) -> dict:
+    """Independently reconstruct the finite source plan from reviewed metadata."""
+    def pin(value, after=None):
+        row=dict(path=archive_path(value['path']),beforeSha256=value['sha256'],
+                 afterSha256=value['afterSha256'] if after is None else after)
+        if not _source_digest(row['beforeSha256']) or not _source_digest(row['afterSha256']):
+            raise ValueError('x64 source plan requires exact source hashes')
+        for source,target in (('size','beforeBytes'),('afterSize','afterBytes')):
+            if source in value:
+                if not _source_positive(value[source]) or value[source] > 1024*1024:
+                    raise ValueError('x64 source plan byte bounds differ')
+                row[target]=value[source]
+        return row
+    loader=manifest.get('windowsFirebirdLoaderPath')
+    if (not isinstance(loader,dict) or set(loader) != {'path','size','sha256','afterSize','afterSha256','condition'}
+            or loader.get('condition') != 'WNT_X86_64'
+            or loader.get('path') != 'external/firebird/ExternalProject_firebird.mk'):
+        raise ValueError('x64 Firebird loader plan has an unknown source or condition')
+    winacc=manifest['winAccFocusOrder']
+    common=[pin(manifest['moduleBootstrap'])]
+    for source in winacc['sources']:
+        common.append(pin(source,winacc['afterSha256'] if source['path']==winacc['path'] else source['sha256']))
+    if (len(common) != 4 or common[1]['path'] != winacc['path']
+            or common[1]['beforeSha256'] != winacc['sha256'] or common[1].get('beforeBytes') != winacc['beforeBytes']):
+        raise ValueError('x64 WinAcc common source-plan identity differs')
+    common[1]['afterBytes']=winacc['afterBytes'];common.append(pin(loader))
+    guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
+    guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
+    guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
+    guarded=[pin(source) for source in guarded if source['path'] != loader['path']]
+    payload=winacc['patch'];payload_pin=dict(filename=payload['filename'],sha256=payload['sha256'])
+    if 'size' in payload:payload_pin['size']=payload['size']
+    plan=dict(recipeId='windows-x64-common-v2',recipe=manifest['nativeSourceRecipes']['windows-x64-common-v2'],
+        sources=common+guarded,armGuardedSources=guarded,sourceDependencies=[],payloads=[payload_pin])
+    digest=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
+    if digest != 'b279ee07849580d4397018a68f5253cd3f4bd7690f41f09c48e1f52142c9e3d1':
+        raise ValueError('x64 source plan differs from the reviewed canonical recipe')
+    return plan
+
+
+def _source_x64_loader_evidence(value) -> None:
+    if not isinstance(value,dict) or set(value) != {'original','effective'}:
+        raise ValueError('x64 Firebird loader evidence descriptors are incomplete')
+    paths={}
+    for name in ('original','effective'):
+        path=_source_windows_path(value[name])
+        archive_path('/'.join(path.parts[1:]))
+        if path.name != name+'-x64-ExternalProject_firebird.mk':
+            raise ValueError('x64 Firebird loader evidence basename differs')
+        paths[name]=path
+    if paths['original'].parent != paths['effective'].parent or not paths['original'].parent.name:
+        raise ValueError('x64 Firebird loader evidence must share one producer directory descriptor')
+
+
 def _source_x64_recipe(proof: dict) -> None:
     folder=Path(__file__).resolve().parent/'engine-build'
     raw=(folder/'source-build.json').read_bytes();manifest=json.loads(raw)
     if proof.get('sourcePortManifestSha256') != hashlib.sha256(raw).hexdigest():
         raise ValueError('x64 source patch manifest differs from reviewed consumer metadata')
-    recipe=proof.get('sourceRecipeProof')
+    plan=_source_x64_plan(manifest);recipe=proof.get('sourceRecipeProof')
     expected=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
         recipeId='windows-x64-common-v2',policySha256=proof['nativeTargetsSha256'],
         manifestSha256=proof['sourcePortManifestSha256'],
-        recipeSha256='d85a584577bea857fc58ae8afc30fe729190aa02f2fb414f670a5693bc5d23ec',
-        hookOrder=['moduleBootstrap','winAccFocusOrder'],nativeBuildVerified=False,
+        recipeSha256='b279ee07849580d4397018a68f5253cd3f4bd7690f41f09c48e1f52142c9e3d1',
+        hookOrder=['moduleBootstrap','firebirdLoaderPath','winAccFocusOrder'],nativeBuildVerified=False,
         fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
-    guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
-    guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
-    guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
-    expected['armGuardedSources']=[dict(path=item['path'],beforeSha256=item['sha256'],sha256=item['sha256'],unchanged=True)
-                                  for item in guarded]
+    expected['armGuardedSources']=[dict(path=item['path'],beforeSha256=item['beforeSha256'],sha256=item['beforeSha256'],unchanged=True)
+                                  for item in plan['armGuardedSources']]
     if not _source_exact(recipe, expected):
         raise ValueError('x64 source recipe or unchanged ARM-only source identities differ')
     pin=manifest['winAccFocusOrder'];patch=proof.get('winAccFocusOrderSourcePatch')
@@ -326,13 +377,21 @@ def _source_x64_recipe(proof: dict) -> None:
     if not _source_exact(patch.get('sourceFiles'), files):
         raise ValueError('x64 WinAcc unchanged dependency/patch identities differ')
     hooks=proof.get('sourceHooks');bootstrap=manifest['moduleBootstrap']
-    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','nativeBuildVerified','basePersistenceVerified'}
+    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','firebirdLoaderPath','nativeBuildVerified','basePersistenceVerified'}
             or hooks.get('kind') != 'native-windows-common-source-hooks' or hooks.get('architecture') != 'x64'
             or hooks.get('nativeBuildVerified') is not False or hooks.get('basePersistenceVerified') is not False
             or not isinstance(hooks.get('moduleBootstrap'),dict)
             or any(hooks['moduleBootstrap'].get(key) != value for key,value in
                 dict(path=bootstrap['path'],beforeSha256=bootstrap['sha256'],afterSha256=bootstrap['afterSha256']).items())):
         raise ValueError('x64 source hook sequence differs from reviewed common hooks')
+    loader=hooks.get('firebirdLoaderPath');pin=manifest['windowsFirebirdLoaderPath']
+    fields=dict(schemaVersion=1,kind='windows-firebird-loader-path-source-hook',path=pin['path'],condition='WNT_X86_64',
+        beforeBytes=pin['size'],afterBytes=pin['afterSize'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],
+        nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+    if (not isinstance(loader,dict) or set(loader) != set(fields)|{'evidence'}
+            or not _source_exact({key:loader[key] for key in fields},fields)):
+        raise ValueError('x64 Firebird loader source descriptor differs from the reviewed source-only hook')
+    _source_x64_loader_evidence(loader['evidence'])
 
 
 def _source_x64_retirement(base: dict) -> None:

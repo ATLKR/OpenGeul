@@ -495,8 +495,17 @@
       "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
       "hooks": [
         "moduleBootstrap",
+        "firebirdLoaderPath",
         "winAccFocusOrder"
       ]
     }
+  },
+  "windowsFirebirdLoaderPath": {
+    "path": "external/firebird/ExternalProject_firebird.mk",
+    "size": 4655,
+    "sha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
+    "afterSize": 4802,
+    "afterSha256": "3f1f9e9717a2246996963392bcdb6976d922d6000984ca926711ef388e702470",
+    "condition": "WNT_X86_64"
   }
 }

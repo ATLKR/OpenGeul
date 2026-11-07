@@ -241,13 +241,22 @@ def x64_source_build_fixture(root, *, runtime_templates=False):
     proof['sourceHooks']=dict(kind='native-windows-common-source-hooks',architecture='x64',nativeBuildVerified=False,
         basePersistenceVerified=False,moduleBootstrap=dict(path=bootstrap['path'],beforeSha256=bootstrap['sha256'],
             afterSha256=bootstrap['afterSha256'],evidence={}))
+    loader=manifest['windowsFirebirdLoaderPath']
+    proof['sourceHooks']['firebirdLoaderPath']=dict(schemaVersion=1,
+        kind='windows-firebird-loader-path-source-hook',path=loader['path'],condition='WNT_X86_64',
+        beforeBytes=loader['size'],afterBytes=loader['afterSize'],beforeSha256=loader['sha256'],
+        afterSha256=loader['afterSha256'],evidence=dict(
+            original='C:\\evidence\\source-recipe\\original-x64-ExternalProject_firebird.mk',
+            effective='C:\\evidence\\source-recipe\\effective-x64-ExternalProject_firebird.mk'),
+        nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
     guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
     guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
     guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
+    guarded=[item for item in guarded if item['path'] != loader['path']]
     proof['sourceRecipeProof']=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
         recipeId='windows-x64-common-v2',policySha256=policy_sha,manifestSha256=manifest_sha,
-        recipeSha256='d85a584577bea857fc58ae8afc30fe729190aa02f2fb414f670a5693bc5d23ec',
-        hookOrder=['moduleBootstrap','winAccFocusOrder'],nativeBuildVerified=False,fullEngineQualified=False,
+        recipeSha256='b279ee07849580d4397018a68f5253cd3f4bd7690f41f09c48e1f52142c9e3d1',
+        hookOrder=['moduleBootstrap','firebirdLoaderPath','winAccFocusOrder'],nativeBuildVerified=False,fullEngineQualified=False,
         acceptanceEligible=False,guiVerified=False,
         armGuardedSources=[dict(path=item['path'],beforeSha256=item['sha256'],sha256=item['sha256'],unchanged=True)
                            for item in guarded])
@@ -1254,6 +1263,78 @@ class NativeX64SourceAdmissionTests(unittest.TestCase):
             lambda p:p['installedRuntimeStage'].update(archiveCount=True),
             lambda p:p['installedRuntimeStage']['receipt'].update(bytes=0)]
         self.reject_mutations(mutations)
+
+    def test_v2_firebird_loader_receipt_has_three_hooks_and_twelve_unchanged_guards(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+            observed=module.validate_source_build_receipt(runtime,path,architecture='x64')
+            recipe=observed['sourceRecipeProof'];loader=observed['sourceHooks']['firebirdLoaderPath']
+            self.assertEqual(recipe['hookOrder'],['moduleBootstrap','firebirdLoaderPath','winAccFocusOrder'])
+            self.assertEqual(len(recipe['armGuardedSources']),12)
+            self.assertNotIn(loader['path'],[row['path'] for row in recipe['armGuardedSources']])
+            self.assertEqual((loader['beforeBytes'],loader['afterBytes']),(4655,4802))
+
+    def test_v2_pre_loader_recipe_cannot_claim_the_current_source_manifest(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+            proof['sourceHooks'].pop('firebirdLoaderPath')
+            recipe=proof['sourceRecipeProof'];recipe['hookOrder']=['moduleBootstrap','winAccFocusOrder']
+            recipe['recipeSha256']='d85a584577bea857fc58ae8afc30fe729190aa02f2fb414f670a5693bc5d23ec'
+            pin=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())['icuBuildPath']
+            recipe['armGuardedSources'].insert(2,dict(path=pin['path'],beforeSha256=pin['sha256'],sha256=pin['sha256'],unchanged=True))
+            pin_source_receipt(runtime,path,proof)
+            with self.assertRaises(ValueError):module.validate_source_build_receipt(runtime,path,architecture='x64')
+
+    def test_v2_loader_fields_and_flags_reject_missing_extra_or_coerced_claims(self):
+        def change(proof,key,value):proof['sourceHooks']['firebirdLoaderPath'][key]=value
+        mutations=[lambda p:p['sourceHooks'].pop('firebirdLoaderPath'),
+            lambda p:p['sourceHooks'].update(arm64Full={}),lambda p:p['sourceHooks'].update(architecture='arm64'),
+            lambda p:p['sourceHooks'].update(basePersistenceVerified=0),
+            lambda p:p['sourceHooks']['firebirdLoaderPath'].pop('beforeSha256'),
+            lambda p:change(p,'architecture','x64')]
+        values={'schemaVersion':True,'kind':'arm64-loader','path':'external/firebird/UnpackedTarball_firebird.mk',
+            'condition':'WNT_AARCH64','beforeBytes':'4655','afterBytes':4803,'beforeSha256':'0'*64,'afterSha256':'0'*64}
+        mutations += [lambda p,key=key,value=value:change(p,key,value) for key,value in values.items()]
+        for key in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
+            for value in (True,0):mutations.append(lambda p,key=key,value=value:change(p,key,value))
+        self.reject_mutations(mutations)
+
+    def test_v2_loader_evidence_is_only_a_fixed_absolute_producer_path_descriptor(self):
+        mutations=[]
+        variants=[None,{},dict(original='original-x64-ExternalProject_firebird.mk',effective='C:\\evidence\\effective-x64-ExternalProject_firebird.mk'),
+            dict(original='C:\\evidence\\original-x64-ExternalProject_firebird.mk',effective='D:\\other\\effective-x64-ExternalProject_firebird.mk'),
+            dict(original='C:\\evidence\\effective-x64-ExternalProject_firebird.mk',effective='C:\\evidence\\original-x64-ExternalProject_firebird.mk'),
+            dict(original='C:\\evidence\\original-x64-ExternalProject_firebird.mk',effective='C:\\evidence\\original-x64-ExternalProject_firebird.mk'),
+            dict(original='C:\\evidence\\..\\other\\original-x64-ExternalProject_firebird.mk',effective='C:\\other\\effective-x64-ExternalProject_firebird.mk'),
+            dict(original='C:\\evidence:alternate\\original-x64-ExternalProject_firebird.mk',effective='C:\\evidence:alternate\\effective-x64-ExternalProject_firebird.mk'),
+            dict(original='C:\\evidence\\original-x64-ExternalProject_firebird.mk',effective='C:\\evidence\\effective-x64-ExternalProject_firebird.mk',runtimeMember=True)]
+        for value in variants:
+            mutations.append(lambda p,value=value:p['sourceHooks']['firebirdLoaderPath'].update(evidence=value))
+        self.reject_mutations(mutations)
+
+    def test_v2_loader_recipe_requires_exact_ordered_guard_rows_and_source_only_flags(self):
+        mutations=[lambda p:p['sourceRecipeProof']['armGuardedSources'].pop(),
+            lambda p:p['sourceRecipeProof']['armGuardedSources'].append(copy.deepcopy(p['sourceRecipeProof']['armGuardedSources'][0])),
+            lambda p:p['sourceRecipeProof']['armGuardedSources'].reverse(),
+            lambda p:p['sourceRecipeProof']['armGuardedSources'][0].update(path='external/firebird/ExternalProject_firebird.mk'),
+            lambda p:p['sourceRecipeProof']['armGuardedSources'][0].update(unchanged=1),
+            lambda p:p['sourceRecipeProof'].update(recipeSha256='0'*64),
+            lambda p:p['sourceRecipeProof'].update(schemaVersion=True),
+            lambda p:p['sourceRecipeProof'].update(guiVerified=0)]
+        self.reject_mutations(mutations)
+
+    def test_v2_loader_source_plan_is_independently_reconstructed_from_fixed_metadata(self):
+        module=implementation();manifest=json.loads((ROOT/'suite/engine-build/source-build.json').read_text())
+        plan=module._source_x64_plan(manifest)
+        self.assertEqual(len(plan['sources'])-len(plan['armGuardedSources']),5)
+        self.assertEqual(len(plan['armGuardedSources']),12)
+        self.assertEqual(plan['sources'][4]['path'],'external/firebird/ExternalProject_firebird.mk')
+        canonical=json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(),'b279ee07849580d4397018a68f5253cd3f4bd7690f41f09c48e1f52142c9e3d1')
+        manifest['windowsFirebirdLoaderPath']['condition']='WNT_AMD64'
+        with self.assertRaises(ValueError):module._source_x64_plan(manifest)
 
     def test_v2_recipe_and_winacc_source_identity_cannot_be_omitted_or_relabelled(self):
         mutations=[lambda p:p.pop('sourceRecipeProof'),lambda p:p.pop('winAccFocusOrderSourcePatch'),
