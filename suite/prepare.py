@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
@@ -94,14 +96,447 @@ def archive_path(name: str) -> str:
     return name
 
 
+def _source_build_target(architecture: str) -> dict:
+    """Select reviewed policy from fixed tracked bytes, never from a receipt."""
+    if not isinstance(architecture,str) or architecture not in NATIVE_MACHINES:
+        raise ValueError('Unsupported native source-build architecture')
+    folder = Path(__file__).resolve().parent/'engine-build'
+    descriptor = dict(filename='native-targets.json', size=1987,
+        sha256='ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc')
+    check_asset(descriptor, folder/'native-targets.json')
+    try:
+        from suite.payload import _json_bytes
+    except ModuleNotFoundError:
+        from payload import _json_bytes
+    policy = _json_bytes((folder/'native-targets.json').read_bytes(), 'native target policy')
+    manifest = _json_bytes((folder/'source-build.json').read_bytes(), 'native source manifest')
+    if (type(policy.get('schemaVersion')) is not int or policy['schemaVersion'] != 1
+            or set(policy.get('targets', {})) != {'arm64', 'x64'}
+            or manifest.get('nativeTargets') != descriptor):
+        raise ValueError('Native source target policy differs from reviewed inputs')
+    return policy['targets'][architecture]
+
+
+def _source_digest(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def _source_positive(value) -> bool:
+    return type(value) is int and value > 0
+
+
+def _source_windows_path(value) -> PureWindowsPath:
+    if (not isinstance(value, str) or not re.match(r'^[A-Za-z]:[\\/]', value)
+            or any(ord(char) < 32 for char in value) or any(part in ('.', '..') for part in re.split(r'[\\/]', value))):
+        raise ValueError('Source proof requires an absolute unambiguous Windows path')
+    return PureWindowsPath(value)
+
+
+def _source_file_identity(record, *, machine=None, role=None) -> None:
+    if (not isinstance(record, dict) or not _source_positive(record.get('size'))
+            or not _source_digest(record.get('sha256'))):
+        raise ValueError('Source proof file size/hash identity is incomplete')
+    _source_windows_path(record.get('path'))
+    if machine is not None and (type(record.get('machine')) is not int or record['machine'] != machine):
+        raise ValueError('Source proof native file machine differs')
+    if role is not None and record.get('role') != role:
+        raise ValueError('Source proof file role differs')
+
+
+def _source_version(value, major=None) -> tuple:
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9]+(?:\.[0-9]+){2,3}', value):
+        raise ValueError('Native toolchain version is invalid')
+    parts=tuple(map(int,value.split('.')))
+    parts=parts+(0,)*(4-len(parts))
+    if major is not None and parts[0] != major:
+        raise ValueError('Native toolchain version profile differs')
+    return parts
+
+
+def _source_exact(actual, expected) -> bool:
+    if type(actual) is not type(expected): return False
+    if isinstance(expected,dict):
+        return actual.keys() == expected.keys() and all(_source_exact(actual[key],value) for key,value in expected.items())
+    if isinstance(expected,list):
+        return len(actual) == len(expected) and all(_source_exact(a,b) for a,b in zip(actual,expected))
+    return actual == expected
+
+
+def _source_x64_preflight(proof: dict) -> None:
+    preflight=proof.get('nativePreflight'); configured=proof.get('configuredToolchain')
+    if (not isinstance(preflight,dict) or type(preflight.get('schemaVersion')) is not int
+            or preflight['schemaVersion'] != 1 or preflight.get('passed') is not True
+            or preflight.get('architecture') != 'x64' or not isinstance(configured,dict)
+            or configured.get('matched') is not True or configured.get('toolset') != 'v143'):
+        raise ValueError('x64 source build lacks native toolchain preflight/configuration binding')
+    compiler=preflight.get('compiler');sdk=preflight.get('sdk')
+    if (not isinstance(compiler,dict) or compiler.get('architecture') != 'x64'
+            or compiler.get('compilerYear') != '2022' or compiler.get('toolset') != 'v143'
+            or not isinstance(sdk,dict) or sdk.get('architecture') != 'x64'):
+        raise ValueError('x64 source build requires the reviewed VS2022 native profile')
+    _source_version(compiler.get('installationVersion'),17)
+    root=_source_windows_path(compiler.get('compilerRoot'))
+    installation=_source_windows_path(compiler.get('installationPath'))
+    directory=_source_version(compiler.get('compilerToolsVersion'),14)
+    if root != installation/'VC/Tools/MSVC'/compiler['compilerToolsVersion']:
+        raise ValueError('Selected native compiler root differs from installation/version')
+    tools=compiler.get('tools')
+    if not isinstance(tools,dict) or set(tools) != {'cl','link','lib'}:
+        raise ValueError('Native compiler tool family is incomplete')
+    floors=[directory]
+    for name,item in tools.items():
+        _source_file_identity(item,machine=0x8664,role='nativeCompilerTool')
+        version=_source_version(item.get('version'),19 if name=='cl' else 14)
+        if (item.get('tool') != name or _source_windows_path(item['path']) != root/('bin/Hostx64/x64/'+name+'.exe')
+                or version[1] != directory[1] or version[2] < directory[2]):
+            raise ValueError('Native compiler tool path/resource version differs')
+        floors.append((14,*version[1:]))
+    if _source_version(compiler.get('minimumRuntimeVersion'),14) != max(floors):
+        raise ValueError('Native compiler/runtime floor is not the maximum observed version')
+    sdk_root=_source_windows_path(sdk.get('root'));sdk_version=sdk.get('version')
+    if (not isinstance(sdk_version,str) or not re.fullmatch(r'10\.0\.[0-9]+\.0',sdk_version)
+            or _source_version(sdk_version) < (10,0,20348,0)):
+        raise ValueError('Native SDK version differs from the source-supported profile')
+    expected={sdk_root/relative for relative in
+        (f'Include/{sdk_version}/um/Windows.h',f'Include/{sdk_version}/shared/sdkddkver.h',
+         f'Include/{sdk_version}/ucrt/stdio.h',f'Lib/{sdk_version}/um/x64/kernel32.lib',
+         f'Lib/{sdk_version}/ucrt/x64/ucrt.lib')}
+    files=sdk.get('files')
+    if not isinstance(files,list) or len(files) != 5:
+        raise ValueError('Native SDK input family is incomplete')
+    for item in files:_source_file_identity(item)
+    if {_source_windows_path(item['path']) for item in files} != expected:
+        raise ValueError('Native SDK input paths differ')
+    resource=sdk.get('resourceCompiler');_source_file_identity(resource,machine=0x8664,role='nativeX64')
+    if _source_windows_path(resource['path']) != sdk_root/f'bin/{sdk_version}/x64/rc.exe':
+        raise ValueError('Native resource compiler differs from selected SDK')
+    if (_source_windows_path(configured.get('compilerRoot')) != root
+            or _source_windows_path(configured.get('sdkRoot')) != sdk_root
+            or configured.get('sdkVersion') != sdk_version):
+        raise ValueError('Configured native toolchain differs from actual preflight')
+    config=proof['configuration']
+    if config.get('VCTOOLSET') != 'v143' or config.get('VCVER') not in ('17.0','17.14'):
+        raise ValueError('Generated native configuration differs from fixed compiler profile')
+    # COMPATH/CC and SDK values in config_host.mk can be Cygwin/short paths.
+    # The producer resolves those against this canonical independent binding.
+    archive=preflight.get('archive');_source_file_identity(archive)
+    if archive.get('machines') != [0x8664] or any(type(value) is not int for value in archive['machines']):
+        raise ValueError('Native archive probe contains foreign COFF members')
+    _source_file_identity(preflight.get('executable'),machine=0x8664,role='nativeX64')
+    process=preflight.get('nativeProcess')
+    cl=_source_version(tools['cl']['version'])
+    if (not isinstance(process,dict) or type(process.get('processMachine')) is not int or process['processMachine'] != 0
+            or type(process.get('nativeMachine')) is not int or process['nativeMachine'] != 0x8664
+            or type(process.get('libraryValue')) is not int or process['libraryValue'] != 42
+            or type(process.get('compilerFullVersion')) is not int
+            or process['compilerFullVersion'] != cl[0]*10000000+cl[1]*100000+cl[2]):
+        raise ValueError('Native compile/archive/link/run witness differs from selected compiler')
+    commands=preflight.get('commands')
+    if not isinstance(commands,dict) or set(commands) != {'member','probe','archive','link','run'}:
+        raise ValueError('Native command proof is incomplete')
+    for item in commands.values():
+        if not isinstance(item,dict) or type(item.get('exitCode')) is not int or item['exitCode'] != 0:
+            raise ValueError('Native preflight command did not succeed')
+        for key in ('receipt','stdout','stderr'):_source_windows_path(item.get(key))
+
+
+def _source_x64_prerequisites(proof: dict) -> None:
+    """Replay retained native Java witnesses and the original workflow deadline."""
+    java=proof.get('javaTools');jdk=java.get('jdk') if isinstance(java,dict) else None
+    if (not isinstance(jdk,dict) or not _source_digest(jdk.get('releaseSha256'))
+            or not isinstance(jdk.get('javaVersion'),str) or not re.fullmatch(r'[0-9]+[^\r\n\x00]*',jdk['javaVersion'])
+            or int(re.match(r'[0-9]+',jdk['javaVersion'])[0]) < 8
+            or jdk.get('selection') not in ('explicit','JAVA_HOME_21_X64')):
+        raise ValueError('x64 source build lacks actual installed native Java prerequisites')
+    home=_source_windows_path(jdk.get('home'))
+    native=jdk.get('nativeFiles');libraries=jdk.get('importLibraries')
+    if not isinstance(native,list) or len(native) != 4 or not isinstance(libraries,list) or len(libraries) != 2:
+        raise ValueError('Native JDK/JNI input family is incomplete')
+    for item in native:_source_file_identity(item,machine=0x8664,role='nativeX64')
+    for item in libraries:
+        _source_file_identity(item)
+        if item.get('machines') != [0x8664] or any(type(value) is not int for value in item['machines']):
+            raise ValueError('JNI import library contains a foreign COFF member')
+    if ({_source_windows_path(item['path']) for item in native} !=
+            {home/name for name in ('bin/java.exe','bin/javac.exe','bin/server/jvm.dll','bin/jawt.dll')}
+            or {_source_windows_path(item['path']) for item in libraries} != {home/'lib/jvm.lib',home/'lib/jawt.lib'}):
+        raise ValueError('Native JDK/JNI paths differ from the selected installation')
+    budget=proof.get('buildBudget')
+    if (not isinstance(budget,dict) or type(budget.get('maximumMinutes')) not in (int,float)
+            or budget['maximumMinutes'] != 330 or type(budget.get('timeoutMilliseconds')) is not int
+            or not 0 < budget['timeoutMilliseconds'] <= 330*60_000
+            or type(budget.get('elapsedSeconds')) not in (int,float)
+            or not math.isfinite(budget['elapsedSeconds']) or not 0 <= budget['elapsedSeconds']*1000 <= budget['timeoutMilliseconds']):
+        raise ValueError('x64 source build exceeded or reset its original absolute budget')
+    def stamp(value):
+        if not isinstance(value,str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z',value):
+            raise ValueError('Native source budget timestamp is not an invariant UTC roundtrip')
+        return datetime.fromisoformat(value)
+    started,deadline,workflow=map(stamp,(budget.get('startedUtc'),budget.get('deadlineUtc'),budget.get('workflowDeadlineUtc')))
+    finished=proof.get('finishedUtc');stamp(finished)
+    if (not 0 < (deadline-started).total_seconds()*1000 <= budget['timeoutMilliseconds']+1
+            # Fixed UTC roundtrip strings preserve the seventh fractional digit
+            # that Python datetime truncates to microseconds.
+            or budget['deadlineUtc'] > budget['workflowDeadlineUtc']
+            or not budget['startedUtc'] <= finished <= budget['deadlineUtc']):
+        raise ValueError('Native source receipt finished outside its original workflow deadline')
+
+
+def _source_x64_recipe(proof: dict) -> None:
+    folder=Path(__file__).resolve().parent/'engine-build'
+    raw=(folder/'source-build.json').read_bytes();manifest=json.loads(raw)
+    if proof.get('sourcePortManifestSha256') != hashlib.sha256(raw).hexdigest():
+        raise ValueError('x64 source patch manifest differs from reviewed consumer metadata')
+    recipe=proof.get('sourceRecipeProof')
+    expected=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
+        recipeId='windows-x64-common-v2',policySha256=proof['nativeTargetsSha256'],
+        manifestSha256=proof['sourcePortManifestSha256'],
+        recipeSha256='d85a584577bea857fc58ae8afc30fe729190aa02f2fb414f670a5693bc5d23ec',
+        hookOrder=['moduleBootstrap','winAccFocusOrder'],nativeBuildVerified=False,
+        fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+    guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
+    guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
+    guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
+    expected['armGuardedSources']=[dict(path=item['path'],beforeSha256=item['sha256'],sha256=item['sha256'],unchanged=True)
+                                  for item in guarded]
+    if not _source_exact(recipe, expected):
+        raise ValueError('x64 source recipe or unchanged ARM-only source identities differ')
+    pin=manifest['winAccFocusOrder'];patch=proof.get('winAccFocusOrderSourcePatch')
+    source=proof.get('sourcePin');upstream=manifest['libreoffice']
+    if (not isinstance(source,dict) or source.get('coreCommit') != pin['coreCommit']
+            or any(source.get(key) != upstream[key] for key in ('url','sha256','version'))):
+        raise ValueError('x64 source recipe differs from its authenticated upstream core/archive')
+    fields=dict(schemaVersion=1,kind='winacc-focus-order-source-patch',passed=True,coreCommit=pin['coreCommit'],
+        path=pin['path'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],patchSha256=pin['patch']['sha256'],
+        nativeBuildVerified=False,guiVerified=False,currentCiRootCauseConfirmed=False)
+    if (not isinstance(patch,dict) or any(patch.get(key) != value or type(patch.get(key)) is not type(value)
+            for key,value in fields.items())):
+        raise ValueError('x64 WinAcc source patch differs from reviewed recipe')
+    files=[dict(path=item['path'],beforeBytes=item['size'],
+        afterBytes=pin['afterBytes'] if item['path']==pin['path'] else item['size'],
+        beforeSha256=item['sha256'],afterSha256=pin['afterSha256'] if item['path']==pin['path'] else item['sha256'])
+        for item in pin['sources']]
+    if not _source_exact(patch.get('sourceFiles'), files):
+        raise ValueError('x64 WinAcc unchanged dependency/patch identities differ')
+    hooks=proof.get('sourceHooks');bootstrap=manifest['moduleBootstrap']
+    if (not isinstance(hooks,dict) or set(hooks) != {'kind','architecture','moduleBootstrap','nativeBuildVerified','basePersistenceVerified'}
+            or hooks.get('kind') != 'native-windows-common-source-hooks' or hooks.get('architecture') != 'x64'
+            or hooks.get('nativeBuildVerified') is not False or hooks.get('basePersistenceVerified') is not False
+            or not isinstance(hooks.get('moduleBootstrap'),dict)
+            or any(hooks['moduleBootstrap'].get(key) != value for key,value in
+                dict(path=bootstrap['path'],beforeSha256=bootstrap['sha256'],afterSha256=bootstrap['afterSha256']).items())):
+        raise ValueError('x64 source hook sequence differs from reviewed common hooks')
+
+
+def _source_x64_retirement(base: dict) -> None:
+    rows=base.get('retirement');hosts=base['nativeProcesses'][1:]
+    if not isinstance(rows,list) or len(rows) != 2:
+        raise ValueError('x64 Base original process retirement is missing')
+    for row,host in zip(rows,hosts):
+        if not isinstance(row,dict) or row.get('phase') != host['phase'] or row.get('handlesClosed') is not True:
+            raise ValueError('x64 Base retained handle retirement differs')
+        cleanup=row.get('cleanup')
+        if (not isinstance(cleanup,dict) or type(cleanup.get('schemaVersion')) is not int or cleanup['schemaVersion'] != 1
+                or cleanup.get('kind') != 'owned-engine-job-cleanup' or cleanup.get('gracefulQualified') is not True
+                or cleanup.get('forcedTermination') is not False or cleanup.get('jobEmptyVerified') is not True
+                or cleanup.get('finalJobPids') != [] or cleanup.get('errors') != []
+                or type(cleanup.get('launcherExitCode')) is not int or cleanup['launcherExitCode'] != 0
+                or not _source_positive(cleanup.get('jobHandleValue'))
+                or _source_windows_path(cleanup.get('expectedEngineImage')) != _source_windows_path(host['image'])):
+            raise ValueError('x64 Base original owned job did not retire gracefully')
+        initial=cleanup.get('initialMembers');final=cleanup.get('finalMembers')
+        if not isinstance(initial,list) or not initial or not isinstance(final,list) or not final:
+            raise ValueError('x64 Base retained original member handles are incomplete')
+        final_identities=set()
+        for member in final:
+            if (not isinstance(member,dict) or any(not _source_positive(member.get(key)) for key in ('pid','creationTime','handleValue'))
+                    or member.get('error') or member.get('alive') is not False
+                    or type(member.get('exitCode')) is not int or member['exitCode'] != 0):
+                raise ValueError('x64 Base discovered member exit is unverified')
+            key=(member['pid'],member['creationTime'],member['handleValue'],_source_windows_path(member.get('image')))
+            if key in final_identities:raise ValueError('x64 Base final member identity is duplicated')
+            final_identities.add(key)
+        identities=set();found=False
+        for before in initial:
+            if (not isinstance(before,dict) or any(not _source_positive(before.get(key)) for key in ('pid','creationTime','handleValue'))
+                    or before.get('error') or type(before.get('alive')) is not bool or type(before.get('exitCode')) is not int):
+                raise ValueError('x64 Base original member identity is invalid')
+            image=_source_windows_path(before.get('image'))
+            key=(before['pid'],before['creationTime'],before['handleValue'],image)
+            if key in identities:raise ValueError('x64 Base retained member aliases another identity')
+            identities.add(key)
+            matches=[item for item in final if isinstance(item,dict)
+                and (item.get('pid'),item.get('creationTime'),item.get('handleValue'),_source_windows_path(item.get('image'))) == key]
+            if len(matches) != 1 or matches[0].get('alive') is not False or matches[0].get('error'):
+                raise ValueError('x64 Base original retained member exit is unverified')
+            exit_code=matches[0].get('exitCode')
+            if type(exit_code) is not int or exit_code != 0:
+                raise ValueError('x64 Base original member exit code differs')
+            found |= before['alive'] is True and key[:2] == (host['pid'],host['creationTime']) and image == _source_windows_path(host['image'])
+        if not found:raise ValueError('x64 Base retirement lacks the independently observed engine generation')
+
+
+def _source_python_templates() -> dict:
+    try:
+        from suite.payload import COMPANION_PE_ADMISSIONS
+    except ModuleNotFoundError:
+        from payload import COMPANION_PE_ADMISSIONS
+    return {name.removeprefix('Office/'):pin for name,pin in COMPANION_PE_ADMISSIONS.items()
+            if pin['role']=='pythonLauncherTemplate'}
+
+
+def _source_x64_inventory(proof: dict) -> dict:
+    root=_source_windows_path(proof['appLocalCrt']['programDirectory']).parent
+    inventory=proof.get('productInventory');templates=_source_python_templates()
+    if not isinstance(inventory,list) or not 0 < len(inventory) <= 100_000:
+        raise ValueError('x64 source product inventory is missing or exceeds bounds')
+    result={};counts=dict(nativeX64=0,managedAnyCpu=0,pythonLauncherTemplate=0)
+    for record in inventory:
+        _source_file_identity(record)
+        try:name=archive_path(_source_windows_path(record['path']).relative_to(root).as_posix())
+        except ValueError:raise ValueError('x64 source product escaped its qualified runtime root') from None
+        if name.casefold() in result:raise ValueError('x64 source product inventory path alias')
+        role=record.get('role');machine=record.get('machine')
+        if type(machine) is not int or role not in counts:
+            raise ValueError('x64 source product role/machine is invalid')
+        if (role=='nativeX64' and machine != 0x8664 or role=='managedAnyCpu' and machine != 0x14c
+                or role=='pythonLauncherTemplate' and (name not in templates or
+                    any(record.get(key) != templates[name][key] for key in ('machine','role','sha256')))):
+            raise ValueError('x64 source product native/managed/pinned template identity differs')
+        result[name.casefold()]=(name,record);counts[role]+=1
+    if (any(type(proof.get(key)) is not int or proof[key] != value for key,value in
+            dict(productPeCount=len(inventory),nativePeCount=counts['nativeX64'],
+                 managedAnyCpuCount=counts['managedAnyCpu'],pinnedTemplateCount=counts['pythonLauncherTemplate']).items())
+            or {name for name,record in result.values() if record['role']=='pythonLauncherTemplate'} != set(templates)):
+        raise ValueError('x64 source product counts/template family are incomplete')
+    if proof.get('crtImportClosure',{}).get('checkedPeCount') != counts['nativeX64']:
+        raise ValueError('x64 source import closure does not cover the full native PE inventory')
+    for crt in proof['crtPreflight']['files']:
+        item=result.get(('program/'+crt['name']).casefold())
+        if item is None or any(item[1].get(key) != crt.get(key) for key in ('machine','size','sha256')):
+            raise ValueError('x64 source CRT bytes differ from the full native PE inventory')
+    critical=('soffice.exe','soffice.bin','python.exe','pyuno.pyd','ifbclient.dll','Engine12.dll','intl/fbintl.dll','winaccessibility.dll')
+    for relative in critical:
+        item=result.get(('program/'+relative).casefold())
+        if item is None or item[0] != 'program/'+relative or item[1]['role'] != 'nativeX64':
+            raise ValueError('x64 source critical runtime file is missing or foreign')
+    winacc=proof.get('winAccBinary');record=result['program/winaccessibility.dll'][1]
+    if (not isinstance(winacc,dict) or winacc.get('path') != 'program/winaccessibility.dll'
+            or any(winacc.get(key) != record.get(key) for key in ('machine','role','size','sha256','imports'))):
+        raise ValueError('x64 WinAcc native identity differs from actual product inventory')
+    imports=winacc.get('imports')
+    if not isinstance(imports,dict) or set(imports) != {'normal','delay'} or not imports['normal']:
+        raise ValueError('x64 WinAcc normal/delay imports are incomplete')
+    for values in imports.values():
+        if (not isinstance(values,list) or values != sorted(set(values))
+                or any(not isinstance(value,str) or not re.fullmatch(r'[a-z0-9_.-]+\.dll',value) for value in values)):
+            raise ValueError('x64 WinAcc import names are malformed or aliased')
+    return result
+
+
+def _source_build_x64(proof: dict, runtime: dict, target: dict) -> None:
+    binding=proof.get('workflowBinding')
+    expected=dict(workflow=target['workflow'],workflowRef='ATLKR/OpenGeul/'+target['workflow']+'@'+target['ref'],
+        ref=target['ref'],job=target['job'],sourceRun=proof['sourceRun'],runAttempt=1,
+        sourceCommit=proof['sourceCommit'],sourceTree=proof['sourceTree'])
+    if (proof.get('acceptanceEligible') is not True or type(proof.get('runAttempt')) is not int or proof['runAttempt'] != 1
+            or not _source_positive(proof.get('host',{}).get('controllerPid'))
+            or proof.get('nativeTargetsSha256') != 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
+            or not _source_digest(proof.get('configurationSha256')) or not _source_digest(proof.get('configureArgumentsSha256'))
+            or proof.get('sourceRecipeChecksExecuted') is not True or binding != expected
+            or not isinstance(binding,dict) or any(type(binding[key]) is not type(value) for key,value in expected.items())):
+        raise ValueError('x64 v2 qualification/source/workflow binding is incomplete')
+    if _source_windows_path(proof['artifact'].get('path')).name != target['archive']:
+        raise ValueError('x64 qualified archive name differs from its fixed target policy')
+    _source_x64_preflight(proof)
+    _source_x64_prerequisites(proof)
+    _source_x64_recipe(proof)
+    _source_x64_retirement(proof['baseProof'])
+    _source_x64_inventory(proof)
+    external=proof.get('externalSources');stage=proof.get('installedRuntimeStage')
+    if (not isinstance(external,dict) or type(external.get('schemaVersion')) is not int or external['schemaVersion'] != 1
+            or external.get('pythonSourceVerified') is not True
+            or not isinstance(external.get('archives'),list) or not external['archives']
+            or not isinstance(external.get('embeddedPythonWheels'),list) or not external['embeddedPythonWheels']
+            or not isinstance(stage,dict) or stage.get('passed') is not True
+            or stage.get('requiredHelpLanguages') != ['en-US','ko']
+            or not _source_positive(stage.get('fileCount')) or stage['fileCount'] < proof['productPeCount']
+            or not _source_positive(stage.get('archiveCount')) or stage['archiveCount'] != 3
+            or _source_windows_path(stage.get('runtimeRoot')) != _source_windows_path(proof['appLocalCrt']['programDirectory']).parent):
+        raise ValueError('x64 source archive/staged runtime provenance is incomplete')
+    names=set();python=False
+    for record in external['archives']:
+        if (not isinstance(record,dict) or not isinstance(record.get('filename'),str)
+                or '/' in record['filename'] or '\\' in record['filename']
+                or archive_path(record['filename']).casefold() in names
+                or not _source_positive(record.get('size')) or not _source_digest(record.get('sha256'))
+                or not isinstance(record.get('pinVariable'),str) or not record['pinVariable']):
+            raise ValueError('x64 authenticated external source inventory is malformed or aliased')
+        names.add(record['filename'].casefold());python |= record['pinVariable']=='PYTHON_TARBALL'
+    if not python:raise ValueError('x64 Python source archive lacks authenticated download-list provenance')
+    names=set()
+    for record in external['embeddedPythonWheels']:
+        if (not isinstance(record,dict) or not isinstance(record.get('path'),str)
+                or not record['path'].endswith('.whl') or archive_path(record['path']).casefold() in names
+                or not _source_positive(record.get('size')) or not _source_digest(record.get('sha256'))
+                or record.get('provenance') != 'unpacked authenticated Python source plus source-controlled patches'):
+            raise ValueError('x64 bundled Python wheel source inventory is malformed or aliased')
+        names.add(record['path'].casefold())
+    reference=stage.get('receipt')
+    if (not isinstance(reference,dict) or set(reference) != {'path','bytes','sha256'}
+            or not _source_positive(reference.get('bytes')) or reference['bytes'] > 32*1024*1024
+            or not _source_digest(reference.get('sha256'))):
+        raise ValueError('x64 installed source runtime stage receipt identity is incomplete')
+    _source_windows_path(reference.get('path'))
+
+
+def _source_x64_runtime(runtime_root: Path, proof: dict) -> None:
+    """Replay every PE against the authenticated producer, including disguised PEs."""
+    expected=_source_x64_inventory(proof);templates=_source_python_templates();actual=set()
+    try:
+        from suite.payload import _pe
+        from suite.pe_imports import read_pe_imports
+    except ModuleNotFoundError:
+        from payload import _pe
+        from pe_imports import read_pe_imports
+    for path in runtime_root.rglob('*'):
+        info=path.lstat()
+        if path.is_symlink() or getattr(info,'st_file_attributes',0)&0x400:
+            raise ValueError('x64 source runtime contains a linked path')
+        if stat.S_ISDIR(info.st_mode):continue
+        if not stat.S_ISREG(info.st_mode):raise ValueError('x64 source runtime contains a nonregular path')
+        with path.open('rb') as stream:magic=stream.read(2)
+        name=path.relative_to(runtime_root).as_posix();key=name.casefold()
+        if magic != b'MZ' and path.suffix.lower() not in ('.exe','.dll','.pyd') and name != 'program/soffice.bin':continue
+        if key in actual or key not in expected or expected[key][0] != name:
+            raise ValueError('x64 source runtime PE was added, renamed or case aliased')
+        actual.add(key);record=expected[key][1]
+        check_asset(record,path)
+        _pe(path,companion=templates.get(name) if record['role']=='pythonLauncherTemplate' else None,architecture='x64')
+        with path.open('rb') as stream:
+            stream.seek(60);offset=struct.unpack('<I',stream.read(4))[0];stream.seek(offset+4)
+            machine=struct.unpack('<H',stream.read(2))[0]
+        if machine != record['machine']:
+            raise ValueError('x64 source runtime PE machine differs from producer inventory')
+        if name=='program/winaccessibility.dll':
+            with path.open('rb') as stream:
+                stream.seek(offset+22);flags=struct.unpack('<H',stream.read(2))[0]
+            imports={key:list(values) for key,values in read_pe_imports(path).items()}
+            if not flags&0x2000 or imports != proof['winAccBinary']['imports']:
+                raise ValueError('x64 WinAcc DLL/import bytes differ from authenticated source proof')
+    if actual != expected.keys():
+        raise ValueError('x64 source runtime lacks inventoried native/managed/template PE bytes')
+
+
 def validate_source_build_lock(runtime: dict, *, architecture: str) -> dict:
     """Require immutable external pins; a receipt never authorizes itself."""
     def digest(value):
         return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
     def positive(value):
         return type(value) is int and value > 0
+    if not isinstance(runtime,dict):raise ValueError('Source-build runtime lock must be an object')
     build = runtime.get('sourceBuild')
-    if (architecture != 'arm64' or runtime.get('format') != 'source-built-zip'
+    if (not isinstance(architecture,str) or architecture not in NATIVE_MACHINES or runtime.get('format') != 'source-built-zip'
             or not isinstance(build, dict) or not positive(runtime.get('size'))
             or not digest(runtime.get('sha256'))
             or not isinstance(runtime.get('sourceCoreCommit'), str)
@@ -111,7 +546,7 @@ def validate_source_build_lock(runtime: dict, *, architecture: str) -> dict:
             or any(not digest(build.get(key)) for key in
                    ('receiptSha256', 'artifactSha256', 'patchManifestSha256'))
             or any(not positive(build.get(key)) for key in ('runId', 'artifactId'))):
-        raise ValueError('Complete ARM64 source-build lock and externally pinned receipt are required')
+        raise ValueError('Complete native source-build lock and externally pinned receipt are required')
     for key in ('url', 'sourceUrl'):
         url = runtime.get(key)
         try:
@@ -123,6 +558,13 @@ def validate_source_build_lock(runtime: dict, *, architecture: str) -> dict:
         if not valid: raise ValueError('Source-build lock requires complete HTTPS provenance')
     if not digest(runtime.get('sourceSha256')) or not isinstance(runtime.get('version'), str):
         raise ValueError('Source-build lock requires authenticated upstream source provenance')
+    if architecture == 'x64':
+        target=_source_build_target(architecture)
+        if (not isinstance(build.get('sourceTree'),str) or not re.fullmatch(r'[0-9a-f]{40}',build['sourceTree'])
+                or not digest(build.get('driverSha256')) or not digest(build.get('nativeTargetsSha256'))
+                or build['nativeTargetsSha256'] != 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
+                or target['proofVersion'] != 2):
+            raise ValueError('x64 v2 source-build lock requires independent source tree, driver and reviewed policy pins')
     return build
 
 
@@ -138,15 +580,18 @@ def validate_source_build_receipt(runtime: dict, receipt: Path, *, architecture:
     except ModuleNotFoundError:
         from payload import _json_bytes
     proof = _json_bytes(receipt.read_bytes(), 'source-build receipt')
+    target = _source_build_target(architecture) if architecture == 'x64' else None
+    machine = native_machine(architecture)
+    version = 2 if architecture == 'x64' else 1
     def positive(value):
         return type(value) is int and value > 0
     def native(value):
         return (isinstance(value, dict) and type(value.get('processMachine')) is int
                 and value['processMachine'] == 0 and type(value.get('nativeMachine')) is int
-                and value['nativeMachine'] == 0xaa64)
-    if (type(proof.get('schemaVersion')) is not int or proof['schemaVersion'] != 1
+                and value['nativeMachine'] == machine)
+    if (type(proof.get('schemaVersion')) is not int or proof['schemaVersion'] != version
             or proof.get('kind') != 'native-office-engine-source-build'
-            or proof.get('phase') != 'Full' or proof.get('architecture') != 'arm64'
+            or proof.get('phase') != 'Full' or proof.get('architecture') != architecture
             or proof.get('passed') is not True or proof.get('fullEngineQualified') is not True
             or proof.get('guiVerified') is not False or proof.get('stage') != 'complete'
             or proof.get('status') != 'native-engine-source-build-qualified'
@@ -159,7 +604,7 @@ def validate_source_build_receipt(runtime: dict, receipt: Path, *, architecture:
             or not isinstance(proof.get('driverSha256'), str)
             or not re.fullmatch(r'[0-9a-f]{64}', proof['driverSha256'])
             or not native(proof.get('host')) or proof['host'].get('isWindows') is not True):
-        raise ValueError('Source-build receipt does not qualify an authenticated full native ARM64 engine')
+        raise ValueError('Source-build receipt does not qualify an authenticated full native engine')
     source = proof.get('sourcePin'); artifact = proof.get('artifact'); config = proof.get('configuration')
     if (not isinstance(source, dict) or any(source.get(a) != runtime.get(b) for a, b in
             (('url', 'sourceUrl'), ('sha256', 'sourceSha256'), ('version', 'version')))
@@ -167,19 +612,20 @@ def validate_source_build_receipt(runtime: dict, receipt: Path, *, architecture:
             or type(artifact.get('size')) is not int or artifact['size'] != runtime['size']
             or artifact.get('sha256') != runtime['sha256']):
         raise ValueError('Source-build receipt artifact/source identity differs from locked input')
-    required = {'OS': 'WNT', 'COM': 'MSC', 'CPUNAME': 'AARCH64',
-                'HOST_PLATFORM': 'aarch64-pc-cygwin', 'BUILD_PLATFORM': 'aarch64-pc-cygwin',
+    cpu, triple = (('X86_64', 'x86_64-pc-cygwin') if architecture == 'x64' else ('AARCH64', 'aarch64-pc-cygwin'))
+    required = {'OS': 'WNT', 'COM': 'MSC', 'CPUNAME': cpu,
+                'HOST_PLATFORM': triple, 'BUILD_PLATFORM': triple,
                 'ENABLE_FIREBIRD_SDBC': 'TRUE', 'CROSS_COMPILING': '', 'SYSTEM_FIREBIRD': '',
                 'PKGFORMAT': 'archive', 'ENABLE_ONLINE_UPDATE': '',
                 'ENABLE_ONLINE_UPDATE_MAR': '', 'ENABLE_BREAKPAD': ''}
     if (not isinstance(config, dict) or any(config.get(key) != value for key, value in required.items())
             or not isinstance(config.get('BUILD_TYPE'), str)
-            or not {'FIREBIRD', 'LIBATOMIC_OPS', 'LIBTOMMATH'} <= set(config['BUILD_TYPE'].split())
+            or not ({'FIREBIRD', 'LIBTOMMATH'} | ({'LIBATOMIC_OPS'} if architecture == 'arm64' else set())) <= set(config['BUILD_TYPE'].split())
             or {'BREAKPAD', 'ONLINEUPDATE'} & {token.upper() for token in config['BUILD_TYPE'].split()}):
         raise ValueError('Source-build receipt configuration does not prove native internal Firebird and disabled OEM services')
     _source_build_identity(proof, runtime['sourceCoreCommit'])
     base = proof.get('baseProof')
-    if (not isinstance(base, dict) or type(base.get('schemaVersion')) is not int or base['schemaVersion'] != 1
+    if (not isinstance(base, dict) or type(base.get('schemaVersion')) is not int or base['schemaVersion'] != version
             or base.get('passed') is not True or base.get('guiVerified') is not False
             or base.get('independentReopenVerified') is not True
             or base.get('rows') != [{'id': 1, 'text': 'Engine-OpenGeul-base 한글', 'amount': 42}]
@@ -206,7 +652,13 @@ def validate_source_build_receipt(runtime: dict, receipt: Path, *, architecture:
     if (images[0] != images[1] or (processes[1]['pid'], processes[1]['creationTime']) ==
             (processes[2]['pid'], processes[2]['creationTime'])):
         raise ValueError('Source-build Base proof must independently reopen with the same engine')
-    _source_build_crt(proof)
+    if architecture == 'x64':
+        if any(proof.get(key) != build[key] for key in ('sourceTree','driverSha256','nativeTargetsSha256')):
+            raise ValueError('x64 source tree/driver/policy differs from externally reviewed lock')
+        try: _source_build_x64(proof, runtime, target)
+        except (KeyError, TypeError, AttributeError, IndexError) as error:
+            raise ValueError('x64 source-build proof is malformed or incomplete') from error
+    _source_build_crt(proof, architecture=architecture)
     return proof
 
 
@@ -303,24 +755,45 @@ def _source_build_identity(proof: dict, core: str) -> dict:
     return identity
 
 
-def _source_build_crt(proof: dict) -> tuple[dict, dict]:
+def _source_build_crt(proof: dict, *, architecture: str = 'arm64') -> tuple[dict, dict]:
     """Join the driver's preflight, signed sources, copied bytes and legal snapshot."""
     plan = proof.get('crtPreflight'); copied = proof.get('appLocalCrt'); terms = proof.get('crtRedistributionTerms')
-    expected = frozenset(crt_names('arm64'))
+    expected = frozenset(crt_names(architecture))
+    toolset, year = ('v143', '2022') if architecture == 'x64' else ('v145', '2026')
     def version(value):
         if not isinstance(value, str) or not re.fullmatch(r'14\.[0-9]+\.[0-9]+(?:\.[0-9]+)?', value):
             raise ValueError('Source-build CRT compiler/runtime version is invalid')
         return tuple(map(int, value.split('.'))) + ((0,) if value.count('.') == 2 else ())
     if (not isinstance(plan, dict) or not isinstance(copied, dict)
             or plan.get('schemaVersion') != 1 or copied.get('schemaVersion') != 1
-            or plan.get('toolset') != 'v145' or copied.get('toolset') != 'v145'
-            or plan.get('architecture') != 'arm64' or copied.get('architecture') != 'arm64'
+            or plan.get('toolset') != toolset or copied.get('toolset') != toolset
+            or plan.get('architecture') != architecture or copied.get('architecture') != architecture
             or not isinstance(plan.get('files'), list) or len(plan['files']) != len(expected)
             or not isinstance(copied.get('files'), list) or len(copied['files']) != len(expected)):
-        raise ValueError('Source-build CRT requires the complete native VS2026 ARM64 eight-file family')
+        raise ValueError('Source-build CRT requires the complete native compiler-specific file family')
+    if architecture == 'x64' and (type(plan['schemaVersion']) is not int or type(copied['schemaVersion']) is not int):
+        raise ValueError('x64 source CRT schema versions require integer identities')
     minimum = version(plan.get('minimumRuntimeVersion'))
-    if minimum != version(plan.get('compilerToolsVersion')):
+    if (architecture == 'arm64' and minimum != version(plan.get('compilerToolsVersion'))
+            or architecture == 'x64' and (minimum < version(plan.get('compilerToolsVersion'))
+                or plan != proof.get('nativePreflight', {}).get('crt')
+                or plan.get('compilerToolsVersion') != proof.get('nativePreflight', {}).get('compiler', {}).get('compilerToolsVersion')
+                or plan.get('minimumRuntimeVersion') != proof.get('nativePreflight', {}).get('compiler', {}).get('minimumRuntimeVersion'))):
         raise ValueError('Source-build CRT version floor differs from selected compiler')
+    if architecture == 'x64':
+        compiler = _source_windows_path(proof['nativePreflight']['compiler']['compilerRoot'])
+        if (_source_windows_path(plan.get('compilerRoot')) != compiler
+                or tuple(part.casefold() for part in compiler.parts[-4:-1]) != ('vc', 'tools', 'msvc')
+                or compiler.name != plan['compilerToolsVersion']):
+            raise ValueError('x64 CRT compiler lineage differs from the selected VS installation')
+        redist = compiler.parents[2]/'Redist/MSVC'
+        directory = plan.get('redistVersionDirectory')
+        match = re.fullmatch(r'[vV]?(14\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)', directory) if isinstance(directory, str) else None
+        candidate = minimum if directory == 'v143' else version(match[1]) if match else None
+        if (candidate is None or candidate < minimum or plan.get('redistFamily') != 'Microsoft.VC143.CRT'
+                or _source_windows_path(plan.get('redistRoot')) != redist
+                or _source_windows_path(plan.get('sourceDirectory')) != redist/directory/'x64/Microsoft.VC143.CRT'):
+            raise ValueError('x64 CRT redist lineage/family differs from the selected native compiler')
     source_dir = plan.get('sourceDirectory'); program_dir = copied.get('programDirectory')
     if (not isinstance(source_dir, str) or not isinstance(program_dir, str)
             or '\x00' in source_dir or '\x00' in program_dir
@@ -335,7 +808,7 @@ def _source_build_crt(proof: dict) -> tuple[dict, dict]:
         if not isinstance(record, dict) or record.get('name') not in expected:
             raise ValueError('Unexpected source-build CRT file')
         name = record['name']; signature = record.get('signature')
-        if (name in records or type(record.get('machine')) is not int or record['machine'] != 0xaa64
+        if (name in records or type(record.get('machine')) is not int or record['machine'] != native_machine(architecture)
                 or type(record.get('size')) is not int or record['size'] <= 0
                 or not isinstance(record.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', record['sha256'])
                 or not isinstance(record.get('sourcePath'), str) or '\x00' in record['sourcePath']
@@ -357,7 +830,7 @@ def _source_build_crt(proof: dict) -> tuple[dict, dict]:
                 raise ValueError('Source-build CRT signed runtime is older than selected compiler')
         records[name] = record
     if set(records) != expected:
-        raise ValueError('Source-build CRT exact ARM64 eight-file family is incomplete')
+        raise ValueError('Source-build CRT exact native file family is incomplete')
     seen = set()
     for item in copied['files']:
         source = item.get('source') if isinstance(item, dict) else None
@@ -371,28 +844,28 @@ def _source_build_crt(proof: dict) -> tuple[dict, dict]:
         seen.add(name)
     app_terms = copied.get('redistributionTerms')
     if (not isinstance(terms, dict) or not isinstance(app_terms, dict)
-            or terms.get('url') != 'https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution'
+            or terms.get('url') != 'https://learn.microsoft.com/en-us/visualstudio/releases/'+year+'/redistribution'
             or type(terms.get('size')) is not int or not 0 < terms['size'] <= 2*1024*1024
             or not isinstance(terms.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', terms['sha256'])
             or app_terms.get('sha256') != terms['sha256'] or not isinstance(app_terms.get('path'), str)
             or '\x00' in app_terms['path'] or PureWindowsPath(app_terms['path']) !=
-                PureWindowsPath(program_dir).parent/'share/readme/Microsoft-VC145-redistribution.html'):
+                PureWindowsPath(program_dir).parent/('share/readme/Microsoft-VC'+toolset[1:]+'-redistribution.html')):
         raise ValueError('Source-build CRT redistribution terms snapshot differs from packaged legal source')
-    _source_build_import_closure(proof)
+    _source_build_import_closure(proof, architecture=architecture)
     return records, terms
 
 
-def _source_build_import_closure(proof: dict) -> dict:
+def _source_build_import_closure(proof: dict, *, architecture: str = 'arm64') -> dict:
     closure = proof.get('crtImportClosure')
-    expected = list(crt_names('arm64'))
+    expected = list(crt_names(architecture))
     if (not isinstance(closure, dict)
             or set(closure) != {'schemaVersion', 'architecture', 'passed', 'requiredCrtFiles', 'checkedPeCount', 'imports'}
             or type(closure.get('schemaVersion')) is not int or closure['schemaVersion'] != 1
-            or closure.get('architecture') != 'arm64' or closure.get('passed') is not True
+            or closure.get('architecture') != architecture or closure.get('passed') is not True
             or closure.get('requiredCrtFiles') != expected
             or type(closure.get('checkedPeCount')) is not int or not 0 < closure['checkedPeCount'] <= 100_000
             or not isinstance(closure.get('imports'), list) or len(closure['imports']) > closure['checkedPeCount']):
-        raise ValueError('Source-build CRT requires an exact successful ARM64 normal/delay import closure')
+        raise ValueError('Source-build CRT requires an exact successful native normal/delay import closure')
     paths = set()
     for item in closure['imports']:
         if (not isinstance(item, dict) or set(item) != {'path', 'normal', 'delay'}
@@ -412,13 +885,17 @@ def _source_build_import_closure(proof: dict) -> dict:
     return closure
 
 
-def validate_source_build_runtime(runtime_root: Path, proof: dict, *, branding: dict | None = None) -> None:
+def validate_source_build_runtime(runtime_root: Path, proof: dict, *, architecture: str = 'arm64', branding: dict | None = None) -> None:
     """Replay metadata and CRT bytes after authenticating the receipt against its lock.
 
     Only the final Suite payload supplies branding; preparation checks the exact
     original metadata hash, and packaging joins that hash to the branded bytes.
     """
-    records, terms = _source_build_crt(proof)
+    if (not isinstance(architecture,str) or architecture not in NATIVE_MACHINES
+            or not isinstance(proof,dict) or proof.get('architecture') != architecture
+            or type(proof.get('schemaVersion')) is not int or proof['schemaVersion'] != (2 if architecture == 'x64' else 1)):
+        raise ValueError('Source-build runtime expected architecture/version differs from authenticated proof')
+    records, terms = _source_build_crt(proof, architecture=architecture)
     core = proof.get('sourcePin', {}).get('coreCommit')
     identity = _source_build_identity(proof, core)
     for name, section in (('program/version.ini', 'Version'), ('program/setup.ini', 'Bootstrap')):
@@ -457,24 +934,26 @@ def validate_source_build_runtime(runtime_root: Path, proof: dict, *, branding: 
         path = runtime_root/'program'/name
         try:
             check_asset(record, path)
-            _pe(path, architecture='arm64')
+            _pe(path, architecture=architecture)
             with path.open('rb') as stream:
                 stream.seek(60); offset = struct.unpack('<I', stream.read(4))[0]
                 stream.seek(offset+4)
-                if struct.unpack('<H', stream.read(2))[0] != 0xaa64:
-                    raise ValueError('App-local CRT must be native ARM64')
+                if struct.unpack('<H', stream.read(2))[0] != native_machine(architecture):
+                    raise ValueError('App-local CRT must use the expected native architecture')
         except (OSError, ValueError, struct.error) as error:
             raise ValueError('Source-build CRT bytes/machine differ from authenticated receipt: '+name) from error
     try:
-        check_asset(terms, runtime_root/'share/readme/Microsoft-VC145-redistribution.html')
+        check_asset(terms, runtime_root/('share/readme/Microsoft-VC'+('143' if architecture == 'x64' else '145')+'-redistribution.html'))
     except (OSError, ValueError) as error:
         raise ValueError('Source-build CRT redistribution terms bytes differ from authenticated receipt') from error
     try:
         from suite.crt import validate_crt_imports
     except ModuleNotFoundError:
         from crt import validate_crt_imports
-    if validate_crt_imports(runtime_root, architecture='arm64') != _source_build_import_closure(proof):
+    if validate_crt_imports(runtime_root, architecture=architecture) != _source_build_import_closure(proof, architecture=architecture):
         raise ValueError('Source-build CRT normal/delay import closure differs from authenticated receipt')
+    if architecture == 'x64':
+        _source_x64_runtime(runtime_root, proof)
 
 
 def extract_source_engine_zip(archive: Path, destination: Path, *, runtime: dict, receipt: Path,
@@ -515,6 +994,7 @@ def extract_source_engine_zip(archive: Path, destination: Path, *, runtime: dict
                 raise ValueError('Source engine ZIP exceeds extraction size bound')
         required = {'program/'+name for name in ('soffice.exe', 'soffice.bin', 'python.exe', 'pyuno.pyd',
                      'ifbclient.dll', 'Engine12.dll', 'intl/fbintl.dll')}
+        if architecture == 'x64':required.add('program/winaccessibility.dll')
         if any(name.casefold() not in aliases or aliases[name.casefold()][1] for name in required):
             raise ValueError('Source engine ZIP lacks required native Office/Base runtime files')
         destination.mkdir(parents=True)
@@ -530,7 +1010,7 @@ def extract_source_engine_zip(archive: Path, destination: Path, *, runtime: dict
                         if size > member.file_size: raise ValueError('Source engine ZIP member exceeds declared size')
                         writer.write(chunk)
                     if size != member.file_size: raise ValueError('Source engine ZIP member size mismatch')
-    validate_source_build_runtime(destination, proof)
+    validate_source_build_runtime(destination, proof, architecture=architecture)
     with receipt.open('rb') as reader, (destination/'opengeul-source-build.json').open('xb') as writer:
         shutil.copyfileobj(reader, writer)
     return destination

@@ -49,7 +49,7 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
         receipt = runtime/'opengeul-source-build.json'
         if not receipt.is_file(): raise ValueError('Source-built runtime requires its pinned source-build receipt')
         proof = validate_source_build_receipt(lock['runtime'], receipt, architecture=lock['architecture'])
-        validate_source_build_runtime(runtime, proof)
+        validate_source_build_runtime(runtime, proof, architecture=lock['architecture'])
     check_asset(lock['hwp'], hwp)
     product_path = ROOT/'suite/config/product.json'
     product = json.loads(product_path.read_text(encoding='utf-8'))
@@ -78,18 +78,22 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
         code = 'https://github.com/ATLKR/OpenGeul'
         commit_url = code+'/tree/'+build['sourceCommit']
         blob = code+'/blob/'+build['sourceCommit']
+        workflow = (proof['workflowBinding']['workflow'] if lock['architecture'] == 'x64'
+                    else '.github/workflows/office-native-engine.yml')
         engine_source_notice = (
             f'Native engine source/build code: {commit_url}\n'
+            f"Native engine producer source archive: {code}/archive/{build['sourceCommit']}.zip\n"
             f'Native engine patch manifest: {blob}/suite/engine-build/source-build.json\n'
             f"Patch manifest SHA256: {build['patchManifestSha256']}\n"
-            f'Native engine workflow: {blob}/.github/workflows/office-native-engine.yml\n'
+            f'Native engine workflow: {blob}/{workflow}\n'
             f"Native engine workflow run: {code}/actions/runs/{build['runId']}\n"
             f"GitHub build artifact ID: {build['artifactId']}\n"
             f"GitHub build artifact SHA256: {build['artifactSha256']}\n"
             'Authenticated native build receipt: ../Office/opengeul-source-build.json\n'
             f"Native build receipt SHA256: {build['receiptSha256']}\n\n"
             'Native engine source patches are enumerated in the pinned patch manifest.\n'
-            'The exact patch files are included in the OpenGeul source archive.\n\n'
+            'The local Suite source ZIP contains OpenGeul Suite additions.\n'
+            'Native engine build scripts and patches are in the pinned producer source archive above.\n\n'
         )
     source_notice = (
         '# OpenGeul Office corresponding source\n\n'

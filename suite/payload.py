@@ -350,7 +350,7 @@ def _metadata(root: Path, files: dict, *, architecture: str):
         if 'Office/opengeul-source-build.json' not in files:
             raise ValueError('Source-built runtime is missing its externally locked source-build receipt')
         proof = validate_source_build_receipt(runtime, receipt_path, architecture=architecture)
-        validate_source_build_runtime(root/'Office', proof, branding=_json(root/'runtime-branding.json'))
+        validate_source_build_runtime(root/'Office', proof, architecture=architecture, branding=_json(root/'runtime-branding.json'))
         if 'Office/opengeul-msi-dependencies.json' in files:
             raise ValueError('Source-built runtime cannot claim an MSI extraction receipt')
     elif runtime_format != 'msi':
@@ -466,6 +466,11 @@ def _validate(root: Path, files: dict, *, architecture: str):
     _metadata(root, files, architecture=architecture)
     companions = (COMPANION_PE_ADMISSIONS if architecture == 'x64'
                   else ARM64_COMPANION_PE_ADMISSIONS)
+    if architecture == 'x64' and _json(root/'suite-provenance.json')['runtime'].get('format') == 'source-built-zip':
+        # Source-built AnyCPU assemblies have their own authenticated producer
+        # inventory. MSI-specific native x86 helpers/publisher bytes grant no
+        # source-engine exception; ordinary managed CLR checks still apply.
+        companions = {name:pin for name,pin in companions.items() if pin['role']=='pythonLauncherTemplate'}
     for name in files:
         path = root/name
         with path.open('rb') as stream:

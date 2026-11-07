@@ -28,7 +28,7 @@ def expected_condition(path, original, *, prefix=False):
 BASE_NAMES = (
     '정확한 소스 바이트 보존', '독립 PDF 검증 도구의 고정 해시 확인·설치',
     'Suite 단위 검사와 Windows shell 빌드 검사', '고정 버전의 패키지 경로 선택',
-    '고정한 네이티브 ARM64 소스 빌드 입력 확보', '고정 입력으로 별도 Suite 개발 패키지 빌드',
+    '고정한 네이티브 소스 빌드 입력 확보', '고정 입력으로 별도 Suite 개발 패키지 빌드',
     '실제 한국어 IME와 네이티브 UI 검사 준비', '한국어 입력 환경의 준비·실패 기록 즉시 보존',
     '실제 Office 엔진의 생성·편집·저장·재열기', 'Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기',
     'Calc Ctrl+S 성공·실패 뒤 패키지 불변 확인', 'Calc Ctrl+S 입력·저장·로컬 네이티브 진단 즉시 보존',

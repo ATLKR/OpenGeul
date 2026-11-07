@@ -20,6 +20,40 @@ from suite.tests.test_navigation_diagnostic_workflow import condition
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def workflow_test_environment(**overrides):
+    # Child fixtures retain only nonsecret paths plus explicit synthetic inputs.
+    names=('PATH','PATHEXT','SystemRoot','WINDIR','SystemDrive','ComSpec','TEMP','TMP',
+           'HOME','USERPROFILE','LOCALAPPDATA','APPDATA','XDG_CACHE_HOME','XDG_CONFIG_HOME',
+           'XDG_DATA_HOME','PYTHONUTF8')
+    values={name:value for name in names if (value:=os.environ.get(name)) is not None}
+    values.update(overrides)
+    return values
+
+
+class WorkflowFixtureEnvironmentTests(unittest.TestCase):
+    def test_offline_child_environments_never_copy_or_enumerate_ambient_values(self):
+        from unittest.mock import patch
+        from suite.tests.test_fetch_source_engine import fetch_test_environment
+        names={'PATH','PATHEXT','SystemRoot','WINDIR','SystemDrive','ComSpec','TEMP','TMP',
+               'HOME','USERPROFILE','LOCALAPPDATA','APPDATA','XDG_CACHE_HOME','XDG_CONFIG_HOME',
+               'XDG_DATA_HOME','PYTHONUTF8'}
+        class Source:
+            def __init__(self):self.read=[]
+            def get(self,name):
+                if name not in names:raise AssertionError('Ambient non-allowlisted read forbidden')
+                self.read.append(name)
+                return 'synthetic executable path' if name=='PATH' else None
+            def __iter__(self):raise AssertionError('Ambient enumeration forbidden')
+            def copy(self):raise AssertionError('Ambient copy forbidden')
+            def keys(self):raise AssertionError('Ambient keys forbidden')
+        for helper in (fetch_test_environment,workflow_test_environment):
+            source=Source()
+            with patch.object(os,'environ',source):values=helper(FIXTURE_ONLY='synthetic')
+            self.assertEqual(dict(PATH='synthetic executable path',FIXTURE_ONLY='synthetic'),values)
+            self.assertEqual(16,len(source.read));self.assertEqual(16,len(set(source.read)))
+            self.assertEqual(names,set(source.read))
+
+
 @unittest.skipUnless(shutil.which('pwsh'), 'PowerShell is required for the real command boundary')
 class PortablePackageWorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -32,24 +66,26 @@ class PortablePackageWorkflowTests(unittest.TestCase):
         shutil.copy2(portable_tests.SCRIPT, scripts / portable_tests.SCRIPT.name)
         (scripts / 'build-suite.ps1').write_text(
             "param($Architecture, $EngineArchive, $EngineReceipt)\n"
-            "if ($Architecture -cne $env:PORTABLE_TEST_ARCHITECTURE) { throw 'Wrong build architecture.' }\n",
+            "if ($Architecture -cne $env:PORTABLE_TEST_ARCHITECTURE) { throw 'Wrong build architecture.' }\n"
+            "@{architecture=$Architecture;engineArchive=$EngineArchive;engineReceipt=$EngineReceipt}|ConvertTo-Json|Set-Content build-arguments.json\n",
             encoding='utf-8')
         self.env_file = self.checkout / 'github-env'
         self.env_file.touch()
 
-    def execute_build(self, *, mode='acceptance', architecture='x64', source_commit='a'*40):
+    def execute_build(self, *, mode='acceptance', architecture='x64', source_commit='a'*40, runtime_format='msi', source_outcome='success'):
         archive = Path(str(self.fixture.root) + '.zip')
         shutil.copy2(self.fixture.archive, archive)
         build = next(step for step in workflow_steps() if field(step, 'id') == 'build')
-        code = run_code(build).replace('${{ matrix.architecture }}', architecture)
+        code = run_code(build).replace('${{ matrix.architecture }}', architecture).replace('${{ steps.source-engine.outcome }}', source_outcome)
         script = self.checkout / 'build-step.ps1'
         script.write_text("$ErrorActionPreference = 'Stop'\n"
                           "function python { & $env:PORTABLE_TEST_PYTHON @args }\n" + code,
                           encoding='utf-8')
-        environment = dict(os.environ, OPENGEUL_SUITE_RUN_MODE=mode,
+        environment = workflow_test_environment( OPENGEUL_SUITE_RUN_MODE=mode,
                            SUITE_PACKAGE=str(self.fixture.root), GITHUB_ENV=str(self.env_file),
                            GITHUB_SHA=source_commit, GITHUB_RUN_ID='123456', GITHUB_RUN_ATTEMPT='2',
                            PORTABLE_TEST_ARCHITECTURE=architecture, PORTABLE_TEST_PYTHON=sys.executable,
+                           SUITE_RUNTIME_FORMAT=runtime_format,
                            PYTHONPATH=str(ROOT))
         for name in ('SUITE_ARCHIVE', 'SUITE_FOREIGN_CWD'):
             environment.pop(name, None)
@@ -58,6 +94,81 @@ class PortablePackageWorkflowTests(unittest.TestCase):
                                  capture_output=True, text=True, encoding='utf-8', timeout=30)
         published = dict(line.split('=', 1) for line in self.env_file.read_text(encoding='utf-8-sig').splitlines())
         return process, published, archive
+
+
+    def test_source_format_passes_exact_inputs_for_either_architecture(self):
+        for architecture in ('x64','arm64'):
+            with self.subTest(architecture=architecture):
+                process,_,_=self.execute_build(mode='focus-diagnostic',architecture=architecture,runtime_format='source-built-zip')
+                self.assertEqual(0,process.returncode,process.stdout+process.stderr)
+                args=json.loads((self.checkout/'build-arguments.json').read_text(encoding='utf-8-sig'))
+                self.assertEqual(architecture,args['architecture'])
+                self.assertEqual(f'.work/source-engine-input/OpenGeul-Office-engine-{architecture}.zip',args['engineArchive'])
+                self.assertEqual('.work/source-engine-input/source-build-receipt.json',args['engineReceipt'])
+
+    def test_source_fetch_failure_never_enters_an_msi_build(self):
+        process,published,_=self.execute_build(mode='focus-diagnostic',runtime_format='source-built-zip',source_outcome='failure')
+        self.assertNotEqual(0,process.returncode)
+        self.assertFalse((self.checkout/'build-arguments.json').exists())
+        self.assertEqual({},published)
+
+    def test_unknown_runtime_format_is_fatal_before_build(self):
+        process,published,_=self.execute_build(mode='focus-diagnostic',runtime_format='unknown')
+        self.assertNotEqual(0,process.returncode)
+        self.assertFalse((self.checkout/'build-arguments.json').exists())
+        self.assertEqual({},published)
+
+    def test_runtime_input_selection_is_validated_before_format_based_fetch(self):
+        steps=workflow_steps()
+        selection=next((step for step in steps if field(step,'id')=='runtime-input'),None)
+        self.assertIsNotNone(selection,'An explicit validated runtime selection step is required')
+        fetch=next(step for step in steps if field(step,'id')=='source-engine')
+        self.assertLess(steps.index(selection),steps.index(fetch))
+        self.assertIn("env.SUITE_RUNTIME_FORMAT == 'source-built-zip'",condition(fetch))
+        self.assertTrue(condition(fetch).startswith("env.SUITE_RUNTIME_FORMAT == 'source-built-zip' &&"))
+        self.assertIn('-SourceLockPath $env:SUITE_RUNTIME_LOCK',run_code(fetch))
+
+
+    def test_format_selected_fetch_retains_all_diagnostic_admission_guards(self):
+        fetch=next(step for step in workflow_steps() if field(step,'id')=='source-engine')
+        expression=condition(fetch)
+        for architecture in ('x64','arm64'):
+            with self.subTest(architecture=architecture):
+                self.assertTrue(evaluate(expression,'acceptance',architecture,runtime_format='source-built-zip'))
+                self.assertFalse(evaluate(expression,'acceptance',architecture,runtime_format='msi'))
+                self.assertFalse(evaluate(expression,'acceptance',architecture,runtime_format='unknown'))
+                self.assertFalse(evaluate(expression,'com-wait-diagnostic',architecture,runtime_format='source-built-zip'))
+                for mode in ('focus-diagnostic','reader-console-diagnostic','ime-mode-diagnostic','matched-plugin-caller','sal-offset-mapping','mutex-function-mapping'):
+                    self.assertFalse(evaluate(expression,mode,architecture,{'sal-offset-admission':'failure'},runtime_format='source-built-zip'))
+                    self.assertEqual(architecture=='arm64',evaluate(expression,mode,architecture,{'sal-offset-admission':'success'},runtime_format='source-built-zip'))
+
+    def test_runtime_selection_executes_strict_source_lock_validation_for_both_architectures(self):
+        from suite.tests.test_prepare import source_build_fixture,x64_source_build_fixture
+        selection=next(step for step in workflow_steps() if field(step,'id')=='runtime-input')
+        for architecture in ('x64','arm64'):
+            for mutation in (None,'unknown-format','bad-source-pin','missing-runtime'):
+                with self.subTest(architecture=architecture,mutation=mutation),tempfile.TemporaryDirectory(prefix='runtime input selection ') as temporary:
+                    root=Path(temporary);inputs=root/'fixture';inputs.mkdir()
+                    _,runtime,_,_= (x64_source_build_fixture(inputs) if architecture=='x64' else source_build_fixture(inputs))
+                    lock=dict(schemaVersion=1,architecture=architecture,version='0.1.0-dev',runtime=runtime)
+                    if mutation=='unknown-format':runtime['format']='unknown'
+                    elif mutation=='bad-source-pin':runtime['sourceBuild']['receiptSha256']='invalid'
+                    elif mutation=='missing-runtime':lock.pop('runtime')
+                    config=root/'suite/config';config.mkdir(parents=True)
+                    name='runtime.arm64.lock.json' if architecture=='arm64' else 'runtime.lock.json'
+                    (config/name).write_text(json.dumps(lock))
+                    output=root/'github-env';output.touch();script=root/'selection.ps1'
+                    code=run_code(selection).replace('${{ matrix.architecture }}',architecture)
+                    script.write_text("$ErrorActionPreference='Stop'\nfunction python { & $env:PORTABLE_TEST_PYTHON @args }\n"+code)
+                    environment=workflow_test_environment(GITHUB_ENV=str(output),PORTABLE_TEST_PYTHON=sys.executable,PYTHONPATH=str(ROOT))
+                    process=subprocess.run([shutil.which('pwsh'),'-NoProfile','-File',str(script)],cwd=root,env=environment,capture_output=True,text=True,timeout=30)
+                    fields=dict(line.split('=',1) for line in output.read_text(encoding='utf-8-sig').splitlines())
+                    if mutation is None:
+                        self.assertEqual(0,process.returncode,process.stdout+process.stderr)
+                        self.assertEqual('source-built-zip',fields['SUITE_RUNTIME_FORMAT'])
+                        self.assertEqual('suite/config/'+name,fields['SUITE_RUNTIME_LOCK'])
+                    else:
+                        self.assertNotEqual(0,process.returncode);self.assertEqual({},fields)
 
     def test_acceptance_build_routes_normal_gates_to_verified_repaired_payload(self):
         before = self.fixture.snapshot(self.fixture.root)
@@ -192,7 +303,7 @@ class FinalZipProofWorkflowTests(unittest.TestCase):
                 with archive.open('ab') as stream: stream.write(b'changed after the original check')
             code = run_code(self.proof_step()).replace('${{ matrix.architecture }}', architecture)
             script = root / 'boundary.ps1'; script.write_text(code, encoding='utf-8')
-            environment = dict(os.environ, OPENGEUL_SUITE_RUN_MODE=mode, GITHUB_SHA='a'*40,
+            environment = workflow_test_environment( OPENGEUL_SUITE_RUN_MODE=mode, GITHUB_SHA='a'*40,
                 GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1', SUITE_ARCHIVE=str(archive))
             result = subprocess.run([shutil.which('pwsh'), '-NoLogo', '-NoProfile', '-NonInteractive',
                 '-File', str(script)], cwd=root, env=environment, capture_output=True,

@@ -715,5 +715,55 @@ class Arm64PayloadTests(PayloadFixture):
             self.inventory()
 
 
+class NativeX64SourcePayloadTests(PayloadFixture):
+    def setUp(self):
+        super().setUp()
+        from suite.tests.test_prepare import x64_source_build_fixture, synthetic_source_template_pins
+        archive,runtime,path,self.engine_proof=x64_source_build_fixture(Path(self.temp.name),runtime_templates=True)
+        synthetic={'Office/'+name:pin for name,pin in synthetic_source_template_pins(self.engine_proof).items()}
+        replacement=patch.dict(payload.COMPANION_PE_ADMISSIONS,synthetic)
+        replacement.start();self.addCleanup(replacement.stop)
+        self.provenance['runtime']=runtime
+        self.engine_receipt_path=path
+        self.write('Office/opengeul-source-build.json',path.read_bytes())
+        with zipfile.ZipFile(archive) as source:
+            for name in source.namelist():
+                raw=source.read(name)
+                branded=raw.replace(b'Vendor=The Document Foundation',b'Vendor=ATLKR') if name=='program/version.ini' else raw
+                self.write('Office/'+name,branded)
+                if raw != branded:
+                    self.branding['modifiedFiles'][name]=dict(beforeSha256=digest(raw),sha256=digest(branded))
+        self.branding['source'].update(buildId=runtime['sourceCoreCommit'],
+            sourceUrl='https://github.com/LibreOffice/core/tree/'+runtime['sourceCoreCommit'])
+        self.source_archive();self.save_metadata()
+
+    def test_source_x64_payload_replays_v2_managed_and_native_bytes(self):
+        receipt=create_inventory(self.root,architecture='x64')
+        verify_payload(self.root,receipt)
+        self.assertIn('Office/program/winaccessibility.dll',receipt['files'])
+        self.assertIn('Office/program/policy.1.0.cli_cppuhelper.dll',receipt['files'])
+        with self.assertRaises(ValueError):create_inventory(self.root,architecture='arm64')
+
+    def test_source_x64_rebuilt_inventory_cannot_hide_changed_managed_native_or_template_bytes(self):
+        for name in ('Office/program/winaccessibility.dll','Office/program/policy.1.0.cli_cppuhelper.dll',
+                     'Office/program/python-core-3.13.15/lib/setuptools/cli-arm64.exe'):
+            raw=self.read(name);self.write(name,raw+b'changed')
+            with self.subTest(name=name),self.assertRaises(ValueError):create_inventory(self.root)
+            self.write(name,raw)
+
+    def test_source_x64_does_not_inherit_msi_foreign_native_helper_admissions(self):
+        name='Office/program/twain32shim.exe';raw=pe(0x14c)
+        self.write(name,raw)
+        with patch.dict(payload.COMPANION_PE_ADMISSIONS,{name:dict(machine=0x14c,
+                role='x86CompatibilityHelper',sha256=digest(raw))}):
+            with self.assertRaises(ValueError):create_inventory(self.root)
+
+    def test_source_x64_receipt_identity_remains_bound_to_its_packaged_external_lock(self):
+        runtime=self.provenance['runtime']
+        runtime['sourceBuild']['sourceTree']='0'*40
+        self.save_metadata()
+        with self.assertRaises(ValueError):create_inventory(self.root)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -5,7 +5,7 @@ import io
 import importlib.util
 import inspect
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -110,6 +110,190 @@ def source_build_fixture(root):
 def pin_source_receipt(runtime, path, receipt):
     path.write_text(json.dumps(receipt, ensure_ascii=False), encoding='utf-8')
     runtime['sourceBuild']['receiptSha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def x64_source_build_fixture(root, *, runtime_templates=False):
+    """Synthetic v2 unit evidence, never a qualified runtime lock or build result."""
+    archive, runtime, receipt_path, proof = source_build_fixture(root)
+    manifest_path = ROOT/'suite/engine-build/source-build.json'
+    manifest = json.loads(manifest_path.read_text())
+    policy_sha = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    program = 'C:\\build\\instdir\\program'
+    compiler_root = 'C:\\VS\\VC\\Tools\\MSVC\\14.44.35207'
+    sdk_root = 'C:\\SDK'; sdk_version = '10.0.26100.0'
+    native = dict(processMachine=0, nativeMachine=0x8664)
+    with zipfile.ZipFile(archive) as original:
+        entries = {info.filename: original.read(info) for info in original.infolist()
+                   if not info.filename.endswith('.dll') and not info.filename.endswith('/fbintl.dll')
+                   and not info.filename.startswith('share/readme/')}
+    for name in ('soffice.exe','soffice.bin','python.exe','pyuno.pyd','ifbclient.dll','Engine12.dll','intl/fbintl.dll'):
+        entries['program/'+name] = pe(0x8664, dll=name.endswith(('.dll','.pyd')))
+    from suite.tests.test_pe_imports import imports_pe
+    winacc=imports_pe(('kernel32.dll',))
+    import struct
+    struct.pack_into('<H',winacc,0x84,0x8664)
+    entries['program/winaccessibility.dll'] = bytes(winacc)
+    entries['program/policy.1.0.cli_cppuhelper.dll'] = pe(0x14c, managed=True, dll=True)
+    for name in VC_DLLS: entries['program/'+name] = pe(0x8664,dll=True)
+    terms = b'Official VS2022 redistribution terms'
+    entries['share/readme/Microsoft-VC143-redistribution.html'] = terms
+    with zipfile.ZipFile(archive,'w') as target:
+        for name,raw in entries.items(): target.writestr(name,raw)
+    runtime.update(size=archive.stat().st_size,sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+    runtime['sourceBuild']['patchManifestSha256'] = manifest_sha
+    runtime['sourceBuild'].update(sourceTree='b'*40,driverSha256='4'*64,nativeTargetsSha256=policy_sha)
+    proof.update(schemaVersion=2,architecture='x64',acceptanceEligible=True,
+                 sourcePortManifestSha256=manifest_sha,nativeTargetsSha256=policy_sha,
+                 artifact=dict(path='C:\\evidence\\OpenGeul-Office-engine-x64.zip',size=runtime['size'],sha256=runtime['sha256']),
+                 host=dict(native,isWindows=True,controllerPid=1),
+                 configurationSha256='6'*64,configureArgumentsSha256='7'*64,
+                 sourceRecipeChecksExecuted=True)
+    proof['configuration'].update(CPUNAME='X86_64',HOST_PLATFORM='x86_64-pc-cygwin',
+                                  BUILD_PLATFORM='x86_64-pc-cygwin',BUILD_TYPE='FIREBIRD LIBTOMMATH',
+                                  VCTOOLSET='v143',VCVER='17.0',COMPATH=compiler_root,
+                                  WINDOWS_SDK_HOME=sdk_root,WINDOWS_SDK_VERSION=sdk_version)
+    proof['workflowBinding'] = dict(workflow='.github/workflows/office-native-engine-x64.yml',
+        workflowRef='ATLKR/OpenGeul/.github/workflows/office-native-engine-x64.yml@refs/heads/work/opengeul-office-native-engine-x64',
+        ref='refs/heads/work/opengeul-office-native-engine-x64',job='native-firebird-and-office-x64',
+        sourceCommit=proof['sourceCommit'],sourceTree=proof['sourceTree'],sourceRun=123,runAttempt=1)
+    tools={}
+    for name in ('cl','link','lib'):
+        tools[name]=dict(path=compiler_root+'\\bin\\Hostx64\\x64\\'+name+'.exe',machine=0x8664,
+            role='nativeCompilerTool',tool=name,size=1024,sha256='8'*64,
+            version=('19' if name=='cl' else '14')+'.44.35207.0')
+    compiler=dict(architecture='x64',compilerYear='2022',toolset='v143',installationPath='C:\\VS',
+        installationVersion='17.14.0',compilerRoot=compiler_root,compilerToolsVersion='14.44.35207',
+        minimumRuntimeVersion='14.44.35207.0',tools=tools)
+    sdk_files=[]
+    for relative in (f'Include/{sdk_version}/um/Windows.h',f'Include/{sdk_version}/shared/sdkddkver.h',
+                     f'Include/{sdk_version}/ucrt/stdio.h',f'Lib/{sdk_version}/um/x64/kernel32.lib',
+                     f'Lib/{sdk_version}/ucrt/x64/ucrt.lib'):
+        sdk_files.append(dict(path=sdk_root+'\\'+relative.replace('/','\\'),size=100,sha256='9'*64))
+    proof['nativePreflight']=dict(schemaVersion=1,passed=True,architecture='x64',compiler=compiler,
+        sdk=dict(root=sdk_root,version=sdk_version,architecture='x64',files=sdk_files,
+                 resourceCompiler=dict(path=sdk_root+'\\bin\\'+sdk_version+'\\x64\\rc.exe',
+                     machine=0x8664,role='nativeX64',size=100,sha256='a'*64)),
+        archive=dict(path='C:\\probe\\owned.lib',size=100,sha256='b'*64,machines=[0x8664]),
+        executable=dict(path='C:\\probe\\probe.exe',size=100,sha256='c'*64,machine=0x8664,role='nativeX64'),
+        nativeProcess=dict(native,compilerFullVersion=194435207,libraryValue=42),
+        commands={name:dict(exitCode=0,receipt='C:\\evidence\\'+name+'.json',
+            stdout='C:\\evidence\\'+name+'.stdout.log',stderr='C:\\evidence\\'+name+'.stderr.log')
+            for name in ('member','probe','archive','link','run')})
+    proof['configuredToolchain']=dict(matched=True,compilerRoot=compiler_root,toolset='v143',
+                                     sdkRoot=sdk_root,sdkVersion=sdk_version)
+    proof['javaTools']=dict(jdk=dict(home='C:\\JDK',javaVersion='21.0.8',selection='JAVA_HOME_21_X64',releaseSha256='d'*64,
+        nativeFiles=[dict(path='C:\\JDK\\'+name.replace('/','\\'),machine=0x8664,role='nativeX64',size=100,sha256='e'*64)
+            for name in ('bin/java.exe','bin/javac.exe','bin/server/jvm.dll','bin/jawt.dll')],
+        importLibraries=[dict(path='C:\\JDK\\lib\\'+name,size=100,sha256='f'*64,machines=[0x8664])
+            for name in ('jvm.lib','jawt.lib')]))
+    proof['buildBudget']=dict(startedUtc='2026-11-07T00:00:00.0000000Z',deadlineUtc='2026-11-07T05:30:00.0000000Z',
+        workflowDeadlineUtc='2026-11-07T05:30:00.0000000Z',maximumMinutes=330,timeoutMilliseconds=19800000,elapsedSeconds=60.0)
+    proof['finishedUtc']='2026-11-07T00:01:00.0000000Z'
+    proof['baseProof']['schemaVersion']=2
+    for process in proof['baseProof']['nativeProcesses']: process.update(native)
+    retirements=[]
+    for host in proof['baseProof']['nativeProcesses'][1:]:
+        member=dict(pid=host['pid'],creationTime=host['creationTime'],handleValue=host['pid']+100,
+                    image=host['image'],alive=True,exitCode=259,error=None)
+        final=dict(member,alive=False,exitCode=0)
+        retirements.append(dict(phase=host['phase'],handlesClosed=True,cleanup=dict(schemaVersion=1,
+            kind='owned-engine-job-cleanup',gracefulQualified=True,forcedTermination=False,
+            jobEmptyVerified=True,finalJobPids=[],launcherExitCode=0,errors=[],jobHandleValue=42,
+            expectedEngineImage=host['image'],initialMembers=[member],finalMembers=[final])))
+    proof['baseProof']['retirement']=retirements
+    source_dir='C:\\VS\\VC\\Redist\\MSVC\\14.44.35207\\x64\\Microsoft.VC143.CRT'
+    crt=[]
+    for name in VC_DLLS:
+        old=copy.deepcopy(proof['crtPreflight']['files'][0])
+        old.update(name=name,sourcePath=source_dir+'\\'+name,machine=0x8664,
+                   size=len(entries['program/'+name]),sha256=hashlib.sha256(entries['program/'+name]).hexdigest())
+        old['signature'].update(originalFilename=name,fileVersion='14.44.35207.0',productVersion='14.44.35207.0',
+                                fileVersionParts=[14,44,35207,0],productVersionParts=[14,44,35207,0])
+        crt.append(old)
+    proof['crtPreflight']=dict(schemaVersion=1,architecture='x64',toolset='v143',
+        compilerRoot=compiler_root,compilerToolsVersion='14.44.35207',minimumRuntimeVersion='14.44.35207.0',
+        redistRoot='C:\\VS\\VC\\Redist\\MSVC',redistVersionDirectory='14.44.35207',
+        redistFamily='Microsoft.VC143.CRT',sourceDirectory=source_dir,files=crt)
+    proof['nativePreflight']['crt']=copy.deepcopy(proof['crtPreflight'])
+    proof['appLocalCrt']=dict(schemaVersion=1,architecture='x64',toolset='v143',sourceDirectory=source_dir,
+        programDirectory=program,files=[dict(source=copy.deepcopy(item),destination=program+'\\'+item['name'],
+            alreadyIdentical=False,copiedSha256=item['sha256']) for item in crt],
+        redistributionTerms=dict(path='C:\\build\\instdir\\share\\readme\\Microsoft-VC143-redistribution.html',
+                                 sha256=hashlib.sha256(terms).hexdigest()))
+    proof['crtRedistributionTerms']=dict(url='https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution',
+        path='C:\\evidence\\terms.html',size=len(terms),sha256=hashlib.sha256(terms).hexdigest())
+    proof['crtImportClosure']=dict(schemaVersion=1,architecture='x64',passed=True,
+        requiredCrtFiles=list(VC_DLLS),checkedPeCount=18,imports=[])
+    pin=manifest['winAccFocusOrder']
+    proof['winAccFocusOrderSourcePatch']=dict(schemaVersion=1,kind='winacc-focus-order-source-patch',passed=True,
+        coreCommit=SOURCE_CORE,path=pin['path'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],
+        patchSha256=pin['patch']['sha256'],nativeBuildVerified=False,guiVerified=False,currentCiRootCauseConfirmed=False,
+        sourceFiles=[dict(path=item['path'],beforeBytes=item['size'],
+            afterBytes=pin['afterBytes'] if item['path']==pin['path'] else item['size'],
+            beforeSha256=item['sha256'],afterSha256=pin['afterSha256'] if item['path']==pin['path'] else item['sha256'])
+            for item in pin['sources']],evidence={})
+    bootstrap=manifest['moduleBootstrap']
+    proof['sourceHooks']=dict(kind='native-windows-common-source-hooks',architecture='x64',nativeBuildVerified=False,
+        basePersistenceVerified=False,moduleBootstrap=dict(path=bootstrap['path'],beforeSha256=bootstrap['sha256'],
+            afterSha256=bootstrap['afterSha256'],evidence={}))
+    guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
+    guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
+    guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
+    proof['sourceRecipeProof']=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture='x64',
+        recipeId='windows-x64-common-v2',policySha256=policy_sha,manifestSha256=manifest_sha,
+        recipeSha256='d85a584577bea857fc58ae8afc30fe729190aa02f2fb414f670a5693bc5d23ec',
+        hookOrder=['moduleBootstrap','winAccFocusOrder'],nativeBuildVerified=False,fullEngineQualified=False,
+        acceptanceEligible=False,guiVerified=False,
+        armGuardedSources=[dict(path=item['path'],beforeSha256=item['sha256'],sha256=item['sha256'],unchanged=True)
+                           for item in guarded])
+    inventory=[]
+    for name,raw in entries.items():
+        if not raw.startswith(b'MZ'): continue
+        managed=name.endswith('policy.1.0.cli_cppuhelper.dll')
+        inventory.append(dict(path='C:\\build\\instdir\\'+name.replace('/','\\'),
+            machine=0x14c if managed else 0x8664,role='managedAnyCpu' if managed else 'nativeX64',
+            size=len(raw),sha256=hashlib.sha256(raw).hexdigest()))
+    proof['winAccBinary']=dict(path='program/winaccessibility.dll',machine=0x8664,role='nativeX64',
+        size=len(entries['program/winaccessibility.dll']),sha256=hashlib.sha256(entries['program/winaccessibility.dll']).hexdigest(),
+        imports=dict(normal=['kernel32.dll'],delay=[]))
+    for item in inventory:
+        if item['path'].endswith('winaccessibility.dll'): item['imports']=copy.deepcopy(proof['winAccBinary']['imports'])
+    # Receipt identity tests can use the real reviewed template pins without
+    # treating synthetic PE bytes as those upstream executable templates.
+    from suite.payload import COMPANION_PE_ADMISSIONS
+    for name,pin in COMPANION_PE_ADMISSIONS.items():
+        if pin['role']=='pythonLauncherTemplate':
+            relative=name.removeprefix('Office/')
+            raw=pe(pin['machine']) if runtime_templates else None
+            if raw is not None:entries[relative]=raw
+            inventory.append(dict(path='C:\\build\\instdir\\'+relative.replace('/','\\'),
+                machine=pin['machine'],role=pin['role'],size=len(raw) if raw is not None else 100,
+                sha256=hashlib.sha256(raw).hexdigest() if raw is not None else pin['sha256']))
+    proof.update(productInventory=inventory,productPeCount=len(inventory),
+        nativePeCount=sum(item['role']=='nativeX64' for item in inventory),managedAnyCpuCount=1,pinnedTemplateCount=10)
+    proof['crtImportClosure']['checkedPeCount']=proof['nativePeCount']
+    proof['externalSources']=dict(schemaVersion=1,pythonSourceVerified=True,
+        archives=[dict(filename='Python-3.13.15.tar.xz',size=100,sha256='1'*64,pinVariable='PYTHON_TARBALL')],
+        embeddedPythonWheels=[dict(path='Lib/ensurepip/_bundled/pip-unit.whl',size=100,sha256='2'*64,
+            provenance='unpacked authenticated Python source plus source-controlled patches')])
+    proof['installedRuntimeStage']=dict(passed=True,runtimeRoot='C:\\build\\instdir',fileCount=100,archiveCount=3,
+        requiredHelpLanguages=['en-US','ko'],receipt=dict(path='C:\\evidence\\installed-runtime-stage.json',bytes=100,sha256='3'*64))
+    if runtime_templates:
+        with zipfile.ZipFile(archive,'w') as target:
+            for name,raw in entries.items():target.writestr(name,raw)
+        runtime.update(size=archive.stat().st_size,sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+        proof['artifact'].update(size=runtime['size'],sha256=runtime['sha256'])
+        proof['crtImportClosure']['checkedPeCount']=proof['nativePeCount']
+    pin_source_receipt(runtime,receipt_path,proof)
+    return archive,runtime,receipt_path,proof
+
+
+def synthetic_source_template_pins(proof):
+    """Expected identities for explicitly synthetic launcher-byte unit fixtures."""
+    return {PureWindowsPath(item['path']).relative_to('C:\\build\\instdir').as_posix():
+            {key:item[key] for key in ('machine','role','sha256')}
+            for item in proof['productInventory'] if item['role']=='pythonLauncherTemplate'}
 
 
 def implementation():
@@ -941,6 +1125,224 @@ class PrepareCommandTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'architecture'):
                 self.run_command(module, root, ['--architecture', 'arm64'])
             self.assertFalse((root/'output.json').exists())
+
+
+class NativeX64SourceAdmissionTests(unittest.TestCase):
+    def runtime_fixture(self,root,module):
+        archive,runtime,path,proof=x64_source_build_fixture(root,runtime_templates=True)
+        pins=synthetic_source_template_pins(proof)
+        # This private unit seam substitutes synthetic launcher identities only.
+        # The receipt-only tests above exercise the actual reviewed ten pins.
+        replacement=patch.object(module,'_source_python_templates',return_value=pins)
+        replacement.start();self.addCleanup(replacement.stop)
+        return archive,runtime,path,proof
+
+    def test_v2_runtime_replays_native_managed_and_template_bytes(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);archive,runtime,path,proof=self.runtime_fixture(root,module)
+            output=root/'runtime'
+            module.extract_source_engine_zip(archive,output,runtime=runtime,receipt=path,architecture='x64')
+            module.validate_source_build_runtime(output,proof,architecture='x64')
+            with self.assertRaises(ValueError):module.validate_source_build_runtime(output,proof,architecture='arm64')
+            managed=output/'program/policy.1.0.cli_cppuhelper.dll'
+            managed.write_bytes(managed.read_bytes()+b'changed')
+            with self.assertRaises(ValueError):module.validate_source_build_runtime(output,proof,architecture='x64')
+
+    def test_v2_zip_aliases_and_reparse_members_fail_before_output_creation(self):
+        module=implementation()
+        for bad in ('../escape.dll','program/WINACCESSIBILITY.dll','program/linked.dll'):
+            with self.subTest(member=bad),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);archive,runtime,path,proof=self.runtime_fixture(root,module)
+                with zipfile.ZipFile(archive,'a') as target:
+                    if bad.endswith('linked.dll'):
+                        member=zipfile.ZipInfo(bad);member.create_system=3;member.external_attr=0xa1ff<<16
+                        target.writestr(member,b'target')
+                    else:target.writestr(bad,pe(0x8664,dll=True))
+                runtime.update(size=archive.stat().st_size,sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+                proof['artifact'].update(size=runtime['size'],sha256=runtime['sha256'])
+                pin_source_receipt(runtime,path,proof);output=root/'output'
+                with self.assertRaises(ValueError):module.extract_source_engine_zip(archive,output,
+                    runtime=runtime,receipt=path,architecture='x64')
+                self.assertFalse(output.exists())
+
+    def test_v2_retirement_accepts_additional_discovered_members_only_if_all_exited(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+            cleanup=proof['baseProof']['retirement'][0]['cleanup']
+            extra=copy.deepcopy(cleanup['finalMembers'][0]);extra.update(pid=99,creationTime=999,handleValue=199)
+            cleanup['finalMembers'].append(extra)
+            pin_source_receipt(runtime,path,proof)
+            module.validate_source_build_receipt(runtime,path,architecture='x64')
+            extra['exitCode']=1;pin_source_receipt(runtime,path,proof)
+            with self.assertRaises(ValueError):module.validate_source_build_receipt(runtime,path,architecture='x64')
+
+    def test_v2_external_tree_driver_policy_pins_cannot_be_missing_or_swapped(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,_=x64_source_build_fixture(Path(folder))
+            original=copy.deepcopy(runtime)
+            for key in ('sourceTree','driverSha256','nativeTargetsSha256'):
+                for value in (None,'0'*(40 if key=='sourceTree' else 64),True):
+                    runtime=copy.deepcopy(original)
+                    if value is None:runtime['sourceBuild'].pop(key)
+                    else:runtime['sourceBuild'][key]=value
+                    with self.subTest(key=key,value=value),self.assertRaises(ValueError):
+                        module.validate_source_build_receipt(runtime,path,architecture='x64')
+
+    def test_v2_receipt_is_selected_only_by_independent_x64_expectation(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+            self.assertEqual(module.validate_source_build_receipt(runtime,path,architecture='x64'),proof)
+            with self.assertRaises(ValueError): module.validate_source_build_receipt(runtime,path,architecture='arm64')
+            with self.assertRaises(ValueError): module.validate_source_build_runtime(Path(folder),proof)
+
+    def test_v2_one_field_qualification_and_workflow_mutations_are_rejected(self):
+        changes=[('schemaVersion',1),('schemaVersion',True),('architecture','arm64'),('acceptanceEligible',False),
+                 ('runAttempt',2),('runAttempt',True),('nativeTargetsSha256','0'*64),
+                 ('configurationSha256',None),('configureArgumentsSha256','bad'),('sourceRecipeChecksExecuted',False)]
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,original=x64_source_build_fixture(Path(folder));module=implementation()
+            for field,value in changes:
+                with self.subTest(field=field,value=value):
+                    proof=copy.deepcopy(original);proof[field]=value;pin_source_receipt(runtime,path,proof)
+                    with self.assertRaises(ValueError): module.validate_source_build_receipt(runtime,path,architecture='x64')
+            for field in original['workflowBinding']:
+                with self.subTest(workflow=field):
+                    proof=copy.deepcopy(original);proof['workflowBinding'][field]='untrusted'
+                    pin_source_receipt(runtime,path,proof)
+                    with self.assertRaises(ValueError): module.validate_source_build_receipt(runtime,path,architecture='x64')
+
+    def test_v2_preflight_tool_config_sdk_and_process_witnesses_are_joined(self):
+        mutations=[lambda p:p['nativePreflight'].update(passed=False),
+            lambda p:p['nativePreflight']['nativeProcess'].update(processMachine=0x14c),
+            lambda p:p['nativePreflight']['nativeProcess'].update(libraryValue=True),
+            lambda p:p['nativePreflight']['compiler']['tools']['cl'].update(machine=0xaa64),
+            lambda p:p['nativePreflight']['compiler']['tools']['link'].update(sha256='bad'),
+            lambda p:p['nativePreflight']['commands']['run'].update(exitCode=True),
+            lambda p:p['configuredToolchain'].update(compilerRoot='C:\\Other'),
+            lambda p:p['configuredToolchain'].update(sdkVersion='10.0.11111.0'),
+            lambda p:p['nativePreflight']['sdk']['files'].pop(),
+            lambda p:p['configuration'].update(VCTOOLSET='v145')]
+        self.reject_mutations(mutations)
+
+    def test_v2_native_java_and_original_deadline_cannot_be_missing_or_reset(self):
+        mutations=[lambda p:p.pop('javaTools'),lambda p:p['javaTools']['jdk']['nativeFiles'].pop(),
+            lambda p:p['javaTools']['jdk']['nativeFiles'][0].update(machine=0xaa64),
+            lambda p:p['javaTools']['jdk']['importLibraries'][0].update(machines=[0xaa64]),
+            lambda p:p['javaTools']['jdk'].update(selection='JAVA_HOME'),
+            lambda p:p['buildBudget'].update(maximumMinutes=360),
+            lambda p:p['buildBudget'].update(timeoutMilliseconds=True),
+            lambda p:p['buildBudget'].update(elapsedSeconds=19801.0),
+            lambda p:p['buildBudget'].update(workflowDeadlineUtc='2026-11-07T00:30:00.0000000Z'),
+            lambda p:p.update(finishedUtc='2026-11-07T05:30:00.0000001Z')]
+        self.reject_mutations(mutations)
+
+    def test_v2_authenticated_python_and_installed_source_provenance_are_required(self):
+        mutations=[lambda p:p['externalSources'].update(pythonSourceVerified=False),
+            lambda p:p['externalSources'].update(archives=[]),
+            lambda p:p['externalSources']['archives'][0].update(pinVariable='untrusted'),
+            lambda p:p['externalSources'].update(embeddedPythonWheels=[]),
+            lambda p:p['externalSources']['embeddedPythonWheels'][0].update(sha256='bad'),
+            lambda p:p['installedRuntimeStage'].update(runtimeRoot='C:\\other'),
+            lambda p:p['installedRuntimeStage'].update(archiveCount=True),
+            lambda p:p['installedRuntimeStage']['receipt'].update(bytes=0)]
+        self.reject_mutations(mutations)
+
+    def test_v2_recipe_and_winacc_source_identity_cannot_be_omitted_or_relabelled(self):
+        mutations=[lambda p:p.pop('sourceRecipeProof'),lambda p:p.pop('winAccFocusOrderSourcePatch'),
+            lambda p:p['sourceRecipeProof'].update(recipeSha256='0'*64),
+            lambda p:p['sourceRecipeProof']['armGuardedSources'][0].update(unchanged=False),
+            lambda p:p['sourceRecipeProof'].update(hookOrder=['arm64Full','winAccFocusOrder']),
+            lambda p:p['winAccFocusOrderSourcePatch'].update(afterSha256='0'*64),
+            lambda p:p['sourceHooks']['moduleBootstrap'].update(afterSha256='0'*64)]
+        self.reject_mutations(mutations)
+
+    def test_v2_native_inventory_and_winacc_imports_are_required(self):
+        mutations=[lambda p:p.pop('winAccBinary'),lambda p:p['winAccBinary'].update(machine=0xaa64),
+            lambda p:p['winAccBinary'].update(sha256='0'*64),
+            lambda p:p['winAccBinary']['imports'].update(normal=[]),
+            lambda p:p['productInventory'].pop(),lambda p:p['productInventory'].append(copy.deepcopy(p['productInventory'][0])),
+            lambda p:p['productInventory'][0].update(path='C:\\other\\soffice.exe'),
+            lambda p:p['productInventory'][0].update(role='pythonLauncherTemplate'),
+            lambda p:p['artifact'].update(path='C:\\evidence\\OpenGeul-Office-engine-arm64.zip'),
+            lambda p:p['crtImportClosure'].update(checkedPeCount=p['nativePeCount']-1)]
+        self.reject_mutations(mutations)
+
+    def test_v2_base_retirement_requires_original_generation_and_closed_handles(self):
+        mutations=[lambda p:p['baseProof'].pop('retirement'),
+            lambda p:p['baseProof']['retirement'][0].update(handlesClosed=False),
+            lambda p:p['baseProof']['retirement'][0]['cleanup'].update(forcedTermination=True),
+            lambda p:p['baseProof']['retirement'][0]['cleanup'].update(finalJobPids=[11]),
+            lambda p:p['baseProof']['retirement'][0]['cleanup']['finalMembers'][0].update(handleValue=999),
+            lambda p:p['baseProof']['retirement'][0]['cleanup']['finalMembers'][0].update(exitCode=True),
+            lambda p:p['baseProof']['retirement'][1].update(phase='create')]
+        self.reject_mutations(mutations)
+
+    def test_v2_crt_nine_file_family_terms_and_compiler_floor_are_required(self):
+        mutations=[lambda p:p['crtPreflight']['files'].pop(),
+            lambda p:p['crtPreflight'].update(minimumRuntimeVersion='14.0.0.0'),
+            lambda p:p['crtRedistributionTerms'].update(url='https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution'),
+            lambda p:p['crtImportClosure'].update(architecture='arm64'),
+            lambda p:p['crtPreflight']['files'][0].update(machine=0xaa64)]
+        self.reject_mutations(mutations)
+
+    @staticmethod
+    def rebind_crt_plan(proof, **changes):
+        """Keep synthetic CRT/copy claims self-consistent while testing lineage."""
+        plan=proof['crtPreflight'];plan.update(changes)
+        source=plan['sourceDirectory'];copied=proof['appLocalCrt']
+        copied['sourceDirectory']=source
+        for record,item in zip(plan['files'],copied['files']):
+            record['sourcePath']=source+'\\'+record['name']
+            item['source']=copy.deepcopy(record)
+        proof['nativePreflight']['crt']=copy.deepcopy(plan)
+
+    def test_v2_crt_plan_requires_all_emitted_lineage_fields(self):
+        mutations=[]
+        for name in ('compilerRoot','redistRoot','redistVersionDirectory','redistFamily'):
+            def missing(proof,name=name):
+                proof['crtPreflight'].pop(name)
+                proof['nativePreflight']['crt']=copy.deepcopy(proof['crtPreflight'])
+            mutations.append(missing)
+        self.reject_mutations(mutations)
+
+    def test_v2_crt_plan_rejects_foreign_vs_family_and_escaped_or_older_redist(self):
+        self.reject_mutations([
+            lambda p:self.rebind_crt_plan(p,compilerRoot='D:\\OtherVS\\VC\\Tools\\MSVC\\14.44.35207'),
+            lambda p:self.rebind_crt_plan(p,redistRoot='D:\\OtherVS\\VC\\Redist\\MSVC'),
+            lambda p:self.rebind_crt_plan(p,redistVersionDirectory='14.44'),
+            lambda p:self.rebind_crt_plan(p,redistVersionDirectory='../14.44.35207'),
+            lambda p:self.rebind_crt_plan(p,redistVersionDirectory='v145'),
+            lambda p:self.rebind_crt_plan(p,redistVersionDirectory='14.43.0',
+                sourceDirectory='C:\\VS\\VC\\Redist\\MSVC\\14.43.0\\x64\\Microsoft.VC143.CRT'),
+            lambda p:self.rebind_crt_plan(p,redistFamily='Microsoft.VC145.CRT',
+                sourceDirectory='C:\\VS\\VC\\Redist\\MSVC\\14.44.35207\\x64\\Microsoft.VC145.CRT'),
+            lambda p:self.rebind_crt_plan(p,redistRoot='D:\\OtherVS\\VC\\Redist\\MSVC',
+                sourceDirectory='D:\\OtherVS\\VC\\Redist\\MSVC\\14.44.35207\\x64\\Microsoft.VC143.CRT'),
+            lambda p:self.rebind_crt_plan(p,
+                sourceDirectory='C:\\VS\\VC\\Redist\\MSVC\\..\\MSVC\\14.44.35207\\x64\\Microsoft.VC143.CRT')])
+
+    def test_v2_crt_plan_accepts_only_producer_supported_version_directory_forms(self):
+        module=implementation()
+        for directory in ('14.44.35207','14.44.35207.0','v14.44.35207','V14.44.35207','v143'):
+            with self.subTest(directory=directory),tempfile.TemporaryDirectory() as folder:
+                _,runtime,path,proof=x64_source_build_fixture(Path(folder))
+                self.rebind_crt_plan(proof,redistVersionDirectory=directory,
+                    sourceDirectory='C:\\VS\\VC\\Redist\\MSVC\\'+directory+'\\x64\\Microsoft.VC143.CRT')
+                pin_source_receipt(runtime,path,proof)
+                module.validate_source_build_receipt(runtime,path,architecture='x64')
+
+    def reject_mutations(self,mutations):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            _,runtime,path,original=x64_source_build_fixture(Path(folder))
+            for index,mutate in enumerate(mutations):
+                with self.subTest(mutation=index):
+                    proof=copy.deepcopy(original);mutate(proof);pin_source_receipt(runtime,path,proof)
+                    with self.assertRaises(ValueError): module.validate_source_build_receipt(runtime,path,architecture='x64')
 
 
 if __name__ == '__main__': unittest.main()

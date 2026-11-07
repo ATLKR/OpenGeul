@@ -22,6 +22,92 @@ function Assert-EngineUnlinkedPath([string]$Path) {
     }
 }
 
+function Test-EngineExactString($Value, [string]$Expected) {
+    return ($Value -is [string] -and $Value -ceq $Expected)
+}
+
+function Get-EngineNativeTarget([string]$Architecture) {
+    if ($Architecture -cnotin @('arm64','x64')) { throw 'Unsupported source engine architecture.' }
+    $folder = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../engine-build'))
+    $policyPath = Join-Path $folder 'native-targets.json'
+    $manifestPath = Join-Path $folder 'source-build.json'
+    Assert-EngineUnlinkedPath $policyPath; Assert-EngineUnlinkedPath $manifestPath
+    $expected = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
+    $bytes = [IO.File]::ReadAllBytes($policyPath)
+    if ($bytes.Length -ne 1987 -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() -cne $expected) {
+        throw 'Tracked native target policy differs from reviewed bytes.'
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable
+    $descriptor = $manifest.nativeTargets
+    if ($descriptor -isnot [Collections.IDictionary] -or $descriptor.Count -ne 3 -or
+        -not (Test-EngineExactString $descriptor.filename 'native-targets.json') -or
+        -not (Test-EnginePositiveInteger $descriptor.size) -or $descriptor.size -ne 1987 -or
+        -not (Test-EngineExactString $descriptor.sha256 $expected)) { throw 'Native target manifest binding differs.' }
+    $policy = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json -AsHashtable
+    return $policy.targets[$Architecture]
+}
+
+function Assert-EngineX64ServerBinding($Artifact, $Run, $Jobs, $Target, $Build) {
+    $branch = $Target.ref.Substring('refs/heads/'.Length)
+    $strings = @(
+        @{actual=$Run.status;expected='completed'}, @{actual=$Run.conclusion;expected='success'},
+        @{actual=$Run.event;expected='push'}, @{actual=$Run.path;expected=$Target.workflow},
+        @{actual=$Run.head_branch;expected=$branch}, @{actual=$Run.head_sha;expected=$Build.sourceCommit},
+        @{actual=$Run.repository.full_name;expected='ATLKR/OpenGeul'},
+        @{actual=$Run.head_repository.full_name;expected='ATLKR/OpenGeul'},
+        @{actual=$Run.actor.login;expected='ATLKR'}, @{actual=$Run.actor.type;expected='User'},
+        @{actual=$Run.triggering_actor.login;expected='ATLKR'}, @{actual=$Run.triggering_actor.type;expected='User'},
+        @{actual=$Artifact.workflow_run.head_branch;expected=$branch},
+        @{actual=$Artifact.workflow_run.head_sha;expected=$Build.sourceCommit},
+        @{actual=$Artifact.name;expected=($Target.artifactPrefix+$Build.runId+'-1')}
+    )
+    foreach ($pair in $strings) { if (-not (Test-EngineExactString $pair.actual $pair.expected)) { throw 'x64 source owner/run binding differs.' } }
+    foreach ($value in @($Run.repository.id,$Run.head_repository.id,$Artifact.workflow_run.repository_id,$Artifact.workflow_run.head_repository_id)) {
+        if (-not (Test-EnginePositiveInteger $value) -or $value -ne 1405493151) { throw 'x64 source repository identity differs.' }
+    }
+    foreach ($value in @($Run.actor.id,$Run.triggering_actor.id)) {
+        if (-not (Test-EnginePositiveInteger $value) -or $value -ne 65988341) { throw 'x64 source actor identity differs.' }
+    }
+    if (-not (Test-EnginePositiveInteger $Run.run_attempt) -or $Run.run_attempt -ne 1 -or
+        -not (Test-EnginePositiveInteger $Jobs.total_count) -or $Jobs.total_count -ne 1 -or
+        $Jobs.jobs -isnot [array] -or $Jobs.jobs.Count -ne 1) { throw 'x64 source requires one first-attempt fixed job.' }
+    $job = $Jobs.jobs[0]
+    if (-not (Test-EnginePositiveInteger $job.id) -or -not (Test-EnginePositiveInteger $job.run_id) -or $job.run_id -ne $Build.runId -or
+        -not (Test-EngineExactString $job.name $Target.job) -or -not (Test-EngineExactString $job.head_sha $Build.sourceCommit) -or
+        -not (Test-EngineExactString $job.status 'completed') -or -not (Test-EngineExactString $job.conclusion 'success')) { throw 'x64 fixed native job did not qualify.' }
+    return $job
+}
+
+function Assert-EngineX64ReceiptBinding([string]$Path, $Runtime, $Target) {
+    $proof = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
+    $build = $Runtime.sourceBuild; $binding = $proof.workflowBinding
+    if ($proof -isnot [Collections.IDictionary] -or -not (Test-EnginePositiveInteger $proof.schemaVersion) -or $proof.schemaVersion -ne 2 -or
+        $binding -isnot [Collections.IDictionary]) { throw 'x64 source receipt schema differs.' }
+    foreach ($flag in @('passed','fullEngineQualified','acceptanceEligible')) {
+        if ($proof[$flag] -isnot [bool] -or -not $proof[$flag]) { throw 'x64 source receipt is unqualified.' }
+    }
+    if ($proof.guiVerified -isnot [bool] -or $proof.guiVerified) { throw 'Source proof cannot qualify GUI behavior.' }
+    $strings = @(
+        @{actual=$proof.kind;expected='native-office-engine-source-build'}, @{actual=$proof.phase;expected='Full'},
+        @{actual=$proof.architecture;expected='x64'}, @{actual=$proof.status;expected='native-engine-source-build-qualified'},
+        @{actual=$proof.sourceCommit;expected=$build.sourceCommit}, @{actual=$proof.sourceTree;expected=$build.sourceTree},
+        @{actual=$proof.driverSha256;expected=$build.driverSha256}, @{actual=$proof.nativeTargetsSha256;expected=$build.nativeTargetsSha256},
+        @{actual=$proof.sourcePortManifestSha256;expected=$build.patchManifestSha256},
+        @{actual=$binding.workflow;expected=$Target.workflow}, @{actual=$binding.ref;expected=$Target.ref},
+        @{actual=$binding.workflowRef;expected=('ATLKR/OpenGeul/'+$Target.workflow+'@'+$Target.ref)},
+        @{actual=$binding.job;expected=$Target.job}, @{actual=$binding.sourceCommit;expected=$build.sourceCommit},
+        @{actual=$binding.sourceTree;expected=$build.sourceTree}, @{actual=$proof.artifact.sha256;expected=$Runtime.sha256}
+    )
+    foreach ($pair in $strings) { if (-not (Test-EngineExactString $pair.actual $pair.expected)) { throw 'x64 receipt differs from reviewed external source pins.' } }
+    foreach ($value in @($proof.sourceRun,$binding.sourceRun)) {
+        if (-not (Test-EnginePositiveInteger $value) -or $value -ne $build.runId) { throw 'x64 receipt source run differs.' }
+    }
+    foreach ($value in @($proof.runAttempt,$binding.runAttempt)) {
+        if (-not (Test-EnginePositiveInteger $value) -or $value -ne 1) { throw 'x64 receipt requires the first source attempt.' }
+    }
+    if (-not (Test-EnginePositiveInteger $proof.artifact.size) -or $proof.artifact.size -ne $Runtime.size) { throw 'x64 receipt engine size differs.' }
+}
+
 function Write-EngineFetchJson([string]$Path, $Value) {
     $Value | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $Path -Encoding utf8NoBOM
 }
@@ -111,9 +197,11 @@ function Save-EngineArtifact($ApiClient, $DownloadClient, [string]$Url, [string]
 }
 
 function Expand-EngineArtifact([string]$Archive, [string]$Output, $Runtime,
-                               [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None) {
+                               [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None,
+                               [ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture = 'arm64') {
     $CancellationToken.ThrowIfCancellationRequested()
-    $engineName = 'OpenGeul-Office-engine-arm64.zip'; $receiptName = 'source-build-receipt.json'
+    $target = Get-EngineNativeTarget $Architecture
+    $engineName = $target.archive; $receiptName = 'source-build-receipt.json'
     $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
     try {
         if ($zip.Entries.Count -ne 2) { throw 'Engine artifact must contain exactly the two qualified input files.' }
@@ -143,12 +231,25 @@ function Invoke-SourceEngineFetch([string]$SourceLockPath, [string]$Output, $Api
     Assert-EngineUnlinkedPath $SourceLockPath
     $lock = Get-Content -LiteralPath $SourceLockPath -Raw | ConvertFrom-Json -AsHashtable
     $runtime = $lock.runtime; $build = $runtime.sourceBuild
-    if ($lock.schemaVersion -ne 1 -or $lock.architecture -cne 'arm64' -or $runtime.format -cne 'source-built-zip' -or
+    if ($lock -isnot [Collections.IDictionary] -or -not (Test-EnginePositiveInteger $lock.schemaVersion) -or $lock.schemaVersion -ne 1 -or
+        $lock.architecture -isnot [string] -or $lock.architecture -cnotin @('arm64','x64') -or
+        $runtime -isnot [Collections.IDictionary] -or $build -isnot [Collections.IDictionary] -or
+        -not (Test-EngineExactString $runtime.format 'source-built-zip') -or
         -not (Test-EnginePositiveInteger $runtime.size) -or $runtime.size -gt 8589934592 -or
-        $runtime.sha256 -cnotmatch '^[0-9a-f]{64}$' -or $build.receiptSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-        $build.artifactSha256 -cnotmatch '^[0-9a-f]{64}$' -or $build.patchManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-        $build.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or -not (Test-EnginePositiveInteger $build.runId) -or
-        -not (Test-EnginePositiveInteger $build.artifactId) -or ($build.Contains('artifactSize') -and -not (Test-EnginePositiveInteger $build.artifactSize))) { throw 'Complete externally pinned ARM64 source-build lock is required.' }
+        $build.sourceCommit -isnot [string] -or $build.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+        -not (Test-EnginePositiveInteger $build.runId) -or -not (Test-EnginePositiveInteger $build.artifactId) -or
+        ($build.Contains('artifactSize') -and -not (Test-EnginePositiveInteger $build.artifactSize))) {
+        throw 'Complete externally pinned native source-build lock is required.'
+    }
+    foreach ($value in @($runtime.sha256,$build.receiptSha256,$build.artifactSha256,$build.patchManifestSha256)) {
+        if ($value -isnot [string] -or $value -cnotmatch '^[0-9a-f]{64}$') { throw 'Source engine lock hashes require exact scalar digests.' }
+    }
+    $target = Get-EngineNativeTarget $lock.architecture
+    if ($lock.architecture -ceq 'x64' -and ($build.sourceTree -isnot [string] -or $build.sourceTree -cnotmatch '^[0-9a-f]{40}$' -or
+        $build.driverSha256 -isnot [string] -or $build.driverSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        -not (Test-EngineExactString $build.nativeTargetsSha256 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'))) {
+        throw 'x64 source build requires independently reviewed tree, driver and policy pins.'
+    }
     $token = if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
     if ([string]::IsNullOrWhiteSpace($token)) { throw 'GH_TOKEN or GITHUB_TOKEN with workflow artifact read access is required.' }
     Assert-EngineUnlinkedPath $Output
@@ -159,7 +260,7 @@ function Invoke-SourceEngineFetch([string]$SourceLockPath, [string]$Output, $Api
     $started = [DateTime]::UtcNow; $clock = [Diagnostics.Stopwatch]::StartNew()
     $cancellation = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))
     $audit = [ordered]@{schemaVersion=1;kind='authenticated-source-engine-download';passed=$false;stage='github-metadata';
-        repository='ATLKR/OpenGeul';artifactId=$build.artifactId;runId=$build.runId;sourceCommit=$build.sourceCommit;
+        repository='ATLKR/OpenGeul';architecture=$lock.architecture;artifactId=$build.artifactId;runId=$build.runId;sourceCommit=$build.sourceCommit;
         artifactSha256=$build.artifactSha256;startedUtc=$started.ToString('o');
         timeoutSeconds=$TimeoutSeconds;deadlineUtc=$started.AddSeconds($TimeoutSeconds).ToString('o');deadlineExceeded=$false}
     try {
@@ -174,26 +275,43 @@ function Invoke-SourceEngineFetch([string]$SourceLockPath, [string]$Output, $Api
             ($build.Contains('artifactSize') -and $artifact.size_in_bytes -ne $build.artifactSize) -or
             -not (Test-EnginePositiveInteger $run.id) -or $run.id -ne $build.runId -or $run.head_sha -cne $build.sourceCommit -or
             $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or
-            $run.path -cne '.github/workflows/office-native-engine.yml' -or -not (Test-EnginePositiveInteger $run.run_attempt) -or
-            $artifact.name -cne ('opengeul-native-arm64-engine-'+$build.runId+'-'+$run.run_attempt) -or
+            $run.path -cne $target.workflow -or -not (Test-EnginePositiveInteger $run.run_attempt) -or
+            $artifact.name -cne ($target.artifactPrefix+$build.runId+'-'+$run.run_attempt) -or
             $run.repository.full_name -cne 'ATLKR/OpenGeul' -or $run.head_repository.full_name -cne 'ATLKR/OpenGeul' -or
             -not (Test-EnginePositiveInteger $run.repository.id) -or -not (Test-EnginePositiveInteger $run.head_repository.id) -or
             $run.head_repository.id -ne $run.repository.id -or -not (Test-EnginePositiveInteger $artifact.workflow_run.id) -or
             $artifact.workflow_run.id -ne $build.runId -or -not (Test-EnginePositiveInteger $artifact.workflow_run.repository_id) -or
             $artifact.workflow_run.repository_id -ne $run.repository.id -or -not (Test-EnginePositiveInteger $artifact.workflow_run.head_repository_id) -or
             $artifact.workflow_run.head_repository_id -ne $run.repository.id -or $artifact.workflow_run.head_sha -cne $build.sourceCommit) { throw 'GitHub artifact/run metadata differs from locked successful source build.' }
+        $job = $null
+        if ($lock.architecture -ceq 'x64') {
+            $jobs = Read-EngineApiJson $ApiClient ($api+'/runs/'+$build.runId+'/attempts/1/jobs?per_page=100') $token $cancellation.Token
+            $job = Assert-EngineX64ServerBinding $artifact $run $jobs $target $build
+            $audit.sourceTree=$build.sourceTree; $audit.driverSha256=$build.driverSha256; $audit.nativeTargetsSha256=$build.nativeTargetsSha256
+        }
         $metadata = [ordered]@{schemaVersion=1;repository='ATLKR/OpenGeul';
             artifact=@{id=$artifact.id;name=$artifact.name;size_in_bytes=$artifact.size_in_bytes;digest=$artifact.digest;expired=$artifact.expired;
                 workflow_run=@{id=$artifact.workflow_run.id;repository_id=$artifact.workflow_run.repository_id;head_repository_id=$artifact.workflow_run.head_repository_id;head_sha=$artifact.workflow_run.head_sha}};
             run=@{id=$run.id;run_attempt=$run.run_attempt;head_sha=$run.head_sha;status=$run.status;conclusion=$run.conclusion;path=$run.path;
                 repository=@{id=$run.repository.id;full_name=$run.repository.full_name};head_repository=@{id=$run.head_repository.id;full_name=$run.head_repository.full_name}}}
+        if ($job) {
+            $metadata.job=@{id=$job.id;run_id=$job.run_id;head_sha=$job.head_sha;name=$job.name;status=$job.status;conclusion=$job.conclusion}
+            $metadata.run.event=$run.event; $metadata.run.head_branch=$run.head_branch
+            $metadata.run.actor=@{id=$run.actor.id;login=$run.actor.login;type=$run.actor.type}
+            $metadata.run.triggering_actor=@{id=$run.triggering_actor.id;login=$run.triggering_actor.login;type=$run.triggering_actor.type}
+            $metadata.artifact.workflow_run.head_branch=$artifact.workflow_run.head_branch
+        }
         Write-EngineFetchJson (Join-Path $outputPath 'artifact-server-metadata.json') $metadata
         $audit.stage = 'authenticated-outer-zip'
         $archive = Join-Path $outputPath 'github-artifact.zip'
         Save-EngineArtifact $ApiClient $DownloadClient ($api+'/artifacts/'+$build.artifactId+'/zip') $token $archive $artifact.size_in_bytes $build.artifactSha256 $cancellation.Token
         $audit.artifactSize = $artifact.size_in_bytes
         $audit.stage = 'extract-exact-inputs'
-        Expand-EngineArtifact $archive $outputPath $runtime $cancellation.Token
+        Expand-EngineArtifact $archive $outputPath $runtime $cancellation.Token -Architecture $lock.architecture
+        if ($lock.architecture -ceq 'x64') {
+            $audit.stage='source-receipt-binding'
+            Assert-EngineX64ReceiptBinding (Join-Path $outputPath 'source-build-receipt.json') $runtime $target
+        }
         $audit.engineSize = $runtime.size; $audit.engineSha256 = $runtime.sha256; $audit.receiptSha256 = $build.receiptSha256
         $cancellation.Token.ThrowIfCancellationRequested()
         $audit.passed = $true; $audit.stage = 'complete'

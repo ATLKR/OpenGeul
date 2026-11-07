@@ -48,7 +48,7 @@ public sealed class EngineFakeHttp : HttpMessageHandler {
  public EngineFakeHttp(string root, bool api) { this.root=root;this.api=api; }
  protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) {
   string path=request.RequestUri.AbsolutePath;
-  string endpoint=api?(path.EndsWith("/zip")?"redirect":path.Contains("/artifacts/")?"artifact":"run"):"blob";
+  string endpoint=api?(path.EndsWith("/zip")?"redirect":path.EndsWith("/jobs")?"jobs":path.Contains("/artifacts/")?"artifact":"run"):"blob";
   Events.Add(new { endpoint=endpoint, authenticated=request.Headers.Authorization!=null });
   if(api && (request.Headers.Authorization==null || request.Headers.Authorization.ToString()!="Bearer fetch-test-secret-do-not-record")) throw new Exception("API requires authentication");
   if(!api && request.Headers.Authorization!=null) throw new Exception("Signed download leaked Authorization");
@@ -99,6 +99,16 @@ try {
 '''
 
 
+def fetch_test_environment(**overrides):
+    # Offline fixtures need process paths, never ambient service credentials.
+    names=('PATH','PATHEXT','SystemRoot','WINDIR','SystemDrive','ComSpec','TEMP','TMP',
+           'HOME','USERPROFILE','LOCALAPPDATA','APPDATA','XDG_CACHE_HOME','XDG_CONFIG_HOME',
+           'XDG_DATA_HOME','PYTHONUTF8')
+    values={name:value for name in names if (value:=os.environ.get(name)) is not None}
+    values.update(overrides)
+    return values
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -147,12 +157,15 @@ def loopback_responses(root, *, stalled=None, header_delay=0):
 
 @unittest.skipUnless(PWSH, 'PowerShell runtime unavailable')
 class FetchSourceEngineTests(unittest.TestCase):
-    def fixture(self, root, entries=None, *, engine_payload=b'actual engine fixture'):
+    def fixture(self, root, entries=None, *, engine_payload=b'actual engine fixture', architecture='arm64'):
         engine = zip_bytes([('program/soffice.bin', engine_payload, 0)])
         receipt = b'{"schemaVersion":1,"boundedFixture":true}\n'
-        outer = zip_bytes(entries if entries is not None else [(ENGINE, engine, 0), (RECEIPT, receipt, 0)])
+        engine_name = f'OpenGeul-Office-engine-{architecture}.zip'
+        if architecture == 'x64':
+            receipt = json.dumps(self.x64_receipt(engine)).encode()
+        outer = zip_bytes(entries if entries is not None else [(engine_name, engine, 0), (RECEIPT, receipt, 0)])
         (root/'outer.zip').write_bytes(outer)
-        lock = {'schemaVersion': 1, 'architecture': 'arm64', 'runtime': {
+        lock = {'schemaVersion': 1, 'architecture': architecture, 'runtime': {
             'format': 'source-built-zip', 'size': len(engine), 'sha256': sha(engine),
             'sourceBuild': {'receiptSha256': sha(receipt), 'sourceCommit': 'a'*40,
                             'runId': 123, 'artifactId': 456, 'artifactSha256': sha(outer),
@@ -164,11 +177,132 @@ class FetchSourceEngineTests(unittest.TestCase):
                'path': '.github/workflows/office-native-engine.yml',
                'repository': {'id': 789, 'full_name': 'ATLKR/OpenGeul'},
                'head_repository': {'id': 789, 'full_name': 'ATLKR/OpenGeul'}}
+        if architecture == 'x64':
+            lock['runtime']['sourceBuild'].update(sourceTree='c'*40, driverSha256='d'*64,
+                nativeTargetsSha256='ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc')
+            artifact['name'] = 'opengeul-native-x64-engine-123-1'
+            artifact['workflow_run'].update(repository_id=1405493151, head_repository_id=1405493151,
+                head_branch='work/opengeul-office-native-engine-x64')
+            run.update(path='.github/workflows/office-native-engine-x64.yml', run_attempt=1,
+                event='push', head_branch='work/opengeul-office-native-engine-x64',
+                actor=dict(login='ATLKR',id=65988341,type='User'),
+                triggering_actor=dict(login='ATLKR',id=65988341,type='User'))
+            run['repository']['id'] = run['head_repository']['id'] = 1405493151
+            self.save(root, 'jobs', dict(total_count=1,jobs=[dict(id=999,run_id=123,head_sha='a'*40,
+                name='native-firebird-and-office-x64',status='completed',conclusion='success')]))
         scenario = {'redirectStatus': 302, 'blobStatus': 200, 'throwDownload': False, 'unknownLength': False,
                     'location': 'https://blob.example.test/file?sig='+SIGNED_SECRET}
         for name, value in (('lock', lock), ('artifact', artifact), ('run', run), ('scenario', scenario)):
             self.save(root, name, value)
         return lock, artifact, run, scenario, engine, receipt
+
+
+    def x64_receipt(self, engine):
+        # A labelled acquisition-only unit fixture, never a qualified engine input.
+        return dict(schemaVersion=2, kind='native-office-engine-source-build', phase='Full',
+            architecture='x64', status='native-engine-source-build-qualified', passed=True,
+            fullEngineQualified=True, acceptanceEligible=True, guiVerified=False,
+            sourceCommit='a'*40, sourceTree='c'*40, sourceRun=123, runAttempt=1,
+            driverSha256='d'*64, sourcePortManifestSha256='b'*64,
+            nativeTargetsSha256='ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc',
+            workflowBinding=dict(workflow='.github/workflows/office-native-engine-x64.yml',
+                workflowRef='ATLKR/OpenGeul/.github/workflows/office-native-engine-x64.yml@refs/heads/work/opengeul-office-native-engine-x64',
+                ref='refs/heads/work/opengeul-office-native-engine-x64',job='native-firebird-and-office-x64',
+                sourceRun=123,runAttempt=1,sourceCommit='a'*40,sourceTree='c'*40),
+            artifact=dict(path=r'D:\owned\OpenGeul-Office-engine-x64.zip',size=len(engine),sha256=sha(engine)))
+
+    def test_x64_fetch_uses_fixed_independent_owner_run_job_and_exact_input_family(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);lock,_,_,_,engine,receipt=self.fixture(root,architecture='x64')
+            result,events=self.run_fetch(root)
+            self.assertEqual(0,result.returncode,result.stdout+result.stderr)
+            self.assertEqual(['artifact','run','jobs','redirect','blob'],[e['endpoint'] for e in events])
+            self.assertEqual([True,True,True,True,False],[e['authenticated'] for e in events])
+            self.assertEqual(engine,(root/'output/OpenGeul-Office-engine-x64.zip').read_bytes())
+            self.assertEqual(receipt,(root/'output'/RECEIPT).read_bytes())
+            self.assertFalse((root/'output'/ENGINE).exists())
+            audit=json.loads((root/'output/source-engine-download.json').read_text())
+            self.assertIs(audit['passed'],True);self.assertEqual('x64',audit['architecture'])
+            metadata=json.loads((root/'output/artifact-server-metadata.json').read_text())
+            self.assertEqual('native-firebird-and-office-x64',metadata['job']['name'])
+            self.assertEqual(lock['runtime']['sourceBuild']['sourceTree'],audit['sourceTree'])
+
+    def test_x64_metadata_rejects_failed_whole_run_wrong_owner_branch_attempt_or_job(self):
+        cases=[('run','conclusion','failure'),('run','event','workflow_dispatch'),
+            ('run','head_branch','work/opengeul-office-native-engine'),('run','run_attempt',2),
+            ('run.actor','id',1),('run.triggering_actor','login','another-user'),
+            ('run.repository','id',789),('run','path','.github/workflows/office-native-engine.yml'),
+            ('artifact','name','opengeul-native-arm64-engine-123-1'),
+            ('artifact.workflow_run','head_branch','work/opengeul-office-native-engine'),
+            ('jobs','total_count',2),('jobs.0','name','another-job'),('jobs.0','conclusion','failure'),
+            ('jobs.0','head_sha','f'*40)]
+        for target,key,value in cases:
+            with self.subTest(target=target,key=key),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);_,artifact,run,_,_,_=self.fixture(root,architecture='x64')
+                jobs=json.loads((root/'jobs.json').read_text())
+                selected={'artifact':artifact,'run':run,'jobs':jobs}[target.split('.')[0]]
+                for part in target.split('.')[1:]:
+                    selected=selected['jobs'][int(part)] if part.isdigit() else selected[part]
+                selected[key]=value
+                self.save(root,'artifact',artifact);self.save(root,'run',run);self.save(root,'jobs',jobs)
+                result,events=self.run_fetch(root)
+                self.assertNotEqual(0,result.returncode)
+                self.assertNotIn('blob',[e['endpoint'] for e in events])
+
+    def test_x64_lock_requires_exact_scalar_types_before_any_network(self):
+        for target,key,value in [('lock','schemaVersion',True),('lock','architecture',['x64']),
+                ('runtime','format',['source-built-zip']),('runtime','sha256',None),
+                ('build','sourceCommit',['a'*40]),('build','patchManifestSha256',['b'*64])]:
+            with self.subTest(target=target,key=key),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);lock,_,_,_,_,_=self.fixture(root,architecture='x64')
+                selected=lock if target=='lock' else lock['runtime'] if target=='runtime' else lock['runtime']['sourceBuild']
+                selected[key]=value;self.save(root,'lock',lock)
+                result,events=self.run_fetch(root)
+                self.assertNotEqual(0,result.returncode);self.assertEqual([],events)
+                self.assertFalse((root/'output').exists())
+
+    def test_x64_new_external_pins_are_required_before_network_or_output(self):
+        for key,value in [('sourceTree',None),('driverSha256',None),('nativeTargetsSha256',None),
+                          ('sourceTree','C'*40),('nativeTargetsSha256','f'*64)]:
+            with self.subTest(key=key,value=value),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);lock,_,_,_,_,_=self.fixture(root,architecture='x64')
+                if value is None:lock['runtime']['sourceBuild'].pop(key)
+                else:lock['runtime']['sourceBuild'][key]=value
+                self.save(root,'lock',lock);result,events=self.run_fetch(root)
+                self.assertNotEqual(0,result.returncode);self.assertEqual([],events)
+                self.assertFalse((root/'output').exists())
+
+    def test_x64_extracted_receipt_must_join_external_source_pins_and_fixed_workflow(self):
+        cases=[('proof','sourceTree','f'*40),('proof','driverSha256','f'*64),('proof','nativeTargetsSha256','f'*64),
+               ('proof','architecture','arm64'),('proof','schemaVersion',1),('proof','sourceRun',True),('proof','guiVerified',True),
+               ('binding','workflow','.github/workflows/office-native-engine.yml'),('binding','job','another-job'),
+               ('binding','workflowRef','ATLKR/OpenGeul/other@refs/heads/other'),('binding','ref','refs/heads/other'),
+               ('binding','sourceCommit','f'*40),('binding','sourceTree','f'*40),('binding','runAttempt',True),
+               ('artifact','size',True)]
+        for target,key,value in cases:
+            with self.subTest(target=target,key=key),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);lock,artifact,_,_,engine,receipt=self.fixture(root,architecture='x64')
+                proof=json.loads(receipt)
+                selected=proof if target=='proof' else proof['workflowBinding'] if target=='binding' else proof['artifact']
+                selected[key]=value;receipt=json.dumps(proof).encode()
+                outer=zip_bytes([('OpenGeul-Office-engine-x64.zip',engine,0),(RECEIPT,receipt,0)])
+                (root/'outer.zip').write_bytes(outer)
+                lock['runtime']['sourceBuild'].update(receiptSha256=sha(receipt),artifactSha256=sha(outer),artifactSize=len(outer))
+                artifact.update(size_in_bytes=len(outer),digest='sha256:'+sha(outer))
+                self.save(root,'lock',lock);self.save(root,'artifact',artifact)
+                result,_=self.run_fetch(root);self.assertNotEqual(0,result.returncode)
+                self.assertIs(json.loads((root/'output/source-engine-download.json').read_text())['passed'],False)
+
+    def test_x64_artifact_never_accepts_arm64_names_or_extra_input_members(self):
+        for mutation in ('wrong-architecture','extra-member'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);_,_,_,_,engine,receipt=self.fixture(root,architecture='x64')
+                entries=[('OpenGeul-Office-engine-x64.zip',engine,0),(RECEIPT,receipt,0)]
+                if mutation=='wrong-architecture':entries[0]=(ENGINE,engine,0)
+                else:entries.append(('extra.json',b'{}',0))
+                self.fixture(root,entries,architecture='x64')
+                result,_=self.run_fetch(root);self.assertNotEqual(0,result.returncode)
+                self.assertFalse((root/'output/OpenGeul-Office-engine-x64.zip').exists())
 
     def save(self, root, name, value):
         (root/(name+'.json')).write_text(json.dumps(value), encoding='utf-8')
@@ -177,8 +311,7 @@ class FetchSourceEngineTests(unittest.TestCase):
         script = ROOT/'suite/scripts/fetch-source-engine.ps1'
         self.assertTrue(script.is_file(), 'Authenticated source-engine fetch script is required')
         harness = root/'harness.ps1'; harness.write_text(HARNESS, encoding='utf-8')
-        env = dict(os.environ)
-        env.pop('GH_TOKEN', None); env.pop('GITHUB_TOKEN', None)
+        env = fetch_test_environment()
         if token: env[token_name] = SECRET
         result = subprocess.run([PWSH, '-NoProfile', '-File', str(harness), '-Root', str(root),
                                  '-Script', str(script), '-FetchTimeoutSeconds', str(timeout_seconds)], capture_output=True, text=True, timeout=30, env=env)
@@ -279,7 +412,7 @@ class FetchSourceEngineTests(unittest.TestCase):
     def test_fixed_cli_options_reach_token_gate_without_creating_output_or_using_http(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); self.fixture(root)
-            env = dict(os.environ); env.pop('GH_TOKEN', None); env.pop('GITHUB_TOKEN', None)
+            env = fetch_test_environment()
             result = subprocess.run([PWSH, '-NoProfile', '-File', str(ROOT/'suite/scripts/fetch-source-engine.ps1'),
                                      '-SourceLockPath', str(root/'lock.json'), '-Output', str(root/'output')],
                                     capture_output=True, text=True, env=env, timeout=30)

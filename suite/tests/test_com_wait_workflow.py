@@ -13,8 +13,11 @@ def step(name):
     return found[0]
 
 
-def evaluate(expression, mode, architecture='arm64', outcomes=None):
+def evaluate(expression, mode, architecture='arm64', outcomes=None, runtime_format=None):
+    # Compatibility fixture defaults reflect the existing committed input locks.
+    if runtime_format is None: runtime_format='source-built-zip' if architecture=='arm64' else 'msi'
     text=expression.replace('env.OPENGEUL_SUITE_RUN_MODE',repr(mode)).replace('matrix.architecture',repr(architecture))
+    text=text.replace('env.SUITE_RUNTIME_FORMAT',repr(runtime_format))
     for key,value in (outcomes or {}).items(): text=text.replace('steps.'+key+'.outcome',repr(value))
     return eval(text.replace('&&',' and ').replace('||',' or '),{'__builtins__':{}},{})
 

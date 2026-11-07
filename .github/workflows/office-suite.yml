@@ -95,12 +95,22 @@ jobs:
         if ($shellExit -ne 0) { throw 'Suite shell tests failed.' }
         if ($beforeCapabilityExit -ne 0 -or $afterCapabilityExit -ne 0) { throw 'Suite unit capability receipts failed.' }
     - name: 고정 버전의 패키지 경로 선택
+      id: runtime-input
       shell: pwsh
       run: |
         $architecture = '${{ matrix.architecture }}'
         $lockPath = if ($architecture -ceq 'arm64') { 'suite/config/runtime.arm64.lock.json' } else { 'suite/config/runtime.lock.json' }
         $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
         if ($lock.architecture -cne $architecture -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite lock identity.' }
+        if ($lock.runtime -isnot [pscustomobject]) { throw 'Suite runtime identity is missing.' }
+        $runtimeFormat = if ($lock.runtime.PSObject.Properties.Name -ccontains 'format') { $lock.runtime.format } else { 'msi' }
+        if ($runtimeFormat -isnot [string] -or $runtimeFormat -cnotin @('msi', 'source-built-zip')) { throw 'Unsupported Suite runtime format.' }
+        if ($runtimeFormat -ceq 'source-built-zip') {
+          python -c "import pathlib,sys; from suite.payload import _json_bytes; from suite.prepare import validate_source_build_lock; value=_json_bytes(pathlib.Path(sys.argv[1]).read_bytes(),'runtime lock'); validate_source_build_lock(value['runtime'],architecture=sys.argv[2])" $lockPath $architecture
+          if ($LASTEXITCODE -ne 0) { throw 'Source runtime lock admission failed.' }
+        }
+        "SUITE_RUNTIME_FORMAT=$runtimeFormat" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "SUITE_RUNTIME_LOCK=$lockPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Admit isolated diagnostics against exact owner-push source
       id: sal-offset-admission
@@ -181,14 +191,14 @@ jobs:
         $proof | python -
         if ($LASTEXITCODE -ne 0) { throw 'Static SAL source admission failed.' }
 
-    - name: 고정한 네이티브 ARM64 소스 빌드 입력 확보
+    - name: 고정한 네이티브 소스 빌드 입력 확보
       id: source-engine
-      if: "matrix.architecture == 'arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic') || steps.sal-offset-admission.outcome == 'success') && (env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' || (steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success'))"
+      if: "env.SUITE_RUNTIME_FORMAT == 'source-built-zip' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && (matrix.architecture == 'arm64' || (env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic')) && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic') || steps.sal-offset-admission.outcome == 'success') && (env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' || (steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success'))"
       env:
         GH_TOKEN: ${{ github.token }}
       shell: pwsh
       run: |
-        ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath suite/config/runtime.arm64.lock.json -Output .work/source-engine-input
+        ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath $env:SUITE_RUNTIME_LOCK -Output .work/source-engine-input
 
     - name: Map observed SAL offset from locked ARM64 bytes (not acceptance)
       id: sal-offset-mapping
@@ -288,10 +298,15 @@ jobs:
       if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
       shell: pwsh
       run: |
-        if ('${{ matrix.architecture }}' -ceq 'arm64') {
-          ./suite/scripts/build-suite.ps1 -Architecture arm64 -EngineArchive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip -EngineReceipt .work/source-engine-input/source-build-receipt.json
+        $architecture = '${{ matrix.architecture }}'
+        if ($architecture -cnotin @('x64', 'arm64')) { throw 'Unsupported Suite build architecture.' }
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          if ('${{ steps.source-engine.outcome }}' -cne 'success') { throw 'Authenticated source engine acquisition failed; no alternate input is admitted.' }
+          ./suite/scripts/build-suite.ps1 -Architecture $architecture -EngineArchive ".work/source-engine-input/OpenGeul-Office-engine-$architecture.zip" -EngineReceipt .work/source-engine-input/source-build-receipt.json
+        } elseif ($env:SUITE_RUNTIME_FORMAT -ceq 'msi') {
+          ./suite/scripts/build-suite.ps1 -Architecture $architecture
         } else {
-          ./suite/scripts/build-suite.ps1 -Architecture x64
+          throw 'Validated runtime format is required before building the Suite.'
         }
         if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance' -or ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'ime-mode-diagnostic' -and '${{ matrix.architecture }}' -ceq 'arm64')) {
           $ErrorActionPreference = 'Stop'

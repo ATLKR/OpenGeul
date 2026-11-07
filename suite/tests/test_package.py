@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
+from contextlib import ExitStack
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,8 +61,8 @@ class PackageSourceTests(unittest.TestCase):
 
     def test_assembly_inventory_uses_the_authenticated_lock_architecture(self):
         from suite import payload, prepare
-        for architecture, source_built in (('x64', False), ('arm64', False), ('arm64', True)):
-            with self.subTest(architecture=architecture, source_built=source_built), tempfile.TemporaryDirectory() as folder:
+        for architecture, source_built in (('x64', False), ('arm64', False), ('arm64', True), ('x64', True)):
+            with self.subTest(architecture=architecture, source_built=source_built), tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
                 root = Path(folder)/'repo'; self.repository(root)
                 config = root/'suite/config'; config.mkdir(parents=True)
                 (config/'product.json').write_text(json.dumps({'version': 'test-version'}))
@@ -83,8 +84,11 @@ class PackageSourceTests(unittest.TestCase):
                                 'sourceUrl': 'https://example.org/hwp-source',
                                 'provenanceUrl': 'https://example.org/hwp-provenance'}}
                 if source_built:
-                    from suite.tests.test_prepare import source_build_fixture
-                    archive, lock['runtime'], receipt_path, _ = source_build_fixture(Path(folder))
+                    from suite.tests.test_prepare import source_build_fixture, x64_source_build_fixture, synthetic_source_template_pins
+                    if architecture == 'x64':
+                        archive,lock['runtime'],receipt_path,proof=x64_source_build_fixture(Path(folder),runtime_templates=True)
+                        patches.enter_context(patch.object(prepare,'_source_python_templates',return_value=synthetic_source_template_pins(proof)))
+                    else:archive, lock['runtime'], receipt_path, _ = source_build_fixture(Path(folder))
                     runtime = prepare.extract_source_engine_zip(archive, Path(folder)/'source-runtime',
                         runtime=lock['runtime'], receipt=receipt_path, architecture=architecture)
                 def brand(source, destination, product):
@@ -120,9 +124,14 @@ class PackageSourceTests(unittest.TestCase):
                     notice = (output/'Notices/CORRESPONDING_SOURCE.md').read_text()
                     commit = lock['runtime']['sourceBuild']['sourceCommit']
                     self.assertIn('https://github.com/ATLKR/OpenGeul/blob/'+commit+'/suite/engine-build/source-build.json', notice)
-                    self.assertIn('https://github.com/ATLKR/OpenGeul/blob/'+commit+'/.github/workflows/office-native-engine.yml', notice)
+                    workflow='office-native-engine-x64.yml' if architecture=='x64' else 'office-native-engine.yml'
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/blob/'+commit+'/.github/workflows/'+workflow, notice)
                     self.assertIn('https://github.com/ATLKR/OpenGeul/tree/'+commit, notice)
                     self.assertIn('https://github.com/ATLKR/OpenGeul/actions/runs/123', notice)
+                    self.assertIn('Native engine producer source archive: https://github.com/ATLKR/OpenGeul/archive/'+commit+'.zip', notice)
+                    self.assertIn('The local Suite source ZIP contains OpenGeul Suite additions.', notice)
+                    self.assertIn('Native engine build scripts and patches are in the pinned producer source archive above.', notice)
+                    self.assertNotIn('The exact patch files are included in the OpenGeul source archive.', notice)
                     self.assertEqual((output/'Office/opengeul-source-build.json').read_bytes(), receipt_path.read_bytes())
                     self.assertEqual(json.loads((output/'suite-provenance.json').read_text())['runtime'], lock['runtime'])
 
