@@ -12,20 +12,20 @@
     "name": "LibreOffice",
     "version": "26.8.1.1",
     "format": "source-built-zip",
-    "url": "https://github.com/ATLKR/OpenGeul/actions/runs/42203789086/artifacts/13514656607",
-    "size": 418928410,
-    "sha256": "492b83aff2117b0bfa0dc558f915a346472e0b26bb30c94d57714a068d68de7e",
+    "url": "https://github.com/ATLKR/OpenGeul/actions/runs/42304325191/artifacts/13557382859",
+    "size": 418942108,
+    "sha256": "c63d70f227ac33074fee403fd8a37a31755f255b9b894f4f471cd229e4dec430",
     "sourceUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
     "sourceSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
     "sourceCoreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
     "sourceBuild": {
-      "receiptSha256": "17bf31d06719737a61c66254c64c92f2a88f0944408a1d40358f592ecdc90a88",
-      "sourceCommit": "6714099caea00c800c900272574ae1c6b6144225",
-      "runId": 42203789086,
-      "artifactId": 13514656607,
-      "artifactSha256": "5c24fe95bd2a1cc2ed026d963197c6b2c549ecb3049c64e7e7d730853ad3c440",
-      "artifactSize": 419113269,
-      "patchManifestSha256": "1498c38049b84ef89a324329d59e9eaa21d72f8799f7fd88ba0c7474b616e501"
+      "receiptSha256": "87c56964d35185a85fb56a405a13cc4e1b75aeb779ae6800e704a26481789c05",
+      "sourceCommit": "2921b110a3b9059c6a7c7a0ed222d750dfd59286",
+      "runId": 42304325191,
+      "artifactId": 13557382859,
+      "artifactSha256": "1f6f2f2b377307d2f602adef18624153c245d880dee2f2dac7c253cb82d21bd2",
+      "artifactSize": 419128993,
+      "patchManifestSha256": "28b7269499b3b018372a852275c9df8e9b60bfa4be113ac39a276c45adaee294"
     }
   },
   "hwp": {
