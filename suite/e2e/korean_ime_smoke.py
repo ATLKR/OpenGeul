@@ -27,7 +27,7 @@ import uuid
 
 from windows_smoke import (Windows, INPUT_CASES, capture_failure, close_document,
     close_home, collect_cases, launch_suite, activate_owned_suite, package_text, require_engine_fixture,
-    stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input)
+    stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input, _payload_guard)
 from engine_smoke import verify_content
 import native_suite_architecture as native_arch
 import ime_thread_mode as native_mode
@@ -2353,6 +2353,7 @@ def main(argv=None):
     parser.add_argument('--reopen-output', type=Path)
     args = parser.parse_args(argv)
     if os.name != 'nt' or not __debug__: raise RuntimeError('Actual native Windows execution with assertions enabled is required')
+    _payload_guard._reject_writer_observer(args.suite)
     suite = args.suite.resolve()
     inventory = json.loads((suite / 'suite-inventory.json').read_text(encoding='utf-8-sig'))
     assert isinstance(inventory, dict) and inventory.get('schemaVersion') == 1, 'Suite inventory identity is missing'

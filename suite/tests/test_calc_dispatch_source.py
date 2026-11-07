@@ -321,7 +321,8 @@ $mode.receipt
         build = text.split('      - name: Build and verify native Firebird before the full Office engine', 1)[1].split('      - name:', 1)[0]
         self.assertIn('-CalcDispatchDiagnostic', build); self.assertIn('-MutexSymbols', build)
         qualified = text.split('      - name: Retain the qualified native engine input', 1)[1].split('      - name:', 1)[0]
-        self.assertIn("if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD != 'true' }}", qualified)
+        self.assertIn("env.OPENGEUL_CALC_DISPATCH_BUILD != 'true'", qualified)
+        self.assertIn("env.OPENGEUL_WRITER_SERVER_OBSERVER_BUILD != 'true'", qualified)
         self.assertIn('OPENGEUL_CALC_DISPATCH_BUILD:', text)
         self.assertIn('OpenGeul-Office-engine-arm64-calc-dispatch.zip', text)
         self.assertIn('calc-dispatch-source-build-receipt.json', text)

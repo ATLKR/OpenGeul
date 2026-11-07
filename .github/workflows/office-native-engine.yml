@@ -1,7 +1,7 @@
 name: OpenGeul native ARM64 Office engine source build
 'on':
   push:
-    branches: [work/opengeul-office-native-engine]
+    branches: [work/opengeul-office-native-engine, work/opengeul-office-native-writer-observer]
     paths:
       - .github/workflows/office-native-engine.yml
       - suite/scripts/build-native-engine.ps1
@@ -36,7 +36,8 @@ jobs:
     env:
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
-      OPENGEUL_CALC_DISPATCH_BUILD: 'true'
+      OPENGEUL_CALC_DISPATCH_BUILD: ${{ github.ref == 'refs/heads/work/opengeul-office-native-writer-observer' && 'false' || 'true' }}
+      OPENGEUL_WRITER_SERVER_OBSERVER_BUILD: ${{ github.ref == 'refs/heads/work/opengeul-office-native-writer-observer' && 'true' || 'false' }}
     steps:
       - name: Reserve finalization and evidence time before checkout
         shell: pwsh
@@ -64,6 +65,7 @@ jobs:
           python-version: '3.12'
           architecture: arm64
       - name: Admit exact first owner push for diagnostic symbols
+        if: ${{ env.OPENGEUL_WRITER_SERVER_OBSERVER_BUILD != 'true' }}
         shell: pwsh
         run: |
           . ./suite/scripts/build-native-engine.ps1
@@ -96,7 +98,7 @@ jobs:
       - name: Build and verify native Firebird before the full Office engine
         shell: pwsh
         run: |
-          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC -MutexSymbols -CalcDispatchDiagnostic
+          ./suite/scripts/build-native-engine.ps1 -Phase Full -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.arm64.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC -MutexSymbols:($env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD -cne 'true') -CalcDispatchDiagnostic:($env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD -cne 'true') -WriterServerObserverDiagnostic:($env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD -ceq 'true')
           if (-not $?) { throw 'Native ARM64 Office source build or functional verification failed.' }
       - name: Retain original source build diagnostics
         if: always()
@@ -112,7 +114,7 @@ jobs:
           retention-days: 1
           if-no-files-found: error
       - name: Retain the qualified native engine input
-        if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD != 'true' }}
+        if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD != 'true' && env.OPENGEUL_WRITER_SERVER_OBSERVER_BUILD != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: opengeul-native-arm64-engine-${{ github.run_id }}-${{ github.run_attempt }}
@@ -123,7 +125,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
       - name: Retain the isolated Calc dispatch diagnostic engine
-        if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD == 'true' }}
+        if: ${{ env.OPENGEUL_CALC_DISPATCH_BUILD == 'true' && env.OPENGEUL_WRITER_SERVER_OBSERVER_BUILD != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: opengeul-native-arm64-calc-dispatch-${{ github.run_id }}-${{ github.run_attempt }}
@@ -133,7 +135,19 @@ jobs:
           retention-days: 1
           if-no-files-found: error
           compression-level: 0
+      - name: Retain the isolated Writer server observer engine
+        if: ${{ env.OPENGEUL_WRITER_SERVER_OBSERVER_BUILD == 'true' && env.OPENGEUL_CALC_DISPATCH_BUILD != 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-native-arm64-writer-server-observer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .work/native-engine-evidence/OpenGeul-Office-engine-arm64-writer-server-observer.zip
+            .work/native-engine-evidence/writer-server-observer-source-build-receipt.json
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
       - name: Retain matched diagnostic plugin symbols separately
+        if: ${{ env.OPENGEUL_WRITER_SERVER_OBSERVER_BUILD != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: opengeul-native-arm64-plugin-symbols-${{ github.run_id }}-${{ github.run_attempt }}

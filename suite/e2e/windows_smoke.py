@@ -24,6 +24,11 @@ import traceback
 import xml.etree.ElementTree as ET
 import zipfile
 
+_payload_spec = importlib.util.spec_from_file_location(
+    'suite_writer_observer_payload_guard', Path(__file__).resolve().parents[1]/'payload.py')
+_payload_guard = importlib.util.module_from_spec(_payload_spec)
+_payload_spec.loader.exec_module(_payload_guard)
+
 _evidence_spec = importlib.util.spec_from_file_location(
     'suite_native_window_evidence', Path(__file__).with_name('native_window_evidence.py'))
 _evidence = importlib.util.module_from_spec(_evidence_spec)
@@ -67,6 +72,7 @@ def launch_working_directory(suite, working_directory=None):
 
 
 def launch_suite(command, suite, output, name, *, environment=None, working_directory=None, source_menu=None):
+    _payload_guard._reject_writer_observer(suite)
     cwd = launch_working_directory(suite, working_directory)
     if working_directory is not None and (not command or not Path(command[0]).is_absolute()):
         raise ValueError('Explicit launch directory requires an absolute executable command')
@@ -1685,6 +1691,7 @@ def main(argv=None):
     if os.name != 'nt': raise RuntimeError('Actual Windows GUI execution is required')
     if not __debug__: raise RuntimeError('Do not disable native GUI assertions with Python -O')
     args = argument_parser().parse_args(argv)
+    _payload_guard._reject_writer_observer(args.suite)
     for path in (args.suite, args.fixtures, args.output):
         assert not path.is_symlink() and not getattr(path, 'is_junction', lambda: False)(), 'Linked Suite/fixture/evidence directories are not accepted'
     suite, fixtures, output = args.suite.resolve(), args.fixtures.resolve(), args.output.resolve()

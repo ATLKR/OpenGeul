@@ -1,0 +1,285 @@
+--- a/winaccessibility/source/UAccCOM/MAccessible.cxx
++++ b/winaccessibility/source/UAccCOM/MAccessible.cxx
+@@ -19,6 +19,8 @@
+ 
+ #include  <UAccCOM.h>
+ #include "MAccessible.h"
++#include <opengeul_writer_observer/observer_api.hxx>
++namespace ow = opengeul::writer_observer;
+ 
+ #include <algorithm>
+ #include <cstddef>
+@@ -216,6 +218,7 @@
+ 
+ CMAccessible::~CMAccessible()
+ {
++    ow::invalid_object(static_cast<IMAccessible*>(this));
+     SolarMutexGuard g;
+ 
+     if(m_pszValue!=nullptr)
+@@ -801,18 +804,26 @@
+ */
+ COM_DECLSPEC_NOTHROW STDMETHODIMP CMAccessible::get_accFocus(VARIANT *pvarChild)
+ {
+-    SolarMutexGuard g;
+-
+-    try {
+-        if (m_isDestroy) return S_FALSE;
++    ow::Scope observer(ow::observer_sink(), ow::Kind::Getter, nullptr, static_cast<IMAccessible*>(this), 0, 0);
++    SolarMutexGuard g;
++    observer.mark(ow::Phase::LockAcquired, 0);
++
++    try {
++        if (m_isDestroy) { observer.mark(ow::Phase::Branch, 1); observer.mark(ow::Phase::Return, 1); return S_FALSE; }
+ 
+         if(pvarChild == nullptr)
+         {
++            observer.mark(ow::Phase::Branch, 2);
++            observer.mark(ow::Phase::Return, 2);
+             return E_INVALIDARG;
+         }
+         if( m_dFocusChildID==UACC_NO_FOCUS )
+         {
++            observer.mark(ow::Phase::Branch, 3);
+             pvarChild->vt = VT_EMPTY;//no focus on the object and its children
++            observer.mark(ow::Phase::TagWritten, 1);
++            observer.mark(ow::Phase::OutputComplete, 1);
++            observer.mark(ow::Phase::Return, 0);
+             return S_OK;
+         }
+         //if the descendant of current object has focus indicated by m_dFocusChildID, return the IDispatch of this focused object
+@@ -821,16 +832,22 @@
+             IMAccessible* pIMAcc = g_pAccObjectManager->GetIAccessibleFromResID(m_dFocusChildID);
+             if (pIMAcc == nullptr)
+             {
++                observer.mark(ow::Phase::Branch, 4);
++                observer.mark(ow::Phase::Return, 3);
+                 return E_FAIL;
+             }
++            observer.mark(ow::Phase::Branch, 5);
+             pIMAcc->AddRef();
+             pvarChild->vt = VT_DISPATCH;
++            observer.mark(ow::Phase::TagWritten, 2);
+             pvarChild->pdispVal = pIMAcc;
+-
+-        }
++            observer.mark(ow::Phase::OutputComplete, 2);
++
++        }
++        observer.mark(ow::Phase::Return, 0);
+         return S_OK;
+ 
+-    } catch(...) { return E_FAIL; }
++    } catch(...) { observer.mark(ow::Phase::Branch, 6); observer.mark(ow::Phase::Return, 3); return E_FAIL; }
+ }
+ 
+ /**
+@@ -1187,29 +1204,37 @@
+ {
+     // internal IMAccessible - no mutex meeded
+ 
+-    try {
+-        if (m_isDestroy) return S_FALSE;
++    const unsigned argument = dChildID == CHILDID_SELF ? 1 : (dChildID == UACC_NO_FOCUS ? 2 : 3);
++    ow::Scope observer(ow::observer_sink(), ow::Kind::Focus, nullptr, static_cast<IMAccessible*>(this), 0, argument);
++    try {
++        if (m_isDestroy) { observer.mark(ow::Phase::Return, 1); return S_FALSE; }
+ 
+         if(dChildID==CHILDID_SELF)
+         {
+             if(m_pIParent)
+             {
++                observer.mark(ow::Phase::ParentCallBefore, 1);
+                 m_pIParent->Put_XAccFocus(m_dChildID);
++                observer.mark(ow::Phase::ParentCallAfter, 1);
+             }
+         }
+         else
+         {
+             m_dFocusChildID = dChildID;
++            observer.mark(ow::Phase::Assignment, argument);
+             //traverse all ancestors to set the focused child ID so that when the get_accFocus is called on
+             //any of the ancestors, this id can be used to get the IAccessible of focused object.
+             if(m_pIParent)
+             {
++                observer.mark(ow::Phase::ParentCallBefore, argument);
+                 m_pIParent->Put_XAccFocus(dChildID);
+-            }
+-        }
++                observer.mark(ow::Phase::ParentCallAfter, argument);
++            }
++        }
++        observer.mark(ow::Phase::Return, 0);
+         return S_OK;
+ 
+-    } catch(...) { return E_FAIL; }
++    } catch(...) { observer.mark(ow::Phase::Return, 3); return E_FAIL; }
+ }
+ 
+ /**
+@@ -1253,6 +1278,8 @@
+     // internal IMAccessible - no mutex meeded
+ 
+     g_pAccObjectManager = reinterpret_cast<AccObjectWinManager*>(pManager);
++    if (g_pAccObjectManager && !g_pAccObjectManager->ObserverInstall(ow::observer_sink()))
++        ow::invalid_manager(ow::observer_sink(), g_pAccObjectManager);
+     return S_OK;
+ }
+ 
+@@ -1266,6 +1293,7 @@
+ {
+     // internal IMAccessible - no mutex meeded
+ 
++    ow::invalid_object(static_cast<IMAccessible*>(this));
+     m_isDestroy = true;
+     m_xAccessible.clear();
+     return S_OK;
+--- a/winaccessibility/source/service/AccObjectWinManager.cxx
++++ b/winaccessibility/source/service/AccObjectWinManager.cxx
+@@ -28,6 +28,8 @@
+ 
+ #include <oleacc.h>
+ #include <AccObjectWinManager.hxx>
++#include <opengeul_writer_observer/observer_api.hxx>
++namespace ow = opengeul::writer_observer;
+ #include <AccEventListener.hxx>
+ #include <AccComponentEventListener.hxx>
+ #include <AccContainerEventListener.hxx>
+@@ -60,6 +62,7 @@
+    */
+ AccObjectWinManager::~AccObjectWinManager()
+ {
++    ow::invalid_manager(ObserverSink(), this);
+     {
+         std::scoped_lock l(m_Mutex);
+ 
+@@ -81,17 +84,20 @@
+ sal_Int64
+ AccObjectWinManager::Get_ToATInterface(sal_Int64 nHWnd, long lParam, WPARAM wParam)
+ {
++    ow::Route observer(ObserverSink(), this, static_cast<std::uintptr_t>(nHWnd), lParam == OBJID_CLIENT);
+     IMAccessible* pRetIMAcc = nullptr;
+ 
+     if(lParam == OBJID_CLIENT )
+     {
+         HWND hWnd = reinterpret_cast<HWND>(nHWnd);
+-        pRetIMAcc = GetTopWindowIMAccessible(hWnd);
++        pRetIMAcc = GetTopWindowIMAccessible(hWnd, observer.ready());
+     }
+ 
+     if ( pRetIMAcc && lParam == OBJID_CLIENT )
+     {
++        observer.enter(pRetIMAcc);
+         LRESULT result = LresultFromObject(IID_IAccessible, wParam, pRetIMAcc);
++        observer.result(result > 0 ? 1 : (result == 0 ? 2 : 3));
+         pRetIMAcc->Release();
+         return static_cast<sal_Int64>(result);
+     }
+@@ -122,7 +128,7 @@
+    * @param hWnd, top window handle
+    * @return pointer to AccObject
+    */
+-IMAccessible * AccObjectWinManager::GetTopWindowIMAccessible(HWND hWnd)
++IMAccessible * AccObjectWinManager::GetTopWindowIMAccessible(HWND hWnd, bool observerReady)
+ {
+     std::scoped_lock l(m_Mutex); // tdf#155794 for HwndXAcc and XIdAccList
+ 
+@@ -141,6 +147,8 @@
+         return nullptr;
+     }
+     pRet->AddRef();
++    if (observerReady)
++        ow::bind_root(ObserverSink(), this, pRet, reinterpret_cast<std::uintptr_t>(hWnd));
+     return pRet;
+ }
+ 
+@@ -396,7 +404,10 @@
+     auto iter = std::find_if(HwndXAcc.begin(), HwndXAcc.end(),
+         [&pXAcc](XHWNDToXAccHash::value_type& rEntry) { return rEntry.second == pXAcc; });
+     if (iter != HwndXAcc.end())
++    {
++        ow::invalid_map(ObserverSink(), this, reinterpret_cast<std::uintptr_t>(iter->first), 2);
+         HwndXAcc.erase(iter);
++    }
+ }
+ 
+ /**
+@@ -695,6 +706,7 @@
+ {
+     std::scoped_lock l(m_Mutex);
+ 
++    ow::invalid_map(ObserverSink(), this, reinterpret_cast<std::uintptr_t>(hWnd), 3);
+     HwndXAcc.emplace(hWnd,pXAcc);
+ }
+ 
+--- a/winaccessibility/inc/AccObjectWinManager.hxx
++++ b/winaccessibility/inc/AccObjectWinManager.hxx
+@@ -21,6 +21,7 @@
+ 
+ #include <map>
+ #include <mutex>
++#include <opengeul_writer_observer/private_sink.hxx>
+ 
+ #if !defined WIN32_LEAN_AND_MEAN
+ # define WIN32_LEAN_AND_MEAN
+@@ -51,6 +52,7 @@
+ class AccObjectWinManager
+ {
+ private:
++    std::atomic<opengeul::writer_observer::Sink> m_observerSink{nullptr};
+     typedef std::map<css::accessibility::XAccessible*, AccObject> XIdToAccObjHash;
+     typedef std::map<HWND, css::accessibility::XAccessible*> XHWNDToXAccHash;
+     typedef std::map<const long, AccObject*> XResIdToAccObjHash;
+@@ -81,7 +83,7 @@
+     long ImpleGenerateResID();
+     AccObject* GetAccObjByXAcc( css::accessibility::XAccessible* pXAcc);
+ 
+-    IMAccessible* GetTopWindowIMAccessible(HWND hWnd);
++    IMAccessible* GetTopWindowIMAccessible(HWND hWnd, bool observerReady);
+ 
+     css::accessibility::XAccessible* GetAccDocByHWND(HWND hWnd);
+ 
+@@ -93,6 +95,13 @@
+     ::rtl::Reference<AccEventListener> CreateAccEventListener(
+             css::accessibility::XAccessible* pXAcc);
+ public:
++    bool ObserverInstall(opengeul::writer_observer::Sink sink) noexcept
++    {
++        auto expected = static_cast<opengeul::writer_observer::Sink>(nullptr);
++        return m_observerSink.compare_exchange_strong(expected, sink, std::memory_order_acq_rel) || expected == sink;
++    }
++    opengeul::writer_observer::Sink ObserverSink() const noexcept
++    { return m_observerSink.load(std::memory_order_acquire); }
+     AccObjectWinManager();
+     virtual ~AccObjectWinManager();
+     virtual bool InsertAccObj(css::accessibility::XAccessible* pXAcc,
+--- a/winaccessibility/Library_uacccom.mk
++++ b/winaccessibility/Library_uacccom.mk
+@@ -33,6 +33,8 @@
+ 
+ $(eval $(call gb_Library_Library,UAccCOM))
+ 
++$(eval $(call gb_Library_add_defs,UAccCOM,-DOPENGEUL_WRITER_SERVER_OBSERVER_DIAGNOSTIC))
++
+ $(eval $(call gb_Library_use_custom_headers,UAccCOM,winaccessibility/ia2/idl))
+ 
+ $(eval $(call gb_Library_set_include,UAccCOM,\
+@@ -65,6 +67,7 @@
+ 	winaccessibility/source/UAccCOM/AccValue \
+ 	winaccessibility/source/UAccCOM/EnumVariant \
+ 	winaccessibility/source/UAccCOM/MAccessible \
++	winaccessibility/source/UAccCOM/OpenGeulWriterObserver \
+ 	winaccessibility/source/UAccCOM/StdAfx \
+ 	winaccessibility/source/UAccCOM/UAccCOM \
+ 	winaccessibility/source/UAccCOM/UNOXWrapper \
+--- a/winaccessibility/Library_winaccessibility.mk
++++ b/winaccessibility/Library_winaccessibility.mk
+@@ -25,6 +25,8 @@
+ endif
+ 
+ $(eval $(call gb_Library_Library,winaccessibility))
++
++$(eval $(call gb_Library_add_defs,winaccessibility,-DOPENGEUL_WRITER_SERVER_OBSERVER_DIAGNOSTIC))
+ 
+ $(eval $(call gb_Library_use_custom_headers,winaccessibility,winaccessibility/ia2/idl))
+ 

@@ -1523,6 +1523,8 @@ def _run_source_qualified(suite,fixtures,output,architecture):
 def main(argv=None):
     args = argument_parser().parse_args(argv)
     assert os.name == 'nt' and __debug__, 'Actual Windows GUI with assertions is required'
+    from windows_smoke import _payload_guard
+    _payload_guard._reject_writer_observer(args.suite)
     paths = (args.suite, args.fixtures, args.output)
     for path in paths:
         for part in (path, *path.parents):

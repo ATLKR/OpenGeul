@@ -17,6 +17,8 @@ import zipfile
 
 
 INVENTORY = 'suite-inventory.json'
+WRITER_OBSERVER_MARKERS = frozenset({'writer-server-observer-diagnostic.json',
+    'office/program/opengeul-writer-server-observer-diagnostic.json'})
 REQUIRED = frozenset({
     'OpenGeul.Office.exe', 'OpenGeul.Office.dll', 'suite-product.json',
     'suite-provenance.json', 'runtime-branding.json', 'Office/opengeul-branding.json',
@@ -188,7 +190,26 @@ def _hash(path: Path) -> str:
     return result.hexdigest()
 
 
+def _reject_writer_observer(root: Path):
+    root = Path(root).absolute()
+    for part in (*reversed(root.parents), root):
+        _kind(part)
+    def matching(folder, name):
+        if not folder.is_dir(): return []
+        with os.scandir(folder) as entries:
+            return [folder/entry.name for entry in entries if entry.name.casefold()==name]
+    if matching(root, 'writer-server-observer-diagnostic.json'):
+        raise ValueError('Writer observer diagnostic cannot enter a normal Suite payload')
+    for office in matching(root, 'office'):
+        _kind(office)
+        for program in matching(office, 'program'):
+            _kind(program)
+            if matching(program, 'opengeul-writer-server-observer-diagnostic.json'):
+                raise ValueError('Writer observer diagnostic cannot enter a normal Suite payload')
+
+
 def _scan(root: Path) -> dict:
+    _reject_writer_observer(root)
     root = Path(root).absolute()
     for parent in (*reversed(root.parents), root):
         _kind(parent)
@@ -460,6 +481,8 @@ def _pe(path: Path, *, companion: dict | None = None, architecture: str = 'x64')
 
 
 def _validate(root: Path, files: dict, *, architecture: str):
+    if WRITER_OBSERVER_MARKERS & {name.casefold() for name in files}:
+        raise ValueError('Writer observer diagnostic cannot enter a normal Suite payload')
     if {'office/program/opengeul-calc-dispatch-diagnostic.json',
             'calc-dispatch-diagnostic.json'} & {name.casefold() for name in files}:
         raise ValueError('Diagnostic engine cannot qualify a distributable Suite payload')
@@ -497,6 +520,7 @@ def create_inventory(root: Path, *, architecture: str = 'x64') -> dict:
 
 def verify_payload(root: Path, receipt: dict) -> None:
     """Reject malformed receipts, file changes, missing/extra files and mixed code."""
+    _reject_writer_observer(root)
     if (not isinstance(receipt, dict) or set(receipt) != {'schemaVersion', 'architecture', 'files'}
             or type(receipt['schemaVersion']) is not int or receipt['schemaVersion'] != 1
             or not isinstance(receipt['architecture'], str) or receipt['architecture'] not in NATIVE_MACHINES
