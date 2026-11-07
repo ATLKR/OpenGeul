@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder'],
-          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'winAccFocusOrder']}
+          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'winAccFocusOrder']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
 GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
@@ -88,6 +88,42 @@ class ReceiptNormalizationTests(unittest.TestCase):
 
 
 class RecipePolicyTests(unittest.TestCase):
+    def test_x64_harfbuzz_transform_rejects_changed_repeated_or_forged_input(self):
+        module = load('apply_native_source'); pin = manifest()['windowsHarfbuzzNativeMesonPaths']
+        raw = (ROOT / 'suite/tests/fixtures/native-meson-path/ExternalProject_harfbuzz.mk').read_bytes()
+        effective = module._harfbuzz_bytes(raw, pin)
+        for field, value in [('path', '../escape'), ('condition', 'WNT_AARCH64'), ('size', True),
+                             ('afterSize', 1.5), ('sha256', '0' * 64), ('afterSha256', '0' * 64), ('extra', False)]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                module._harfbuzz_bytes(raw, dict(pin, **{field: value}))
+        for changed in (raw + b'\n', effective):
+            with self.subTest(repeated=changed == effective), self.assertRaises(ValueError):
+                module._harfbuzz_bytes(changed, pin)
+        marker = b'# cannot use CROSS_COMPILING as condition since we have cross-compilation "light" for cases where\n'
+        repeated = raw + marker
+        with self.assertRaises(ValueError):
+            module._harfbuzz_bytes(repeated, dict(pin, size=len(repeated), sha256=hashlib.sha256(repeated).hexdigest()))
+
+    def test_x64_harfbuzz_reclassifies_only_its_pinned_input_and_preserves_arm(self):
+        lock = manifest(); module = load('apply_native_source')
+        self.assertIn('windowsHarfbuzzNativeMesonPaths', lock, 'Missing x64 native Meson descriptor')
+        pin = lock['windowsHarfbuzzNativeMesonPaths']
+        self.assertEqual({'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}, set(pin))
+        self.assertEqual('WNT_X86_64_MSC_WNT && MAKE_HOST=%-cygwin', pin['condition'])
+        self.assertEqual((3074, '2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50',
+                          5920, '5bd3e604b5b253b064a62899efc7231c16c415f5533503e1fcbb1c8b00d68327'),
+                         (pin['size'], pin['sha256'], pin['afterSize'], pin['afterSha256']))
+        policy = (ENGINE / 'native-targets.json').read_bytes()
+        arm = module._select_plan(lock, policy, 'arm64'); x64 = module._select_plan(lock, policy, 'x64')
+        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+                         hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
+        self.assertEqual((18, 4), (len(x64['sources']), len(x64['armGuardedSources'])))
+        self.assertNotIn(pin['path'], [r['path'] for r in x64['armGuardedSources']])
+        for field, value in [('path', '../escape'), ('condition', 'WNT_AARCH64'), ('size', True),
+                             ('afterSize', 1.5), ('sha256', '0' * 64), ('afterSha256', 'invalid'), ('extra', False)]:
+            changed = copy.deepcopy(lock); changed['windowsHarfbuzzNativeMesonPaths'][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError): module._select_plan(changed, policy, 'x64')
+
     def test_x64_atl_descriptor_reclassifies_six_exact_inputs_without_changing_arm(self):
         lock = manifest(); module = load('apply_native_source')
         self.assertTrue('windowsAtlNativePaths' in lock, 'x64 native ATL source descriptor is missing')
@@ -106,9 +142,9 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
         selected = module._select_plan(lock, policy, 'x64')
-        self.assertEqual((18, 5), (len(selected['sources']), len(selected['armGuardedSources'])))
+        self.assertEqual((18, 4), (len(selected['sources']), len(selected['armGuardedSources'])))
         self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks',
-                          'gpgBuildCompilerPath', 'atlNativePaths', 'winAccFocusOrder'], selected['recipe']['hooks'])
+                          'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'winAccFocusOrder'], selected['recipe']['hooks'])
         guarded = {r['path'] for r in selected['armGuardedSources']}
         self.assertTrue(guarded.isdisjoint(r['path'] for r in original))
         for mutate in [lambda d: d.update(extra=False), lambda d: d.update(condition='WNT_AARCH64'),
@@ -137,7 +173,7 @@ class RecipePolicyTests(unittest.TestCase):
         module = load('apply_native_source'); lock = manifest()
         raw = (ENGINE / 'native-targets.json').read_bytes()
         plan = module._select_plan(lock, raw, 'x64')
-        self.assertEqual(5, len(plan['armGuardedSources']))
+        self.assertEqual(4, len(plan['armGuardedSources']))
         self.assertNotIn('external/zstd/UnpackedTarball_zstd.mk',
                          [row['path'] for row in plan['armGuardedSources']])
         self.assertEqual(ORDERS['x64'],
@@ -170,7 +206,7 @@ class RecipePolicyTests(unittest.TestCase):
     def test_x64_retains_the_pinned_firebird_loader_recipe_with_the_zstd_exception(self):
         module = load('apply_native_source'); lock = manifest()
         plan = module._select_plan(lock, (ENGINE / 'native-targets.json').read_bytes(), 'x64')
-        self.assertEqual(5, len(plan['armGuardedSources']))
+        self.assertEqual(4, len(plan['armGuardedSources']))
         self.assertNotIn('external/firebird/ExternalProject_firebird.mk',
                          [row['path'] for row in plan['armGuardedSources']])
         self.assertEqual(ORDERS['x64'], plan['recipe']['hooks'])
@@ -187,7 +223,7 @@ class RecipePolicyTests(unittest.TestCase):
             plan = module._select_plan(manifest(), (ENGINE / 'native-targets.json').read_bytes(), architecture)
             self.assertEqual(ORDERS[architecture], plan['recipe']['hooks'])
             self.assertEqual(RECIPES[architecture], plan['recipeId'])
-            self.assertEqual(13 if architecture == 'arm64' else 5, len(plan['armGuardedSources']))
+            self.assertEqual(13 if architecture == 'arm64' else 4, len(plan['armGuardedSources']))
             self.assertEqual(17 if architecture == 'arm64' else 18, len(plan['sources']))
             self.assertIn('sourceDependencies', plan)
             self.assertEqual(1 if architecture == 'arm64' else 0, len(plan['sourceDependencies']))
@@ -254,7 +290,7 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
             hashlib.sha256(json.dumps(arm,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest())
         self.assertEqual((17,13),(len(arm['sources']),len(arm['armGuardedSources'])))
-        self.assertEqual((18,5),(len(x64['sources']),len(x64['armGuardedSources'])))
+        self.assertEqual((18,4),(len(x64['sources']),len(x64['armGuardedSources'])))
         self.assertEqual(GPG_PATH,x64['sources'][6]['path'])
         self.assertNotIn(GPG_PATH,[row['path'] for row in arm['sources']])
         for field,value in [('path','../escape'),('condition','WNT_AARCH64'),('size',True),
@@ -314,6 +350,106 @@ class ActualSourceRecipeTests(unittest.TestCase):
         if not target.exists():
             target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(GPG_FIXTURE.read_bytes())
         return target
+
+    def harfbuzz_replay(self, raw, **profile):
+        from suite.tests import test_native_meson_path as replay
+        from suite.tests.test_native_python_host import require_posix_recipe_replay
+        require_cygwin = os.environ.get('OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY') == '1'
+        require_posix_recipe_replay(os.name, Path('/usr/bin/make'), Path('/bin/bash'),
+                                   require_cygwin)
+        # Replace the mapping itself; the receiver only ever copies this literal
+        # non-secret environment, including in Windows unit discovery.
+        synthetic = {'PATH': '/usr/bin:/bin', 'PYTHONUTF8': '1',
+                     'XDG_CACHE_HOME': '/tmp/opengeul-meson/cache',
+                     'XDG_CONFIG_HOME': '/tmp/opengeul-meson/config',
+                     'XDG_DATA_HOME': '/tmp/opengeul-meson/data'}
+        profile = dict(cpu='X86_64', build='x86_64-pc-cygwin', target='x86_64-pc-cygwin') | profile
+        with patch.object(os, 'environ', synthetic):
+            if require_cygwin: replay.make_profile(require_cygwin=True)
+            return replay.replay(self.folder, raw, **profile)
+
+    def test_x64_harfbuzz_native_meson_receives_exact_compiler_argv_and_native_package_list(self):
+        from suite.tests import test_native_meson_path as replay
+        path = 'external/harfbuzz/ExternalProject_harfbuzz.mk'; original = self.inputs[path]
+        self.install('x64'); effective = (self.source / path).read_bytes()
+        before = self.harfbuzz_replay(original); after = self.harfbuzz_replay(effective)
+        self.assertEqual(0, before.returncode); self.assertEqual(0, after.returncode)
+        baseline = replay.observations(before); observed = replay.observations(after)
+        self.assertEqual(2, len(observed)); split = replay.windows_split_args()
+        for item in observed:
+            for name in ('CC', 'CXX'): self.assertEqual([replay.NATIVE_COMPILER], split(item[name]))
+            for name in ('PKG_CONFIG', 'AR', 'LD', 'NINJA'):
+                self.assertEqual(baseline[0][name], item[name])
+        self.assertEqual([r['args'] for r in baseline], [r['args'] for r in observed])
+        self.assertEqual(['C:/Python With Spaces/lib/pkgconfig', 'D:/additional packages',
+                          'C:/native' + str(self.folder / 'work/graphite'),
+                          'C:/native' + str(self.folder / 'work/icu')], observed[0]['PKG_CONFIG_PATH'].split(';'))
+        self.assertNotEqual([replay.NATIVE_COMPILER], split(baseline[0]['CC']))
+
+    def test_x64_harfbuzz_other_profiles_keep_original_argv_and_environment(self):
+        path = 'external/harfbuzz/ExternalProject_harfbuzz.mk'; original = self.inputs[path]
+        self.install('x64'); effective = (self.source / path).read_bytes()
+        profiles = [{'cpu': 'AARCH64'}, {'platform': 'LINUX'}, {'com': 'GCC'},
+                    {'host': 'x86_64-pc-linux-gnu'}, {'host': 'x86_64-w64-mingw32'},
+                    {'build': 'aarch64-pc-cygwin'}, {'wsl': 'TRUE'}, {'python': '/usr/bin/python3'},
+                    {'system_python': 'TRUE'}, {'build_type': ''}]
+        for profile in profiles:
+            with self.subTest(profile=list(profile)):
+                before = self.harfbuzz_replay(original, **profile); after = self.harfbuzz_replay(effective, **profile)
+                self.assertEqual(0, before.returncode); self.assertEqual(0, after.returncode)
+                self.assertEqual(before.stdout, after.stdout)
+
+    def test_x64_harfbuzz_rejects_invalid_compilers_and_conversion_before_meson(self):
+        path = 'external/harfbuzz/ExternalProject_harfbuzz.mk'
+        self.install('x64'); effective = (self.source / path).read_bytes()
+        for profile in [{'cc': ''}, {'cxx': ''}, {'cc': '/missing/cl.exe'},
+                        {'cc': 'ccache /missing/cl.exe'}, {'cxx': '/missing/cl.exe -nologo'},
+                        {'converter': 'fail'}, {'converter': 'empty'},
+                        {'prefix': '/badpkg', 'converter': 'pkg-fail'},
+                        {'prefix': '/badpkg', 'converter': 'pkg-empty'}]:
+            with self.subTest(case=list(profile)):
+                result = self.harfbuzz_replay(effective, **profile)
+                self.assertNotEqual(0, result.returncode); self.assertEqual('', result.stdout)
+
+    def test_x64_harfbuzz_retains_exact_evidence_and_cannot_qualify_an_engine(self):
+        result = self.install('x64')
+        self.assertIn('harfbuzzNativeMesonPaths', result['sourceHooks'], 'Missing native Meson source evidence')
+        proof = result['sourceHooks']['harfbuzzNativeMesonPaths']; pin = self.lock['windowsHarfbuzzNativeMesonPaths']
+        self.assertEqual({'schemaVersion', 'kind', 'path', 'condition', 'beforeBytes', 'afterBytes',
+                          'beforeSha256', 'afterSha256', 'evidence', 'nativeBuildVerified',
+                          'fullEngineQualified', 'acceptanceEligible', 'guiVerified'}, set(proof))
+        self.assertIs(type(proof['schemaVersion']), int); self.assertEqual(1, proof['schemaVersion'])
+        self.assertEqual('windows-x64-harfbuzz-native-meson-source-hook', proof['kind'])
+        for field, key in [('path', 'path'), ('condition', 'condition'), ('beforeBytes', 'size'),
+                           ('afterBytes', 'afterSize'), ('beforeSha256', 'sha256'), ('afterSha256', 'afterSha256')]:
+            self.assertEqual(pin[key], proof[field])
+        for phase, key in [('original', 'sha256'), ('effective', 'afterSha256')]:
+            path = Path(proof['evidence'][phase])
+            self.assertEqual(self.evidence / (phase + '-x64-ExternalProject_harfbuzz.mk'), path)
+            self.assertEqual(pin[key], hashlib.sha256(path.read_bytes()).hexdigest())
+        for flag in ('nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified'):
+            self.assertIs(proof[flag], False)
+
+    def test_x64_harfbuzz_real_cygwin_uses_builtin_host_and_actual_path_conversion(self):
+        from suite.tests import test_native_meson_path as replay
+        required = os.environ.get('OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY') == '1'
+        if not sys.platform.startswith('cygwin'):
+            if required: self.fail('Mandatory real Cygwin Python profile is unavailable')
+            self.skipTest('Real Cygwin Python and cygpath are required for native path replay')
+        path = 'external/harfbuzz/ExternalProject_harfbuzz.mk'; self.install('x64')
+        result = self.harfbuzz_replay((self.source / path).read_bytes(), host=None, adapter=False, prefix='')
+        self.assertEqual(0, result.returncode)
+        observed = replay.observations(result); self.assertEqual(2, len(observed))
+        compiler = self.folder / 'compiler with spaces' / "O'Brien" / 'cl.exe'
+        converted = subprocess.run(['/usr/bin/cygpath', '-lm', str(compiler)],
+            env={'PATH': '/usr/bin:/bin', 'PYTHONUTF8': '1'}, capture_output=True, text=True, timeout=10)
+        self.assertEqual(0, converted.returncode); expected = converted.stdout.strip(); self.assertTrue(expected)
+        for item in observed:
+            self.assertEqual('real-cygwin-path-and-recipe-replay', item['profileClassification'])
+            self.assertTrue(item['builtinMakeHost'].endswith('-cygwin'))
+            for name in ('CC', 'CXX'): self.assertEqual([expected], replay.windows_split_args()(item[name]))
+            self.assertEqual(2, len(item['PKG_CONFIG_PATH'].split(';')))
+
 
     def test_x64_atl_retains_all_six_exact_recipes_and_group_evidence(self):
         result = self.install('x64')
@@ -619,7 +755,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256((ENGINE / filename).read_bytes()).hexdigest(), proof[key])
         plan = self.module._select_plan(self.lock, (ENGINE / 'native-targets.json').read_bytes(), architecture)
         self.assertEqual(hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(), proof['recipeSha256'])
-        self.assertEqual(13 if architecture == 'arm64' else 5, len(proof['armGuardedSources']))
+        self.assertEqual(13 if architecture == 'arm64' else 4, len(proof['armGuardedSources']))
         for pin, row in zip(plan['armGuardedSources'], proof['armGuardedSources']):
             expected = pin['beforeSha256'] if architecture == 'x64' else pin['afterSha256']
             self.assertEqual({'path': pin['path'], 'beforeSha256': pin['beforeSha256'],
@@ -653,17 +789,19 @@ class ActualSourceRecipeTests(unittest.TestCase):
         self.assertEqual({p.relative_to(direct).as_posix(): p.read_bytes() for p in direct.rglob('*') if p.is_file()},
                          {p.relative_to(self.source).as_posix(): p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
-    def test_x64_recipe_applies_exactly_bootstrap_loader_zstd_gpg_atl_then_winacc(self):
+    def test_x64_recipe_applies_exactly_bootstrap_loader_zstd_gpg_atl_meson_then_winacc(self):
         events = []; bootstrap = self.module.ARM.install_module_bootstrap; winacc = self.module.WINACC.install
         loader = self.module._install_firebird_loader_path
         zstd = self.module._install_zstd_source_links
         gpg = self.module._install_gpg_build_compiler_path
         atl = self.module._install_atl_native_paths
+        meson = self.module._install_harfbuzz_native_meson_paths
         def common(*args): events.append('moduleBootstrap'); return bootstrap(*args)
         def loader_path(*args): events.append('firebirdLoaderPath'); return loader(*args)
         def zstd_links(*args): events.append('zstdSourceLinks'); return zstd(*args)
         def gpg_path(*args): events.append('gpgBuildCompilerPath'); return gpg(*args)
         def atl_paths(*args): events.append('atlNativePaths'); return atl(*args)
+        def meson_paths(*args): events.append('harfbuzzNativeMesonPaths'); return meson(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         with patch.object(self.module.ARM, 'install', side_effect=AssertionError('x64 selected full ARM installer')), \
                 patch.object(self.module.ARM, 'install_module_bootstrap', side_effect=common), \
@@ -671,11 +809,12 @@ class ActualSourceRecipeTests(unittest.TestCase):
                 patch.object(self.module, '_install_zstd_source_links', side_effect=zstd_links), \
                 patch.object(self.module, '_install_gpg_build_compiler_path', side_effect=gpg_path), \
                 patch.object(self.module, '_install_atl_native_paths', side_effect=atl_paths), \
+                patch.object(self.module, '_install_harfbuzz_native_meson_paths', side_effect=meson_paths), \
                 patch.object(self.module.WINACC, 'install', side_effect=focus):
             result = self.install('x64')
         self.proof(result, 'x64'); self.assertEqual(ORDERS['x64'], events)
         hooks = result['sourceHooks']
-        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths',
+        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths',
                           'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
         self.assertEqual('native-windows-common-source-hooks', hooks['kind']); self.assertEqual('x64', hooks['architecture'])
         self.assertIs(hooks['nativeBuildVerified'], False); self.assertIs(hooks['basePersistenceVerified'], False)
@@ -695,13 +834,13 @@ class ActualSourceRecipeTests(unittest.TestCase):
         for field in ['nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified']:
             self.assertIs(proof[field], False)
 
-    def test_x64_leaves_all_five_remaining_arm_only_targets_unchanged(self):
+    def test_x64_leaves_all_four_remaining_arm_only_targets_unchanged(self):
         result = self.install('x64'); self.proof(result, 'x64')
         changed = {name for name, raw in self.inputs.items() if (self.source / name).read_bytes() != raw}
         if (self.source/GPG_PATH).read_bytes()!=GPG_FIXTURE.read_bytes():changed.add(GPG_PATH)
         self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path'],
                           self.lock['windowsFirebirdLoaderPath']['path'],
-                          self.lock['windowsZstdSourceLinks']['path'], GPG_PATH,
+                          self.lock['windowsZstdSourceLinks']['path'], GPG_PATH, self.lock['windowsHarfbuzzNativeMesonPaths']['path'],
                           *(pin['path'] for pin in self.lock['windowsAtlNativePaths']['recipes'])}, changed)
         self.assertEqual(set(self.inputs)|{GPG_PATH}, {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
 

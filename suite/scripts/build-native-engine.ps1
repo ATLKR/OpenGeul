@@ -2035,8 +2035,8 @@ function Assert-NativeX64AtlSourceBinding($Proof,$Descriptor,[string]$EvidenceDi
 
 function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','winAccFocusOrder')}
-    $guardCount=if($Architecture -ceq 'arm64'){13}else{5}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder')}
+    $guardCount=if($Architecture -ceq 'arm64'){13}else{4}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
        $proof.recipeSha256 -cnotmatch '^[0-9a-f]{64}$' -or ($proof.hookOrder -join '/') -cne ($order -join '/') -or @($proof.armGuardedSources).Count -ne $guardCount -or
@@ -2047,8 +2047,9 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
         $manifestPath=Join-Path $PSScriptRoot '../engine-build/source-build.json';Assert-UnlinkedPath $manifestPath
         if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
         $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
-        $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe,$manifest.harfbuzzNativeMesonPaths.recipe)
-        for($i=0;$i -lt 5;$i++) {
+        $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe)
+        if($proof.recipeSha256 -cne 'cc8aa7c7aed29a5a8708e2aa860b7573a176419e71c05893e60045e8c27a55c6') {throw 'x64 canonical source recipe differs.'}
+        for($i=0;$i -lt 4;$i++) {
             $row=$proof.armGuardedSources[$i]
             if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
         }
@@ -2127,6 +2128,43 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
         }
         if([IO.Path]::GetDirectoryName($gpg.evidence.original) -cne [IO.Path]::GetDirectoryName($gpg.evidence.effective)) {throw 'Source GPG evidence directories differ.'}
         Assert-NativeX64AtlSourceBinding $Receipt.sourceHooks.atlNativePaths $manifest.windowsAtlNativePaths ([IO.Path]::GetDirectoryName($loader.evidence.original))
+        $pin=$manifest.windowsHarfbuzzNativeMesonPaths;$harfbuzz=$Receipt.sourceHooks.harfbuzzNativeMesonPaths
+        Assert-NativeAtlKeys $pin @('path','size','sha256','afterSize','afterSha256','condition')
+        foreach($name in @('path','sha256','afterSha256','condition')) {
+            if($pin.$name -isnot [string]) {throw 'Source HarfBuzz descriptor requires scalar strings.'}
+        }
+        if(($pin.size -isnot [int] -and $pin.size -isnot [long]) -or ($pin.afterSize -isnot [int] -and $pin.afterSize -isnot [long]) -or
+           $pin.path -cne 'external/harfbuzz/ExternalProject_harfbuzz.mk' -or
+           $pin.condition -cne 'WNT_X86_64_MSC_WNT && MAKE_HOST=%-cygwin' -or
+           $pin.size -ne 3074 -or $pin.afterSize -ne 5920 -or
+           $pin.sha256 -cne '2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50' -or
+           $pin.afterSha256 -cne '5bd3e604b5b253b064a62899efc7231c16c415f5533503e1fcbb1c8b00d68327') {throw 'Source HarfBuzz pinned descriptor differs.'}
+        if((Compare-Object -CaseSensitive @($harfbuzz.PSObject.Properties.Name) $fields) -or
+           ($harfbuzz.schemaVersion -isnot [int] -and $harfbuzz.schemaVersion -isnot [long]) -or $harfbuzz.schemaVersion -ne 1 -or
+           $harfbuzz.kind -cne 'windows-x64-harfbuzz-native-meson-source-hook' -or
+           $harfbuzz.path -cne $pin.path -or $harfbuzz.condition -cne $pin.condition -or
+           ($harfbuzz.beforeBytes -isnot [int] -and $harfbuzz.beforeBytes -isnot [long]) -or
+           ($harfbuzz.afterBytes -isnot [int] -and $harfbuzz.afterBytes -isnot [long]) -or
+           $harfbuzz.beforeBytes -ne $pin.size -or $harfbuzz.afterBytes -ne $pin.afterSize -or
+           $harfbuzz.beforeSha256 -cne $pin.sha256 -or $harfbuzz.afterSha256 -cne $pin.afterSha256) {throw 'x64 HarfBuzz native Meson source proof differs.'}
+        foreach($name in @('kind','path','condition','beforeSha256','afterSha256')) {
+            if($harfbuzz.$name -isnot [string]) {throw 'Source HarfBuzz identity requires scalar strings.'}
+        }
+        foreach($name in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+            if($harfbuzz.$name -isnot [bool] -or $harfbuzz.$name) {throw 'Source HarfBuzz hook cannot qualify a native engine.'}
+        }
+        Assert-NativeAtlKeys $harfbuzz.evidence @('original','effective')
+        $directory=[IO.Path]::GetDirectoryName($loader.evidence.original)
+        if($directory -cne [IO.Path]::GetFullPath($directory)) {throw 'Source HarfBuzz evidence parent is not canonical.'}
+        Assert-UnlinkedPath $directory
+        foreach($phase in @('original','effective')) {
+            $path=$harfbuzz.evidence.$phase
+            if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or $path -cne [IO.Path]::GetFullPath($path) -or
+               [IO.Path]::GetDirectoryName($path) -cne $directory -or
+               [IO.Path]::GetFileName($path) -cne ($phase+'-x64-ExternalProject_harfbuzz.mk')) {throw 'Source HarfBuzz evidence path differs.'}
+            if($phase -ceq 'original') {Confirm-FileIdentity $path $pin.size SHA256 $pin.sha256|Out-Null}
+            else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
+        }
     }
 }
 
@@ -2274,6 +2312,22 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.stage='real-source-port-tests';Assert-NativeBuildTimeRemaining
             Invoke-CygwinScript $bash $cygpath $sourceGate $work (Join-Path $evidence 'source-port-tests')|Out-Null
             $receipt.firebirdSourcePortChecksExecuted=$true
+        }
+        if($Architecture -ceq 'x64') {
+            $receipt.stage='real-x64-harfbuzz-native-meson-tests';Assert-NativeBuildTimeRemaining
+            $harfbuzzGate=Join-Path $commands 'x64-harfbuzz-source-gate.sh'
+            Write-BashScript $harfbuzzGate @('set -euo pipefail',"export PATH=/usr/local/bin:/usr/bin:/bin:`$PATH",
+                "cd $(Quote-Bash $unixRepo)","export OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE=$(Quote-Bash $unixSource)",
+                'export OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE=1','export OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY=1',
+                "/usr/bin/python3 - <<'PY'",'import unittest','names = [',
+                "    'suite.tests.test_native_source_recipe.ActualSourceRecipeTests.test_x64_harfbuzz_native_meson_receives_exact_compiler_argv_and_native_package_list',",
+                "    'suite.tests.test_native_source_recipe.ActualSourceRecipeTests.test_x64_harfbuzz_other_profiles_keep_original_argv_and_environment',",
+                "    'suite.tests.test_native_source_recipe.ActualSourceRecipeTests.test_x64_harfbuzz_rejects_invalid_compilers_and_conversion_before_meson',",
+                "    'suite.tests.test_native_source_recipe.ActualSourceRecipeTests.test_x64_harfbuzz_real_cygwin_uses_builtin_host_and_actual_path_conversion',",
+                ']','result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(names))',
+                'if result.testsRun != 4 or result.skipped or not result.wasSuccessful():','    raise SystemExit(1)','PY')
+            Invoke-CygwinScript $bash $cygpath $harfbuzzGate $work (Join-Path $evidence 'harfbuzz-native-meson-tests')|Out-Null
+            $receipt.harfbuzzNativeMesonReplayChecksExecuted=$true
         }
         $python=(Get-Command python -ErrorAction Stop).Source
         $receipt.stage='real-source-recipe-tests';Assert-NativeBuildTimeRemaining
@@ -2431,6 +2485,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.stage='native-normal-delay-crt-import-closure';Assert-NativeBuildTimeRemaining
             $receipt.crtImportClosure=Invoke-CrtImportAudit (Join-Path $instdir 'program/python.exe') $repo $instdir $evidence $Architecture
             if($Architecture -ceq 'x64') {
+                if($receipt.harfbuzzNativeMesonReplayChecksExecuted -isnot [bool] -or $receipt.harfbuzzNativeMesonReplayChecksExecuted -ne $true) {throw 'Full x64 requires the actual no-skip HarfBuzz replay gate.'}
                 $receipt.productInventory=$inventory
                 $receipt.winAccBinary=Get-WinAccBinaryProof (Join-Path $instdir 'program/python.exe') $repo $instdir $evidence x64
                 $winAccInventory=@($inventory|Where-Object {$_.path -ceq (Join-Path $instdir 'program/winaccessibility.dll')})
@@ -2443,6 +2498,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 foreach($atlPin in $manifest.windowsAtlNativePaths.recipes) {
                     Confirm-FileIdentity (Join-Path $source $atlPin.path) $atlPin.afterSize SHA256 $atlPin.afterSha256|Out-Null
                 }
+                Confirm-FileIdentity (Join-Path $source $manifest.windowsHarfbuzzNativeMesonPaths.path) $manifest.windowsHarfbuzzNativeMesonPaths.afterSize SHA256 $manifest.windowsHarfbuzzNativeMesonPaths.afterSha256|Out-Null
             }
             $receipt.stage='actual-native-uno-base-persistence';Assert-NativeBuildTimeRemaining
             $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe $Architecture

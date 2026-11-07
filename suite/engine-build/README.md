@@ -453,13 +453,14 @@ pins and output bytes stay unchanged. X64 outputs use only
 other profiles retain the original arguments. Recipe-local quoted native paths
 cover include, resource and existing static ATL linker operands, including the
 authentic merged `emser` receiver. No global compiler flags or feature selection
-change. This hook follows the GPG compiler correction and precedes the common
-accessibility patch.
+change. This hook follows the GPG compiler correction and precedes the x64
+HarfBuzz boundary and common accessibility patch.
 
 All six preimages, candidate hashes and twelve evidence destinations are checked
 before source writes. `sourceHooks.atlNativePaths` records the ordered group and
 each exact original/effective recipe. The source plan still has eighteen inputs;
-six move from unchanged guards to explicit x64 outputs, leaving five guards.
+six move from unchanged guards to explicit x64 outputs. The subsequent HarfBuzz
+adapter leaves four unchanged ARM guards and fourteen common x64 inputs.
 Source installation, argv replay and owned ATL prerequisite checks do not qualify
 native compilation. Full source-build and Suite UI acceptance remain separate.
 
@@ -476,3 +477,38 @@ Windows unit discovery skips POSIX replay only when neither strict flag requires
 it. No tests download source or execute a product binary. Control 39098589144 supports bounded
 native compile/link path feasibility; it did not prove all consumed static
 library architectures or qualify the full engine, Base, IME or E2E behavior.
+
+The x64 `windowsHarfbuzzNativeMesonPaths` descriptor pins the complete original
+HarfBuzz recipe and a separate x64 output. Source run 42360993495 reached native
+Meson, which attempted to launch the configured POSIX-form `cl.exe` for its
+version query and returned `WinError 2`. Its owned ATL prerequisite passed;
+this does not establish completion of all six ATL consumers or Full admission.
+
+The HarfBuzz adapter preserves the existing ARM helper and its output bytes.
+Only `WNT_X86_64_MSC_WNT` with genuine Cygwin GNU make, equal build/host,
+internal Meson, bundled Windows Python, and no WSL selects native conversion.
+CC/CXX must each identify one existing executable; wrappers, extra flags,
+empty results and failed conversions stop before Meson. Quoted native compiler
+operands preserve spaces and apostrophes. Pkg-config search entries are converted
+individually while preserving drive colons, semicolons and conditional ICU.
+The original Meson commands, options, dependency selection and other profiles
+stay unchanged. No compiler, linker, assembly or feature policy changes.
+
+`sourceHooks.harfbuzzNativeMesonPaths` retains thirteen exact fields, including
+original/effective evidence named `original-x64-ExternalProject_harfbuzz.mk` and
+`effective-x64-ExternalProject_harfbuzz.mk`. All source qualification flags remain
+typed false. The driver joins these bytes/hashes and their owned evidence parent
+to the manifest and checks the final actual recipe. Input count remains eighteen;
+hook order places HarfBuzz after ATL and before the accessibility patch.
+
+Before hooks are applied, a mandatory x64 Cygwin gate replays four HarfBuzz tests
+against the pristine authenticated source. `OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE=1`
+and `OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY=1` reject missing source/tools and unsupported
+profiles; all four tests must run without a skip. Genuine builtin `MAKE_HOST`,
+Bash and actual `cygpath -lm` are checked separately from deliberate adapter
+profile overrides. Replay uses a POSIX Python argv/environment receiver and the
+authenticated Meson Windows argument parser. It does not execute native Windows
+Python or compile with `cl`. That actual process boundary, Full compilation,
+Base persistence and Suite GUI acceptance remain independent later gates.
+The driver records `harfbuzzNativeMesonReplayChecksExecuted=true` only after
+the mandatory gate succeeds; the strict Full consumer requires that boolean.

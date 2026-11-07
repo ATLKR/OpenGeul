@@ -499,6 +499,7 @@
         "zstdSourceLinks",
         "gpgBuildCompilerPath",
         "atlNativePaths",
+        "harfbuzzNativeMesonPaths",
         "winAccFocusOrder"
       ]
     }
@@ -526,6 +527,14 @@
     "afterSize": 10480,
     "afterSha256": "f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b",
     "condition": "WNT_X86_64 && BUILD_PLATFORM=%cygwin"
+  },
+  "windowsHarfbuzzNativeMesonPaths": {
+    "path": "external/harfbuzz/ExternalProject_harfbuzz.mk",
+    "size": 3074,
+    "sha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+    "afterSize": 5920,
+    "afterSha256": "5bd3e604b5b253b064a62899efc7231c16c415f5533503e1fcbb1c8b00d68327",
+    "condition": "WNT_X86_64_MSC_WNT && MAKE_HOST=%-cygwin"
   },
   "windowsAtlNativePaths": {
     "condition": "WNT_X86_64_MSC && MAKE_HOST=%-cygwin",

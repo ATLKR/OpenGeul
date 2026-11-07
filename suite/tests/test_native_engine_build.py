@@ -30,7 +30,8 @@ class NativeEngineBuildTests(unittest.TestCase):
         source = self.root / 'source'; evidence = self.root / 'evidence'; evidence.mkdir()
         for name, fixture in [('external/firebird/ExternalProject_firebird.mk', 'native-icu-path/ExternalProject_firebird.mk'),
                               ('external/zstd/UnpackedTarball_zstd.mk', 'native-zstd-unpack/UnpackedTarball_zstd.mk'),
-                              ('solenv/gbuild/platform/com_MSC_defs.mk', 'native-gpg-build-compiler/com_MSC_defs.mk')]:
+                              ('solenv/gbuild/platform/com_MSC_defs.mk', 'native-gpg-build-compiler/com_MSC_defs.mk'),
+                              ('external/harfbuzz/ExternalProject_harfbuzz.mk', 'native-meson-path/ExternalProject_harfbuzz.mk')]:
             target = source / name; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((SOURCE.parents[1] / 'tests/fixtures' / fixture).read_bytes())
         loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
@@ -43,10 +44,12 @@ class NativeEngineBuildTests(unittest.TestCase):
             target = source/relative; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((SOURCE.parents[1]/'tests/fixtures'/fixture).read_bytes())
         atl = module._install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths'])
+        harfbuzz = module._install_harfbuzz_native_meson_paths(source, evidence, lock['windowsHarfbuzzNativeMesonPaths'])
         good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
                     nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
                     sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
-                                     firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg, atlNativePaths=atl),
+                                     firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg, atlNativePaths=atl,
+                                     harfbuzzNativeMesonPaths=harfbuzz),
                     sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
                         recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
                         policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
@@ -88,6 +91,53 @@ class NativeEngineBuildTests(unittest.TestCase):
 
     def test_x64_gpg_binding_rejects_malformed_proof_or_missing_evidence(self):
         self._assert_x64_source_hook_binding('gpgBuildCompilerPath')
+
+    def test_x64_harfbuzz_binding_rejects_malformed_proof_or_missing_evidence(self):
+        self._assert_x64_source_hook_binding('harfbuzzNativeMesonPaths')
+
+    def test_x64_harfbuzz_binding_requires_canonical_loader_parent_and_exact_plan(self):
+        import copy
+        _, _, _, evidence, good = self._x64_source_hook_fixture()
+        packet=self.root/'harfbuzz-receipt.json'
+        call=f'Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64'
+        packet.write_text(json.dumps(good));self.ps(call)
+        selected=good['sourceHooks']['harfbuzzNativeMesonPaths']
+        variants=[]
+        for field,value in [('beforeBytes',str(selected['beforeBytes'])),('afterBytes',str(selected['afterBytes'])),
+                            ('path',[selected['path']]),('kind',[selected['kind']])]:
+            changed=copy.deepcopy(good);changed['sourceHooks']['harfbuzzNativeMesonPaths'][field]=value;variants.append(changed)
+        for flag in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
+            changed=copy.deepcopy(good);changed['sourceHooks']['harfbuzzNativeMesonPaths'][flag]=0;variants.append(changed)
+        changed=copy.deepcopy(good);changed['sourceRecipeProof']['recipeSha256']='0'*64;variants.append(changed)
+        changed=copy.deepcopy(good);changed['sourceRecipeProof']['hookOrder'].remove('harfbuzzNativeMesonPaths');variants.append(changed)
+        other=self.root/'other-evidence';other.mkdir()
+        for phase in ('original','effective'):
+            original=Path(selected['evidence'][phase]);(other/original.name).write_bytes(original.read_bytes())
+        changed=copy.deepcopy(good);changed['sourceHooks']['harfbuzzNativeMesonPaths']['evidence']={phase:str(other/Path(path).name) for phase,path in selected['evidence'].items()};variants.append(changed)
+        for phase in ('original','effective'):
+            changed=copy.deepcopy(good);original=Path(selected['evidence'][phase])
+            changed['sourceHooks']['harfbuzzNativeMesonPaths']['evidence'][phase]=str(evidence/'..'/evidence.name/original.name);variants.append(changed)
+            alternate=evidence/('other-'+original.name);alternate.write_bytes(original.read_bytes())
+            changed=copy.deepcopy(good);changed['sourceHooks']['harfbuzzNativeMesonPaths']['evidence'][phase]=str(alternate);variants.append(changed)
+        for index,changed in enumerate(variants):
+            with self.subTest(mutation=index):packet.write_text(json.dumps(changed));self.rejected(call)
+
+    def test_x64_harfbuzz_manifest_descriptor_is_closed_and_typed(self):
+        _, _, _, _, good = self._x64_source_hook_fixture()
+        packet=self.root/'harfbuzz-receipt.json';packet.write_text(json.dumps(good))
+        engine=SOURCE.parents[1]/'engine-build'
+        self.ps(f'Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64')
+        for mutation in ("$pin|Add-Member -NotePropertyName unexpected -NotePropertyValue 0", "$pin.size=[string]$pin.size", "$pin.afterSize=[string]$pin.afterSize",
+                         "$pin.sha256=@($pin.sha256)", "$pin.path=@($pin.path)", "$pin.condition='WNT_X86_64'"):
+            body=f"""
+$receipt=Get-Content {quote(packet)} -Raw|ConvertFrom-Json
+$manifest=Get-Content {quote(engine/'source-build.json')} -Raw|ConvertFrom-Json
+$pin=$manifest.windowsHarfbuzzNativeMesonPaths;{mutation}
+$encoded=$manifest|ConvertTo-Json -Depth 40 -Compress
+function Get-Content {{param($LiteralPath,[switch]$Raw) $encoded}}
+Assert-NativeSourceRecipeBinding $receipt x64
+"""
+            with self.subTest(mutation=mutation):self.rejected(body)
 
     def test_x64_atl_group_binding_rejects_malformed_or_missing_recipe_evidence(self):
         import copy
@@ -134,6 +184,114 @@ Invoke-Expression $loops[0].Extent.Text
             with self.subTest(recipe=pin['path']):self.rejected(execute)
             target.write_bytes(raw)
 
+    def _harfbuzz_cygwin_gate(self, architecture='x64', failure=False, expired=False):
+        commands=self.root/'commands';commands.mkdir(exist_ok=True)
+        repo=self.root/'repo with space';repo.mkdir(exist_ok=True)
+        source=self.root/'pristine source';source.mkdir(exist_ok=True)
+        body=f"""
+$Architecture={quote(architecture)};$receipt=[ordered]@{{}};$commands={quote(commands)}
+$unixRepo={quote(repo)};$unixSource={quote(source)};$work={quote(self.root)};$evidence={quote(self.root)}
+$bash='owned-bash';$cygpath='owned-cygpath';$script:calls=0;$script:budgetCalls=0
+function Assert-NativeBuildTimeRemaining {{$script:budgetCalls++;if(${str(expired).lower()}){{throw 'expired original test budget'}}}}
+function Invoke-CygwinScript {{param($Bash,$Cygpath,$Script,$WorkingDirectory,$LogPrefix) $script:calls++;if(${str(failure).lower()}){{throw 'owned replay failed'}}}}
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile({quote(SOURCE)},[ref]$tokens,[ref]$errors)
+$blocks=@($ast.FindAll({{param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
+ $n.Clauses[0].Item1.Extent.Text -ceq "`$Architecture -ceq 'x64'" -and $n.Extent.Text.Contains("`$receipt.stage='real-x64-harfbuzz-native-meson-tests'")}},$true))
+if($errors.Count -or $blocks.Count -ne 1){{throw 'Expected one x64 pristine HarfBuzz replay gate'}}
+$rejected=$false;try{{Invoke-Expression $blocks[0].Extent.Text}}catch{{$rejected=$true}}
+[ordered]@{{calls=$script:calls;budgetCalls=$script:budgetCalls;rejected=$rejected;recorded=$receipt.Contains('harfbuzzNativeMesonReplayChecksExecuted');passed=$receipt.harfbuzzNativeMesonReplayChecksExecuted}}|ConvertTo-Json -Compress
+"""
+        return json.loads(self.ps(body)),commands/'x64-harfbuzz-source-gate.sh',repo,source
+
+    def test_x64_harfbuzz_cygwin_gate_requires_success_in_original_budget_before_hooks(self):
+        good,script,_,_=self._harfbuzz_cygwin_gate()
+        self.assertEqual(dict(calls=1,budgetCalls=1,rejected=False,recorded=True,passed=True),good)
+        self.assertTrue(script.is_file())
+        arm,_,_,_=self._harfbuzz_cygwin_gate('arm64')
+        self.assertEqual(dict(calls=0,budgetCalls=0,rejected=False,recorded=False,passed=None),arm)
+        failed,_,_,_=self._harfbuzz_cygwin_gate(failure=True)
+        self.assertEqual(dict(calls=1,budgetCalls=1,rejected=True,recorded=False,passed=None),failed)
+        expired,_,_,_=self._harfbuzz_cygwin_gate(expired=True)
+        self.assertEqual(dict(calls=0,budgetCalls=1,rejected=True,recorded=False,passed=None),expired)
+        raw=SOURCE.read_text();self.assertLess(raw.index("$receipt.stage='real-x64-harfbuzz-native-meson-tests'"),raw.index("$receipt.stage='install-authenticated-source-hooks'"))
+        execute=f"""
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile({quote(SOURCE)},[ref]$tokens,[ref]$errors)
+$guards=@($ast.FindAll({{param($n) $n -is [Management.Automation.Language.IfStatementAst] -and
+ $n.Clauses[0].Item1.Extent.Text.Contains('$receipt.harfbuzzNativeMesonReplayChecksExecuted -isnot [bool]')}},$true))
+if($errors.Count -or $guards.Count -ne 1){{throw 'Expected one Full replay qualification guard'}}
+$receipt=[ordered]@{{harfbuzzNativeMesonReplayChecksExecuted=$true}};Invoke-Expression $guards[0].Extent.Text
+foreach($value in @($false,0,1,'true',$null)){{
+ $receipt=[ordered]@{{harfbuzzNativeMesonReplayChecksExecuted=$value}};$rejected=$false
+ try{{Invoke-Expression $guards[0].Extent.Text}}catch{{$rejected=$true}}
+ if(-not $rejected){{throw 'Missing or untyped replay was qualified'}}
+}}
+$receipt=[ordered]@{{}};$rejected=$false;try{{Invoke-Expression $guards[0].Extent.Text}}catch{{$rejected=$true}}
+if(-not $rejected){{throw 'Missing replay was qualified'}}
+"""
+        self.ps(execute)
+
+    @unittest.skipIf(os.name == 'nt', 'Portable Bash runner; actual Cygwin replay is a separate Windows source gate')
+    def test_x64_harfbuzz_cygwin_gate_rejects_skips_wrong_count_or_failed_tests(self):
+        import sys
+        _,script,repo,source=self._harfbuzz_cygwin_gate()
+        text=script.read_text();self.assertIn('/usr/bin/python3 -',text)
+        methods=[
+            'test_x64_harfbuzz_native_meson_receives_exact_compiler_argv_and_native_package_list',
+            'test_x64_harfbuzz_other_profiles_keep_original_argv_and_environment',
+            'test_x64_harfbuzz_rejects_invalid_compilers_and_conversion_before_meson',
+            'test_x64_harfbuzz_real_cygwin_uses_builtin_host_and_actual_path_conversion']
+        expected=['suite.tests.test_native_source_recipe.ActualSourceRecipeTests.'+name for name in methods]
+        receiver=f"""
+import json,os
+from pathlib import Path
+from types import SimpleNamespace
+assert os.environ.get('OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE')=={str(source)!r}
+assert os.environ.get('OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE')=='1'
+assert os.environ.get('OPENGEUL_MESON_REQUIRE_CYGWIN_REPLAY')=='1'
+class Loader:
+ def loadTestsFromNames(self,names):
+  assert names=={expected!r}
+  return names
+defaultTestLoader=Loader()
+class TextTestRunner:
+ def __init__(self,*args,**kwargs):pass
+ def run(self,suite):
+  row=json.loads(Path('controlled-result.json').read_text())
+  return SimpleNamespace(testsRun=row['testsRun'],skipped=[0]*row['skipped'],wasSuccessful=lambda:row['success'])
+"""
+        (repo/'unittest.py').write_text(receiver)
+        # Substitute only the controller interpreter for this portable test;
+        # the generated production command remains the actual Cygwin Python.
+        script.write_text(text.replace('/usr/bin/python3 -',shlex.quote(sys.executable)+' -',1))
+        clean={'PATH':'/workspace/toolcache/opengeul-validation/powershell:/usr/bin:/bin',
+            'XDG_CACHE_HOME':'/workspace/toolcache/opengeul-validation/cache',
+            'XDG_CONFIG_HOME':'/workspace/toolcache/opengeul-validation/config',
+            'XDG_DATA_HOME':'/workspace/toolcache/opengeul-validation/data','PYTHONUTF8':'1'}
+        for count,skip,passed in ((4,0,True),(3,0,True),(4,1,True),(4,0,False)):
+            (repo/'controlled-result.json').write_text(json.dumps(dict(testsRun=count,skipped=skip,success=passed)))
+            result=subprocess.run(['/usr/bin/bash',str(script)],env=clean,capture_output=True,timeout=10)
+            with self.subTest(testsRun=count,skipped=skip,success=passed):
+                self.assertEqual(count==4 and skip==0 and passed,result.returncode==0)
+
+    def test_x64_final_harfbuzz_source_mutation_is_rejected(self):
+        _, _, source, _, _ = self._x64_source_hook_fixture()
+        engine=SOURCE.parents[1]/'engine-build'
+        execute=f"""
+$source={quote(source)};$manifest=Get-Content {quote(engine/'source-build.json')} -Raw|ConvertFrom-Json
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile({quote(SOURCE)},[ref]$tokens,[ref]$errors)
+$calls=@($ast.FindAll({{param($n) $n -is [Management.Automation.Language.CommandAst] -and
+ $n.GetCommandName() -eq 'Confirm-FileIdentity' -and $n.Extent.Text.Contains('$manifest.windowsHarfbuzzNativeMesonPaths.path')}},$true))
+if($errors.Count -or $calls.Count -ne 1){{throw 'Expected one actual final HarfBuzz source identity check'}}
+Invoke-Expression $calls[0].Extent.Text|Out-Null
+"""
+        self.ps(execute)
+        target=source/'external/harfbuzz/ExternalProject_harfbuzz.mk'
+        raw=target.read_bytes();target.write_bytes(raw+b'changed');self.rejected(execute)
+        target.unlink();self.rejected(execute)
+
     def test_x64_final_gpg_source_mutation_is_rejected(self):
         from suite.tests.test_native_source_recipe import load
         module=load('apply_native_source');engine=SOURCE.parents[1]/'engine-build'
@@ -175,10 +333,10 @@ Invoke-Expression $calls[0].Extent.Text|Out-Null
         target.write_bytes(target.read_bytes() + b'changed')
         self.rejected(execute)
 
-    def test_x64_source_binding_requires_exact_loader_hook_and_five_unchanged_guards(self):
+    def test_x64_source_binding_requires_exact_loader_hook_and_four_unchanged_guards(self):
         import copy
         _, _, _, _, good = self._x64_source_hook_fixture()
-        self.assertEqual(5, len(good['sourceRecipeProof']['armGuardedSources']))
+        self.assertEqual(4, len(good['sourceRecipeProof']['armGuardedSources']))
         path = self.root / 'receipt.json'; path.write_text(json.dumps(good))
         call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64"
         self.ps(call)

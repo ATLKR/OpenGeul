@@ -18,11 +18,13 @@ HERE = Path(__file__).resolve().parent
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'winAccFocusOrder'])}
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'winAccFocusOrder'])}
 LOADER_PATH = 'external/firebird/ExternalProject_firebird.mk'
 ZSTD_PATH = 'external/zstd/UnpackedTarball_zstd.mk'
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
 GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
+HARFBUZZ_PATH = 'external/harfbuzz/ExternalProject_harfbuzz.mk'
+HARFBUZZ_CONDITION = 'WNT_X86_64_MSC_WNT && MAKE_HOST=%-cygwin'
 ARM_PATHS = ('configure.ac', 'external/firebird/UnpackedTarball_firebird.mk',
              'external/firebird/ExternalProject_firebird.mk', 'external/zstd/UnpackedTarball_zstd.mk',
              'external/mdds/UnpackedTarball_mdds.mk', 'external/python3/ExternalProject_python3.mk',
@@ -160,7 +162,14 @@ def _select_plan(lock, policy_raw, architecture):
                 raise ValueError('source-recipe-input')
             common.append(_pin(gpg, GPG_PATH))
             common.extend(_pin(pin, path) for pin, path in zip(_atl_pins(lock), ATL_PATHS))
-            guarded = [row for row in guarded if row['path'] not in (LOADER_PATH, ZSTD_PATH, *ATL_PATHS)]
+            harfbuzz = lock['windowsHarfbuzzNativeMesonPaths']
+            if (set(harfbuzz) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+                    or harfbuzz['condition'] != HARFBUZZ_CONDITION
+                    or any(harfbuzz[key] != lock['harfbuzzNativeMesonPaths']['recipe'][key]
+                           for key in ('path', 'size', 'sha256'))):
+                raise ValueError('source-recipe-input')
+            common.append(_pin(harfbuzz, HARFBUZZ_PATH))
+            guarded = [row for row in guarded if row['path'] not in (LOADER_PATH, ZSTD_PATH, *ATL_PATHS, HARFBUZZ_PATH)]
         payloads = [('winacc-focus-order.patch', winacc['patch'])]
         dependencies = []
         if architecture == 'arm64':
@@ -298,6 +307,83 @@ def _install_gpg_build_compiler_path(source, evidence, pin):
             'acceptanceEligible': False, 'guiVerified': False}
 
 
+def _harfbuzz_bytes(original, pin):
+    """Confine the existing native Meson boundary to the pinned x64 recipe."""
+    if (set(pin) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+            or pin['path'] != HARFBUZZ_PATH or pin['condition'] != HARFBUZZ_CONDITION
+            or type(pin['size']) is not int or type(pin['afterSize']) is not int
+            or len(original) != pin['size'] or _sha(original) != pin['sha256']):
+        raise ValueError('source-recipe-input')
+    hook = r'''# OpenGeul: only native Windows Meson needs these Cygwin process boundaries.
+harfbuzz_meson_env :=
+harfbuzz_meson_pkg_config_path = ${PKG_CONFIG_PATH}$(LIBO_PATH_SEPARATOR)$(gb_UnpackedTarball_workdir)/graphite$(if $(SYSTEM_ICU),,$(LIBO_PATH_SEPARATOR)$(gb_UnpackedTarball_workdir)/icu)
+ifeq ($(OS)_$(CPUNAME)_$(COM)_$(OS_FOR_BUILD),WNT_X86_64_MSC_WNT)
+ifneq ($(filter %-cygwin,$(MAKE_HOST)),)
+ifeq ($(BUILD_PLATFORM),$(HOST_PLATFORM))
+ifeq ($(strip $(WSL)$(PYTHON_FOR_BUILD)$(SYSTEM_PYTHON)),)
+ifneq ($(filter MESON,$(BUILD_TYPE)),)
+# Keep shell quoting separate from the literal double quotes parsed by Meson.
+harfbuzz_meson_shquote = '$(subst ','"'"',$(1))'
+define harfbuzz_meson_native_path
+$(eval harfbuzz_meson_path := $(shell cygpath -lm $(call harfbuzz_meson_shquote,$(1))))$(if $(filter 0,$(.SHELLSTATUS)),,$(error HarfBuzz Meson path conversion failed))$(if $(strip $(harfbuzz_meson_path)),,$(error HarfBuzz Meson path conversion returned no path))$(harfbuzz_meson_path)
+endef
+define harfbuzz_meson_native_executable
+$(if $(strip $(1)),,$(error HarfBuzz Meson $(2) executable is empty))$(eval harfbuzz_meson_path := $(shell value=$(call harfbuzz_meson_shquote,$(1)); value=$${value#"$${value%%[![:space:]]*}"}; value=$${value%"$${value##*[![:space:]]}"}; test -f "$$value" && cygpath -lm "$$value"))$(if $(filter 0,$(.SHELLSTATUS)),,$(error HarfBuzz Meson $(2) executable validation/conversion failed; wrappers and flags are unsupported))$(if $(strip $(harfbuzz_meson_path)),,$(error HarfBuzz Meson path conversion returned no path))$(harfbuzz_meson_path)
+endef
+harfbuzz_meson_cc := $(call harfbuzz_meson_native_executable,$(CC),CC)
+harfbuzz_meson_cxx := $(call harfbuzz_meson_native_executable,$(CXX),CXX)
+# Split native or POSIX lists per entry; a drive-letter colon is never a separator.
+harfbuzz_meson_pkg_prefix := $(shell value=$(call harfbuzz_meson_shquote,$(PKG_CONFIG_PATH)); out=; item=; \
+    emit() { if [ -n "$$item" ]; then native=$$(cygpath -lm "$$item") || return 7; \
+        [ -n "$$native" ] || return 8; out="$${out:+$$out;}$$native"; fi; item=; }; \
+    while [ -n "$$value" ]; do char=$${value%"$${value#?}"}; value=$${value#?}; \
+        case "$$char" in (';') emit || exit $$?;; (':') \
+            case "$$item" in ([a-zA-Z]) item="$$item:";; (*) emit || exit $$?;; esac;; \
+            (*) item="$$item$$char";; esac; done; emit || exit $$?; printf '%s' "$$out")
+ifneq ($(filter 0,$(.SHELLSTATUS)),0)
+$(error HarfBuzz Meson pkg-config path conversion failed)
+endif
+harfbuzz_meson_pkg_config_path := $(harfbuzz_meson_pkg_prefix)$(if $(harfbuzz_meson_pkg_prefix),;)$(call harfbuzz_meson_native_path,$(gb_UnpackedTarball_workdir)/graphite)$(if $(SYSTEM_ICU),,;$(call harfbuzz_meson_native_path,$(gb_UnpackedTarball_workdir)/icu))
+harfbuzz_meson_env = export CC=$(call harfbuzz_meson_shquote,"$(harfbuzz_meson_cc)") CXX=$(call harfbuzz_meson_shquote,"$(harfbuzz_meson_cxx)") &&
+endif
+endif
+endif
+endif
+endif
+
+'''.encode('utf-8')
+    marker = b'# cannot use CROSS_COMPILING as condition since we have cross-compilation "light" for cases where\n'
+    old = b'\t\tPKG_CONFIG_PATH="${PKG_CONFIG_PATH}$(LIBO_PATH_SEPARATOR)$(gb_UnpackedTarball_workdir)/graphite$(if $(SYSTEM_ICU),,$(LIBO_PATH_SEPARATOR)$(gb_UnpackedTarball_workdir)/icu)" \\\n'
+    if original.count(marker) != 1 or original.count(old) != 1:
+        raise ValueError('source-recipe-input')
+    changed = original.replace(marker, hook + marker, 1).replace(old,
+        b'\t\t$(harfbuzz_meson_env) \\\n\t\tPKG_CONFIG_PATH="$(harfbuzz_meson_pkg_config_path)" \\\n', 1)
+    if len(changed) != pin['afterSize'] or _sha(changed) != pin['afterSha256']:
+        raise ValueError('source-recipe-input')
+    return changed
+
+
+def _install_harfbuzz_native_meson_paths(source, evidence, pin):
+    target = source / HARFBUZZ_PATH; original = _regular(target)
+    changed = _harfbuzz_bytes(original, pin)
+    retained = {phase: evidence / (phase + '-x64-ExternalProject_harfbuzz.mk')
+                for phase in ('original', 'effective')}
+    if any(path.exists() or path.is_symlink() for path in retained.values()):
+        raise ValueError('source-recipe-input')
+    for phase, raw in [('original', original), ('effective', changed)]:
+        with retained[phase].open('xb') as stream: stream.write(raw)
+        if _regular(retained[phase]) != raw: raise ValueError('source-recipe-output')
+    target.write_bytes(changed)
+    if _regular(target) != changed: raise ValueError('source-recipe-output')
+    return {'schemaVersion': 1, 'kind': 'windows-x64-harfbuzz-native-meson-source-hook',
+            'path': HARFBUZZ_PATH, 'condition': HARFBUZZ_CONDITION,
+            'beforeBytes': len(original), 'afterBytes': len(changed),
+            'beforeSha256': _sha(original), 'afterSha256': _sha(changed),
+            'evidence': {phase: str(path) for phase, path in retained.items()},
+            'nativeBuildVerified': False, 'fullEngineQualified': False,
+            'acceptanceEligible': False, 'guiVerified': False}
+
+
 def _atl_pins(lock):
     descriptor = lock['windowsAtlNativePaths']
     original = [lock['atlNativePaths']['recipe'], *lock['atlConsumerNativePaths']['recipes']]
@@ -377,6 +463,7 @@ def _validate_common(inputs, lock, payloads, architecture):
         _zstd_bytes(inputs[ZSTD_PATH], lock['windowsZstdSourceLinks'])
         _gpg_build_compiler_bytes(inputs[GPG_PATH], lock['windowsGpgBuildCompilerPath'])
         for pin in _atl_pins(lock): _atl_bytes(inputs[pin['path']], pin)
+        _harfbuzz_bytes(inputs[HARFBUZZ_PATH], lock['windowsHarfbuzzNativeMesonPaths'])
 
 
 def apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict:
@@ -419,6 +506,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
                  'zstdSourceLinks': _install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks']),
                  'gpgBuildCompilerPath': _install_gpg_build_compiler_path(source, evidence, lock['windowsGpgBuildCompilerPath']),
                  'atlNativePaths': _install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths']),
+                 'harfbuzzNativeMesonPaths': _install_harfbuzz_native_meson_paths(source, evidence, lock['windowsHarfbuzzNativeMesonPaths']),
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
     if architecture == 'arm64':
