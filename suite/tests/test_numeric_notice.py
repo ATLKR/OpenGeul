@@ -566,7 +566,7 @@ class NumericNoticeTests(unittest.TestCase):
         fragments = ('calc_close_probe.py --suite', 'home_routing_smoke.py --suite',
                      '--output .work/suite-korean-ime\n', 'korean_ui_smoke.py --suite',
                      'writer_style_smoke.py --suite', 'lifecycle_smoke.py --suite',
-                     '--output .work/suite-native\n', '--output .work/suite-native-2\n',
+                     '--output .work/suite-native @sourceMenuArgs\n', '--output .work/suite-native-2 @sourceMenuArgs\n',
                      '--diagnose-calc-dispatch --expected-engine-source-commit',
                      'verify_native_archive_completeness(')
         expected = [next(step for step in workflow_steps() if field(step,'run')=='|' and fragment in run_code(step))

@@ -39,7 +39,7 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
             '--output .work/suite-korean-ime\n', 'korean_ui_smoke.py --suite',
             'writer_style_smoke.py --suite', 'lifecycle_smoke.py --suite',
             '--output .work/suite-startup --attempts 40\n',
-            '--output .work/suite-native\n', '--output .work/suite-native-2\n',
+            '--output .work/suite-native @sourceMenuArgs\n', '--output .work/suite-native-2 @sourceMenuArgs\n',
             'def check_all_native_archives(',
         ):
             candidate = self.command(fragment)
