@@ -1082,3 +1082,470 @@ class WindowsKernel:
         if isinstance(source,MsaaHitSource):return run_local_hit(source,scope,sdk,self,deadline)
         raise ValueError('Unknown native point source')
     def boundary_worker(self):return run_native_boundary(self)
+
+
+# Profile 3 is a separately selected, non-accepting observation. The original
+# SDK binder, both positive workers and public begin_msaa_hit stay unchanged.
+# This pins actual official IDL content, not an unverified immutable revision.
+_IA2_PREFIX=(
+    'QueryInterface','AddRef','Release','GetTypeInfoCount','GetTypeInfo',
+    'GetIDsOfNames','Invoke','get_accParent','get_accChildCount','get_accChild',
+    'get_accName','get_accValue','get_accDescription','get_accRole','get_accState',
+    'get_accHelp','get_accHelpTopic','get_accKeyboardShortcut','get_accFocus',
+    'get_accSelection','get_accDefaultAction','accSelect','accLocation',
+    'accNavigate','accHitTest','accDoDefaultAction','put_accName','put_accValue')
+_IA2_DERIVED=('nRelations','relation','relations','role','scrollTo','scrollToPoint',
+    'groupPosition','states','extendedRole','localizedExtendedRole','nExtendedStates',
+    'extendedStates','localizedExtendedStates','uniqueID','windowHandle',
+    'indexInParent','locale','attributes')
+_IA2_METADATA=(
+    'https://raw.githubusercontent.com/LinuxA11y/IAccessible2/master/api/Accessible2.idl',
+    30918,'e3d6a3fa6f72a1e630c746abba9376508cf327a4ae7648fcd176cff8c90317f6',
+    'e89f726e-c4f4-4c19-bb19-b647d7fa8478','IAccessible2','IAccessible',
+    _IA2_PREFIX,_IA2_DERIVED,
+    (('uniqueID','propget',('out','retval'),'HRESULT32','LONG32*'),
+     ('windowHandle','propget',('out','retval'),'HRESULT32','HWND*')),
+    ('6d5140c1-7436-11ce-8034-00aa006009fa',
+     ('QueryInterface','AddRef','Release','QueryService'),
+     ('GUID*','GUID*','void**'),(1,1,2)))
+
+
+def _closed_metadata(actual,expected):
+    if type(actual) is not type(expected):return False
+    if type(expected) is tuple:
+        return len(actual)==len(expected) and all(_closed_metadata(a,b) for a,b in zip(actual,expected))
+    return actual==expected
+
+
+class Ia2SdkAbi(SdkAbi):
+    """Typed, content-pinned IA2 getter ABI, selected before a native lease.
+
+    Unused inherited/derived names establish layout only; they are not called.
+    The service's real QueryService output supplies the IA2 interface pointer.
+    """
+    def __init__(self,*,_metadata=None,**arguments):
+        metadata=_IA2_METADATA if _metadata is None else _metadata
+        if not _closed_metadata(metadata,_IA2_METADATA):raise ValueError('IA2 metadata differs')
+        super().__init__(**arguments)
+        methods=_methods(arguments['accessible_interface'])
+        def normalize(name):
+            if name.startswith('_get_acc'):return 'get_'+name[5:]
+            if name.startswith('_set_acc'):return 'put_'+name[5:]
+            return name
+        if (tuple(normalize(item.name) for item in methods)!=metadata[6]
+                or len(methods)!=28 or len(metadata[7])!=18
+                or not _scalar(C.c_int32,4,True) or C.sizeof(C.c_void_p)!=8):
+            raise ValueError('IA2 inherited declaration differs')
+        self.slots['service_query']=self.slots['accessible_query']
+        self.signatures['service_query']=self.signatures['accessible_query']
+        # QueryService follows the declared IUnknown prefix. Its two GUIDs are
+        # input refs and the separately owned interface output is void**.
+        self.slots['ia2_query']=len(metadata[9][1])-1
+        self.signatures['ia2_query']=(C.c_int32,
+            (C.POINTER(self.Guid),C.POINTER(self.Guid),C.POINTER(C.c_void_p)))
+        for key,name,kind in (('unique_id','uniqueID',C.c_int32),
+                ('window_handle','windowHandle',C.c_void_p)):
+            self.slots[key]=len(methods)+metadata[7].index(name)
+            self.signatures[key]=(C.c_int32,(C.POINTER(kind),))
+
+    def matches_source(self,source):
+        if type(source) is not MsaaHitSourceV3:return False
+        def matches(value,expected):
+            try:
+                kind=type(value);interface=kind.__com_interface__
+                return (issubclass(kind,C.c_void_p) and bool(C.cast(value,C.c_void_p).value)
+                    and any(_iid(base,expected) for base in interface.__mro__))
+            except (AttributeError,TypeError,ValueError):return False
+        return source.valid() and matches(source.client,'client') and all(matches(value,'element')
+            for value in (source.retained_file,source.fresh_file,source.fresh_target,
+                source.retained_target,*source.negative_refs))
+
+
+@dataclass(frozen=True)
+class MsaaHitSourceV3(MsaaHitSourceV2):
+    captured_at:float
+    action_deadline:float
+    document_hwnd:int
+    popup_hwnd:int
+    popup_thread:int
+    owner_chain:tuple
+
+    def valid(self):
+        return (MsaaHitSourceV2.valid(self)
+            and all(type(value) in (int,float) and math.isfinite(value)
+                for value in (self.captured_at,self.action_deadline))
+            and 0<self.action_deadline-self.captured_at<=5
+            and all(type(value) is int and 0<value<2**64
+                for value in (self.document_hwnd,self.popup_hwnd))
+            and type(self.popup_thread) is int and 0<self.popup_thread<2**32
+            and type(self.owner_chain) is tuple and 2<=len(self.owner_chain)<=16
+            and all(type(value) is int and 0<value<2**64 for value in self.owner_chain)
+            and self.owner_chain[0]==self.popup_hwnd)
+
+
+_V3_OPERATIONS=_V2_OPERATIONS+('service_query','ia2_query','unique_id','window_handle')
+
+
+def worker_record_v3():
+    record=worker_record_v2()
+    record.pop('canonicalStatus')
+    record.update(workerSchemaVersion=3,diagnosticComplete=0,ia2Status=0,
+        filePairObserved=0,fileOriginalRepeatObserved=0,targetPairObserved=0,
+        targetDifferentFromFileObserved=0,hitMatchesTargetObserved=0,
+        tupleComparisonsObserved=0,fileTupleEqual=0,targetTupleEqual=0,
+        targetDifferentFilesTuple=0,hitMatchesTargetsTuple=0,hitDifferentFilesTuple=0,
+        fileAnchorStable=0,targetAnchorStable=0,ia2TupleCount=0,uidZeroCount=0,
+        uidNegativeCount=0,hwndDomainMask=0)
+    for name in _V3_OPERATIONS:
+        record.update({name+'Attempted':0,name+'Completed':0,name+'Hresult':0})
+    return record
+
+
+def run_ia2_diagnostic(source,scope,sdk,platform,deadline):
+    """One fixed read-only measurement; no value can authorize input.
+
+    51+N provider calls, 26 acquired refs and a separate owned VARIANT on the
+    complete path. Deadline checks bound admission, not synchronous COM/Release.
+    """
+    record=worker_record_v3();refs=[];variant=None;token=0;initialized=False;finished=False
+    expiry=deadline
+    if type(source) is MsaaHitSourceV3 and source.valid() and type(deadline) in (int,float):
+        expiry=min(deadline,source.action_deadline,source.captured_at+1.5)
+    def budget():
+        if type(expiry) not in (int,float) or not math.isfinite(expiry) or platform.clock()>=expiry:
+            record['ia2Status']=2;raise _Stop()
+    def check():
+        budget()
+        if not platform.guard():record['ia2Status']=3;raise _Stop()
+        budget()
+    def require(value,code=5):
+        if not value:record['ia2Status']=code;raise _Stop()
+    def call(key,pointer,*arguments):
+        check();record[key+'Attempted']+=1
+        hr=sdk.call(key,pointer,*arguments)
+        if type(hr) is not int:raise TypeError()
+        record[key+'Completed']+=1;record[key+'Hresult']=hr&0xffffffff
+        check();require(hr==0,4)
+    def out(key,pointer,*arguments):
+        value=C.c_void_p()
+        try:call(key,pointer,*arguments,C.byref(value))
+        finally:
+            if value.value:refs.append(value.value);record['referencesAcquired']+=1
+        require(bool(value.value))
+        return value.value
+    def same(first,second):
+        value=C.c_int32();call('compare',source.client,first,second,C.byref(value))
+        require(value.value in (0,1),5)
+        return value.value==1
+    def scalars(pointer):
+        unique=C.c_int32();window=C.c_void_p()
+        call('unique_id',pointer,C.byref(unique))
+        call('window_handle',pointer,C.byref(window));require(bool(window.value))
+        check();domain=platform.window_domain(window.value,source,scope);check()
+        require(type(domain) is int and 1<=domain<=5,7)
+        record['hwndDomainMask']|=1<<domain
+        return unique.value,window.value
+    def identity(accessible):
+        service=out('service_query',accessible,C.byref(service_iid))
+        ia2=out('ia2_query',service,C.byref(accessible_iid),C.byref(ia2_iid))
+        values=scalars(ia2);record['ia2TupleCount']+=1
+        record['uidZeroCount']+=int(values[0]==0);record['uidNegativeCount']+=int(values[0]<0)
+        return ia2,values
+    try:
+        record['workerStage']=1
+        require(type(source) is MsaaHitSourceV3 and source.valid())
+        require(isinstance(scope,MsaaHitScope) and scope.valid())
+        require(source.owner_chain[-1] in (scope.child_hwnd,source.document_hwnd))
+        require(source.captured_at<=platform.clock())
+        budget();hr=platform.initialize()
+        if type(hr) is not int:raise TypeError()
+        require(hr in (0,1),4);initialized=True;record['comInitialized']=1
+        budget();require(platform.apartment());budget();record['workerMta']=1
+        token=platform.enter_dpi();require(bool(token));record['dpiEntered']=1;budget()
+        require(platform.physical_dpi());budget();record['physicalDpiVerified']=1
+        check();record['processBefore']=1;record['workerStage']=2
+        # These are source selection guards. Unlike canonical inequality, a
+        # FALSE positive or colliding negative stops all subsequent reads.
+        require(same(source.retained_file,source.fresh_file),7);record['fileUiPositive']=1
+        require(same(source.fresh_target,source.retained_target),7);record['targetUiPositive']=1
+        for negative in source.negative_refs:
+            record['negativeCount']+=1;require(not same(source.fresh_target,negative),7)
+            record['negativeRejected']+=1
+        legacy_iid=sdk.Guid('{'+_IIDS['legacy']+'}');unknown_iid=sdk.Guid('{'+_IIDS['unknown']+'}')
+        accessible_iid=sdk.Guid('{'+_IIDS['accessible']+'}')
+        service_iid=sdk.Guid('{'+_IA2_METADATA[9][0]+'}');ia2_iid=sdk.Guid('{'+_IA2_METADATA[3]+'}')
+        bindings=[];record['workerStage']=3
+        for element in (source.retained_file,source.fresh_file,source.fresh_target,source.retained_target):
+            pattern=out('pattern',element,10018,C.byref(legacy_iid))
+            child=C.c_int32(-1);call('child_id',pattern,C.byref(child));require(child.value==0)
+            record['selfCount']+=1
+            accessible=out('accessible',pattern)
+            canonical=out('accessible_query',accessible,C.byref(unknown_iid))
+            kind=C.c_int32();call('control_type',element,C.byref(kind));require(kind.value==50011)
+            ia2,values=identity(accessible)
+            bindings.append((pattern,accessible,canonical,ia2,values));record['bindingCount']+=1
+        original,fresh_file,fresh_target,retained_target=bindings
+        record.update(filePairObserved=1,filePairEqual=int(original[2]==fresh_file[2]),workerStage=4)
+        repeated=out('accessible',original[0]);repeat_identity=out('accessible_query',repeated,C.byref(unknown_iid))
+        record.update(fileOriginalRepeatObserved=1,fileOriginalRepeatEqual=int(repeat_identity==original[2]),
+            targetPairObserved=1,targetPairEqual=int(fresh_target[2]==retained_target[2]),
+            targetDifferentFromFileObserved=1,
+            targetDifferentFromFile=int(all(target[2]!=file[2] for target in (fresh_target,retained_target)
+                for file in (original,fresh_file))),workerStage=5)
+        variant=sdk.Variant();record['variantAttempted']=1
+        call('hit_test',original[1],scope.x,scope.y,C.byref(variant));record['variantType']=int(variant.vt)
+        require(variant.vt==9 and bool(variant._.c_void_p))
+        hit=out('query',C.c_void_p(variant._.c_void_p),C.byref(accessible_iid))
+        hit_identity=out('accessible_query',hit,C.byref(unknown_iid))
+        record.update(hitMatchesTargetObserved=1,hitMatchesTarget=int(hit_identity==fresh_target[2]))
+        _,hit_values=identity(hit);record['workerStage']=6
+        file_anchor=scalars(original[3]);target_anchor=scalars(fresh_target[3])
+        record.update(tupleComparisonsObserved=1,fileTupleEqual=int(original[4]==fresh_file[4]),
+            targetTupleEqual=int(fresh_target[4]==retained_target[4]),
+            targetDifferentFilesTuple=int(all(target[4]!=file[4] for target in (fresh_target,retained_target)
+                for file in (original,fresh_file))),
+            hitMatchesTargetsTuple=int(all(hit_values==target[4] for target in (fresh_target,retained_target))),
+            hitDifferentFilesTuple=int(all(hit_values!=file[4] for file in (original,fresh_file))),
+            fileAnchorStable=int(file_anchor==original[4]),targetAnchorStable=int(target_anchor==fresh_target[4]))
+        check();record['processAfter']=1;finished=True
+    except _Stop:pass
+    except BaseException:record.update(ia2Status=6,cleanupError=1)
+    finally:
+        cleanup_failed=False
+        if variant is not None:
+            try:
+                hr=platform.clear_variant(variant)
+                if type(hr) is not int:raise TypeError()
+                record['variantCleanupHresult']=hr&0xffffffff;record['variantCleared']=int(hr==0)
+                if hr!=0:cleanup_failed=True
+            except BaseException:cleanup_failed=True
+        for pointer in reversed(refs):
+            try:
+                result=sdk.call('release',C.c_void_p(pointer))
+                if type(result) is not int or not 0<=result<=0xffffffff:raise TypeError()
+                record['referencesReleased']+=1
+            except BaseException:cleanup_failed=True
+        refs.clear()
+        if token:
+            try:record['dpiRestored']=int(bool(platform.leave_dpi(token)))
+            except BaseException:cleanup_failed=True
+            if not record['dpiRestored']:cleanup_failed=True
+        if initialized:
+            try:platform.uninitialize();record['comUninitialized']=1
+            except BaseException:cleanup_failed=True
+        if cleanup_failed:record.update(cleanupError=1,ia2Status=8)
+        clean=(not record['cleanupError'] and record['referencesAcquired']==record['referencesReleased']
+            and (not record['variantAttempted'] or record['variantCleared'])
+            and (not initialized or record['comUninitialized']) and (not token or record['dpiRestored']))
+        record['workerCleanup']=int(clean)
+        try:
+            if platform.clock()>=expiry:record['ia2Status']=2
+            elif finished and clean:
+                if not platform.guard():record['ia2Status']=3
+                elif platform.clock()>=expiry:record['ia2Status']=2
+                else:record.update(ia2Status=1,workerStage=7,diagnosticComplete=1)
+        except BaseException:record.update(ia2Status=6,cleanupError=1,workerCleanup=0)
+        record['localKnown']=record['localMatch']=0
+    return record
+
+
+def _record_v3(scope,synthetic):
+    boundary=_record(scope,synthetic,profile_version=2)
+    for name in worker_record_v2():boundary.pop(name,None)
+    boundary.update(schemaVersion=3)
+    return dict(worker_record_v3(),**boundary)
+
+
+def _valid_v3_worker(result,negative_count):
+    expected=worker_record_v3()
+    if (type(result) is not dict or result.keys()!=expected.keys()
+            or any(type(value) is not int or not 0<=value<=0xffffffff for value in result.values())
+            or result['workerSchemaVersion']!=3 or result['localKnown'] or result['localMatch']
+            or result['diagnosticComplete'] not in (0,1)):
+        return False
+    counts=dict(pattern=4,child_id=4,accessible=5,accessible_query=6,control_type=4,
+        hit_test=1,query=1,compare=2+negative_count,service_query=5,ia2_query=5,
+        unique_id=7,window_handle=7)
+    booleans=('workerCleanup','workerMta','comInitialized','comUninitialized','dpiEntered',
+        'dpiRestored','physicalDpiVerified','processBefore','processAfter','variantAttempted',
+        'variantCleared','cleanupError','fileUiPositive','targetUiPositive','filePairObserved',
+        'fileOriginalRepeatObserved','targetPairObserved','targetDifferentFromFileObserved',
+        'hitMatchesTargetObserved','tupleComparisonsObserved','filePairEqual','fileOriginalRepeatEqual',
+        'targetPairEqual','targetDifferentFromFile','hitMatchesTarget','fileTupleEqual',
+        'targetTupleEqual','targetDifferentFilesTuple','hitMatchesTargetsTuple','hitDifferentFilesTuple',
+        'fileAnchorStable','targetAnchorStable')
+    if (any(result[key] not in (0,1) for key in booleans)
+            or not 0<=result['ia2Status']<=8 or not 0<=result['workerStage']<=7
+            or not result['referencesReleased']<=result['referencesAcquired']<=26
+            or not result['negativeRejected']<=result['negativeCount']<=negative_count
+            or not result['selfCount']<=4 or not result['bindingCount']<=4
+            or not result['uidZeroCount']+result['uidNegativeCount']<=result['ia2TupleCount']<=5
+            or result['hwndDomainMask']&~62 or result['variantType']>65535
+            or any(not result[name+'Completed']<=result[name+'Attempted']<=count
+                for name,count in counts.items())
+            or result['workerCleanup'] and (result['cleanupError']
+                or result['referencesAcquired']!=result['referencesReleased']
+                or result['variantAttempted']!=result['variantCleared']
+                or result['comInitialized']!=result['comUninitialized']
+                or result['dpiEntered']!=result['dpiRestored'])):
+        return False
+    if not result['diagnosticComplete']:return True
+    facts=('workerCleanup','workerMta','comInitialized','comUninitialized','dpiEntered',
+        'dpiRestored','physicalDpiVerified','processBefore','processAfter','variantAttempted',
+        'variantCleared','fileUiPositive','targetUiPositive','filePairObserved',
+        'fileOriginalRepeatObserved','targetPairObserved','targetDifferentFromFileObserved',
+        'hitMatchesTargetObserved','tupleComparisonsObserved')
+    return (all(result[key]==1 for key in facts) and result['ia2Status']==1
+        and result['workerStage']==7 and result['referencesAcquired']==result['referencesReleased']==26
+        and result['variantType']==9 and result['variantCleanupHresult']==result['cleanupError']==0
+        and result['bindingCount']==result['selfCount']==4 and result['ia2TupleCount']==5
+        and result['negativeCount']==result['negativeRejected']==negative_count
+        and result['uidZeroCount']+result['uidNegativeCount']<=5
+        and 0<result['hwndDomainMask']<64 and not result['hwndDomainMask']&1
+        and all(result[name+'Attempted']==result[name+'Completed']==count
+            and result[name+'Hresult']==0 for name,count in counts.items()))
+
+
+class Ia2DiagnosticLease(MsaaHitLease):
+    def __init__(self,source,scope,sdk,deadline,kernel):
+        super().__init__(source,scope,sdk,deadline,kernel,profile_version=2)
+        self.record=_record_v3(scope,getattr(kernel,'synthetic',False))
+        self._profile_version=3;self._status_key='ia2Status'
+        self.action_deadline=deadline
+        if type(source) is MsaaHitSourceV3 and source.valid() and type(deadline) in (int,float):
+            self.deadline=min(deadline,source.captured_at+1.5)
+
+    def valid(self):
+        return (type(self.source) is MsaaHitSourceV3 and self.source.valid()
+            and isinstance(self.scope,MsaaHitScope) and self.scope.valid()
+            and self.source.action_deadline==self.action_deadline
+            and self.source.captured_at<=self.kernel.clock()
+            and type(self.action_deadline) in (int,float) and math.isfinite(self.action_deadline)
+            and self.kernel.clock()<self.deadline<=self.kernel.clock()+1.5
+            and self.action_deadline<=self.kernel.clock()+5)
+
+    def _run(self):
+        try:
+            result=self.runner()
+            if _valid_v3_worker(result,len(self.source.negative_refs)):self.worker=dict(result)
+            else:self._worker_exception=True
+        except BaseException:self._worker_exception=True
+        return 0
+
+    def _collect(self,deadline,retiring):
+        result=super()._collect(deadline,retiring)
+        if (result['stageCode']!=13 or result['pending'] or result['workerException']
+                or not result['workerCleanup'] or result['localKnown'] or result['localMatch']):
+            self.record['diagnosticComplete']=0
+        # Positive worker packets were rejected in _run, never quiet-coerced.
+        self.record['localKnown']=self.record['localMatch']=0
+        return dict(self.record)
+
+    def _unknown(self):
+        self.record['diagnosticComplete']=0
+        return super()._unknown()
+
+
+def begin_ia2_diagnostic(source,scope,sdk,deadline,*,native_enabled=False,_kernel=None):
+    """Separate preselected profile; shares the one pending callback registry."""
+    lease=Ia2DiagnosticLease(source,scope,sdk,deadline,_kernel)
+    synthetic=_kernel is not None and getattr(_kernel,'synthetic',False) is True
+    if not synthetic and (native_enabled is not True or not NATIVE_LAUNCH_ENABLED):
+        lease.record['stageCode']=1;return lease
+    if type(source) is not MsaaHitSourceV3:
+        lease.record['stageCode']=3;return lease
+    if not _reserve(lease):lease.record['stageCode']=2;return lease
+    if not synthetic:
+        try:
+            _kernel=Ia2WindowsKernel()
+            if (not isinstance(sdk,Ia2SdkAbi) or sdk.function_factory is not C.WINFUNCTYPE
+                    or not sdk.matches_source(source)):raise ValueError('Native IA2 SDK binder required')
+            lease.kernel=_kernel
+        except BaseException:lease.record['stageCode']=3;lease._clear();return lease
+    if not lease.valid():lease.record['stageCode']=3;lease._clear();return lease
+    try:
+        if not _kernel.apartment():lease.record['stageCode']=4;lease._release_unstarted();return lease
+        lease.record['stageCode']=5
+        for handle,pid,birth in ((source.shell_handle,scope.shell_pid,scope.shell_birth),
+                (source.engine_handle,scope.engine_pid,scope.engine_birth)):
+            duplicate=_kernel.duplicate(handle,pid,birth);lease.process_handles.append((duplicate,pid,birth))
+            adopt=getattr(_kernel,'adopt_duplicate',None)
+            if adopt is not None:adopt(duplicate)
+            if not _kernel.check_process(duplicate,pid,birth):raise _Stop()
+        if _kernel.clock()>=lease.deadline:
+            lease.record['stageCode']=11;lease._release_unstarted();return lease
+        lease.record.update(stageCode=6,nativeAttempted=1)
+        lease.thread,lease.tid,lease.birth=_kernel.start(lease._run)
+        if not lease.thread or not lease.tid or not lease.birth:lease.record['pending']=1
+    except BaseException:
+        if lease.record['nativeAttempted'] and getattr(_kernel,'start_uncertain',False):lease.record['pending']=1
+        else:lease._release_unstarted()
+    return lease
+
+
+class Ia2WindowsKernel(WindowsKernel):
+    """Original process/HANDLE capsule plus profile3's exact popup guard."""
+    def __init__(self):
+        super().__init__()
+        class Point(C.Structure):_fields_=[('x',C.c_int32),('y',C.c_int32)]
+        class Rect(C.Structure):_fields_=[('left',C.c_int32),('top',C.c_int32),('right',C.c_int32),('bottom',C.c_int32)]
+        class Gui(C.Structure):
+            _fields_=[('cbSize',C.c_uint32),('flags',C.c_uint32),
+                *((name,C.c_void_p) for name in ('active','focus','capture','menu','move','caret')),
+                ('caretRect',Rect)]
+        self.Point=Point;self.Gui=Gui
+        for name in ('IsWindow','IsWindowVisible','IsWindowEnabled','IsIconic'):
+            self._bind(self.user,name,(C.c_void_p,),C.c_int32)
+        self._bind(self.user,'GetWindowThreadProcessId',(C.c_void_p,C.POINTER(C.c_uint32)),C.c_uint32)
+        self._bind(self.user,'GetParent',(C.c_void_p,),C.c_void_p)
+        self._bind(self.user,'GetAncestor',(C.c_void_p,C.c_uint32),C.c_void_p)
+        self._bind(self.user,'GetWindow',(C.c_void_p,C.c_uint32),C.c_void_p)
+        self._bind(self.user,'GetForegroundWindow',(),C.c_void_p)
+        self._bind(self.user,'WindowFromPhysicalPoint',(Point,),C.c_void_p)
+        self._bind(self.user,'GetGUIThreadInfo',(C.c_uint32,C.POINTER(Gui)),C.c_int32)
+        self._diagnostic_source=None;self._diagnostic_scope=None
+
+    def _window_process(self,hwnd):
+        pid=C.c_uint32();thread=int(self.user.GetWindowThreadProcessId(hwnd,C.byref(pid)))
+        return thread,pid.value
+
+    def guard(self):
+        if not super().guard():return False
+        source,scope=self._diagnostic_source,self._diagnostic_scope
+        if type(source) is not MsaaHitSourceV3 or not source.valid() or not scope.valid():return False
+        u=self.user;doc=source.document_hwnd;popup=source.popup_hwnd
+        windows=(doc,scope.parent_hwnd,scope.child_hwnd,*source.owner_chain)
+        if not all(u.IsWindow(hwnd) for hwnd in windows):return False
+        if self._window_process(doc)[1]!=scope.shell_pid or self._window_process(scope.parent_hwnd)[1]!=scope.shell_pid:return False
+        if any(self._window_process(hwnd)!=(source.popup_thread,scope.engine_pid)
+                for hwnd in (scope.child_hwnd,popup)):return False
+        if any(self._window_process(hwnd)[1]!=scope.engine_pid for hwnd in source.owner_chain[:-1]):return False
+        if int(u.GetParent(scope.child_hwnd) or 0)!=scope.parent_hwnd:return False
+        if int(u.GetAncestor(scope.child_hwnd,2) or 0)!=doc:return False
+        if not all(u.IsWindowVisible(hwnd) and u.IsWindowEnabled(hwnd) for hwnd in (doc,popup)) or u.IsIconic(doc):return False
+        for first,second in zip(source.owner_chain,source.owner_chain[1:]):
+            if int(u.GetWindow(first,4) or 0)!=second:return False
+        if int(u.GetForegroundWindow() or 0) not in (doc,popup):return False
+        if int(u.WindowFromPhysicalPoint(self.Point(scope.x,scope.y)) or 0)!=popup:return False
+        gui=self.Gui();gui.cbSize=C.sizeof(gui)
+        if not u.GetGUIThreadInfo(source.popup_thread,C.byref(gui)):return False
+        if (not gui.focus or self._window_process(gui.focus)[1]!=scope.engine_pid
+                or int(u.GetAncestor(gui.focus,2) or 0) not in (doc,popup)
+                or int(gui.capture or 0) not in (0,scope.child_hwnd,popup)
+                or int(gui.menu or 0) not in (0,scope.child_hwnd,popup)):return False
+        return super().guard()
+
+    def window_domain(self,hwnd,source,scope):
+        # No identifier/HWND is exported; only this closed relationship code.
+        if not self.guard():return 0
+        if hwnd==scope.child_hwnd:return 1
+        if hwnd==source.popup_hwnd:return 2
+        if hwnd==scope.parent_hwnd:return 3
+        if hwnd==source.document_hwnd:return 4
+        if hwnd in source.owner_chain and self._window_process(hwnd)[1] in (scope.engine_pid,scope.shell_pid):return 5
+        return 0
+
+    def worker(self,source,scope,sdk,deadline):
+        if type(source) is not MsaaHitSourceV3:raise ValueError('IA2 diagnostic source required')
+        self._diagnostic_source,self._diagnostic_scope=source,scope
+        return run_ia2_diagnostic(source,scope,sdk,self,deadline)

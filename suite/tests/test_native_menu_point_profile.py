@@ -232,6 +232,196 @@ class NativeMenuCanonicalProfileTests(unittest.TestCase):
                 self.assertEqual(post,[])
 
 
+class NativeIdentityDiagnosticTests(unittest.TestCase):
+    fixture=NativeMenuPointProfileTests.fixture
+
+    def diagnostic(self):
+        module,probe,boundary,binding,state,lease,calls,pane=self.fixture()
+        probe._native_identity_diagnostic=3
+        import native_menu_msaa_hit as helper
+        packet=helper._record_v3(None,False)
+        packet.update(diagnosticComplete=1,nativeExit=1,threadClosed=1,processesClosed=1,
+            workerCleanup=1,stageCode=13,threadBirth=1<<48,scopeId=1,negativeCount=5,negativeRejected=5)
+        started=[]
+        def wait():state.waited=True;return copy.deepcopy(packet)
+        lease.wait=wait
+        def begin(*args,**kwargs):started.append((args,kwargs));return lease
+        probe._begin_identity_diagnostic_lease=begin
+        return module,probe,boundary,binding,state,lease,calls,pane,packet,started
+
+    def test_diagnostic_constructor_is_a_separate_closed_zero_or_three_opt_in(self):
+        import inspect
+        owner=boundaries.OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
+        module,api,process,record,clock,boundary,calls,(user,kernel,dwm),context=owner.lazy_provider_boundary()
+        self.assertIn('native_identity_diagnostic',inspect.signature(module.NativeMenuProbe).parameters)
+        with context:
+            for value in (1,2,True,False,'3',None):
+                with self.subTest(value=value),self.assertRaises(AssertionError):
+                    module.NativeMenuProbe(clock()+5,clock,user=user,kernel=kernel,dwm=dwm,
+                        native_point_profile=True,native_point_profile_version=2,native_identity_diagnostic=value)
+            probe=module.NativeMenuProbe(clock()+5,clock,user=user,kernel=kernel,dwm=dwm,
+                native_point_profile=True,native_point_profile_version=2,native_identity_diagnostic=3)
+            self.assertEqual(probe._native_identity_diagnostic,3);self.assertEqual(calls,[])
+
+    def test_global_true_diagnostic_is_terminal_without_positive_provider_fallback(self):
+        module,probe,boundary,binding,state,lease,calls,pane=self.fixture()
+        self.assertTrue(hasattr(module,'NativeIdentityDiagnosticTerminal'))
+        probe._native_identity_diagnostic=3
+        probe._provider_local_point=lambda *args:self.fail('Diagnostic reached a positive provider worker')
+        probe._observe_identity_diagnostic=lambda *args:self.fail('A global TRUE source cannot begin the fixed Pane diagnostic')
+        with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+            probe.point_snapshot(99,[50,70],probe.current_control)
+        self.assertEqual(calls,[])
+        self.assertEqual(probe.interop['identityDiagnosticControl']['terminalCode'],5)
+        probe._uia_call=lambda *args:self.fail('Terminal diagnostic started another provider query')
+        with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+            probe.point_snapshot(99,[50,70],probe.current_control)
+        with self.assertRaises(module.NativeIdentityDiagnosticTerminal):probe.snapshot(binding,'save')
+
+    def test_run_cannot_send_escape_or_target_input_when_a_diagnostic_observer_returns(self):
+        owner=boundaries.OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
+        module,api,process,record,clock,probe=owner.fixture()
+        self.assertTrue(hasattr(module,'NativeIdentityDiagnosticTerminal'))
+        process.opengeul_native_menu_identity_diagnostic=3
+        process.opengeul_native_menu_point_profile=True;process.opengeul_native_menu_point_profile_version=2
+        probe._native_point_profile=True;probe._native_point_profile_version=2;probe._native_identity_diagnostic=3
+        with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+            module.inspect_native_menu(api,process,11,record,'open-escape',probe=probe,clock=clock)
+        self.assertEqual([row for row in probe.calls if type(row) is tuple and row[0] in ('click','key')],[('click','file')])
+        self.assertEqual(record['nativeMenuActions'][-1]['keys'],[])
+        self.assertFalse(record['nativeMenuActions'][-1]['success'])
+        first=list(probe.calls)
+        with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+            module.inspect_native_menu(api,process,11,record,'open-escape',probe=probe,clock=clock)
+        self.assertEqual([row for row in probe.calls[len(first):] if type(row) is tuple and row[0] in ('click','key')],[])
+
+    def test_complete_read_is_terminal_with_real_fresh_refs_one_lease_and_no_positive_claim(self):
+        module,probe,boundary,binding,state,lease,calls,pane,packet,started=self.diagnostic()
+        fresh_calls=[];original=probe._fresh_proof_with_refs
+        def fresh(target):
+            result=original(target);fresh_calls.append((probe.clock(),probe.deadline,result));return result
+        probe._fresh_proof_with_refs=fresh
+        with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+            probe._observe_identity_diagnostic([50,70],probe.current_control.element_info._element,pane)
+        self.assertEqual(len(started),1)
+        args,kwargs=started[0]
+        self.assertIs(args[0],fresh_calls[0][2][1])
+        self.assertIsNot(args[0]['file'],probe._identity_refs['file'])
+        self.assertIsNot(args[0]['target:save'],probe._identity_refs['target:save'])
+        self.assertEqual((kwargs['captured_at'],kwargs['action_deadline'],fresh_calls[0][1]),(1.,6.,2.5))
+        self.assertEqual((kwargs['exposure']['hwnd'],kwargs['exposure']['threadId'],kwargs['exposure']['ownerChain']),(99,9,[99,56]))
+        self.assertEqual(probe.deadline,6.)
+        self.assertEqual(probe.interop['identityDiagnosticControl']['diagnosticComplete'],1)
+        self.assertEqual(probe.interop['identityDiagnosticControl']['postScopeVerified'],1)
+        self.assertEqual(probe.interop['identityDiagnosticResult']['threadBirth'],1<<48)
+        self.assertEqual((packet['localKnown'],packet['localMatch']),(0,0))
+        with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+            probe._observe_identity_diagnostic([50,70],probe.current_control.element_info._element,pane)
+        self.assertEqual(len(started),1)
+
+    def test_pending_late_failed_wrong_mode_and_positive_packets_start_no_post_queries(self):
+        for damage in ('pending','late','failed','mode','positive','synthetic','extra','scope','negative'):
+            with self.subTest(damage=damage):
+                module,probe,boundary,binding,state,lease,calls,pane,packet,started=self.diagnostic()
+                post=[]
+                probe._fresh_proof=lambda target:post.append(1)
+                provider_boundary_calls=NS(count=0)
+                for name in ('_popup_exposure','_call','_uia_call'):
+                    original=getattr(probe,name)
+                    def boundary_call(*args,_original=original,**kwargs):
+                        if state.waited:provider_boundary_calls.count+=1
+                        return _original(*args,**kwargs)
+                    setattr(probe,name,boundary_call)
+                if damage=='pending':lease.pending=True;packet['pending']=1
+                elif damage=='failed':packet['diagnosticComplete']=0
+                elif damage=='mode':packet['workerSchemaVersion']=2
+                elif damage=='positive':packet['localKnown']=1
+                elif damage=='synthetic':packet['synthetic']=1
+                elif damage=='extra':packet['other']=1
+                elif damage=='scope':packet['scopeId']=2
+                elif damage=='negative':packet['negativeCount']=4
+                def wait():
+                    if damage=='late':boundary.clock.now=2.5
+                    state.waited=True
+                    return copy.deepcopy(packet)
+                lease.wait=wait
+                with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+                    probe._observe_identity_diagnostic([50,70],probe.current_control.element_info._element,pane)
+                self.assertEqual(post,[])
+                self.assertTrue(state.waited)
+                self.assertEqual(provider_boundary_calls.count,0)
+                self.assertEqual(probe.interop['identityDiagnosticControl']['diagnosticComplete'],0)
+                if damage in ('mode','positive','synthetic','extra','scope','negative'):
+                    self.assertNotIn('identityDiagnosticResult',probe.interop)
+                self.assertEqual(probe.deadline,6.)
+
+    def test_source_discovery_consumes_age_before_the_only_lease_is_admitted(self):
+        module,probe,boundary,binding,state,lease,calls,pane,packet,started=self.diagnostic()
+        original=probe._fresh_proof_with_refs
+        def fresh(target):
+            value=original(target);boundary.clock.now=2.5;return value
+        probe._fresh_proof_with_refs=fresh
+        with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+            probe._observe_identity_diagnostic([50,70],probe.current_control.element_info._element,pane)
+        self.assertEqual(started,[]);self.assertFalse(state.waited)
+        self.assertEqual(probe.deadline,6.)
+
+    def test_nonfile_early_failure_and_missing_retained_scope_are_terminal(self):
+        for damage in ('early','scope'):
+            with self.subTest(damage=damage):
+                module,probe,boundary,binding,state,lease,calls,pane,packet,started=self.diagnostic()
+                if damage=='early':probe._chrome=lambda target:(_ for _ in ()).throw(ValueError('synthetic'))
+                else:probe._uses_comparison=False
+                with self.assertRaises(module.NativeIdentityDiagnosticTerminal):
+                    probe.point_snapshot(99,[50,70],probe.current_control)
+                self.assertEqual(started,[])
+
+    def test_actual_profile_three_adapter_constructs_typed_source_without_using_positive_begin(self):
+        import sys
+        from types import ModuleType
+        import native_menu_msaa_hit as helper
+        import test_native_menu_msaa_hit as metadata
+        module,probe,boundary,binding,state,lease,calls,pane,packet,started=self.diagnostic()
+        probe._begin_identity_diagnostic_lease=module.NativeMenuProbe._begin_identity_diagnostic_lease.__get__(probe,type(probe))
+        sdk=metadata.sdk_fixture()
+        library=NS(IUIAutomation=sdk['client_interface'],IUIAutomationElement=sdk['element_interface'],
+            IUIAutomationLegacyIAccessiblePattern=sdk['legacy_interface'])
+        def ref(interface,value):return type('Borrowed',(C.c_void_p,),{'__com_interface__':interface})(value)
+        refs=[ref(sdk['element_interface'],value) for value in range(501,508)]
+        retained_file,fresh_file,retained_target,fresh_target,*negative=refs
+        probe.provider_client=ref(sdk['client_interface'],500);probe._uia_library=library
+        probe._identity_refs={'file':retained_file,'target:save':retained_target}
+        fresh_refs={'file':fresh_file,'target:save':fresh_target}
+        comtypes=ModuleType('comtypes');comtypes.GUID=sdk['guid_type'];comtypes.HRESULT=sdk['hresult_type']
+        automation=ModuleType('comtypes.automation');automation.VARIANT=sdk['variant_type']
+        captured=[]
+        def begin(source,scope,binder,deadline,*,native_enabled=False):
+            captured.append((source,scope,binder,deadline,native_enabled));return lease
+        with patch.dict(sys.modules,{'comtypes':comtypes,'comtypes.automation':automation}), \
+                patch.object(module.C,'WINFUNCTYPE',C.CFUNCTYPE,create=True), \
+                patch.object(helper,'begin_ia2_diagnostic',side_effect=begin), \
+                patch.object(helper,'begin_msaa_hit',side_effect=AssertionError('Positive entry is forbidden')):
+            result=probe._begin_identity_diagnostic_lease(fresh_refs,negative,7,[50,70],captured_at=1.,action_deadline=6.,
+                exposure=dict(hwnd=99,threadId=9,ownerChain=[99,56]))
+        self.assertIs(result,lease);source,scope,binder,deadline,enabled=captured[0]
+        self.assertIs(type(source),helper.MsaaHitSourceV3);self.assertTrue(binder.matches_source(source))
+        self.assertIs(source.retained_file,retained_file);self.assertIs(source.fresh_file,fresh_file)
+        self.assertIs(source.fresh_target,fresh_target);self.assertIs(source.retained_target,retained_target)
+        self.assertIs(source.keepalive[0],probe);self.assertIs(source.keepalive[1],fresh_refs)
+        self.assertEqual(source.negative_refs,tuple(negative))
+        self.assertEqual((source.captured_at,source.action_deadline,source.document_hwnd,source.popup_hwnd,source.popup_thread,source.owner_chain),
+            (1.,6.,11,99,9,(99,56)))
+        self.assertEqual((deadline,enabled),(6.,True))
+
+    def test_original_file_foreground_failure_retains_the_same_single_getter_value(self):
+        module,probe,boundary,binding,state,lease,calls,pane=self.fixture()
+        seen=[]
+        probe.foreground=lambda:seen.append(1) or 12345
+        with self.assertRaises(AssertionError):probe._physical_base()
+        self.assertEqual(seen,[1])
+        self.assertEqual(probe.interop['graphRefresh']['foregroundHwnd'],12345)
+
+
 class NativeApartmentGuardTests(unittest.TestCase):
     def native_probe(self,*,thread_id=123,kind=1,hresult=0,clock_values=()):
         module=boundaries.OwnedNativeMenuTests(methodName='runTest').feature()

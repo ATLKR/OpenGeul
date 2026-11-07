@@ -38,16 +38,18 @@ class NativeMenuPointCliTests(unittest.TestCase):
 
     def test_only_dedicated_cli_enables_actual_windows_session_profile_after_preflight(self):
         smoke,output,events,setup=self.fixture()
-        def modules(suite,fixtures,folder,*,session_factory,point_preflight):
+        def modules(suite,fixtures,folder,*,session_factory,point_preflight,identity_diagnostic):
             self.assertTrue((output/'native-point-preflight.json').is_file())
             self.assertEqual(point_preflight,preflight())
             session=session_factory(suite,fixtures,folder,'writer')
             self.assertIs(type(session),smoke.WindowsSession)
             self.assertTrue(session.native_point_profile)
-            events.append('modules');return dict(success=True)
+            self.assertEqual(session.native_identity_diagnostic,3)
+            self.assertEqual(identity_diagnostic,3)
+            events.append('modules');return dict(success=False)
         with patch.object(smoke,'run_modules',side_effect=modules):
             result=smoke._run_point_profile(Path('/suite'),Path('/fixtures'),output,setup=setup)
-        self.assertEqual(result,0);self.assertEqual(events,['modules','fence'])
+        self.assertEqual(result,1);self.assertEqual(events,['modules','fence'])
         default=smoke.WindowsSession(Path('/suite'),Path('/fixtures'),output,'writer')
         self.assertFalse(default.native_point_profile)
 

@@ -94,33 +94,47 @@ class NativeMenuSmokeTests(unittest.TestCase):
         return self.smoke.run_case(Path('/synthetic/suite'), Path('/synthetic/fixtures'),
             Path('/synthetic/output'), module, session_factory=lambda *args: session)
 
-    def test_dedicated_cli_selects_profile_two_without_changing_the_native_preflight_schema(self):
+    def test_dedicated_cli_selects_diagnostic_three_without_changing_the_native_preflight_schema(self):
         from test_native_menu_point_cli import preflight
         output=Path(self.enterContext(tempfile.TemporaryDirectory()))
         boundary=preflight();events=[]
         helper=SimpleNamespace(verify_native_thread_boundary=lambda deadline:boundary)
         setup=lambda:(SimpleNamespace(finish=lambda:events.append('fence')),helper)
-        def modules(suite,fixtures,folder,*,session_factory,point_preflight):
+        def modules(suite,fixtures,folder,*,session_factory,point_preflight,identity_diagnostic):
             self.assertEqual(point_preflight['schemaVersion'],1)
             session=session_factory(suite,fixtures,folder,'writer')
             self.assertIs(session.native_point_profile,True)
             self.assertEqual(getattr(session,'native_point_profile_version',None),2)
-            events.append('modules');return dict(success=True)
+            self.assertEqual(getattr(session,'native_identity_diagnostic',None),3)
+            self.assertEqual(identity_diagnostic,3)
+            events.append('modules');return dict(success=False)
         with patch.object(self.smoke,'run_modules',side_effect=modules):
-            self.assertEqual(self.smoke._run_point_profile(Path('/suite'),Path('/fixtures'),output,setup=setup),0)
+            self.assertEqual(self.smoke._run_point_profile(Path('/suite'),Path('/fixtures'),output,setup=setup),1)
         self.assertEqual(events,['modules','fence'])
         default=self.smoke.WindowsSession(Path('/suite'),Path('/fixtures'),output,'writer')
         self.assertIs(default.native_point_profile,False)
         self.assertEqual(getattr(default,'native_point_profile_version',None),1)
+        self.assertEqual(getattr(default,'native_identity_diagnostic',None),0)
+
+    def test_diagnostic_case_never_promotes_a_returned_gesture_or_continues_other_scenarios(self):
+        session=Session();session.native_identity_diagnostic=3
+        result=self.run_case(session)
+        self.assertEqual(session.calls,['open','ready','initial-screenshot','open-escape','cleanup'])
+        self.assertEqual(result.get('diagnosticProfile'),3)
+        self.assertEqual(result.get('diagnosticOnly'),1)
+        self.assertEqual(result.get('acceptanceEligible'),0)
+        for key in ('success','nativeMenuVerified','scenarioCompleted','viewPhysicalVerified','nativeHwpMenuLaunchExecuted'):
+            self.assertIs(result[key],False)
 
     def test_actual_open_copies_only_the_explicit_profile_before_attachment(self):
         import windows_smoke
         class StopAtAttachment(Exception):pass
-        for enabled,version in ((False,1),(True,1),(True,2)):
-            with self.subTest(enabled=enabled,version=version):
+        for enabled,version,diagnostic in ((False,1,0),(True,1,0),(True,2,0),(True,2,3)):
+            with self.subTest(enabled=enabled,version=version,diagnostic=diagnostic):
                 process=SimpleNamespace()
                 session=self.smoke.WindowsSession(Path('/suite'),Path('/fixtures'),Path('/output'),'writer')
                 session.native_point_profile=enabled;session.native_point_profile_version=version
+                session.native_identity_diagnostic=diagnostic
                 with patch.object(self.smoke.os,'name','nt'), \
                         patch.dict(sys.modules,{'pywinauto':SimpleNamespace(Desktop=object)}), \
                         patch.object(windows_smoke,'new_document_command',return_value=['synthetic-launch']), \
@@ -130,6 +144,7 @@ class NativeMenuSmokeTests(unittest.TestCase):
                     with self.assertRaises(StopAtAttachment):session.open(dict(case='native-menu-writer'))
                 self.assertEqual(getattr(process,'opengeul_native_menu_point_profile',False),enabled)
                 self.assertEqual(getattr(process,'opengeul_native_menu_point_profile_version',None),version if enabled else None)
+                self.assertEqual(getattr(process,'opengeul_native_menu_identity_diagnostic',0),diagnostic)
 
     def test_report_declares_profile_two_only_with_the_existing_preflight(self):
         from test_native_menu_point_cli import preflight
@@ -140,6 +155,22 @@ class NativeMenuSmokeTests(unittest.TestCase):
                     session_factory=lambda *args:Session(),point_preflight=boundary)
                 self.assertEqual(report['nativePointProfileVersion'],expected)
                 self.assertIs(report['acceptanceEligible'],False)
+
+    def test_diagnostic_report_is_separate_from_point_two_and_never_counts_scenarios_as_passed(self):
+        from test_native_menu_point_cli import preflight
+        def factory(*args):
+            session=Session();session.native_identity_diagnostic=3;return session
+        with tempfile.TemporaryDirectory() as folder,contextlib.redirect_stdout(io.StringIO()):
+            report=self.smoke.run_modules(Path('/suite'),Path('/fixtures'),Path(folder),
+                session_factory=factory,point_preflight=preflight(),identity_diagnostic=3)
+        self.assertEqual(report['nativePointProfileVersion'],0)
+        self.assertEqual((report['diagnosticProfile'],report['diagnosticOnly'],report['acceptanceEligible']),(3,1,0))
+        self.assertEqual((report['completedCaseCount'],report['passedCaseCount']),(6,0))
+        for row in report['tests']:
+            self.assertEqual((row['diagnosticProfile'],row['diagnosticOnly'],row['acceptanceEligible']),(3,1,0))
+            self.assertEqual(row['gestures'],[])
+            for key in ('success','nativeMenuVerified','scenarioCompleted'):
+                self.assertIs(row[key],False)
 
     def test_writer_requires_native_hwp_launcher_before_finish_without_certifying_synthetic_input(self):
         session=Session();record=self.run_case(session)

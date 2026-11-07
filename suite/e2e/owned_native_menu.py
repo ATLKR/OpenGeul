@@ -47,6 +47,30 @@ IDENTITY_ROLES=('file','bar','peer','contrast-edit')+tuple('target:'+name for na
 class NativeMenuPending(AssertionError):pass
 
 
+class NativeIdentityDiagnosticTerminal(AssertionError):
+    """A selected diagnostic ended; no target input or observation retry."""
+
+
+def _identity_diagnostic_packet(packet):
+    """Closed numeric mode3 packet; a positive is rejected, never corrected."""
+    from native_menu_msaa_hit import _record_v3
+    expected=_record_v3(None,False)
+    assert type(packet) is dict and packet.keys()==expected.keys()
+    assert all(type(n) is int and 0<=n<(1<<64 if key=='threadBirth' else 1<<32)
+        for key,n in packet.items())
+    assert packet['schemaVersion']==packet['workerSchemaVersion']==3
+    assert packet['diagnosticOnly']==packet['providerLocalOnly']==1
+    assert packet['acceptanceEligible']==packet['localKnown']==packet['localMatch']==packet['globalHitSubstituted']==packet['synthetic']==0
+    assert packet['diagnosticComplete'] in (0,1) and packet['pending'] in (0,1)
+    return copy.deepcopy(packet)
+
+
+def _identity_diagnostic_control():
+    return dict(schemaVersion=3,diagnosticProfile=3,diagnosticOnly=1,acceptanceEligible=0,
+        localKnown=0,localMatch=0,leaseAttempted=0,pending=0,postScopeVerified=0,
+        diagnosticComplete=0,terminalCode=1)
+
+
 def _menu_key_events(shortcut):
     plans={'ALT_F':((0x38,0),(0x21,0)),'DOWN':((0x50,1),),'ESCAPE':((0x01,0),)}
     assert type(shortcut) is str and shortcut in plans, 'Unknown native menu shortcut'
@@ -526,22 +550,30 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         success=False,deliveryProved=False,documentHwnd=document,shellPid=process.pid,
         startedAt=start,deadline=deadline,pointers=[],keys=[],dpiScope={},engineHandleReleased=False)
     record.setdefault('nativeMenuActions',[]).append(value)
-    handle=None;primary=None
+    handle=None;primary=None;diagnostic=getattr(process,'opengeul_native_menu_identity_diagnostic',0)
     def budget():assert clock()<deadline, 'Original native menu deadline expired'
     def retain():retain_native_menu_receipt(process,value)
     try:
         budget()
+        assert type(diagnostic) is int and diagnostic in (0,3), 'Unknown native identity diagnostic'
+        if diagnostic:
+            value.update(diagnosticProfile=3,diagnosticOnly=1,acceptanceEligible=0)
+            assert gesture and operation=='open-escape', 'The diagnostic has one fixed first gesture'
+            assert not getattr(process,'opengeul_native_menu_identity_diagnostic_started',False), 'The diagnostic cannot repeat'
+            process.opengeul_native_menu_identity_diagnostic_started=True
         profile=getattr(process,'opengeul_native_menu_point_profile',False) is True
         version=getattr(process,'opengeul_native_menu_point_profile_version',1) if profile else 1
         assert type(version) is int and version in (1,2), 'Unknown native point profile version'
+        assert not diagnostic or profile and version==2, 'The diagnostic needs the existing retained-ref guards'
         if profile:
             from native_menu_msaa_hit import pending_msaa_hit
             assert pending_msaa_hit() is None, 'An original native provider callback is still unretired'
         if probe is None:probe=NativeMenuProbe(deadline,clock,interop=value.setdefault('uiaInterop',{}),
-            native_point_profile=profile,native_point_profile_version=version)
+            native_point_profile=profile,native_point_profile_version=version,native_identity_diagnostic=diagnostic)
         elif profile:
             assert getattr(probe,'_native_point_profile_version',1)==version, 'Native point profile changed before admission'
             if version==2:assert getattr(probe,'_native_point_profile',False) is True
+            assert getattr(probe,'_native_identity_diagnostic',0)==diagnostic, 'Native identity diagnostic changed before admission'
         assert native_menu_active(api,process,document), 'Native-only document menu is not ready'
         suite=Path(process.opengeul_suite_root).resolve()
         shell=probe.process_snapshot(process)
@@ -587,6 +619,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 measured['stageCode']=21;value['observationStage']=21
                 try:row=probe.snapshot(binding,target)
                 except NativeMenuPending:
+                    if diagnostic:raise NativeIdentityDiagnosticTerminal('Diagnostic source was not ready') from None
                     budget();time.sleep(min(.01,max(0,deadline-clock())));continue
                 measured.update(stageCode=22,snapshot=row);value['observationStage']=22
                 _require_shell_menus(row,binding,process.pid,menu_scope)
@@ -629,6 +662,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             measured['stageCode']=12;value['observationStage']=12
             return row
         def pointer(target):
+            assert not diagnostic or target=='file', 'A diagnostic cannot send target input'
             row=observe(target);anchor=_validate(row,binding,process.pid,target,menu_scope=menu_scope)
             rect=row['control']['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
             item=dict(target=target,chosenPhysicalPoint=point,snapshots=[row],hits=[])
@@ -645,6 +679,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
             assert all(type(item[k]) is int for k in ('inputCallAttempts','requestedInputs','insertedInputs'))
             assert item['inputCallAttempts']==1 and item['requestedInputs']==item['insertedInputs']==2
         def keyboard(shortcut):
+            assert not diagnostic, 'A diagnostic cannot send menu keys'
             if shortcut=='ALT_F':
                 before=observe('file');editor_before=editor(2)
             else:
@@ -667,7 +702,9 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 elif operation.startswith('disabled-'):
                     target=operation[len('disabled-'):]
                     value.update(disabledSnapshot=observe(target,enabled=False),disabledObserved=True)
-                else:observe('save')
+                else:
+                    observe('save')
+                    if diagnostic:raise NativeIdentityDiagnosticTerminal('Diagnostic point returned without its terminal marker')
                 if operation=='open-outside':
                     continuity();hit=probe.outside_snapshot(binding)
                     assert hit['pid']==process.pid and hit['rootHwnd']==document and hit['hitHwnd']==document and hit['hitTest']==2
@@ -685,7 +722,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         primary=exc;value['failureType']=type(exc).__name__
         try:
             capture=getattr(probe,'capture_primary_failure',None)
-            if capture:capture(exc)
+            if capture and not diagnostic:capture(exc)
         except BaseException:value['numericPrimaryCaptureFailed']=1
         try:
             import numeric_notice
@@ -693,8 +730,10 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
         except BaseException:value['numericFailureCaptureFailed']=1
         try:
             observer=getattr(probe,'observe_failure_context',None)
-            if observer:observer(value.get('binding'))
+            if observer and not diagnostic:observer(value.get('binding'))
         except BaseException:value['numericContextCaptureFailed']=1
+        if diagnostic and not isinstance(exc,NativeIdentityDiagnosticTerminal):
+            raise NativeIdentityDiagnosticTerminal('Diagnostic source ended before input') from None
         raise
     finally:
         errors=[]
@@ -931,10 +970,13 @@ class NativeMenuProbe(NativeControlProbe):
     # CUIAutomation8 is the documented Windows 8+ IUIAutomation2 implementation.
     # A private client avoids changing pywinauto's shared UIA singleton settings.
     CLIENT='{e22ad333-b25f-460c-83d0-0581107395c9}'
-    def __init__(self,deadline,clock,*,interop=None,native_point_profile=False,native_point_profile_version=1,**libraries):
+    def __init__(self,deadline,clock,*,interop=None,native_point_profile=False,native_point_profile_version=1,native_identity_diagnostic=0,**libraries):
         assert type(native_point_profile) is bool
         assert type(native_point_profile_version) is int and native_point_profile_version in (1,2)
         assert native_point_profile_version==1 or native_point_profile
+        assert type(native_identity_diagnostic) is int and native_identity_diagnostic in (0,3)
+        assert not native_identity_diagnostic or native_point_profile and native_point_profile_version==2
+        self._native_identity_diagnostic=native_identity_diagnostic
         self._native_point_profile_version=native_point_profile_version
         self._native_point_profile=self._physical_file_refresh=native_point_profile
         self._provider_creator=None;self._msaa_lease=None
@@ -1080,7 +1122,8 @@ class NativeMenuProbe(NativeControlProbe):
             assert child['visible'] is child['enabled'] is True
             assert type(child['threadId']) is int and child['threadId']>0
             assert attachment['windows']['child']['threadId']==child['threadId']
-            assert self.foreground()==binding['document'], 'Physical File header requires its original foreground document'
+            foreground=self.foreground();observation['foregroundHwnd']=foreground
+            assert foreground==binding['document'], 'Physical File header requires its original foreground document'
             return child
         before=owned();observation['ownershipBefore']=True
         file_row=self._chrome(refs['file'])
@@ -1339,6 +1382,78 @@ class NativeMenuProbe(NativeControlProbe):
             provider=provider,before=before,after=after,fresh=fresh,creator=creator,globalPoint=global_point)
         if version==2:result['sourceFresh']=source_fresh
         return result
+    def _begin_identity_diagnostic_lease(self,fresh_refs,negative,scope_id,point,*,captured_at,action_deadline,exposure):
+        """Separate profile3 source; never passes mode3 to a positive factory."""
+        assert getattr(self,'_native_identity_diagnostic',0)==3
+        assert type(fresh_refs) is dict and set(fresh_refs)==set(self._identity_refs)
+        from native_menu_msaa_hit import Ia2SdkAbi,MsaaHitScope,MsaaHitSourceV3,begin_ia2_diagnostic
+        from comtypes import GUID,HRESULT
+        from comtypes.automation import VARIANT
+        library=self._uia_library;legacy=library.IUIAutomationLegacyIAccessiblePattern
+        method=next(item for item in vars(legacy)['_methods_'] if item.name=='GetIAccessible')
+        accessible=method.argtypes[0]._type_.__com_interface__
+        sdk=Ia2SdkAbi(client_interface=library.IUIAutomation,element_interface=library.IUIAutomationElement,
+            legacy_interface=legacy,accessible_interface=accessible,guid_type=GUID,hresult_type=HRESULT,
+            variant_type=VARIANT,function_factory=C.WINFUNCTYPE)
+        scope=self._identity_scope;binding=scope['binding'];role=_target_role(self._active_target)
+        source=MsaaHitSourceV3(self.provider_client,self._identity_refs['file'],fresh_refs['file'],
+            fresh_refs[role],self._identity_refs[role],tuple(negative),self._point_source['shellHandle'],
+            self._point_source['engineHandle'],(self,fresh_refs),captured_at,action_deadline,
+            binding['document'],exposure['hwnd'],exposure['threadId'],tuple(exposure['ownerChain']))
+        request=MsaaHitScope(scope_id,binding['officePid'],scope['officeCreationTime'],scope['shellPid'],
+            scope['shellCreationTime'],binding['parent'],binding['child'],*point)
+        return begin_ia2_diagnostic(source,request,sdk,action_deadline,native_enabled=True)
+    def _observe_identity_diagnostic(self,point,target,actual):
+        """One bounded read observation; every branch is terminal and nonaccepting."""
+        control=_identity_diagnostic_control()
+        self.interop['identityDiagnosticControl']=control
+        action_deadline=self.deadline
+        try:
+            assert getattr(self,'_native_identity_diagnostic',0)==3 and self._active_target=='save'
+            assert not getattr(self,'_identity_diagnostic_attempted',False), 'A diagnostic lease cannot repeat'
+            self._identity_diagnostic_attempted=True
+            assert not self._provider_pending(), 'A previous callback remains unretired'
+            creator=self._require_provider_creator();scope=self._identity_scope;binding=scope['binding']
+            assert self._uia_call(9,lambda:actual.CurrentControlType)==50033
+            assert self._uia_call(8,lambda:actual.CurrentProcessId)==binding['officePid']
+            rectangle=self._chrome(target)['rectangle'];before=self._popup_exposure(binding,point,rectangle)
+            assert self._uia_call(7,lambda:actual.CurrentNativeWindowHandle)==before['hwnd']
+            # Discovery consumes this same narrowed expiry; it is never reset.
+            captured_at=self.clock();effective=min(action_deadline,captured_at+1.5)
+            self.deadline=effective
+            source_fresh,fresh_refs=self._fresh_proof_with_refs(self._active_target)
+            assert self.clock()<effective
+            role=_target_role(self._active_target)
+            assert self._same(target,fresh_refs[role]), 'Current diagnostic target differs from the fresh binding'
+            negative=[ref for key,ref in self._identity_refs.items() if key!=role]+[actual]
+            sequence=getattr(self,'_point_sequence',0)+1;assert sequence<=32;self._point_sequence=sequence
+            control.update(leaseAttempted=1,terminalCode=2)
+            lease=self._begin_identity_diagnostic_lease(fresh_refs,negative,sequence,point,
+                captured_at=captured_at,action_deadline=action_deadline,exposure=before)
+            self._msaa_lease=lease
+            packet=lease.wait()
+            retained=_identity_diagnostic_packet(packet)
+            assert packet['scopeId']==sequence, 'Diagnostic packet belongs to another source'
+            if packet['diagnosticComplete']==1:
+                assert packet['negativeCount']==packet['negativeRejected']==len(negative)
+            self.interop['identityDiagnosticResult']=retained
+            control['pending']=int(lease.pending is not False)
+            assert lease.pending is False and packet['pending']==0
+            assert self.clock()<effective, 'The diagnostic source age expired'
+            if packet['diagnosticComplete']!=1:return
+            assert all(packet[key]==1 for key in ('nativeExit','threadClosed','processesClosed','workerCleanup'))
+            assert packet['stageCode']==13
+            assert self._require_provider_creator()==creator
+            after=self._popup_exposure(binding,point,rectangle);assert before==after
+            self._fresh_proof(self._active_target)
+            assert self.clock()<effective
+            control.update(postScopeVerified=1,diagnosticComplete=1,terminalCode=3)
+        except BaseException:
+            control['terminalCode']=4
+        finally:
+            self.deadline=action_deadline
+            # This marker is distinct from the observation retry exception.
+            raise NativeIdentityDiagnosticTerminal('Read-only identity diagnostic ended') from None
     def _popup_exposure(self,binding,point,target_rect):
         """The exact pinned VCL popup at a physical point, not target identity.
 
@@ -1392,6 +1507,12 @@ class NativeMenuProbe(NativeControlProbe):
         try:self.interop['pointObservation']=observation
         except BaseException:pass
         actual=target=original=None
+        diagnostic=getattr(self,'_native_identity_diagnostic',0)==3 and self._active_target!='file'
+        if diagnostic:
+            if getattr(self,'_identity_diagnostic_point_seen',False):
+                raise NativeIdentityDiagnosticTerminal('The diagnostic point cannot be observed again')
+            self._identity_diagnostic_point_seen=True
+            self.interop['identityDiagnosticControl']=_identity_diagnostic_control()
         try:
             hit=int(self._call(self.user.WindowFromPhysicalPoint,Point(*point)) or 0);pid=C.c_uint32()
             if hit:self._required(self._call(self.user.GetWindowThreadProcessId,hit,C.byref(pid)),'Physical native menu hit PID')
@@ -1424,6 +1545,12 @@ class NativeMenuProbe(NativeControlProbe):
                     proof['differentFrom'][key]=self._same(actual,ref)
                     observation['primary']['differentFrom'].append([IDENTITY_ROLES.index(key)+1,proof['differentFrom'][key]])
                 observation['stageCode']=9
+                if diagnostic:
+                    if (match is False and proof['targetEqualsRetained'] is True and proof['hitEqualsRetained'] is False
+                            and all(value is False for value in proof['differentFrom'].values())):
+                        self._observe_identity_diagnostic(point,target,actual)
+                    self.interop['identityDiagnosticControl']['terminalCode']=5
+                    raise NativeIdentityDiagnosticTerminal('The fixed diagnostic source is unavailable')
                 if (getattr(self,'_native_point_profile',False) and self._active_target!='file' and
                         match is False and proof['targetEqualsRetained'] is True and proof['hitEqualsRetained'] is False and
                         all(value is False for value in proof['differentFrom'].values())):
@@ -1435,17 +1562,24 @@ class NativeMenuProbe(NativeControlProbe):
                 observation['stageCode']=10
                 assert all(value is False for value in result['identityProof']['differentFrom'].values())
             observation['stageCode']=11
+            if diagnostic:raise NativeIdentityDiagnosticTerminal('The diagnostic has no retained identity scope')
             return result
         except BaseException as exc:
             observation.update(failed=True,**self._exception_numbers(exc))
             self._failure_point=(actual,original if original is not None else target)
             try:
+                if diagnostic:raise NativeIdentityDiagnosticTerminal('Diagnostic failure observations are suppressed')
                 self.capture_primary_failure(exc)
                 observation['primaryCall']=copy.deepcopy(self.interop.get('primaryFailureCall',{}))
                 observation['primaryComparison']=copy.deepcopy(self.interop.get('lastComparison',{}))
             except BaseException:pass
+            if diagnostic and not isinstance(exc,NativeIdentityDiagnosticTerminal):
+                raise NativeIdentityDiagnosticTerminal('Diagnostic point failed before input') from None
             raise
     def observe_failure_context(self,binding):
+        if getattr(self,'_native_identity_diagnostic',0)==3:
+            self.interop['failureContext']=dict(diagnosticProfile=3,providerQueriesSuppressed=1)
+            return
         if getattr(self,'_failure_context_recorded',False):return
         self._failure_context_recorded=True
         if self._provider_pending():
@@ -1719,6 +1853,9 @@ class NativeMenuProbe(NativeControlProbe):
             result.update(verifiedSystemCount=0,unknownCount=count,proofs=[])
         return result
     def snapshot(self,binding,target):
+        if (getattr(self,'_native_identity_diagnostic',0)==3 and target!='file'
+                and getattr(self,'_identity_diagnostic_point_seen',False)):
+            raise NativeIdentityDiagnosticTerminal('The diagnostic source cannot be rediscovered')
         doc=binding['document'];child=binding['child'];pid=binding['officePid']
         self._active_target=target
         physical=(getattr(self,'_physical_file_refresh',False) and hasattr(self,'file_element') and

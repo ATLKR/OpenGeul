@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import copy
 import ctypes
 import json
 import math
@@ -388,14 +389,18 @@ class WindowsSession:
         self.home_hwnd = 0
         self.native_point_profile = False
         self.native_point_profile_version = 1
+        self.native_identity_diagnostic = 0
 
     def open(self, record):
         entry_deadline = time.monotonic() + 150
         assert os.name == 'nt' and __debug__, 'Actual Windows GUI with assertions is required'
         profile=getattr(self,'native_point_profile',False)
         profile_version=getattr(self,'native_point_profile_version',1)
+        diagnostic=getattr(self,'native_identity_diagnostic',0)
         assert type(profile) is bool and type(profile_version) is int and profile_version in (1,2)
         assert profile or profile_version==1, 'A native point profile requires explicit opt-in'
+        assert type(diagnostic) is int and diagnostic in (0,3)
+        assert not diagnostic or profile and profile_version==2
         import windows_smoke as native
         import startup_smoke as startup
         import owned_native_menu as menu
@@ -406,6 +411,7 @@ class WindowsSession:
         if profile:
             self.process.opengeul_native_menu_point_profile = True
             self.process.opengeul_native_menu_point_profile_version = profile_version
+        if diagnostic:self.process.opengeul_native_menu_identity_diagnostic = diagnostic
         self.api = native.Windows()
         self.hwnd, self.parent, self.child, self.office_pid = native.verified_attachment(
             self.api, self.process, self.module)
@@ -985,6 +991,9 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
     session = None
     try:
         session = session_factory(suite, fixtures, output, module)
+        diagnostic=getattr(session,'native_identity_diagnostic',0)
+        assert type(diagnostic) is int and diagnostic in (0,3)
+        if diagnostic:record.update(diagnosticProfile=3,diagnosticOnly=1,acceptanceEligible=0,diagnosticComplete=0)
         record['actualWindowsExecuted'] = session.actual_windows is True and os.name == 'nt'
         session.open(record)
         record['stage'] = 'require-native-menu'
@@ -995,6 +1004,8 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
         for index, gesture in enumerate(GESTURES):
             record['stage'] = gesture
             result = session.gesture(gesture, record)
+            if diagnostic:
+                raise AssertionError('The selected identity diagnostic returned to its scenario')
             assert type(result) is dict and result.get('success') is True
             assert result.get('gesture') == gesture
             record['gestures'].append(dict(index=index, gesture=gesture, receipt=result))
@@ -1043,6 +1054,23 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession)
                     record['initialFocusTraceAfterRetirement'] = _initial_focus_retired_unknown(11)
         if not record['cleanupConfirmed']:
             record['success'] = False
+        if record.get('diagnosticProfile')==3:
+            record['success']=record['scenarioCompleted']=False
+            for action in record.get('nativeMenuActions',[]):
+                interop=action.get('uiaInterop',{})
+                packet=interop.get('identityDiagnosticResult')
+                control=interop.get('identityDiagnosticControl')
+                if packet is not None:
+                    from owned_native_menu import _identity_diagnostic_packet
+                    record['identityDiagnosticResult']=_identity_diagnostic_packet(packet)
+                if type(control) is dict:
+                    from owned_native_menu import _identity_diagnostic_control
+                    assert control.keys()==_identity_diagnostic_control().keys()
+                    assert all(type(n) is int and 0<=n<=0xffffffff for n in control.values())
+                    assert control['schemaVersion']==control['diagnosticProfile']==3 and control['diagnosticOnly']==1
+                    assert control['acceptanceEligible']==control['localKnown']==control['localMatch']==0
+                    record['identityDiagnosticControl']=copy.deepcopy(control)
+                    record['diagnosticComplete']=int(control.get('diagnosticComplete')==1 and record['cleanupConfirmed'])
         record['nativeMenuVerified'] = record['success'] and record['actualWindowsExecuted']
         record['nativeHwpMenuLaunchExecuted'] = bool(record['nativeMenuVerified'] and record['hwpLauncherCompleted']
             and type(session) is WindowsSession)
@@ -1069,11 +1097,14 @@ def require_native_point_preflight(value):
     assert all(value[key]>0 for key in ('controllerPid','threadId','threadBirth'))
 
 
-def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, point_preflight=None):
+def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, point_preflight=None,identity_diagnostic=0):
+    assert type(identity_diagnostic) is int and identity_diagnostic in (0,3)
+    assert not identity_diagnostic or point_preflight is not None
     if point_preflight is not None:require_native_point_preflight(point_preflight)
     records = []
     for module in MODULES:
         record = run_case(suite, fixtures, output, module, session_factory=session_factory)
+        assert not identity_diagnostic or record.get('diagnosticProfile')==3
         records.append(record)
         with (output / (record['case'] + '.json')).open('x', encoding='utf-8') as stream:
             json.dump(record, stream, ensure_ascii=False, allow_nan=False, indent=2)
@@ -1100,8 +1131,11 @@ def run_modules(suite, fixtures, output, *, session_factory=WindowsSession, poin
         missingModules=[module for module in MODULES if module not in counts],
         failedModules=[row['module'] for row in records if not row['success']],
         externalAcceptanceGates=list(EXTERNAL_GATES), tests=records)
-    report.update(nativePointProfileVersion=2 if point_preflight is not None else 0,
+    report.update(nativePointProfileVersion=2 if point_preflight is not None and not identity_diagnostic else 0,
         nativePointPreflight=point_preflight)
+    if identity_diagnostic:
+        assert report['success'] is False and report['nativeMenuVerified'] is False and report['scenarioSuccess'] is False
+        report.update(diagnosticProfile=3,diagnosticOnly=1,acceptanceEligible=0,scenarioCompleted=False)
     with (output / 'results.json').open('x', encoding='utf-8') as stream:
         json.dump(report, stream, ensure_ascii=False, allow_nan=False, indent=2)
     return report
@@ -1146,8 +1180,11 @@ def _run_point_profile(suite, fixtures, output, *, setup=None):
             session = WindowsSession(*args)
             session.native_point_profile = True
             session.native_point_profile_version = 2
+            session.native_identity_diagnostic = 3
             return session
-        return 0 if run_modules(suite, fixtures, output, session_factory=factory,point_preflight=boundary)['success'] else 1
+        result=run_modules(suite, fixtures, output, session_factory=factory,point_preflight=boundary,identity_diagnostic=3)
+        assert result['success'] is False, 'A read-only identity diagnostic cannot qualify menus'
+        return 1
     except BaseException as exc:
         code = 2 if isinstance(exc, KeyboardInterrupt) else 3 if isinstance(exc, SystemExit) else 1 if isinstance(exc, Exception) else 4
         retain('native-point-controller-failure.json', dict(schemaVersion=1, success=False,

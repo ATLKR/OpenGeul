@@ -1816,4 +1816,504 @@ class WindowsNativeThreadTests(unittest.TestCase):
         self.assertEqual(result['localMatch'],0);self.assertIsNone(helper.pending_msaa_hit())
 
 
+class Ia2DiagnosticCalls(CanonicalCalls):
+    """Distinct native acquisitions; no names, values or external environment."""
+    def __init__(self):
+        super().__init__()
+        self.identities[211]=311  # Same scoped File tuple, different COM wrapper.
+        self.services={value:value+1000 for value in (201,211,202,203,222)}
+        self.ia2={value:value+2000 for value in self.services.values()}
+        self.tuples={self.ia2[self.services[value]]:(-11 if value in (201,211) else -22,13)
+                     for value in self.services}
+        self.owned_outputs=[];self.after=None;self.null_at=0
+        self.exception_at=0;self.noninteger_at=0
+        self.getter_reads={};self.recheck_changes={}
+
+    def call(self,key,pointer,*args):
+        value=pointer.value if isinstance(pointer,C.c_void_p) else pointer
+        if key=='release':return super().call(key,pointer,*args)
+        if key in ('service_query','ia2_query','unique_id','window_handle'):
+            self.calls.append((key,value))
+            if key=='service_query':
+                assert C.string_at(args[0],16)==uuid.UUID('6d5140c1-7436-11ce-8034-00aa006009fa').bytes_le
+                args[1]._obj.value=self.services[value]
+            elif key=='ia2_query':
+                assert C.string_at(args[0],16)==uuid.UUID('618736e0-3c3d-11cf-810c-00aa00389b71').bytes_le
+                assert C.string_at(args[1],16)==uuid.UUID('e89f726e-c4f4-4c19-bb19-b647d7fa8478').bytes_le
+                args[2]._obj.value=self.ia2[value]
+            else:
+                ordinal=self.getter_reads.get((value,key),0)+1
+                self.getter_reads[value,key]=ordinal
+                datum=self.tuples[value][int(key=='window_handle')]
+                if ordinal>1:datum=self.recheck_changes.get((value,key),datum)
+                args[0]._obj.value=datum
+            hr=self.hresult if len(self.calls)==self.failure_at else 0
+        else:hr=super().call(key,pointer,*args)
+        ordinal=len(self.calls)
+        if ordinal==self.null_at:args[-1]._obj.value=None
+        if key in ('pattern','accessible','accessible_query','query','service_query','ia2_query'):
+            output=args[-1]._obj.value
+            if output:self.owned_outputs.append(output)
+        if self.after:self.after(key,ordinal)
+        if ordinal==self.exception_at:raise KeyboardInterrupt('Synthetic IA2 call exception')
+        if ordinal==self.noninteger_at:return True
+        return hr
+
+
+class Ia2DiagnosticV3Tests(unittest.TestCase):
+    def setUp(self):
+        self.helper=load_helper();self.sdk=Ia2DiagnosticCalls();self.platform=FakePlatform()
+        self.platform.window_domain=lambda hwnd,source,scope:1 if hwnd==13 else 0
+        self.scope=self.helper.MsaaHitScope(7,8,9,10,11,12,13,14,15)
+
+    def source(self,**changes):
+        values=dict(client=9,retained_file=1,fresh_file=11,fresh_target=2,retained_target=3,
+            negative_refs=(4,5,6),shell_handle=20,engine_handle=21,keepalive=(self.sdk,),
+            captured_at=10.,action_deadline=15.,document_hwnd=30,popup_hwnd=31,
+            popup_thread=40,owner_chain=(31,13))
+        values.update(changes)
+        return self.helper.MsaaHitSourceV3(**values)
+
+    def run_worker(self,source=None):
+        return self.helper.run_ia2_diagnostic(source or self.source(),self.scope,self.sdk,self.platform,15.)
+
+    def assert_non_accepting(self,result):
+        self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+        self.assertEqual(result['workerSchemaVersion'],3)
+        self.assertTrue(all(type(value) is int and 0<=value<=0xffffffff for value in result.values()))
+        self.assertNotIn('from_accessible',[key for key,_ in self.sdk.calls])
+        self.assertEqual(self.sdk.releases,list(reversed(self.sdk.owned_outputs)))
+
+    def test_profile_three_has_a_separate_non_accepting_entry_and_source(self):
+        helper=load_helper()
+        for name in ('Ia2SdkAbi','MsaaHitSourceV3','worker_record_v3','_record_v3',
+                     'run_ia2_diagnostic','begin_ia2_diagnostic'):
+            self.assertTrue(callable(getattr(helper,name,None)),name)
+
+    def test_canonical_mismatch_is_measured_with_exact_full_call_and_reference_budget(self):
+        result=self.run_worker();self.assert_non_accepting(result)
+        self.assertEqual((result['diagnosticComplete'],result['ia2Status']),(1,1))
+        self.assertEqual((result['referencesAcquired'],result['referencesReleased']),(26,26))
+        self.assertEqual(len(self.sdk.calls),54)
+        counts=dict(compare=5,pattern=4,child_id=4,accessible=5,accessible_query=6,
+            control_type=4,hit_test=1,query=1,service_query=5,ia2_query=5,unique_id=7,window_handle=7)
+        for operation,count in counts.items():
+            self.assertEqual((result[operation+'Attempted'],result[operation+'Completed'],result[operation+'Hresult']),(count,count,0))
+        self.assertEqual(self.sdk.calls[:5],[('compare',9)]*5)
+        self.assertEqual([value for key,value in self.sdk.calls if key=='pattern'],[1,11,2,3])
+        self.assertEqual([value for key,value in self.sdk.calls if key=='accessible'],[101,111,102,103,101])
+        self.assertEqual((result['filePairObserved'],result['filePairEqual']),(1,0))
+        for key in ('fileOriginalRepeatObserved','fileOriginalRepeatEqual','targetPairObserved','targetPairEqual',
+                    'targetDifferentFromFileObserved','targetDifferentFromFile','hitMatchesTargetObserved','hitMatchesTarget',
+                    'fileTupleEqual','targetTupleEqual','targetDifferentFilesTuple','hitMatchesTargetsTuple',
+                    'hitDifferentFilesTuple','fileAnchorStable','targetAnchorStable','tupleComparisonsObserved'):
+            self.assertEqual(result[key],1,key)
+        self.assertEqual((result['ia2TupleCount'],result['uidZeroCount'],result['uidNegativeCount']),(5,0,5))
+        self.assertEqual((result['variantAttempted'],result['variantCleared'],self.platform.clears),(1,1,[401]))
+        for raw in (201,211,302,311,3201,3211,13,0xfffffff5):self.assertNotIn(raw,result.values())
+
+    def test_every_canonical_disagreement_remains_observable_and_never_enables_input(self):
+        for pointer,identity in ((221,331),(203,333),(202,301),(222,341)):
+            with self.subTest(pointerCode=pointer):
+                self.setUp();self.sdk.identities[pointer]=identity
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual((result['diagnosticComplete'],len(self.sdk.calls)),(1,54))
+
+    def test_valid_signed_zero_and_positive_unique_ids_are_not_support_filters(self):
+        for uid,zero,negative in ((0,5,0),(2**31-1,0,0),(-2**31,0,5)):
+            with self.subTest(signCode=(uid>0)-(uid<0)):
+                self.setUp();self.sdk.tuples={key:(uid,hwnd) for key,(_,hwnd) in self.sdk.tuples.items()}
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual((result['diagnosticComplete'],result['uidZeroCount'],result['uidNegativeCount']),(1,zero,negative))
+                self.assertEqual(result['targetDifferentFilesTuple'],0)
+
+    def test_tuple_and_anchor_changes_are_facts_without_canonical_promotion(self):
+        for accessible,changed in ((211,(-33,13)),(203,(-44,13)),(222,(-11,13))):
+            with self.subTest(accessibleCode=accessible):
+                self.setUp();self.sdk.tuples[self.sdk.ia2[self.sdk.services[accessible]]]=changed
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual(result['diagnosticComplete'],1)
+        for accessible in (201,202):
+            with self.subTest(anchorCode=accessible):
+                self.setUp();ia2=self.sdk.ia2[self.sdk.services[accessible]]
+                self.sdk.recheck_changes[ia2,'unique_id']=-99
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual(result['fileAnchorStable' if accessible==201 else 'targetAnchorStable'],0)
+
+    def test_uia_positive_false_or_negative_collision_stops_before_native_extraction(self):
+        for reason in ('file','target','negative'):
+            with self.subTest(reason=reason):
+                self.setUp();original=self.sdk.call
+                def call(key,pointer,*args):
+                    hr=original(key,pointer,*args)
+                    if key=='compare' and ((reason=='file' and args[:2]==(1,11)) or
+                            (reason=='target' and args[:2]==(2,3))):args[-1]._obj.value=0
+                    if key=='compare' and reason=='negative' and args[1]==4:args[-1]._obj.value=1
+                    return hr
+                self.sdk.call=call;result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual((result['diagnosticComplete'],result['patternAttempted']),(0,0))
+
+    def test_non_self_children_bad_menuitem_and_bad_variants_never_continue(self):
+        for key,value in [('child',1),('child',-1),('kind',50033),('variant',0),('variant',3),('variant',13),('dispatch',0)]:
+            with self.subTest(kind=key,value=value):
+                self.setUp()
+                if key=='child':self.sdk.children[111]=value
+                elif key=='kind':self.sdk.types[11]=value
+                elif key=='variant':self.sdk.variant_type=value
+                else:self.sdk.variant_pointer=value
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual(result['diagnosticComplete'],0)
+                if key in ('variant','dispatch'):self.assertEqual(result['variantCleared'],1)
+
+    def test_nonnull_failed_outputs_and_nulls_are_owned_and_stop_at_each_operation(self):
+        baseline=self.run_worker();calls=list(self.sdk.calls)
+        outputs={'pattern','accessible','accessible_query','query','service_query','ia2_query'}
+        for ordinal,(key,_) in enumerate(calls,1):
+            if key not in outputs:continue
+            for failure in ('failed','sfalse','null','exception','noninteger'):
+                with self.subTest(ordinal=ordinal,failure=failure):
+                    self.setUp()
+                    if failure in ('failed','sfalse'):
+                        self.sdk.failure_at=ordinal;self.sdk.hresult=-2147467259 if failure=='failed' else 1
+                    else:setattr(self.sdk,{'null':'null_at','exception':'exception_at','noninteger':'noninteger_at'}[failure],ordinal)
+                    result=self.run_worker();self.assert_non_accepting(result)
+                    self.assertEqual((result['diagnosticComplete'],len(self.sdk.calls)),(0,ordinal))
+                    self.assertEqual(result['referencesAcquired'],len(self.sdk.owned_outputs))
+
+    def test_every_provider_return_deadline_and_process_loss_prevents_next_provider_call(self):
+        for ordinal in range(1,55):
+            for reason in ('deadline','process'):
+                with self.subTest(ordinal=ordinal,reason=reason):
+                    self.setUp()
+                    def after(key,number):
+                        if number==ordinal:
+                            if reason=='deadline':self.platform.now=11.5
+                            else:self.platform.owns=False
+                    self.sdk.after=after;result=self.run_worker();self.assert_non_accepting(result)
+                    self.assertEqual((result['diagnosticComplete'],len(self.sdk.calls)),(0,ordinal))
+
+    def test_each_original_guard_boundary_stops_calls_and_preserves_owned_cleanup(self):
+        checks=[];self.platform.guard=lambda:checks.append(len(self.sdk.calls)) or True
+        result=self.run_worker();self.assertEqual(result['diagnosticComplete'],1)
+        for stop,expected_calls in enumerate(checks,1):
+            with self.subTest(boundary=stop):
+                self.setUp();seen=[]
+                def guard():seen.append(1);return len(seen)<stop
+                self.platform.guard=guard;result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual((result['diagnosticComplete'],len(self.sdk.calls)),(0,expected_calls))
+
+    def test_unsupported_or_foreign_window_domain_stops_without_exporting_the_handle(self):
+        for hwnd in (0,0x123456789abc):
+            with self.subTest(isNull=int(hwnd==0)):
+                self.setUp();self.sdk.tuples[3201]=(-11,hwnd)
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual((result['diagnosticComplete'],result['ia2TupleCount']),(0,0))
+                if hwnd:self.assertNotIn(hwnd,result.values())
+
+    def test_late_or_failed_cleanup_keeps_facts_but_never_completes(self):
+        for failure in ('late','process','release','variant','dpi','uninitialize'):
+            with self.subTest(failure=failure):
+                self.setUp();original=self.sdk.call
+                if failure in ('late','process','release'):
+                    def call(key,pointer,*args):
+                        hr=original(key,pointer,*args)
+                        if key=='release':
+                            if failure=='late':self.platform.now=11.5
+                            elif failure=='process':self.platform.owns=False
+                            else:raise RuntimeError('Synthetic IA2 release failure')
+                        return hr
+                    self.sdk.call=call
+                elif failure=='variant':self.platform.clear_hr=-2147467259
+                elif failure=='dpi':self.platform.restore=False
+                else:self.platform.uninitialize=lambda:(_ for _ in ()).throw(RuntimeError('Synthetic cleanup failure'))
+                result=self.run_worker();self.assert_non_accepting(result)
+                self.assertEqual(result['diagnosticComplete'],0)
+                self.assertEqual(result['tupleComparisonsObserved'],1)
+
+    def test_freshness_includes_discovery_and_never_resets_the_action_deadline(self):
+        for changes,now in ((dict(captured_at=8.),10.),(dict(action_deadline=10.5),10.5),
+                            (dict(captured_at=10.),11.5),(dict(captured_at=10.1),10.)):
+            with self.subTest(sourceExpired=int(now>=10.5)):
+                self.setUp();self.platform.now=now
+                result=self.run_worker(self.source(**changes));self.assert_non_accepting(result)
+                self.assertEqual((result['diagnosticComplete'],len(self.sdk.calls)),(0,0))
+
+    def test_aliased_owned_interfaces_are_released_once_for_each_acquisition(self):
+        self.sdk.patterns[11]=101
+        self.sdk.services={key:1201 for key in self.sdk.services}
+        self.sdk.services[221]=1201
+        self.sdk.ia2={1201:3201};self.sdk.tuples={3201:(0,13)}
+        result=self.run_worker();self.assert_non_accepting(result)
+        self.assertEqual((result['diagnosticComplete'],result['referencesAcquired'],len(self.sdk.releases)),(1,26,26))
+
+    def test_sdk_metadata_derives_getter_slots_and_closed_pinned_declaration(self):
+        abi=self.helper.Ia2SdkAbi(**sdk_fixture())
+        self.assertEqual((abi.slots['unique_id'],abi.slots['window_handle'],abi.slots['ia2_query'],abi.slots['service_query']),(41,42,3,0))
+        for key in ('unique_id','window_handle','ia2_query','service_query'):
+            self.assertIs(abi.signatures[key][0],C.c_int32)
+        self.assertEqual(abi.signatures['unique_id'][1],(C.POINTER(C.c_int32),))
+        self.assertEqual(abi.signatures['window_handle'][1],(C.POINTER(C.c_void_p),))
+        metadata=self.helper._IA2_METADATA
+        for changed in (None,(),metadata[:-1],(*metadata,'unknown')):
+            if changed is None:continue
+            with self.subTest(shape=len(changed)),self.assertRaises(ValueError):
+                self.helper.Ia2SdkAbi(**sdk_fixture(),_metadata=changed)
+        for damaged in ('prefix','HRESULT','GUID'):
+            args=sdk_fixture()
+            if damaged=='prefix':args['accessible_interface']._methods_[0].name='unrecognized_accParent'
+            elif damaged=='HRESULT':args['hresult_type']=C.c_int64
+            else:args['guid_type']=C.c_int32
+            with self.subTest(damaged=damaged),self.assertRaises(ValueError):self.helper.Ia2SdkAbi(**args)
+
+    def test_content_iid_prefix_order_getter_and_service_metadata_all_fail_before_address_binding(self):
+        metadata=self.helper._IA2_METADATA
+        def replaced(index,value):return metadata[:index]+(value,)+metadata[index+1:]
+        variants=[replaced(0,'https://example.invalid/other.idl'),replaced(1,True),replaced(1,30917),
+            replaced(2,'0'*64),replaced(3,'00000000-0000-0000-c000-000000000046'),
+            replaced(4,'IAccessibleEx'),replaced(5,'IUnknown'),replaced(6,metadata[6][:-1]),
+            replaced(7,metadata[7][:-1]),replaced(7,metadata[7][::-1])]
+        for index in (0,1):
+            original=metadata[8][index]
+            for part,value in ((0,'otherGetter'),(1,'method'),(2,('in','retval')),
+                               (3,'HRESULT64'),(4,'LONG64*' if index==0 else 'HWND**')):
+                getter=original[:part]+(value,)+original[part+1:]
+                family=metadata[8][:index]+(getter,)+metadata[8][index+1:]
+                variants.append(replaced(8,family))
+        for part,value in ((0,'00000000-0000-0000-c000-000000000046'),
+                           (1,('QueryInterface','AddRef','QueryService','Release')),
+                           (2,('GUID','GUID*','void**')),(3,(1,1,1))):
+            service=metadata[9][:part]+(value,)+metadata[9][part+1:]
+            variants.append(replaced(9,service))
+        for ordinal,changed in enumerate(variants):
+            with self.subTest(case=ordinal):
+                calls=[];arguments=sdk_fixture()
+                arguments['function_factory']=lambda *args:calls.append(1)
+                with self.assertRaises(ValueError):self.helper.Ia2SdkAbi(**arguments,_metadata=changed)
+                self.assertEqual(calls,[])
+
+    def test_mutating_unused_sdk_inherited_order_is_not_treated_as_a_getter_slot_hint(self):
+        for index in range(21):
+            with self.subTest(entry=index):
+                args=sdk_fixture();methods=args['accessible_interface']._methods_
+                methods[index].name='wrongPrefixEntry'
+                with self.assertRaises(ValueError):self.helper.Ia2SdkAbi(**args)
+
+    def test_actual_raw_typed_getters_write_only_the_declared_outputs(self):
+        abi=self.helper.Ia2SdkAbi(**sdk_fixture());observed=[]
+        for operation,kind,value in (('unique_id',C.c_int32,-2**31),('window_handle',C.c_void_p,0x123456789abc)):
+            prototype=C.CFUNCTYPE(C.c_int32,C.c_void_p,C.c_void_p)
+            @prototype
+            def getter(this,out):
+                observed.append(operation);C.cast(out,C.POINTER(kind))[0]=value;return -2147467259
+            table=(C.c_void_p*46)();table[abi.slots[operation]]=C.cast(getter,C.c_void_p).value
+            instance=C.pointer(C.cast(table,C.POINTER(C.c_void_p)));output=kind()
+            self.assertEqual(abi.call(operation,instance,C.byref(output)),-2147467259)
+            self.assertEqual(output.value,value)
+        self.assertEqual(observed,['unique_id','window_handle'])
+
+    def test_actual_raw_query_service_uses_both_exact_iids_and_separately_owned_output(self):
+        abi=self.helper.Ia2SdkAbi(**sdk_fixture());observed=[]
+        prototype=C.CFUNCTYPE(C.c_int32,C.c_void_p,C.c_void_p,C.c_void_p,C.c_void_p)
+        @prototype
+        def query(this,service,interface,out):
+            observed.append((C.string_at(service,16),C.string_at(interface,16)))
+            C.cast(out,C.POINTER(C.c_void_p))[0]=0x123456789abc
+            return -2147467259
+        table=(C.c_void_p*4)();table[abi.slots['ia2_query']]=C.cast(query,C.c_void_p).value
+        instance=C.pointer(C.cast(table,C.POINTER(C.c_void_p)));output=C.c_void_p()
+        service=Guid('618736e0-3c3d-11cf-810c-00aa00389b71')
+        interface=Guid('e89f726e-c4f4-4c19-bb19-b647d7fa8478')
+        self.assertEqual(abi.call('ia2_query',instance,C.byref(service),C.byref(interface),C.byref(output)),-2147467259)
+        self.assertEqual(output.value,0x123456789abc)
+        self.assertEqual(observed,[(uuid.UUID('618736e0-3c3d-11cf-810c-00aa00389b71').bytes_le,
+            uuid.UUID('e89f726e-c4f4-4c19-bb19-b647d7fa8478').bytes_le)])
+
+    def test_sdk_borrowed_source_checks_real_interfaces_and_never_relabels_v2(self):
+        from dataclasses import replace
+        metadata=sdk_fixture();abi=self.helper.Ia2SdkAbi(**metadata)
+        def ref(interface,value):return type('Borrowed',(C.c_void_p,),{'__com_interface__':interface})(value)
+        client=ref(metadata['client_interface'],9)
+        elements=[ref(metadata['element_interface'],number) for number in (1,11,2,3,4,5,6)]
+        source=self.source(client=client,retained_file=elements[0],fresh_file=elements[1],fresh_target=elements[2],
+            retained_target=elements[3],negative_refs=tuple(elements[4:]))
+        self.assertTrue(abi.matches_source(source))
+        for field in ('client','retained_file','fresh_file','fresh_target','retained_target'):
+            self.assertFalse(abi.matches_source(replace(source,**{field:C.c_void_p(99)})))
+        for value in ((),(elements[4],),[elements[4],elements[5]],(None,elements[4])):
+            self.assertFalse(abi.matches_source(replace(source,negative_refs=value)))
+        with self.assertRaises(ValueError):
+            self.helper.begin_msaa_hit(source,self.scope,abi,15.,profile_version=3,_kernel=FakeKernel())
+
+    def test_diagnostic_lease_uses_shared_registry_and_strict_non_positive_worker_packet(self):
+        for damage in ('none','positiveKnown','positiveMatch','v1','v2','extra','missing','bool'):
+            with self.subTest(packet=damage):
+                self.setUp();kernel=FakeKernel()
+                def worker(*args):
+                    record=self.run_worker()
+                    if damage=='positiveKnown':record['localKnown']=1
+                    elif damage=='positiveMatch':record['localMatch']=1
+                    elif damage=='v1':return self.helper.worker_record()
+                    elif damage=='v2':return self.helper.worker_record_v2()
+                    elif damage=='extra':record['unexpected']=0
+                    elif damage=='missing':record.pop('ia2Status')
+                    elif damage=='bool':record['diagnosticComplete']=True
+                    return record
+                kernel.worker=worker
+                lease=self.helper.begin_ia2_diagnostic(self.source(),self.scope,self.sdk,15.,_kernel=kernel)
+                result=lease.wait()
+                self.assertEqual((result['schemaVersion'],result['localKnown'],result['localMatch'],result['diagnosticOnly'],result['acceptanceEligible']),(3,0,0,1,0))
+                self.assertEqual(result['workerException'],int(damage!='none'))
+                if lease.pending:self.helper._active=None  # All synthetic callbacks returned; no native refs.
+
+    def test_pending_late_and_unknown_native_exit_never_admit_another_profile(self):
+        kernel=FakeKernel();kernel.finished=False
+        kernel.worker=lambda *args:self.run_worker()
+        lease=self.helper.begin_ia2_diagnostic(self.source(),self.scope,self.sdk,15.,_kernel=kernel)
+        result=lease.wait();self.assertEqual((result['pending'],result['diagnosticComplete']),(1,0))
+        self.assertIs(lease.source.keepalive[0],self.sdk)
+        old=self.helper.MsaaHitSource(9,1,2,3,(4,5),20,21)
+        second=self.helper.begin_msaa_hit(old,self.scope,self.sdk,15.,_kernel=FakeKernel())
+        self.assertEqual(second.record['stageCode'],2)
+        kernel.finished=True;kernel.now=12.
+        result=lease.retire(20.)
+        self.assertEqual((result['pending'],result['localKnown'],result['localMatch'],result['diagnosticComplete']),(0,0,0,0))
+        self.assertIsNone(lease.source);self.assertIsNone(self.helper.pending_msaa_hit())
+
+    def test_begin_requires_original_deadline_and_fresh_captured_source_before_native_start(self):
+        for deadline,changes in ((14.,{}),(15.,dict(captured_at=8.)),(15.,dict(captured_at=11.))):
+            with self.subTest(deadline=deadline):
+                kernel=FakeKernel();lease=self.helper.begin_ia2_diagnostic(self.source(**changes),self.scope,self.sdk,deadline,_kernel=kernel)
+                self.assertEqual(lease.record['nativeAttempted'],0)
+                self.assertEqual(kernel.duplicates,[])
+                self.assertIsNone(kernel.callback)
+
+    def test_diagnostic_kernel_dispatch_cannot_call_either_positive_worker(self):
+        from unittest.mock import patch
+        kernel=self.helper.Ia2WindowsKernel.__new__(self.helper.Ia2WindowsKernel);calls=[]
+        with patch.object(self.helper,'run_ia2_diagnostic',side_effect=lambda *args:calls.append(3) or 3), \
+                patch.object(self.helper,'run_local_hit',side_effect=AssertionError('v1 diagnostic fallback')), \
+                patch.object(self.helper,'run_canonical_hit',side_effect=AssertionError('v2 diagnostic fallback')):
+            self.assertEqual(kernel.worker(self.source(),self.scope,self.sdk,11.5),3)
+            for source in (self.helper.MsaaHitSource(9,1,2,3,(4,5),20,21),
+                           self.helper.MsaaHitSourceV2(9,1,11,2,3,(4,5),20,21,(self.sdk,)),object()):
+                with self.assertRaises(ValueError):kernel.worker(source,self.scope,self.sdk,11.5)
+        self.assertEqual(calls,[3])
+
+    def test_source_lifetime_and_window_context_are_closed_before_any_provider_call(self):
+        changes=[dict(keepalive=()),dict(shell_handle=True),dict(engine_handle=0),
+            dict(captured_at=True),dict(action_deadline=float('inf')),
+            dict(document_hwnd=0),dict(popup_hwnd=True),dict(popup_thread=0),
+            dict(owner_chain=[]),dict(owner_chain=(99,13)),dict(owner_chain=(31,99))]
+        for ordinal,change in enumerate(changes):
+            with self.subTest(case=ordinal):
+                self.setUp();result=self.run_worker(self.source(**change));self.assert_non_accepting(result)
+                self.assertEqual((result['diagnosticComplete'],len(self.sdk.calls)),(0,0))
+
+    def test_collection_after_expiry_nonzero_exit_or_callback_mismatch_never_completes(self):
+        for reason in ('late','process','exit','callback','retire'):
+            with self.subTest(reason=reason):
+                self.setUp();kernel=FakeKernel()
+                kernel.worker=lambda *args:self.run_worker()
+                lease=self.helper.begin_ia2_diagnostic(self.source(),self.scope,self.sdk,15.,_kernel=kernel)
+                if reason=='late':kernel.now=11.5
+                elif reason=='process':kernel.identity_failure=True
+                elif reason=='exit':kernel.exit_code=86
+                elif reason=='callback':kernel.callback_identity_failure=True
+                result=lease.retire(20.) if reason=='retire' else lease.wait()
+                self.assertEqual((result['localKnown'],result['localMatch'],result['diagnosticComplete']),(0,0,0))
+                if lease.pending:self.helper._active=None  # Synchronous synthetic callback is already finished.
+
+    def test_native_launch_stays_disabled_without_the_existing_controller_fence(self):
+        self.assertFalse(self.helper.NATIVE_LAUNCH_ENABLED)
+        lease=self.helper.begin_ia2_diagnostic(self.source(),self.scope,object(),15.,native_enabled=True)
+        self.assertEqual((lease.record['nativeAttempted'],lease.record['schemaVersion'],lease.record['diagnosticComplete']),(0,3,0))
+        self.assertIsNone(self.helper.pending_msaa_hit())
+
+    def numeric_kernel(self):
+        kernel=self.helper.Ia2WindowsKernel.__new__(self.helper.Ia2WindowsKernel)
+        kernel.processes={120:(10,11),121:(8,9)}
+        kernel.check_process=lambda handle,pid,birth:True
+        kernel._diagnostic_source=self.source(owner_chain=(31,33,13));kernel._diagnostic_scope=self.scope
+        class Point(C.Structure):_fields_=[('x',C.c_int32),('y',C.c_int32)]
+        class Rect(C.Structure):_fields_=[('left',C.c_int32),('top',C.c_int32),('right',C.c_int32),('bottom',C.c_int32)]
+        class Gui(C.Structure):
+            _fields_=[('cbSize',C.c_uint32),('flags',C.c_uint32),
+                *((name,C.c_void_p) for name in ('active','focus','capture','menu','move','caret')),('caretRect',Rect)]
+        kernel.Point=Point;kernel.Gui=Gui
+        state=dict(processes={30:(50,10),12:(50,10),13:(40,8),31:(40,8),32:(40,8),33:(40,8)},
+            parent=12,root=30,owners={31:33,33:13},foreground=31,physical=31,
+            focus=32,focusRoot=31,capture=0,menu=31,visible=True,enabled=True,iconic=False,gui=True)
+        def process(hwnd,out):
+            thread,pid=state['processes'].get(hwnd,(0,0));out._obj.value=pid;return thread
+        def gui(thread,out):
+            if thread!=40 or not state['gui']:return 0
+            self.assertEqual(out._obj.cbSize,C.sizeof(Gui))
+            out._obj.focus=state['focus'];out._obj.capture=state['capture'];out._obj.menu=state['menu']
+            return 1
+        kernel.user=NS(IsWindow=lambda hwnd:int(hwnd in state['processes']),
+            IsWindowVisible=lambda hwnd:state['visible'],IsWindowEnabled=lambda hwnd:state['enabled'],
+            IsIconic=lambda hwnd:state['iconic'],GetWindowThreadProcessId=process,
+            GetParent=lambda hwnd:state['parent'],
+            GetAncestor=lambda hwnd,flag:state['focusRoot'] if hwnd==state['focus'] else state['root'],
+            GetWindow=lambda hwnd,flag:state['owners'].get(hwnd,0),
+            GetForegroundWindow=lambda:state['foreground'],
+            WindowFromPhysicalPoint=lambda point:state['physical'] if (point.x,point.y)==(14,15) else 0,
+            GetGUIThreadInfo=gui)
+        return kernel,state
+
+    def test_actual_native_guard_rechecks_original_physical_popup_and_process_window_contract(self):
+        kernel,state=self.numeric_kernel();self.assertTrue(kernel.guard())
+        mutations=[lambda s:s.update(parent=99),lambda s:s.update(root=99),
+            lambda s:s['owners'].update({31:99}),lambda s:s.update(foreground=99),
+            lambda s:s.update(physical=13),lambda s:s.update(focus=99),
+            lambda s:s.update(focusRoot=99),lambda s:s.update(capture=99),lambda s:s.update(menu=99),
+            lambda s:s.update(visible=False),lambda s:s.update(enabled=False),
+            lambda s:s.update(iconic=True),lambda s:s.update(gui=False),
+            lambda s:s['processes'].update({31:(41,8)}),lambda s:s['processes'].update({13:(40,9)}),
+            lambda s:s['processes'].update({30:(50,8)}),lambda s:s['processes'].update({12:(50,8)}),
+            lambda s:s['processes'].update({32:(40,10)}),lambda s:s['processes'].pop(33),
+            lambda s:s['processes'].update({33:(40,99)})]
+        for ordinal,mutate in enumerate(mutations):
+            with self.subTest(boundary=ordinal):
+                kernel,state=self.numeric_kernel();mutate(state);self.assertFalse(kernel.guard())
+        kernel,state=self.numeric_kernel();kernel.check_process=lambda *args:False
+        self.assertFalse(kernel.guard())
+
+    def test_actual_native_window_domain_is_a_closed_enum_with_no_foreign_owner_fallback(self):
+        kernel,state=self.numeric_kernel();source=kernel._diagnostic_source
+        self.assertEqual([kernel.window_domain(hwnd,source,self.scope) for hwnd in (13,31,12,30,33,99)],
+                         [1,2,3,4,5,0])
+        state['foreground']=99
+        self.assertEqual(kernel.window_domain(13,source,self.scope),0)
+
+    def test_complete_worker_packets_cannot_forge_consistent_but_incomplete_call_or_reference_counts(self):
+        for damage in ('bindingCall','ownedReference'):
+            with self.subTest(packet=damage):
+                self.setUp();kernel=FakeKernel();valid=self.run_worker()
+                self.assertEqual(valid['diagnosticComplete'],1)
+                def worker(*args):
+                    record=dict(valid)
+                    if damage=='bindingCall':record.update(patternAttempted=3,patternCompleted=3)
+                    else:record.update(referencesAcquired=25,referencesReleased=25)
+                    return record
+                kernel.worker=worker
+                lease=self.helper.begin_ia2_diagnostic(self.source(),self.scope,self.sdk,15.,_kernel=kernel)
+                result=lease.wait()
+                self.assertEqual((result['workerException'],result['diagnosticComplete'],result['pending']),(1,0,1))
+                self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+                self.helper._active=None  # Synchronous synthetic worker already returned; no native callback.
+
+    def test_complete_worker_packets_reject_out_of_range_boolean_observations(self):
+        for field in ('filePairEqual','targetTupleEqual','fileAnchorStable','tupleComparisonsObserved'):
+            with self.subTest(field=field):
+                self.setUp();kernel=FakeKernel();valid=self.run_worker()
+                self.assertEqual(valid['diagnosticComplete'],1)
+                kernel.worker=lambda *args:dict(valid,**{field:2})
+                lease=self.helper.begin_ia2_diagnostic(self.source(),self.scope,self.sdk,15.,_kernel=kernel)
+                result=lease.wait()
+                self.assertEqual((result['workerException'],result['diagnosticComplete'],result['pending']),(1,0,1))
+                self.assertEqual((result['localKnown'],result['localMatch']),(0,0))
+                self.helper._active=None  # Finished synthetic callback, no native thread or references.
+
+
 if __name__=='__main__':unittest.main()
