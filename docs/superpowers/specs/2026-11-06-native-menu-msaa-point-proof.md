@@ -87,7 +87,7 @@ The narrow popup class candidate is `SALTMPSUBFRAME`, with `WS_POPUP` and
 `WS_EX_TOOLWINDOW` and without `WS_CHILD`, as defined by the
 [pinned Windows frame source](https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/vcl/win/window/salframe.cxx#L420)
 and [class constants](https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/vcl/inc/win/saldata.hxx#L158).
-Actual class matching is still unverified. Class/style and rectangle containment
+Require class/style and rectangle containment on every live observation. These
 are exposure conditions; they do not establish Save identity.
 
 ## Verification
@@ -98,3 +98,77 @@ VARIANT cleanup, DPI restoration, late completion and unresolved callback exit.
 Exercise the real native thread startup/wait boundary on Windows without UI
 input. Keep synthetic and actual provider results separate. The original six
 menu cases, view round trips and complete Suite acceptance gates remain required.
+
+## Source-qualified IA2 mode
+
+Mode 4 has a separate source admission and numeric proof. The backend,
+source-selected launch, menu callers and separate archive verifier are implemented.
+Actual Windows qualification of this path remains pending. The existing global UIA, canonical IUnknown and
+read-only diagnostic results keep their original meanings. In particular, a
+canonical comparison that returned FALSE remains FALSE.
+
+Source admission uses the architecture's tracked external runtime lock, an
+authenticated normal Full source-build receipt and the exact engine ZIP. Join
+the bundled provenance and complete payload inventory to that lock. Then join
+both `program/UAccCOM.dll` and `program/winaccessibility.dll` in the authenticated
+engine ZIP to the actual Office files and verified inventory. Require the pinned
+core and reviewed accessibility source outputs. An MSI version string, a caller
+Boolean, a diagnostic engine or an arbitrary replacement lock cannot qualify.
+Keep the resulting immutable admission object alive through each measurement;
+its bounded summary and digest identify the proof without exporting COM pointers.
+
+The identity argument is limited to that admitted provider implementation and
+the current owned process generation. Compare IA2 window/unique-ID tuples for
+retained and independently discovered File and target objects, and the File
+`accHitTest` result. Preserve all UIA role positives and negatives and the raw
+global Pane comparison. Require File/target distinction, the original child
+window domain, nonzero IDs, both post-call anchor getters returning `S_OK`, and
+stable tuples while the references overlap. Negative signed IDs are valid.
+Destruction and ID reuse remain possible; equal tuples from unrelated processes,
+generations, source inputs or non-overlapping lifetimes are insufficient.
+
+The worker records a candidate only. Controller admission additionally requires
+the original popup exposure, physical point, attachment, retained process HANDLE
+generations, source admission digest, all reference/VARIANT cleanup, native
+thread exit and post-call ownership checks. The original canonical
+`localIdentityKnown` and `localIdentityMatch` fields are not promoted. A signed
+32-bit UIA HWND is normalized only after strict type/range checks; retain its raw
+value and require the normalized value to equal the independently owned popup.
+
+Every required observation uses fresh discovery and a separate retired capsule.
+Each proof expires 1.5 seconds after its own capture and must be consumed before
+expiry, inside the original five-second action deadline. These are per-action
+and per-measurement limits; they do not establish a shared cohort deadline. Do
+not renew a deadline, retry a failed measurement, reuse an expired proof for later
+input or accept a partial set of pointer observations. Keep one
+pending capsule at most, its duplicated HANDLEs and borrowed-reference keepalive,
+and the existing controller exit fence. A pending or unknown outcome prohibits
+the next action, activation or launch.
+
+The caller seam is explicit and defaults off. A selected launch carries the
+actual sealed admission through its original Popen and each later document/action
+binding. Source preparation has its own bounded prelaunch budget; each later
+measurement retains its original document/action deadline. Runtime metadata drift or changed provider bytes fails
+without automatic re-admission. Archive verification uses a separate closed
+mode-4 branch and fresh authenticated source admission; historical receipt time
+checks cannot reuse a live proof as authority for new input. Neither a source
+build nor a completed identity diagnostic proves a menu gesture or Suite
+acceptance.
+
+
+The x64 source recipe additionally requires six pinned native ATL consumer
+transformations and twelve original/effective evidence members. Its normal Full
+build receipt must retain verified inputs from the selected compiler's ATL header
+and library, with bounded sizes, file generations and hashes. This prerequisite
+is source-build evidence; it does not attest which DLL a live process loaded or
+qualify a Suite UI gesture. The existing qualified ARM64 source receipt remains a
+separate supported input.
+
+Initial editor focus counters distinguish a live status prefix from the final
+disposal snapshot. Prefix counters cannot prove that no later activation or
+queued attempt occurred. Only a final snapshot joined to the retained original
+process/window generation and independently confirmed retirement can establish a
+complete zero count. If forced termination leaves no valid final snapshot, or
+only a prefix is recovered, the outcome remains unknown. Collection reuses the
+bounded numeric trace read; it adds no
+focus, input, timer, native query or RPC.
