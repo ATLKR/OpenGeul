@@ -5,6 +5,7 @@ polling. Instance adapters supply strict full-schema observations and audit the
 single native send boundary; they never change legacy module globals.
 """
 import ctypes
+import copy
 import importlib.util
 import io
 
@@ -81,9 +82,10 @@ class PreparationSession:
         self.source_receipt = source_receipt
         self.actions = []; self.close_requests = 0; self.pointer_invocations = 0
         self.inputs = 0; self.pointer_passed = False
+        self.post_close_text_recheck = None
 
     def summary(self, *, qualified=False):
-        return {**self.c.flags(prepare_privacy=True), 'actions': list(self.actions),
+        result = {**self.c.flags(prepare_privacy=True), 'actions': list(self.actions),
                 'closeRequests': self.close_requests, 'physicalPointerGateInvocations': self.pointer_invocations,
                 'inputsPerformed': self.inputs,
                 'inputCountStatus': ('unknown: no finalized original pointer receipt' if self.inputs is None else
@@ -92,6 +94,9 @@ class PreparationSession:
                 'privacyPreparationQualified': qualified,
                 'physicalTaskbarGatePassed': self.pointer_passed,
                 'initialPrivacyObservation': self.classification.get('status')}
+        if self.post_close_text_recheck is not None:
+            result['postCloseTextRecheck'] = self.post_close_text_recheck
+        return result
 
     def identity_source(self):
         self.budget.remaining(3)
@@ -116,6 +121,8 @@ class PreparationSession:
             # sublimits inside the one original controller deadline/reserve.
             self.budget.remaining(16)
             result = self.c.legacy.WindowsProbe.close_verified(adapter, candidate)
+            if self.post_close_text_recheck is not None:
+                result['postCloseTextRecheck'] = self.post_close_text_recheck
             self.evidence.write('p23-close-result', result)
             confirmed = (result['messageRequests'] == self.close_requests == 1
                 and result['messageDelivered'] and result['surfaceDismissed']
@@ -244,6 +251,8 @@ class PrivacyAdapter:
         self.session, self.probe, self.candidate = session, session.probe, candidate
         self.c, self.out, self.budget = session.c, session.evidence, session.budget
         self.cleanup_failures = []; self.held = None; self.last_state = None; self.state_exception = None
+        self._original_candidate = copy.deepcopy(candidate)
+        self._delivery_confirmed = False; self._delivered_handle = None; self._terminal_attempted = False
         self.user = SendBoundary(self)
         self.kernel = HeldKernel(self)
         self.dwm = self.probe.dwm
@@ -316,6 +325,69 @@ class PrivacyAdapter:
             and state['sessionId'] == self.session_id(), 'Held privacy identity/session changed')
         return state
 
+    def post_close_text_recheck(self, candidate, handle, original):
+        """One read-only destroyed observation; never another close or a retry deadline."""
+        observation = getattr(original, 'native31_chrome_read', None)
+        if not (type(observation) is dict and set(observation) == {'apiCode', 'length', 'lastError'}
+                and all(type(value) is int for value in observation.values())
+                and observation['apiCode'] in (1, 2)):
+            return None
+        record = {'schemaVersion': 1, 'attempted': 0, 'recovered': 0, 'reasonCode': 0,
+                  'chromeRead': dict(observation), 'originalFailure': self.c.error_record(original),
+                  'heldBefore': 0, 'heldAfter': 0, 'candidateUnchanged': 0,
+                  'windowAbsent': 0, 'foregroundDifferent': 0, 'finalAbsent': 0}
+        # Keep the first error even if the legacy primitive later performs its
+        # independent post-release observation. No UI text is copied here.
+        if self.session.post_close_text_recheck is not None: return None
+        self.session.post_close_text_recheck = record
+        state = None
+        eligible = (observation['length'] == 0 and observation['lastError'] == 1400
+            and self._delivery_confirmed and self.session.close_requests == 1
+            and handle and handle == self.held == self._delivered_handle
+            and candidate is self.candidate and candidate == self._original_candidate
+            and not self._terminal_attempted)
+        if eligible:
+            self._terminal_attempted = True
+            record['attempted'] = 1; record['reasonCode'] = 3
+            try:
+                self.budget.remaining(3)
+                self.checked_state(handle)
+                self.budget.remaining(3)
+                record['heldBefore'] = 1
+                self.c.require(handle == self.held == self._delivered_handle
+                    and candidate == self._original_candidate, 'Terminal privacy identity changed')
+                state = self.c.legacy.WindowsProbe.window_state(self, candidate, handle)
+                self.budget.remaining(3)
+                self.c.require(state['heldCreationFileTime'] == candidate['process']['createdFileTime']
+                    and state['heldProcessMachine'] == 0 and state['heldNativeMachine'] == 0xAA64,
+                    'Terminal held identity query failed')
+                self.checked_state(handle)
+                self.budget.remaining(3)
+                record['heldAfter'] = 1
+                self.c.require(handle == self.held == self._delivered_handle
+                    and candidate == self._original_candidate, 'Terminal privacy identity changed')
+                record['candidateUnchanged'] = 1
+                record['windowAbsent'] = int(state['windowExists'] is False)
+                record['foregroundDifferent'] = int(state['foregroundHwnd'] != candidate['hwnd'])
+                self.c.require(record['windowAbsent'] and record['foregroundDifferent']
+                    and state['surfaceDismissed'] is True and state['dismissalKind'] == 'destroyed',
+                    'Terminal privacy observation is not destroyed')
+                record['finalAbsent'] = int(not self.probe.user.IsWindow(candidate['hwnd']))
+                self.budget.remaining(3)
+                self.c.require(record['finalAbsent'] and handle == self.held == self._delivered_handle
+                    and candidate == self._original_candidate, 'Terminal privacy HWND/identity changed')
+                record['recovered'] = 1; record['reasonCode'] = 1
+            except Exception as exc:
+                record['terminalFailure'] = self.c.error_record(exc)
+        elif observation['length'] == 0 and observation['lastError'] == 1400:
+            record['reasonCode'] = 2
+        try:
+            self.out.write('p25-post-close-text-recheck', record)
+        except Exception as exc:
+            record['recovered'] = 0; record['reasonCode'] = 3
+            self.cleanup_failures.append({'stage': 'post-close-text-recheck-receipt', **self.c.error_record(exc)})
+        return state if record['recovered'] else None
+
     def window_state(self, candidate, held_handle):
         self.budget.remaining(3)
         self.c.require(candidate is self.candidate, 'Unexpected close candidate')
@@ -337,16 +409,22 @@ class PrivacyAdapter:
             if state['windowExists']:
                 self.c.require(state['dwmHresult'] == '0x00000000' and state['cloakedBits'] is not None,
                                'Privacy DWM state query unavailable')
-                self.c.require(state['title'] == self.probe.text_value(candidate['hwnd'])
-                    and state['className'] == self.probe.text_value(candidate['hwnd'], True), 'Privacy window text raced/truncated')
                 self.c.require(state['ownerMatches'], 'Privacy HWND ownership changed')
+                try:
+                    self.c.require(state['title'] == self.probe.text_value(candidate['hwnd'], observation={})
+                        and state['className'] == self.probe.text_value(candidate['hwnd'], True, observation={}),
+                        'Privacy window text raced/truncated')
+                except ValueError as exc:
+                    recovered = self.post_close_text_recheck(candidate, held_handle, exc)
+                    if recovered is None: raise
+                    state = recovered
             else:
                 self.c.require(state['foregroundHwnd'] != candidate['hwnd'], 'Destroyed privacy HWND remains foreground')
             self.last_state = state
             return state
         except Exception as exc:
             primary = exc
-            self.state_exception = exc
+            if self.state_exception is None: self.state_exception = exc
             raise
         finally:
             if extra:
@@ -403,6 +481,8 @@ class SendBoundary:
             delivered = a.probe.user.SendMessageTimeoutW(hwnd, message, wparam, lparam, flags, timeout, result)
             a.out.write('p22-close-delivery', {'messageDelivered': bool(delivered), 'messageResult': int(result._obj.value),
                        'lastError': getattr(ctypes, 'get_last_error', lambda: None)() if not delivered else None})
+            a._delivery_confirmed = bool(delivered)
+            if delivered: a._delivered_handle = a.held
             return delivered
         except Exception as exc:
             try:

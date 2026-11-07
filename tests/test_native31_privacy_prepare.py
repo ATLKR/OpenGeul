@@ -148,7 +148,7 @@ class ActionContracts(unittest.TestCase):
             process_identity=lambda handle,pid:copy.deepcopy(raw),
             startup_process_state=lambda handle,pid:copy.deepcopy(state),
             strict_uia=lambda hwnd:copy.deepcopy(observed['uia'][0]),
-            text_value=lambda hwnd,cls=False:window['className' if cls else 'title'])
+            text_value=lambda hwnd,cls=False,**kw:window['className' if cls else 'title'])
         if drift:drift(probe,observed,raw,state)
         session=p.PreparationSession(m,probe,evidence,m.Budget(),{},self.classification)
         session.identity_source=lambda:{'source':{'test':'unchanged'},'host':{'test':'unchanged'}}
@@ -305,7 +305,7 @@ class ActionContracts(unittest.TestCase):
                     data._obj.rc.left=0;data._obj.rc.top=1040;data._obj.rc.right=1920;data._obj.rc.bottom=1080;return 1
                 native.shell.SHAppBarMessage.action=appbar
                 validate=m.validate_context
-                with self.image_patches(process),patch.dict(os.environ,{**self.env,'GITHUB_EVENT_PATH':str(event)}), \
+                with self.image_patches(process),patch.object(os,'environ',{**self.env,'GITHUB_EVENT_PATH':str(event)}), \
                      patch.dict('sys.modules',{'PIL':SimpleNamespace(ImageGrab=SimpleNamespace(grab=lambda all_screens:screen))}), \
                      patch.object(m,'source_receipt',return_value=source), \
                      patch.object(m,'validate_context',side_effect=lambda env,event,checkout,identity,platform,**kw:validate(env,event,checkout,identity,'nt',**kw)), \
@@ -395,5 +395,229 @@ class ActionContracts(unittest.TestCase):
                 result=p.preparation_receipt(m,evidence)
                 self.assertEqual(result['inputsPerformed'],None if original=='partial' else 1)
                 self.assertFalse(result['privacyPreparationQualified']);self.assertIn('preparationReceiptFailure',result)
+
+class ChromeReadRaceContracts(unittest.TestCase):
+    setUp=PreparationContracts.setUp
+    session=ActionContracts.session
+    image_patches=ActionContracts.image_patches
+
+    def race_session(self, folder, *, api=1, code=1400, length=0, terminal='gone', before_send=False,
+                     delivered=True, cleanup=False):
+        session,observed,process,sent,closed=self.session(folder,outcome='visible')
+        probe=session.probe; state={'alive':True,'fault':False,'error':0,'strictReads':0}
+        probe.text_value=m.Probe.text_value.__get__(probe)
+        probe.user.IsWindow.action=lambda hwnd:state['alive']
+        probe.user.GetForegroundWindow.action=lambda:12 if not state['fault'] or terminal=='foreground' else 99
+        probe.user.IsWindowVisible.action=lambda hwnd:not(state['fault'] and terminal=='hidden')
+        old_cloak=probe.dwm.DwmGetWindowAttribute.action
+        def cloak(hwnd,attribute,value,size):
+            if state['fault'] and terminal=='cloaked':value._obj.value=1;return 0
+            return old_cloak(hwnd,attribute,value,size)
+        probe.dwm.DwmGetWindowAttribute.action=cloak
+        old_pid=probe.user.GetWindowThreadProcessId.action
+        def pid(hwnd,out):
+            if state['fault'] and terminal=='reused':out._obj.value=999;return 202
+            return old_pid(hwnd,out)
+        probe.user.GetWindowThreadProcessId.action=pid
+        old_state=probe.startup_process_state
+        def held(handle,pid):
+            value=old_state(handle,pid)
+            if state['fault']:
+                if terminal=='generation':value['createdFileTime']+=1
+                if terminal=='native':value['nativeMachine']=0x8664
+                if terminal=='session':value['sessionId']+=1
+            return value
+        probe.startup_process_state=held
+        def text(which):
+            def read(hwnd,buffer,size):
+                if size==258:state['strictReads']+=1
+                if size==258 and which==api and not state['fault'] and (sent or before_send):
+                    state['fault']=True;state['error']=code
+                    if terminal in ('gone','foreground','generation','native','session','deadline','native-error','reappear'):
+                        state['alive']=False
+                    if 'onFault' in state:state['onFault']()
+                    return length
+                buffer.value=observed['foreground']['className' if which==2 else 'title']
+                return len(buffer.value)
+            return read
+        probe.user.GetWindowTextW.action=text(1);probe.user.GetClassNameW.action=text(2)
+        native_send=probe.user.SendMessageTimeoutW.action
+        probe.user.SendMessageTimeoutW.action=lambda *args:bool(native_send(*args) and delivered)
+        native_close=probe.kernel.CloseHandle.action
+        def close(handle):
+            value=native_close(handle)
+            if state['fault'] and terminal=='reappear':state['alive']=True
+            return value and not(cleanup and bool(sent))
+        probe.kernel.CloseHandle.action=close
+        if terminal=='deadline':
+            session.budget=SimpleNamespace(deadline=120,remaining=lambda *args:
+                (_ for _ in ()).throw(TimeoutError('original deadline exhausted')) if state['fault'] else 100)
+        if terminal=='native-error':
+            probe.user.IsWindow.action=lambda hwnd:(_ for _ in ()).throw(OSError('native observation failed')) if state['fault'] else True
+        return session,process,sent,closed,state
+
+    def last_errors(self,state):
+        from contextlib import ExitStack
+        stack=ExitStack()
+        stack.enter_context(patch.object(ctypes,'set_last_error',side_effect=lambda value:state.update(error=value),create=True))
+        stack.enter_context(patch.object(ctypes,'get_last_error',side_effect=lambda:state['error'],create=True))
+        return stack
+
+    def test_actual_getter_marks_only_native_length_error_guard_and_preserves_observation(self):
+        for api in (1,2):
+            with self.subTest(api=api):
+                state={'error':0};user=pointer_fixture.Library();probe=SimpleNamespace(user=user)
+                def read(hwnd,buffer,size):state['error']=1400;return 0
+                (user.GetWindowTextW if api==1 else user.GetClassNameW).action=read
+                observation={}
+                with self.last_errors(state),self.assertRaisesRegex(ValueError,'Window text unavailable/truncated') as raised:
+                    m.Probe.text_value(probe,12,api==2,observation=observation)
+                self.assertEqual(observation,{'apiCode':api,'length':0,'lastError':1400})
+                self.assertEqual(raised.exception.native31_chrome_read,observation)
+                self.assertIsNot(raised.exception.native31_chrome_read,observation)
+                self.assertNotIn('details',m.error_record(raised.exception))
+
+    def test_live_then_invalid_hwnd_then_destroyed_preserves_error_and_one_close(self):
+        for api in (1,2):
+            with self.subTest(api=api),tempfile.TemporaryDirectory() as temp:
+                session,process,sent,closed,state=self.race_session(temp,api=api)
+                deadline=session.budget.deadline
+                original=m.legacy.WindowsProbe.window_state
+                with self.last_errors(state),self.image_patches(process),patch.object(m.legacy.WindowsProbe,'window_state',wraps=original) as observations:
+                    result=session.close(self.candidate)
+                self.assertEqual(observations.call_count,4) # before/send-poll/one terminal/post-release
+                self.assertTrue(result['surfaceDismissed']);self.assertIsNone(result['postSendErrorType'])
+                self.assertEqual(result['dismissalKind'],'destroyed');self.assertEqual(len(sent),1)
+                self.assertEqual(result['afterHandleReleaseState']['dismissalKind'],'destroyed')
+                self.assertEqual(closed,[77,77]);self.assertEqual(session.budget.deadline,deadline)
+                record=result['postCloseTextRecheck']
+                self.assertEqual(record['attempted'],1);self.assertEqual(record['recovered'],1)
+                self.assertEqual(record['chromeRead'],{'apiCode':api,'length':0,'lastError':1400})
+                self.assertEqual(record['originalFailure']['type'],'ValueError')
+                self.assertEqual(record,session.summary()['postCloseTextRecheck'])
+                self.assertEqual(record,json.loads((session.evidence.path/'p25-post-close-text-recheck.json').read_text()))
+                self.assertEqual(session.inputs,0);self.assertEqual(session.pointer_invocations,0)
+                self.assertFalse(session.summary()['privacyPreparationQualified'])
+                with self.assertRaises(ValueError):session.close(self.candidate)
+                self.assertEqual(len(sent),1)
+
+    def test_before_send_or_unconfirmed_delivery_cannot_recheck(self):
+        for before,delivered in ((True,True),(False,False)):
+            with self.subTest(before=before,delivered=delivered),tempfile.TemporaryDirectory() as temp:
+                session,process,sent,closed,state=self.race_session(temp,before_send=before,delivered=delivered)
+                with self.last_errors(state),self.image_patches(process),self.assertRaisesRegex(ValueError,'Window text unavailable/truncated'):
+                    session.close(self.candidate)
+                self.assertEqual(len(sent),int(not before))
+                record=session.summary()['postCloseTextRecheck']
+                self.assertEqual((record['attempted'],record['recovered']),(0,0))
+                self.assertEqual(session.inputs,0)
+
+    def test_live_reuse_generation_foreground_deadline_and_native_failure_remain_failures(self):
+        for terminal in ('live','hidden','cloaked','reused','generation','native','session','foreground','deadline','native-error'):
+            with self.subTest(terminal=terminal),tempfile.TemporaryDirectory() as temp:
+                session,process,sent,closed,state=self.race_session(temp,terminal=terminal)
+                original=m.legacy.WindowsProbe.window_state;terminal_states=[]
+                def observe(adapter,candidate,handle):
+                    value=original(adapter,candidate,handle)
+                    if state['fault']:
+                        terminal_states.append({key:value[key] for key in ('windowExists','cloakedBits','dismissalKind')})
+                    return value
+                with self.last_errors(state),self.image_patches(process), \
+                     patch.object(m.legacy.WindowsProbe,'window_state',side_effect=observe), \
+                     self.assertRaisesRegex(ValueError,'Window text unavailable/truncated'):
+                    session.close(self.candidate)
+                record=session.summary()['postCloseTextRecheck']
+                self.assertEqual((record['attempted'],record['recovered']),(1,0))
+                self.assertEqual(record['originalFailure']['type'],'ValueError')
+                self.assertEqual(len(sent),1);self.assertEqual(session.inputs,0)
+                self.assertFalse(session.summary()['privacyPreparationQualified'])
+                if terminal=='cloaked':
+                    self.assertEqual(terminal_states[0],{'windowExists':True,'cloakedBits':1,'dismissalKind':'cloaked'})
+
+    def test_other_error_length_or_unmarked_mismatch_is_not_recovered(self):
+        for code,length in ((5,0),(0,257),(1400,1)):
+            with self.subTest(code=code,length=length),tempfile.TemporaryDirectory() as temp:
+                session,process,sent,closed,state=self.race_session(temp,code=code,length=length)
+                with self.last_errors(state),self.image_patches(process),self.assertRaises(ValueError):session.close(self.candidate)
+                self.assertEqual(session.summary()['postCloseTextRecheck']['attempted'],0)
+                self.assertEqual(len(sent),1)
+        with tempfile.TemporaryDirectory() as temp:
+            session,observed,process,sent,closed=self.session(temp,outcome='visible')
+            def mismatch(hwnd,cls=False,**kw):return 'synthetic mismatch' if sent else observed['foreground']['className' if cls else 'title']
+            session.probe.text_value=mismatch
+            with self.image_patches(process),self.assertRaisesRegex(ValueError,'Privacy window text raced/truncated'):session.close(self.candidate)
+            self.assertNotIn('postCloseTextRecheck',session.summary());self.assertEqual(len(sent),1)
+
+    def test_cleanup_and_post_release_confirmation_still_block_close(self):
+        for terminal,cleanup in (('gone',True),('reappear',False)):
+            with self.subTest(terminal=terminal,cleanup=cleanup),tempfile.TemporaryDirectory() as temp:
+                session,process,sent,closed,state=self.race_session(temp,terminal=terminal,cleanup=cleanup)
+                with self.last_errors(state),self.image_patches(process),self.assertRaises(ValueError):session.close(self.candidate)
+                self.assertEqual(session.summary()['postCloseTextRecheck']['recovered'],1)
+                self.assertEqual(len(sent),1);self.assertFalse(session.summary()['privacyPreparationQualified'])
+
+    def test_getter_invocation_and_later_text_validation_never_receive_recovery_marker(self):
+        user=pointer_fixture.Library();probe=SimpleNamespace(user=user);state={'error':0}
+        def invalid_text(hwnd,buffer,size):buffer.value='synthetic\ninvalid';return len(buffer.value)
+        for action,kind in ((lambda *args:(_ for _ in ()).throw(OSError('native read failed')),OSError),
+                            (invalid_text,ValueError)):
+            user.GetWindowTextW.action=action;observation={}
+            with self.last_errors(state),self.assertRaises(kind) as raised:
+                m.Probe.text_value(probe,12,observation=observation)
+            self.assertFalse(hasattr(raised.exception,'native31_chrome_read'))
+            if kind is OSError:self.assertEqual(observation,{'apiCode':1,'length':None,'lastError':None})
+        user.GetWindowTextW.action=lambda *args:state.update(error=1400) or 0
+        with self.last_errors(state),self.assertRaises(ValueError) as raised:m.Probe.text_value(probe,12)
+        self.assertFalse(hasattr(raised.exception,'native31_chrome_read'))
+
+    def test_original_candidate_or_retained_handle_change_cannot_start_terminal_observation(self):
+        for mutation in ('handle','candidate'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as temp:
+                session,process,sent,closed,state=self.race_session(temp)
+                adapters=[];init=p.PrivacyAdapter.__init__
+                def remember(adapter,*args):init(adapter,*args);adapters.append(adapter)
+                def change():
+                    if mutation=='handle':adapters[0].held=88
+                    else:self.candidate['window']['threadId']+=1
+                state['onFault']=change
+                original=m.legacy.WindowsProbe.window_state
+                with self.last_errors(state),self.image_patches(process),patch.object(p.PrivacyAdapter,'__init__',remember), \
+                     patch.object(m.legacy.WindowsProbe,'window_state',wraps=original) as observations, \
+                     self.assertRaisesRegex(ValueError,'Window text unavailable/truncated'):
+                    session.close(self.candidate)
+                self.assertEqual(observations.call_count,3) # terminal admission refused
+                self.assertEqual(session.summary()['postCloseTextRecheck']['attempted'],0)
+                self.assertEqual(len(sent),1)
+
+    def test_generation_change_after_terminal_query_preserves_first_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            session,process,sent,closed,state=self.race_session(temp)
+            original=session.probe.startup_process_state;after=[]
+            def held(handle,pid):
+                value=original(handle,pid)
+                if state['fault']:
+                    after.append(1)
+                    if len(after)==2:value['createdFileTime']+=1
+                return value
+            session.probe.startup_process_state=held
+            with self.last_errors(state),self.image_patches(process),self.assertRaisesRegex(ValueError,'Window text unavailable/truncated'):
+                session.close(self.candidate)
+            record=session.summary()['postCloseTextRecheck']
+            self.assertEqual((record['heldBefore'],record['heldAfter'],record['recovered']),(1,0,0))
+            self.assertEqual(len(sent),1);self.assertEqual(session.inputs,0)
+
+    def test_terminal_receipt_failure_blocks_recovered_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            session,process,sent,closed,state=self.race_session(temp)
+            write=session.evidence.write
+            def fail(name,value):
+                if name=='p25-post-close-text-recheck':raise OSError('synthetic evidence failure')
+                return write(name,value)
+            with self.last_errors(state),self.image_patches(process),patch.object(session.evidence,'write',side_effect=fail), \
+                 self.assertRaisesRegex(ValueError,'Window text unavailable/truncated') as raised:
+                session.close(self.candidate)
+            self.assertEqual(session.summary()['postCloseTextRecheck']['recovered'],0)
+            self.assertTrue(raised.exception.cleanup_failures)
+            self.assertEqual(len(sent),1);self.assertFalse(session.summary()['privacyPreparationQualified'])
 
 if __name__=='__main__':unittest.main()

@@ -509,13 +509,22 @@ class Probe(legacy.WindowsProbe):
         legacy.text(buffer.value, 1024)
         return {'processId': pid, 'imagePath': buffer.value, **state}
 
-    def text_value(self, hwnd, class_name=False):
+    def text_value(self, hwnd, class_name=False, *, observation=None):
         buffer = ctypes.create_unicode_buffer(258)
         ctypes.set_last_error(0)
         function = self.user.GetClassNameW if class_name else self.user.GetWindowTextW
+        if observation is not None:
+            observation.update(apiCode=2 if class_name else 1, length=None, lastError=None)
         length = function(hwnd, buffer, 258)
-        require(0 <= length <= 256 and (length or not class_name) and ctypes.get_last_error() == 0,
-                'Window text unavailable/truncated')
+        last_error = ctypes.get_last_error()
+        if observation is not None:
+            observation.update(apiCode=2 if class_name else 1, length=length, lastError=last_error)
+        try:
+            require(0 <= length <= 256 and (length or not class_name) and last_error == 0,
+                    'Window text unavailable/truncated')
+        except ValueError as exc:
+            if observation is not None: exc.native31_chrome_read = dict(observation)
+            raise
         legacy.text(buffer.value)
         return buffer.value
 
