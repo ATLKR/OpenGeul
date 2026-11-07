@@ -1,6 +1,7 @@
 """Exercise installed-archive staging with small ZIPs, without executing PE code."""
 import hashlib
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 import stat
@@ -22,6 +23,11 @@ def helper():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def child_environment():
+    # The helper imports only stdlib and launches no children.
+    return {'PYTHONUTF8': '1'}
 
 
 class InstalledRuntimeStageTests(unittest.TestCase):
@@ -71,12 +77,16 @@ class InstalledRuntimeStageTests(unittest.TestCase):
         with zipfile.ZipFile(path, 'a') as archive:
             archive.writestr(name, data)
 
-    def stage(self):
-        return helper().stage_runtime(self.source, self.output, self.evidence)
+    def stage(self, **options):
+        module = helper()
+        if options:
+            self.assertIn('architecture', inspect.signature(module.stage_runtime).parameters,
+                          'Staging has no explicit architecture selector')
+        return module.stage_runtime(self.source, self.output, self.evidence, **options)
 
-    def reject(self, message):
+    def reject(self, message, **options):
         with self.assertRaisesRegex((ValueError, FileExistsError), message):
-            self.stage()
+            self.stage(**options)
         receipt = json.loads((self.evidence / 'installed-runtime-stage.json').read_text(encoding='utf-8'))
         self.assertFalse(receipt['passed'])
         self.assertIn('error', receipt)
@@ -166,7 +176,7 @@ class InstalledRuntimeStageTests(unittest.TestCase):
     def test_cli_emits_small_summary_bound_to_separate_member_receipt(self):
         result = subprocess.run([sys.executable, str(HELPER), '--source-root', str(self.source),
             '--destination', str(self.output), '--evidence-directory', str(self.evidence)],
-            check=True, capture_output=True, text=True, timeout=30)
+            env=child_environment(), check=True, capture_output=True, text=True, timeout=30)
         summary = json.loads(result.stdout)
         self.assertTrue(summary['passed'])
         self.assertEqual(summary['archiveCount'], 3)
@@ -184,6 +194,116 @@ class InstalledRuntimeStageTests(unittest.TestCase):
         path.unlink()
         self.archive('LibreOfficeDev_helppack', 'ko', path.name, rows)
         self.reject('unique ko help runtime root')
+
+    def use_x64_archives(self):
+        old_root = self.main_root
+        self.main_root = 'LibreOfficeDev_26.8.1.1_Win_x86-64_archive_en-US_ko_qtz/LibreOfficeDev26.8/'
+        with zipfile.ZipFile(self.main) as archive:
+            rows = {item.filename.replace(old_root, self.main_root): archive.read(item)
+                    for item in archive.infolist()}
+        self.main.unlink()
+        self.main = self.archive('LibreOfficeDev', 'en-US_ko_qtz',
+            'LibreOfficeDev_26.8.1.1_Win_x86-64_archive_en-US_ko_qtz.zip', rows)
+        for language, path in self.help.items():
+            with zipfile.ZipFile(path) as archive:
+                rows = {item.filename.replace('Win_aarch64_archive', 'Win_x86-64_archive'): archive.read(item)
+                        for item in archive.infolist()}
+            path.unlink()
+            self.help[language] = self.archive('LibreOfficeDev_helppack', language,
+                path.name.replace('Win_aarch64_archive', 'Win_x86-64_archive'), rows)
+
+    def test_explicit_x64_stages_actual_archive_name_and_both_help_languages(self):
+        self.use_x64_archives()
+        record = self.stage(architecture='x64')
+        self.assertTrue(record['passed'])
+        self.assertEqual(record['architecture'], 'x64')
+        self.assertEqual(record['mainLanguageDirectory'], 'en-US_ko_qtz')
+        self.assertEqual(record['requiredHelpLanguages'], ['en-US', 'ko'])
+        self.assertEqual(len(record['archives']), 3)
+        self.assertEqual(record['archives'][0]['sha256'], hashlib.sha256(self.main.read_bytes()).hexdigest())
+        for name in REQUIRED:
+            self.assertEqual((self.output/name).read_bytes(), b'fixture-'+name.encode())
+        for language in ('en-US', 'ko'):
+            self.assertEqual((self.output/'help'/language/'text/shared/main.xhp').read_bytes(), language.encode())
+        self.assertFalse((self.output/'program/avmedialo.dll').exists())
+        self.assertFalse((self.output/'program/unrelated.dll').exists())
+
+    def test_explicit_arm64_keeps_original_archive_contract(self):
+        record = self.stage(architecture='arm64')
+        self.assertTrue(record['passed'])
+        self.assertEqual(record['architecture'], 'arm64')
+        self.assertEqual(record['mainLanguageDirectory'], 'en-US_qtz_ko')
+        self.assertEqual(len(record['archives']), 3)
+        self.assertEqual(record['requiredHelpLanguages'], ['en-US', 'ko'])
+
+    def test_selected_main_and_help_reject_other_platform_product_or_version(self):
+        ordinal = 0
+        for architecture in ('arm64', 'x64'):
+            if architecture == 'x64': self.use_x64_archives()
+            platform = 'aarch64' if architecture == 'arm64' else 'x86-64'
+            other = 'x86-64' if architecture == 'arm64' else 'aarch64'
+            for role, path in (('main', self.main), ('help', self.help['ko'])):
+                for mutation in ('platform', 'product', 'version'):
+                    ordinal += 1
+                    self.evidence = self.root/('identity-evidence-'+str(ordinal)); self.evidence.mkdir()
+                    name = (path.name.replace('Win_'+platform+'_', 'Win_'+other+'_') if mutation == 'platform'
+                            else path.name.replace('LibreOfficeDev_', 'LibreOffice_') if mutation == 'product'
+                            else path.name.replace('_26.8.1.1_', '_26.8.1.2_'))
+                    changed = path.with_name(name)
+                    path.rename(changed)
+                    try:
+                        with self.subTest(architecture=architecture, role=role, mutation=mutation):
+                            self.reject(role+' archive identity', architecture=architecture)
+                            self.assertFalse(self.output.exists())
+                    finally:
+                        changed.rename(path)
+
+    def test_unknown_or_untyped_selector_is_rejected_before_staging(self):
+        for index, architecture in enumerate((None, True, 0, 'X64', 'aarch64', 'x86-64', 'auto', [], {})):
+            self.evidence = self.root/('selector-evidence-'+str(index)); self.evidence.mkdir()
+            with self.subTest(selectorCode=index):
+                self.reject('architecture', architecture=architecture)
+                self.assertFalse(self.output.exists())
+
+    def test_selected_x64_corrupt_member_crc_does_not_qualify(self):
+        self.use_x64_archives()
+        with zipfile.ZipFile(self.main) as archive:
+            info = archive.getinfo(self.main_root+'program/soffice.bin')
+        data = bytearray(self.main.read_bytes())
+        start = info.header_offset+30+int.from_bytes(data[info.header_offset+26:info.header_offset+28], 'little')
+        start += int.from_bytes(data[info.header_offset+28:info.header_offset+30], 'little')
+        data[start] ^= 1
+        self.main.write_bytes(data)
+        with self.assertRaises(zipfile.BadZipFile):
+            self.stage(architecture='x64')
+        receipt = json.loads((self.evidence/'installed-runtime-stage.json').read_text())
+        self.assertFalse(receipt['passed'])
+        self.assertTrue(receipt['error'].startswith('BadZipFile:'))
+
+    def test_cli_selected_x64_summary_binds_architecture_and_member_receipt(self):
+        self.use_x64_archives()
+        result = subprocess.run([sys.executable, str(HELPER), '--source-root', str(self.source),
+            '--destination', str(self.output), '--evidence-directory', str(self.evidence),
+            '--architecture', 'x64'], env=child_environment(), capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, 'Explicit x64 CLI staging failed')
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary['architecture'], 'x64')
+        self.assertEqual(summary['archiveCount'], 3)
+        self.assertEqual(summary['requiredHelpLanguages'], ['en-US', 'ko'])
+        receipt = Path(summary['receipt']['path']); raw = receipt.read_bytes()
+        self.assertEqual(summary['receipt']['bytes'], len(raw))
+        self.assertEqual(summary['receipt']['sha256'], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(json.loads(raw)['architecture'], 'x64')
+
+    def test_cli_unknown_selector_does_not_create_stage_output_or_receipt(self):
+        for architecture in ('X64', 'auto', 'x86-64', 'ARM64'):
+            with self.subTest(selector=architecture):
+                result = subprocess.run([sys.executable, str(HELPER), '--source-root', str(self.source),
+                    '--destination', str(self.output), '--evidence-directory', str(self.evidence),
+                    '--architecture', architecture], env=child_environment(), capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.output.exists())
+                self.assertFalse((self.evidence/'installed-runtime-stage.json').exists())
 
 
 if __name__ == '__main__':

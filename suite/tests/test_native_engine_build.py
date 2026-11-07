@@ -518,6 +518,119 @@ Invoke-Expression $calls[0].Extent.Text|Out-Null
     def rejected(self,body):
         self.ps("$rejected=$false; try { "+body+" } catch { $rejected=$true }; if(-not $rejected){ throw 'Unsafe condition was accepted' }")
 
+    def full_stage_caller(self, architecture, summary_kind):
+        """Execute the actual Full stage statements at the logged-command boundary."""
+        script=self.root/'full-stage-caller.ps1'
+        body=r'''
+$ErrorActionPreference='Stop'
+$driver=__DRIVER__
+$root=__ROOT__
+$Architecture=__ARCHITECTURE__
+$summaryKind=__SUMMARY_KIND__
+$tokens=$null;$parseErrors=$null
+$tree=[System.Management.Automation.Language.Parser]::ParseFile($driver,[ref]$tokens,[ref]$parseErrors)
+if($parseErrors.Count -ne 0){throw 'Stage caller parse failed'}
+$entry=@($tree.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-NativeEngineBuild'},$true))
+if($entry.Count -ne 1){throw 'Stage caller function is ambiguous'}
+$calls=@($entry[0].Body.FindAll({param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$staged' -and
+    @($node.Right.FindAll({param($child) $child -is [System.Management.Automation.Language.CommandAst] -and $child.GetCommandName() -ceq 'Invoke-LoggedCommand'},$true)).Count -eq 1
+},$true))
+if($calls.Count -ne 1){throw 'Stage caller assignment is ambiguous'}
+$statements=@($calls[0].Parent.Statements)
+$index=[Array]::IndexOf($statements,$calls[0])
+if($index -lt 0 -or $index+2 -ge $statements.Count){throw 'Stage caller statements are incomplete'}
+$summary=$statements[$index+1];$guard=$statements[$index+2]
+if($summary -isnot [System.Management.Automation.Language.AssignmentStatementAst] -or
+    $summary.Left.Extent.Text -cne '$receipt.installedRuntimeStage' -or
+    @($summary.Right.FindAll({param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Get-Content'},$true)).Count -ne 1 -or
+    $guard -isnot [System.Management.Automation.Language.IfStatementAst]){throw 'Stage caller summary guard is incomplete'}
+$repo=Split-Path (Split-Path (Split-Path $driver -Parent) -Parent) -Parent
+$source=Join-Path $root 'source';$instdir=Join-Path $root 'installed-runtime';$evidence=Join-Path $root 'evidence'
+$stageHelper=Join-Path $repo 'suite/engine-build/stage_installed_runtime.py';$python='bounded-python'
+$script:summaryPath=Join-Path $root 'stage-summary.json'
+$compact=[ordered]@{passed=$true;runtimeRoot=$instdir}
+switch($summaryKind){
+    'matching' {$compact.architecture=$Architecture}
+    'wrong' {$compact.architecture=if($Architecture -ceq 'x64'){'arm64'}else{'x64'}}
+    'nonstring' {$compact.architecture=@($Architecture)}
+    'missing' {}
+    default {throw 'Unexpected summary fixture'}
+}
+$compact|ConvertTo-Json -Depth 4 -Compress|Set-Content -LiteralPath $script:summaryPath -Encoding utf8
+$script:callCount=0;$script:arguments=@()
+function Invoke-LoggedCommand {
+    param($File,$Arguments,$WorkingDirectory,$Prefix)
+    $script:callCount++;$script:arguments=@($Arguments)
+    return @{stdout=$script:summaryPath}
+}
+$receipt=@{};$accepted=$false
+$actual=($calls[0].Extent.Text,$summary.Extent.Text,$guard.Extent.Text)-join "`n"
+try { & ([scriptblock]::Create($actual));$accepted=$true } catch {$accepted=$false}
+$selectors=@(for($i=0;$i -lt $script:arguments.Count;$i++){if($script:arguments[$i] -ceq '--architecture'){$i}})
+$matches=$selectors.Count -eq 1 -and $selectors[0]+1 -lt $script:arguments.Count -and $script:arguments[$selectors[0]+1] -ceq $Architecture
+[ordered]@{accepted=$accepted;callCount=$script:callCount;selectorCount=$selectors.Count;selectorMatches=$matches}|ConvertTo-Json -Compress
+'''
+        for token,value in [('__DRIVER__',quote(SOURCE)),('__ROOT__',quote(self.root)),
+                            ('__ARCHITECTURE__',quote(architecture)),('__SUMMARY_KIND__',quote(summary_kind))]:
+            body=body.replace(token,value)
+        script.write_text(body,encoding='utf-8')
+        for name in ('stage-child-cache','stage-child-config','stage-child-data'):
+            (self.root/name).mkdir(exist_ok=True)
+        child_environment={'PATH':str(Path(PWSH).resolve(strict=True).parent),
+            'XDG_CACHE_HOME':str(self.root/'stage-child-cache'),
+            'XDG_CONFIG_HOME':str(self.root/'stage-child-config'),
+            'XDG_DATA_HOME':str(self.root/'stage-child-data'),'PYTHONUTF8':'1'}
+        result=subprocess.run([PWSH,'-NoLogo','-NoProfile','-File',str(script)],
+            cwd=self.root,env=child_environment,text=True,capture_output=True,timeout=30)
+        self.assertEqual(0,result.returncode,'The actual stage caller boundary did not complete')
+        try:value=json.loads(result.stdout.strip())
+        except (ValueError,TypeError):self.fail('The stage caller returned no numeric summary')
+        self.assertEqual(set(value),{'accepted','callCount','selectorCount','selectorMatches'})
+        self.assertIs(type(value['accepted']),bool);self.assertIs(type(value['selectorMatches']),bool)
+        self.assertIs(type(value['callCount']),int);self.assertIs(type(value['selectorCount']),int)
+        return value
+
+    def test_full_stage_caller_child_environment_uses_selected_binary_and_owned_paths(self):
+        from unittest.mock import patch
+        selected=self.root/'selected PowerShell binary'/'pwsh.exe'
+        selected.parent.mkdir();selected.write_bytes(b'synthetic selected binary')
+        expected={'XDG_CACHE_HOME':self.root/'stage-child-cache',
+            'XDG_CONFIG_HOME':self.root/'stage-child-config','XDG_DATA_HOME':self.root/'stage-child-data'}
+        seen=[]
+        def boundary(arguments,**options):
+            child=options.get('env');values=child if type(child) is dict else {}
+            checks={'closedFive':type(child) is dict and set(child)=={'PATH',*expected,'PYTHONUTF8'},
+                'binarySelected':arguments[0]==str(selected),
+                'pathSelected':values.get('PATH')==str(selected.resolve(strict=True).parent),
+                'utf8':values.get('PYTHONUTF8')=='1','cwdOwned':options.get('cwd')==self.root}
+            checks.update({key:values.get(key)==str(value) for key,value in expected.items()})
+            seen.append(checks)
+            return subprocess.CompletedProcess([],0,json.dumps(dict(accepted=True,callCount=1,
+                selectorCount=1,selectorMatches=True)),'')
+        with patch(__name__+'.PWSH',str(selected)),patch.object(subprocess,'run',side_effect=boundary):
+            value=self.full_stage_caller('x64','matching')
+        self.assertEqual(len(seen),1)
+        self.assertTrue(all(seen[0].values()),'The stage child environment escaped its selected or owned paths')
+        self.assertTrue(value['accepted'])
+
+    def test_actual_full_stage_caller_passes_selected_architecture_once(self):
+        for architecture in ('x64','arm64'):
+            with self.subTest(architecture=architecture):
+                value=self.full_stage_caller(architecture,'matching')
+                self.assertEqual(value['callCount'],1)
+                self.assertTrue(value['accepted'])
+                self.assertEqual(value['selectorCount'],1)
+                self.assertTrue(value['selectorMatches'])
+
+    def test_actual_full_stage_caller_rejects_missing_wrong_or_nonstring_architecture(self):
+        for architecture in ('x64','arm64'):
+            for summary in ('missing','wrong','nonstring'):
+                with self.subTest(architecture=architecture,summary=summary):
+                    value=self.full_stage_caller(architecture,summary)
+                    self.assertEqual(value['callCount'],1)
+                    self.assertFalse(value['accepted'])
+
     def test_native_source_gate_requires_explicit_mdds_archive_and_existing_actual_source_module(self):
         script = self.root/'source-gate.sh'
         self.ps(f"Write-NativeSourceGate {quote(script)} '/owned/repo' '/owned/lo source' '/owned/firebird.tar.bz2' '/owned/mdds.tar.xz'")

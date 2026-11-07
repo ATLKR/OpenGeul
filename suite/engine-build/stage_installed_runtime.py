@@ -20,6 +20,7 @@ REQUIRED_NATIVE_OUTPUTS = ('program/soffice.bin', 'program/python.exe',
                            'program/pyuno.pyd', 'program/ifbclient.dll',
                            'program/Engine12.dll', 'program/intl/fbintl.dll')
 HELP_LANGUAGES = ('en-US', 'ko')
+ARCHIVE_PLATFORMS = {'arm64': 'aarch64', 'x64': 'x86-64'}
 
 
 def sha256_file(path):
@@ -101,7 +102,7 @@ def retain_developer_marker(source, evidence):
     return row
 
 
-def stage_runtime(source_root, destination, evidence_directory):
+def stage_runtime(source_root, destination, evidence_directory, *, architecture='arm64'):
     source, destination, evidence = map(Path, (source_root, destination, evidence_directory))
     receipt = evidence / 'installed-runtime-stage.json'
     if receipt.exists():
@@ -114,6 +115,10 @@ def stage_runtime(source_root, destination, evidence_directory):
               'scope': 'Archive assembly only; original PE/CRT/Base qualification remains required.'}
     opened = []
     try:
+        if type(architecture) is not str or architecture not in ARCHIVE_PLATFORMS:
+            raise ValueError('Unsupported installed runtime architecture')
+        platform = ARCHIVE_PLATFORMS[architecture]
+        record['architecture'] = architecture
         if os.path.lexists(destination):
             raise FileExistsError('Installed runtime destination already exists')
         record['developerMergedMarker'] = retain_developer_marker(source, evidence)
@@ -130,7 +135,7 @@ def stage_runtime(source_root, destination, evidence_directory):
         if len(candidates['main']) != 1:
             raise ValueError('Expected a unique main archive from the completed source build')
         main = candidates['main'][0]
-        prefix = re.escape(product + '_' + version + '_Win_aarch64_archive')
+        prefix = re.escape(product + '_' + version + '_Win_' + platform + '_archive')
         if not re.fullmatch(prefix + r'(?:_[A-Za-z0-9_-]+)?\.zip', main.name) or '_helppack_' in main.name or '_sdk' in main.name:
             raise ValueError('Unexpected main archive identity: ' + main.name)
         selected = [('main', None, main)]
@@ -139,7 +144,7 @@ def stage_runtime(source_root, destination, evidence_directory):
             if len(matches) != 1:
                 raise ValueError('Expected a unique ' + language + ' help archive')
             path = matches[0]
-            if path.name != product + '_' + version + '_Win_aarch64_archive_helppack_' + language + '.zip':
+            if path.name != product + '_' + version + '_Win_' + platform + '_archive_helppack_' + language + '.zip':
                 raise ValueError('Unexpected help archive identity: ' + path.name)
             selected.append(('help', language, path))
         record['configuredProduct'] = product
@@ -230,10 +235,13 @@ def main():
     parser.add_argument('--source-root', type=Path, required=True)
     parser.add_argument('--destination', type=Path, required=True)
     parser.add_argument('--evidence-directory', type=Path, required=True)
+    parser.add_argument('--architecture', choices=tuple(ARCHIVE_PLATFORMS), default='arm64')
     args = parser.parse_args()
-    record = stage_runtime(args.source_root, args.destination, args.evidence_directory)
+    record = stage_runtime(args.source_root, args.destination, args.evidence_directory,
+                           architecture=args.architecture)
     receipt = args.evidence_directory / 'installed-runtime-stage.json'
     print(json.dumps({'runtimeRoot': str(args.destination), 'passed': record['passed'],
+        'architecture': record['architecture'],
         'fileCount': record['fileCount'], 'archiveCount': len(record['archives']),
         'requiredHelpLanguages': record['requiredHelpLanguages'],
         'receipt': {'path': str(receipt), 'bytes': receipt.stat().st_size, 'sha256': sha256_file(receipt)}}))
