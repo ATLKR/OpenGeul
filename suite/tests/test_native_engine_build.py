@@ -20,7 +20,78 @@ def quote(value): return "'"+str(value).replace("'","''")+"'"
 
 
 class NativeEngineBuildTests(unittest.TestCase):
-    def test_x64_source_binding_requires_exact_loader_hook_and_twelve_unchanged_guards(self):
+    def test_x64_zstd_binding_rejects_malformed_proof_or_missing_evidence(self):
+        import copy
+        import hashlib
+        from suite.tests.test_native_source_recipe import load
+        module = load('apply_native_source'); engine = SOURCE.parents[1] / 'engine-build'
+        lock = json.loads((engine / 'source-build.json').read_bytes())
+        self.assertIn('windowsZstdSourceLinks', lock)
+        plan = module._select_plan(lock, (engine / 'native-targets.json').read_bytes(), 'x64')
+        source = self.root / 'source'; evidence = self.root / 'evidence'; evidence.mkdir()
+        for name, fixture in [('external/firebird/ExternalProject_firebird.mk', 'native-icu-path/ExternalProject_firebird.mk'),
+                              ('external/zstd/UnpackedTarball_zstd.mk', 'native-zstd-unpack/UnpackedTarball_zstd.mk')]:
+            target = source / name; target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((SOURCE.parents[1] / 'tests/fixtures' / fixture).read_bytes())
+        loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
+        zstd = module._install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks'])
+        good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
+                    nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
+                    sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
+                                     firebirdLoaderPath=loader, zstdSourceLinks=zstd),
+                    sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
+                        recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
+                        policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
+                        manifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
+                        recipeSha256=hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(),
+                        armGuardedSources=[dict(path=row['path'], beforeSha256=row['beforeSha256'],
+                                               sha256=row['beforeSha256'], unchanged=True) for row in plan['armGuardedSources']],
+                        nativeBuildVerified=False, fullEngineQualified=False, acceptanceEligible=False, guiVerified=False))
+        path = self.root / 'receipt.json'; path.write_text(json.dumps(good))
+        call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64"
+        self.ps(call)
+        for field, value in [('schemaVersion', True), ('kind', 'other'), ('path', '../escape'), ('condition', 'WNT_AARCH64'),
+                             ('condition', ['WNT_X86_64']), ('beforeSha256', [zstd['beforeSha256']]),
+                             ('beforeBytes', True), ('afterBytes', 1.5), ('beforeSha256', '0' * 64),
+                             ('afterSha256', '0' * 64), ('nativeBuildVerified', 0), ('fullEngineQualified', True),
+                             ('acceptanceEligible', True), ('guiVerified', True), ('evidence', {}),
+                             ('evidence', dict(zstd['evidence'], extra=zstd['evidence']['original'])), ('extra', False)]:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(good); changed['sourceHooks']['zstdSourceLinks'][field] = value
+                path.write_text(json.dumps(changed)); self.rejected(call)
+        changed = copy.deepcopy(good); changed['sourceHooks'].pop('zstdSourceLinks')
+        path.write_text(json.dumps(changed)); self.rejected(call)
+        path.write_text(json.dumps(good))
+        for phase in ('original', 'effective'):
+            with self.subTest(phase=phase):
+                retained = Path(zstd['evidence'][phase]); raw = retained.read_bytes()
+                retained.unlink(); self.rejected(call)
+                retained.write_bytes(raw + b'changed'); self.rejected(call)
+                retained.write_bytes(raw)
+
+    def test_x64_final_zstd_source_mutation_is_rejected(self):
+        from suite.tests.test_native_source_recipe import load
+        module = load('apply_native_source'); engine = SOURCE.parents[1] / 'engine-build'
+        lock = json.loads((engine / 'source-build.json').read_bytes())
+        self.assertIn('windowsZstdSourceLinks', lock)
+        source = self.root / 'source'; target = source / 'external/zstd/UnpackedTarball_zstd.mk'
+        target.parent.mkdir(parents=True); target.write_bytes((SOURCE.parents[1] / 'tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes())
+        evidence = self.root / 'evidence'; evidence.mkdir()
+        module._install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks'])
+        execute = f"""
+$source={quote(source)};$manifest=Get-Content {quote(engine/'source-build.json')} -Raw|ConvertFrom-Json
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile({quote(SOURCE)},[ref]$tokens,[ref]$errors)
+$calls=@($ast.FindAll({{param($n) $n -is [Management.Automation.Language.CommandAst] -and
+ $n.GetCommandName() -eq 'Confirm-FileIdentity' -and $n.Extent.Text.Contains('$manifest.windowsZstdSourceLinks.path')}},$true))
+if($errors.Count -or $calls.Count -ne 1){{throw 'Expected one actual final zstd source identity check'}}
+Invoke-Expression $calls[0].Extent.Text|Out-Null
+"""
+        self.ps(execute)
+        target.write_bytes(target.read_bytes() + b'changed')
+        self.rejected(execute)
+
+    def test_x64_source_binding_requires_exact_loader_hook_and_eleven_unchanged_guards(self):
         import copy
         import hashlib
         from suite.tests.test_native_source_recipe import load
@@ -29,11 +100,15 @@ class NativeEngineBuildTests(unittest.TestCase):
         plan = module._select_plan(lock, (engine / 'native-targets.json').read_bytes(), 'x64')
         source = self.root / 'source'; target = source / module.LOADER_PATH; target.parent.mkdir(parents=True)
         target.write_bytes((SOURCE.parents[1] / 'tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes())
+        zstd_target = source / module.ZSTD_PATH; zstd_target.parent.mkdir(parents=True)
+        zstd_target.write_bytes((SOURCE.parents[1] / 'tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes())
         evidence = self.root / 'evidence'; evidence.mkdir()
         loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
+        zstd = module._install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks'])
         good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
                     nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
-                    sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64', firebirdLoaderPath=loader),
+                    sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
+                                     firebirdLoaderPath=loader, zstdSourceLinks=zstd),
                     sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
                         recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
                         policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),

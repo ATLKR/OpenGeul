@@ -496,6 +496,7 @@
       "hooks": [
         "moduleBootstrap",
         "firebirdLoaderPath",
+        "zstdSourceLinks",
         "winAccFocusOrder"
       ]
     }
@@ -506,6 +507,14 @@
     "sha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
     "afterSize": 4802,
     "afterSha256": "3f1f9e9717a2246996963392bcdb6976d922d6000984ca926711ef388e702470",
+    "condition": "WNT_X86_64"
+  },
+  "windowsZstdSourceLinks": {
+    "path": "external/zstd/UnpackedTarball_zstd.mk",
+    "size": 779,
+    "sha256": "3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909",
+    "afterSize": 1078,
+    "afterSha256": "5edd0fe8a6048b6a0183557aa423ba44b047e7655f2235ac84c99791267101fc",
     "condition": "WNT_X86_64"
   }
 }

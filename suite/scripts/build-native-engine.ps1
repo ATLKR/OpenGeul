@@ -1804,8 +1804,8 @@ function Assert-NativeConfiguredToolchain([string]$CompilerRoot,[Collections.IDi
 
 function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','winAccFocusOrder')}
-    $guardCount=if($Architecture -ceq 'arm64'){13}else{12}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','winAccFocusOrder')}
+    $guardCount=if($Architecture -ceq 'arm64'){13}else{11}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
        $proof.recipeSha256 -cnotmatch '^[0-9a-f]{64}$' -or ($proof.hookOrder -join '/') -cne ($order -join '/') -or @($proof.armGuardedSources).Count -ne $guardCount -or
@@ -1816,10 +1816,10 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
         $manifestPath=Join-Path $PSScriptRoot '../engine-build/source-build.json';Assert-UnlinkedPath $manifestPath
         if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
         $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
-        $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.zstdSourceLinks,
+        $pins=@($manifest.configureSource,$manifest.sourceHook,
             $manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe,$manifest.atlNativePaths.recipe)+
             @($manifest.atlConsumerNativePaths.recipes)+@($manifest.harfbuzzNativeMesonPaths.recipe)
-        for($i=0;$i -lt 12;$i++) {
+        for($i=0;$i -lt 11;$i++) {
             $row=$proof.armGuardedSources[$i]
             if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
         }
@@ -1847,6 +1847,31 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
             else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
         }
         if([IO.Path]::GetDirectoryName($loader.evidence.original) -cne [IO.Path]::GetDirectoryName($loader.evidence.effective)) {throw 'Source loader evidence directories differ.'}
+        $pin=$manifest.windowsZstdSourceLinks;$zstd=$Receipt.sourceHooks.zstdSourceLinks
+        if((Compare-Object -CaseSensitive @($zstd.PSObject.Properties.Name) $fields) -or
+           ($zstd.schemaVersion -isnot [int] -and $zstd.schemaVersion -isnot [long]) -or
+           $zstd.schemaVersion -ne 1 -or $zstd.kind -cne 'windows-zstd-source-links-source-hook' -or
+           $zstd.path -cne 'external/zstd/UnpackedTarball_zstd.mk' -or $zstd.path -cne $pin.path -or
+           $zstd.condition -cne 'WNT_X86_64' -or $zstd.condition -cne $pin.condition -or
+           ($zstd.beforeBytes -isnot [int] -and $zstd.beforeBytes -isnot [long]) -or
+           ($zstd.afterBytes -isnot [int] -and $zstd.afterBytes -isnot [long]) -or
+           $zstd.beforeBytes -ne $pin.size -or $zstd.afterBytes -ne $pin.afterSize -or
+           $zstd.beforeSha256 -cne $pin.sha256 -or $zstd.afterSha256 -cne $pin.afterSha256) {throw 'x64 zstd source-link proof differs.'}
+        foreach($name in @('kind','path','condition','beforeSha256','afterSha256')) {
+            if($zstd.$name -isnot [string]) {throw 'Source zstd identity requires scalar strings.'}
+        }
+        foreach($name in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+            if($zstd.$name -isnot [bool] -or $zstd.$name) {throw 'Source zstd hook cannot qualify a native engine.'}
+        }
+        if((Compare-Object -CaseSensitive @($zstd.evidence.PSObject.Properties.Name) @('original','effective'))) {throw 'Source zstd evidence is incomplete.'}
+        foreach($phase in @('original','effective')) {
+            $path=$zstd.evidence.$phase
+            if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or
+               [IO.Path]::GetFileName($path) -cne ($phase+'-x64-UnpackedTarball_zstd.mk')) {throw 'Source zstd evidence path differs.'}
+            if($phase -ceq 'original') {Confirm-FileIdentity $path $pin.size SHA256 $pin.sha256|Out-Null}
+            else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
+        }
+        if([IO.Path]::GetDirectoryName($zstd.evidence.original) -cne [IO.Path]::GetDirectoryName($zstd.evidence.effective)) {throw 'Source zstd evidence directories differ.'}
     }
 }
 
@@ -2148,6 +2173,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 $winAccInventory[0].imports=$receipt.winAccBinary.imports
                 Write-BuildJson (Join-Path $evidence 'native-pe-inventory.json') $inventory
                 Confirm-FileIdentity (Join-Path $source $manifest.winAccFocusOrder.path) $manifest.winAccFocusOrder.afterBytes SHA256 $manifest.winAccFocusOrder.afterSha256|Out-Null
+                Confirm-FileIdentity (Join-Path $source $manifest.windowsZstdSourceLinks.path) $manifest.windowsZstdSourceLinks.afterSize SHA256 $manifest.windowsZstdSourceLinks.afterSha256|Out-Null
             }
             $receipt.stage='actual-native-uno-base-persistence';Assert-NativeBuildTimeRemaining
             $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe $Architecture

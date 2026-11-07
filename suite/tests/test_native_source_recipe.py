@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder'],
-          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'winAccFocusOrder']}
+          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'winAccFocusOrder']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
 
 
@@ -85,13 +85,47 @@ class ReceiptNormalizationTests(unittest.TestCase):
 
 
 class RecipePolicyTests(unittest.TestCase):
-    def test_x64_reclassifies_only_the_pinned_firebird_loader_recipe(self):
+    def test_x64_zstd_source_link_exception_reclassifies_only_its_exact_input(self):
+        module = load('apply_native_source'); lock = manifest()
+        raw = (ENGINE / 'native-targets.json').read_bytes()
+        plan = module._select_plan(lock, raw, 'x64')
+        self.assertEqual(11, len(plan['armGuardedSources']))
+        self.assertNotIn('external/zstd/UnpackedTarball_zstd.mk',
+                         [row['path'] for row in plan['armGuardedSources']])
+        self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'winAccFocusOrder'],
+                         plan['recipe']['hooks'])
+        arm = module._select_plan(lock, raw, 'arm64')
+        self.assertEqual(13, len(arm['armGuardedSources']))
+        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+                         hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
+
+    def test_x64_zstd_descriptor_and_raw_source_drift_are_rejected(self):
+        module = load('apply_native_source'); lock = manifest()
+        self.assertIn('windowsZstdSourceLinks', lock)
+        original = (ROOT / 'suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk').read_bytes()
+        pin = lock['windowsZstdSourceLinks']
+        for field, value in [('path', '../escape'), ('condition', 'WNT_AARCH64'),
+                             ('size', True), ('size', pin['size'] + 1), ('afterSize', 1.5),
+                             ('afterSize', pin['afterSize'] + 1), ('sha256', '0' * 64),
+                             ('afterSha256', '0' * 64)]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                module._zstd_bytes(original, dict(pin, **{field: value}))
+        for changed in [original + b'\n', original[:-1]]:
+            with self.assertRaises(ValueError): module._zstd_bytes(changed, pin)
+        for mutate in [lambda p: p['windowsZstdSourceLinks'].update(extra=True),
+                       lambda p: p.pop('windowsZstdSourceLinks'),
+                       lambda p: p['windowsZstdSourceLinks'].update(condition='WNT_AARCH64')]:
+            changed = copy.deepcopy(lock); mutate(changed)
+            with self.assertRaises(ValueError):
+                module._select_plan(changed, (ENGINE / 'native-targets.json').read_bytes(), 'x64')
+
+    def test_x64_retains_the_pinned_firebird_loader_recipe_with_the_zstd_exception(self):
         module = load('apply_native_source'); lock = manifest()
         plan = module._select_plan(lock, (ENGINE / 'native-targets.json').read_bytes(), 'x64')
-        self.assertEqual(12, len(plan['armGuardedSources']))
+        self.assertEqual(11, len(plan['armGuardedSources']))
         self.assertNotIn('external/firebird/ExternalProject_firebird.mk',
                          [row['path'] for row in plan['armGuardedSources']])
-        self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'winAccFocusOrder'], plan['recipe']['hooks'])
+        self.assertEqual(ORDERS['x64'], plan['recipe']['hooks'])
         original = (ROOT / 'suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk').read_bytes()
         pin = lock['windowsFirebirdLoaderPath']
         for field, value in [('sha256', '0' * 64), ('afterSha256', '0' * 64), ('size', pin['size'] + 1),
@@ -105,7 +139,7 @@ class RecipePolicyTests(unittest.TestCase):
             plan = module._select_plan(manifest(), (ENGINE / 'native-targets.json').read_bytes(), architecture)
             self.assertEqual(ORDERS[architecture], plan['recipe']['hooks'])
             self.assertEqual(RECIPES[architecture], plan['recipeId'])
-            self.assertEqual(13 if architecture == 'arm64' else 12, len(plan['armGuardedSources']))
+            self.assertEqual(13 if architecture == 'arm64' else 11, len(plan['armGuardedSources']))
             self.assertEqual(17, len(plan['sources']))
             self.assertIn('sourceDependencies', plan)
             self.assertEqual(1 if architecture == 'arm64' else 0, len(plan['sourceDependencies']))
@@ -188,6 +222,55 @@ class ActualSourceRecipeTests(unittest.TestCase):
     def install(self, architecture):
         return self.module.apply_native_source(self.source, self.evidence, architecture=architecture)
 
+    @unittest.skipUnless(os.name != 'nt' and shutil.which('make'),
+                         'GNU make target-policy replay is portable; Windows unpack remains a separate gate')
+    def test_x64_zstd_sys_mode_is_confined_to_the_exact_cpu_and_unpack_target(self):
+        name = 'external/zstd/UnpackedTarball_zstd.mk'
+        original = self.inputs[name]
+        self.install('x64'); effective = (self.source / name).read_bytes()
+        observer = self.folder / 'link-mode.py'
+        observer.write_text("import json,os\nprint(json.dumps(os.environ['CYGWIN']))\n")
+        def replay(raw, os_name, cpu, target):
+            recipe = self.folder / 'zstd.mk'; recipe.write_bytes(raw)
+            makefile = self.folder / 'policy.mk'
+            makefile.write_text('OS := ' + os_name + '\nCPUNAME := ' + cpu + '\nMSYSTEM :=\n'
+                'CYGWIN := winsymlinks:nativestrict\nexport CYGWIN\nZSTD_TARBALL := zstd-source\n'
+                'gb_UnpackedTarget_get_target = $(1)\ninclude ' + shlex.quote(str(recipe)) + '\n'
+                '.PHONY: zstd-source other-source\nzstd-source other-source:\n\t@'
+                + shlex.quote(sys.executable) + ' ' + shlex.quote(str(observer)) + '\n')
+            result = subprocess.run(['make', '--no-print-directory', '-f', str(makefile), target],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            return json.loads(result.stdout)
+        self.assertEqual('winsymlinks:nativestrict', replay(original, 'WNT', 'X86_64', 'zstd-source'))
+        self.assertEqual('winsymlinks:sys', replay(effective, 'WNT', 'X86_64', 'zstd-source'))
+        for os_name, cpu, target in [('WNT', 'X86_64', 'other-source'),
+                                     ('WNT', 'AARCH64', 'zstd-source'), ('LINUX', 'X86_64', 'zstd-source')]:
+            with self.subTest(os=os_name, cpu=cpu, target=target):
+                self.assertEqual('winsymlinks:nativestrict', replay(effective, os_name, cpu, target))
+        arm_source = self.folder / 'arm-zstd'; arm_path = arm_source / name
+        arm_path.parent.mkdir(parents=True); arm_path.write_bytes(original)
+        _, _, arm = self.module.ARM._zstd_source_links(arm_source, self.lock['zstdSourceLinks'])
+        self.assertEqual('winsymlinks:sys', replay(arm, 'WNT', 'AARCH64', 'zstd-source'))
+        self.assertEqual('winsymlinks:nativestrict', replay(arm, 'WNT', 'X86_64', 'zstd-source'))
+
+    def test_x64_zstd_hook_retains_exact_raw_evidence_and_false_qualification_flags(self):
+        result = self.install('x64')
+        self.assertIn('zstdSourceLinks', result['sourceHooks'])
+        proof = result['sourceHooks']['zstdSourceLinks']; pin = self.lock['windowsZstdSourceLinks']
+        self.assertEqual({'schemaVersion', 'kind', 'path', 'condition', 'beforeBytes', 'afterBytes',
+                          'beforeSha256', 'afterSha256', 'evidence', 'nativeBuildVerified',
+                          'fullEngineQualified', 'acceptanceEligible', 'guiVerified'}, set(proof))
+        self.assertEqual('windows-zstd-source-links-source-hook', proof['kind'])
+        self.assertEqual('WNT_X86_64', proof['condition'])
+        self.assertEqual(self.inputs[pin['path']], Path(proof['evidence']['original']).read_bytes())
+        self.assertEqual((self.source / pin['path']).read_bytes(), Path(proof['evidence']['effective']).read_bytes())
+        for field, key in [('beforeBytes', 'size'), ('afterBytes', 'afterSize'),
+                           ('beforeSha256', 'sha256'), ('afterSha256', 'afterSha256')]:
+            self.assertEqual(pin[key], proof[field])
+        for field in ['nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified']:
+            self.assertIs(proof[field], False)
+
     @unittest.skipUnless(os.name != 'nt' and shutil.which('make') and shutil.which('bash'),
                          'This nested GNU make replay requires POSIX make/Bash; it is not native Windows proof')
     def test_windows_loader_paths_survive_both_make_levels_for_each_owned_recipe(self):
@@ -260,7 +343,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256((ENGINE / filename).read_bytes()).hexdigest(), proof[key])
         plan = self.module._select_plan(self.lock, (ENGINE / 'native-targets.json').read_bytes(), architecture)
         self.assertEqual(hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest(), proof['recipeSha256'])
-        self.assertEqual(13 if architecture == 'arm64' else 12, len(proof['armGuardedSources']))
+        self.assertEqual(13 if architecture == 'arm64' else 11, len(proof['armGuardedSources']))
         for pin, row in zip(plan['armGuardedSources'], proof['armGuardedSources']):
             expected = pin['beforeSha256'] if architecture == 'x64' else pin['afterSha256']
             self.assertEqual({'path': pin['path'], 'beforeSha256': pin['beforeSha256'],
@@ -294,20 +377,23 @@ class ActualSourceRecipeTests(unittest.TestCase):
         self.assertEqual({p.relative_to(direct).as_posix(): p.read_bytes() for p in direct.rglob('*') if p.is_file()},
                          {p.relative_to(self.source).as_posix(): p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
-    def test_x64_recipe_applies_exactly_bootstrap_loader_then_winacc(self):
+    def test_x64_recipe_applies_exactly_bootstrap_loader_zstd_then_winacc(self):
         events = []; bootstrap = self.module.ARM.install_module_bootstrap; winacc = self.module.WINACC.install
         loader = self.module._install_firebird_loader_path
+        zstd = self.module._install_zstd_source_links
         def common(*args): events.append('moduleBootstrap'); return bootstrap(*args)
         def loader_path(*args): events.append('firebirdLoaderPath'); return loader(*args)
+        def zstd_links(*args): events.append('zstdSourceLinks'); return zstd(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         with patch.object(self.module.ARM, 'install', side_effect=AssertionError('x64 selected full ARM installer')), \
                 patch.object(self.module.ARM, 'install_module_bootstrap', side_effect=common), \
                 patch.object(self.module, '_install_firebird_loader_path', side_effect=loader_path), \
+                patch.object(self.module, '_install_zstd_source_links', side_effect=zstd_links), \
                 patch.object(self.module.WINACC, 'install', side_effect=focus):
             result = self.install('x64')
         self.proof(result, 'x64'); self.assertEqual(ORDERS['x64'], events)
         hooks = result['sourceHooks']
-        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath',
+        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks',
                           'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
         self.assertEqual('native-windows-common-source-hooks', hooks['kind']); self.assertEqual('x64', hooks['architecture'])
         self.assertIs(hooks['nativeBuildVerified'], False); self.assertIs(hooks['basePersistenceVerified'], False)
@@ -327,11 +413,12 @@ class ActualSourceRecipeTests(unittest.TestCase):
         for field in ['nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified']:
             self.assertIs(proof[field], False)
 
-    def test_x64_leaves_all_12_arm_only_targets_unchanged(self):
+    def test_x64_leaves_all_11_arm_only_targets_unchanged(self):
         result = self.install('x64'); self.proof(result, 'x64')
         changed = {name for name, raw in self.inputs.items() if (self.source / name).read_bytes() != raw}
         self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path'],
-                          self.lock['windowsFirebirdLoaderPath']['path']}, changed)
+                          self.lock['windowsFirebirdLoaderPath']['path'],
+                          self.lock['windowsZstdSourceLinks']['path']}, changed)
         self.assertEqual(set(self.inputs), {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
 
     def test_every_input_drift_rejects_before_any_recipe_write(self):

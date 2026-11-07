@@ -124,32 +124,52 @@ Microsoft signature; unsigned observations do not qualify a runtime. Consumers
 replay the recorded path/version/hash joins and authenticated receipt; root's
 independent adoption check can additionally hash the separate raw evidence.
 
-The x64 recipe is exactly `moduleBootstrap`, `firebirdLoaderPath`, then
-`winAccFocusOrder`. The loader hook reclassifies only
+The x64 recipe is exactly `moduleBootstrap`, `firebirdLoaderPath`,
+`zstdSourceLinks`, then `winAccFocusOrder`. The loader hook reclassifies only
 `external/firebird/ExternalProject_firebird.mk` after a real x64 examples/isql
 loader failure and an authenticated nested GNU make reproduction exposed two
 concatenated complete PATH assignments and the wrong Windows DLL directory.
 This establishes the source-expression defect, not that every loader failure
 has the same cause. The correction uses one existing helper for ICU/source/lib
 and Firebird/bin, guarded specifically by WNT_X86_64. It adds no driver PATH
-workaround, feature skip or other ARM hook to the x64 build.
+workaround or feature skip to the x64 build.
 
-`windowsFirebirdLoaderPath` in the fixed source manifest pins the exact path,
-condition, before/after byte counts and SHA256 values. The original ARM helper,
-ARM final source bytes and thirteen-row ARM guarded plan remain unchanged.
-The x64 plan retains seventeen authenticated source inputs but treats this one
-file as common, leaving exactly twelve unchanged ARM-only source guards.
+The zstd hook separately reclassifies only
+`external/zstd/UnpackedTarball_zstd.mk`. Actual run `42336380144` failed while
+creating `tests/cli-tests/bin/unzstd` as a symlink to `zstd`; this was a tar
+symlink-creation failure, not proof of a missing zstd executable. The x64 recipe
+had left this source file unchanged under global `winsymlinks:nativestrict`,
+whereas the established ARM helper already confines a `winsymlinks:sys`
+exception to the exact zstd unpack target. The new x64 hook adds that same
+target-specific policy only under `WNT_X86_64`, using
+`$(call gb_UnpackedTarget_get_target,$(ZSTD_TARBALL))`. It does not alter global
+CYGWIN, other unpack targets, Linux, or the existing ARM helper. No package,
+privilege, SDK or ABI change is part of this correction. The original archive
+was unavailable for this investigation, so member ordering, the full link chain
+and the exact Cygwin failure cause remain unverified. The policy difference is
+consistent with the observed failure; actual native unpack, Full/Base and GUI
+gates still have to verify the correction.
+
+`windowsFirebirdLoaderPath` and `windowsZstdSourceLinks` in the fixed source
+manifest pin their exact paths, conditions, before/after byte counts and SHA256
+values. The original ARM helper, twenty-one ARM output files, ARM recipe hash
+and thirteen-row ARM guarded plan remain unchanged. The x64 plan retains
+seventeen authenticated source inputs: six common rows and exactly eleven
+unchanged ARM-only source guards. The zstd archive provenance stays bound by
+the existing manifest entry; its ARM descriptor is unchanged.
 Future unknown hooks, source-pin changes or recipe-membership drift fail closed.
 Source-only installation never proves actual native build/runtime behavior.
 
-The x64 `sourceHooks` record adds `firebirdLoaderPath`, with schemaVersion=1,
-kind=windows-firebird-loader-path-source-hook, fixed path/condition,
-beforeBytes/afterBytes, beforeSha256/afterSha256, original/effective evidence
-paths, and false nativeBuildVerified/fullEngineQualified/acceptanceEligible/
-guiVerified flags. `sourceRecipeProof` retains its existing keys; hookOrder has
-the three entries above and armGuardedSources contains the twelve exact
+The x64 `sourceHooks` record contains `firebirdLoaderPath` and
+`zstdSourceLinks`. Each thirteen-field hook receipt has schemaVersion=1, its
+fixed kind/path/condition, beforeBytes/afterBytes, beforeSha256/afterSha256,
+original/effective evidence paths, and typed false
+nativeBuildVerified/fullEngineQualified/acceptanceEligible/guiVerified flags.
+The zstd kind is `windows-zstd-source-links-source-hook`.
+`sourceRecipeProof` retains its existing keys; hookOrder has
+the four entries above and armGuardedSources contains the eleven exact
 unchanged ARM-only path/hash rows. ARM retains its two hooks and thirteen rows.
-The driver checks the x64 descriptor and actual retained evidence bytes against
+The driver checks both x64 descriptors and actual retained evidence bytes against
 the manifest, rather than using diagnostic success as engine qualification.
 The runtime artifact still has exactly its original two members.
 
@@ -221,4 +241,4 @@ applicable install/update/repair gates. A later changed-driver ARM Full and ARM
 Suite are separate required regression evidence before adopting that ARM output.
 Failures remain failures; no cross-architecture relabelling or MSI fallback.
 
-Initial source classification (the loader reclassification above supersedes its x64 exclusion): [reviewed inventory](2026-11-07-native-x64-source-recipes.md).
+Initial source classification (the loader and zstd reclassifications above supersede their x64 exclusions): [reviewed inventory](2026-11-07-native-x64-source-recipes.md).

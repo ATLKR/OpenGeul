@@ -18,8 +18,9 @@ HERE = Path(__file__).resolve().parent
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'winAccFocusOrder'])}
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'winAccFocusOrder'])}
 LOADER_PATH = 'external/firebird/ExternalProject_firebird.mk'
+ZSTD_PATH = 'external/zstd/UnpackedTarball_zstd.mk'
 ARM_PATHS = ('configure.ac', 'external/firebird/UnpackedTarball_firebird.mk',
              'external/firebird/ExternalProject_firebird.mk', 'external/zstd/UnpackedTarball_zstd.mk',
              'external/mdds/UnpackedTarball_mdds.mk', 'external/python3/ExternalProject_python3.mk',
@@ -143,7 +144,13 @@ def _select_plan(lock, policy_raw, architecture):
                     or loader['condition'] != 'WNT_X86_64'):
                 raise ValueError('source-recipe-input')
             common.append(_pin(loader, LOADER_PATH))
-            guarded = [row for row in guarded if row['path'] != LOADER_PATH]
+            zstd = lock['windowsZstdSourceLinks']
+            if (set(zstd) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+                    or zstd['condition'] != 'WNT_X86_64'
+                    or zstd['sha256'] != lock['zstdSourceLinks']['sha256']):
+                raise ValueError('source-recipe-input')
+            common.append(_pin(zstd, ZSTD_PATH))
+            guarded = [row for row in guarded if row['path'] not in (LOADER_PATH, ZSTD_PATH)]
         payloads = [('winacc-focus-order.patch', winacc['patch'])]
         dependencies = []
         if architecture == 'arm64':
@@ -205,6 +212,44 @@ def _install_firebird_loader_path(source, evidence, pin):
             'acceptanceEligible': False, 'guiVerified': False}
 
 
+def _zstd_bytes(original, pin):
+    if (set(pin) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+            or pin['path'] != ZSTD_PATH or pin['condition'] != 'WNT_X86_64'
+            or type(pin['size']) is not int or type(pin['afterSize']) is not int
+            or len(original) != pin['size'] or _sha(original) != pin['sha256']):
+        raise ValueError('source-recipe-input')
+    changed = original + (
+        b'\n# Preserve portable source-only CLI test links in this exact Windows x64 unpack target.\n'
+        b'# Keep all other source and native module targets under the original link policy.\n'
+        b'ifeq ($(OS)_$(CPUNAME),WNT_X86_64)\n'
+        b'$(call gb_UnpackedTarget_get_target,$(ZSTD_TARBALL)): export CYGWIN := winsymlinks:sys\n'
+        b'endif\n')
+    if len(changed) != pin['afterSize'] or _sha(changed) != pin['afterSha256']:
+        raise ValueError('source-recipe-input')
+    return changed
+
+
+def _install_zstd_source_links(source, evidence, pin):
+    target = source / ZSTD_PATH; original = _regular(target)
+    changed = _zstd_bytes(original, pin)
+    retained = {'original': evidence / 'original-x64-UnpackedTarball_zstd.mk',
+                'effective': evidence / 'effective-x64-UnpackedTarball_zstd.mk'}
+    if any(path.exists() or path.is_symlink() for path in retained.values()):
+        raise ValueError('source-recipe-input')
+    for name, raw in [('original', original), ('effective', changed)]:
+        with retained[name].open('xb') as stream: stream.write(raw)
+        if _regular(retained[name]) != raw: raise ValueError('source-recipe-output')
+    target.write_bytes(changed)
+    if _regular(target) != changed: raise ValueError('source-recipe-output')
+    return {'schemaVersion': 1, 'kind': 'windows-zstd-source-links-source-hook',
+            'path': ZSTD_PATH, 'condition': 'WNT_X86_64',
+            'beforeBytes': len(original), 'afterBytes': len(changed),
+            'beforeSha256': _sha(original), 'afterSha256': _sha(changed),
+            'evidence': {name: str(path) for name, path in retained.items()},
+            'nativeBuildVerified': False, 'fullEngineQualified': False,
+            'acceptanceEligible': False, 'guiVerified': False}
+
+
 def _validate_common(inputs, lock, payloads, architecture):
     bootstrap = lock['moduleBootstrap']
     original = inputs[COMMON_PATHS[0]]
@@ -222,6 +267,7 @@ def _validate_common(inputs, lock, payloads, architecture):
     if expected != payloads['winacc-focus-order.patch']: raise ValueError('source-recipe-input')
     if architecture == 'x64':
         _loader_bytes(inputs[LOADER_PATH], lock['windowsFirebirdLoaderPath'])
+        _zstd_bytes(inputs[ZSTD_PATH], lock['windowsZstdSourceLinks'])
 
 
 def apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict:
@@ -261,6 +307,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
         hooks = {'kind': 'native-windows-common-source-hooks', 'architecture': 'x64',
                  'moduleBootstrap': ARM.install_module_bootstrap(source, evidence),
                  'firebirdLoaderPath': _install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath']),
+                 'zstdSourceLinks': _install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks']),
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
     if architecture == 'arm64':
