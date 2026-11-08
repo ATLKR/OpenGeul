@@ -610,7 +610,8 @@ def test_qpc_reversal_on_same_thread_is_incomplete(mod):
     capture.disable();assert capture.snapshot()['captureIncomplete'] is True
 
 
-def test_compare_exchange_export_old_value_with_fake_windows_primitive(mod):
+@parameters('compiler_declaration', ('', '#ifdef __declspec\n#undef __declspec\n#endif\n#define __declspec(x) __attribute__((x))\n'))
+def test_compare_exchange_export_old_value_with_fake_windows_primitive(mod, compiler_declaration):
     import subprocess
     import tempfile
     candidate=BASE/'suite/e2e/ascii_message_observer.cpp'
@@ -618,11 +619,11 @@ def test_compare_exchange_export_old_value_with_fake_windows_primitive(mod):
     source=candidate.read_text()
     start=source.index('extern "C" __declspec(dllexport) unsigned int CompareExchangeWord(')
     function=source[start:source.index('\n}',start)+2]
-    preamble='''#include <cstdint>\n#include <cassert>\n#define __declspec(x)\nusing LONG=std::int32_t;\nLONG InterlockedCompareExchange(volatile LONG* p,LONG e,LONG c){LONG old=*p;if(old==c)*p=e;return old;}\n'''
+    preamble='''#include <cstdint>\n#include <cassert>\n#ifdef __declspec\n#undef __declspec\n#endif\n#define __declspec(x)\nusing LONG=std::int32_t;\nLONG InterlockedCompareExchange(volatile LONG* p,LONG e,LONG c){LONG old=*p;if(old==c)*p=e;return old;}\n'''
     main='''\nint main(){std::uint32_t x=5;assert(CompareExchangeWord(&x,9,5)==5&&x==9);assert(CompareExchangeWord(&x,11,5)==9&&x==9);assert(CompareExchangeWord(&x,0x80000009u,9)==9&&x==0x80000009u);assert(CompareExchangeWord(&x,3,0x80000009u)==0x80000009u&&x==3);}\n'''
     with tempfile.TemporaryDirectory() as folder:
         code=Path(folder)/'atomic.cpp';binary=Path(folder)/'atomic'
-        code.write_text(preamble+function+main)
+        code.write_text(compiler_declaration+preamble+function+main)
         compiled=subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',str(code),'-o',str(binary)],capture_output=True)
         assert compiled.returncode==0, 'Synthetic CAS C++ compilation failed'
         assert subprocess.run([str(binary)],capture_output=True).returncode==0

@@ -2,7 +2,9 @@
 #include <opengeul_writer_observer/wire.h>
 #include <cwchar>
 #include <cstdint>
+#ifndef __cdecl
 #define __cdecl
+#endif
 using BOOL=int;using DWORD=std::uint32_t;using LONG=std::int32_t;using HANDLE=void*;using HWND=void*;using HMODULE=void*;using LPCWSTR=wchar_t const*;
 struct LARGE_INTEGER{std::int64_t QuadPart;};struct FILETIME{DWORD dwLowDateTime,dwHighDateTime;};
 constexpr DWORD GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS=4,GET_MODULE_HANDLE_EX_FLAG_PIN=1,FILE_MAP_READ=4,FILE_MAP_WRITE=2,SYNCHRONIZE=0x100000,PROCESS_QUERY_LIMITED_INFORMATION=0x1000,WAIT_TIMEOUT=258;

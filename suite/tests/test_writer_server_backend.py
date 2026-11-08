@@ -87,6 +87,20 @@ class SourceInstallContract(unittest.TestCase):
             exercise_private_header(self,tree)
 
 
+class CompilerMacroContract(unittest.TestCase):
+    def test_fake_sdk_preserves_a_compiler_defined_calling_convention(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);include=root/'include/opengeul_writer_observer';include.mkdir(parents=True)
+            shutil.copyfile(BACKEND/'wire.h',include/'wire.h')
+            source=root/'macro.cpp'
+            source.write_text('#include <string_view>\n#ifdef __cdecl\n#undef __cdecl\n#endif\n'
+                '#define __cdecl __attribute__((used))\n#include <windows.h>\n'
+                '#define STRINGIFY_I(x) #x\n#define STRINGIFY(x) STRINGIFY_I(x)\n'
+                'static_assert(std::string_view(STRINGIFY(__cdecl))=="__attribute__((used))");\nint main(){}\n')
+            with compiled_fixture(self,source,includes=[BACKEND/'tests/fake_sdk',root/'include']) as image:
+                self.assertEqual(image.run().returncode,0)
+
+
 class NativeBoundaryContract(unittest.TestCase):
     def test_actual_native_session_rejects_prearm_pin_failure_and_dead_controller(self):
         require_compiler()
