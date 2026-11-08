@@ -91,7 +91,8 @@ class Native:
 
 
 def setup(mod,folder):
-    root=Path(folder)
+    root=Path(folder);root.mkdir(parents=True,exist_ok=True)
+    root=root.resolve(strict=True)
     for name in ('host','Windows/System32','temp','Office/program','user/AppData/Roaming','user/AppData/Local','source'):
         (root/name).mkdir(parents=True,exist_ok=True)
     python=root/'host/python.exe';python.write_bytes(b'SYNTHETIC_HOST')
@@ -112,6 +113,29 @@ def prepared(mod,folder):
         values.__getitem__,root/'results')
     probe.prepare()
     return probe,api,clock,OriginalWriterBudget.start(clock)
+
+
+def test_fixture_canonicalizes_existing_parent_traversal_before_real_host_validation(helper,mod):
+    with tempfile.TemporaryDirectory() as folder:
+        base=Path(folder).resolve(strict=True)
+        (base/'hop').mkdir();(base/'case').mkdir()
+        supplied=base/'hop'/'..'/'case'
+        assert supplied.is_dir() and not supplied.is_symlink()
+        assert supplied!=supplied.resolve(strict=True)
+        try:
+            root,runtime,values=setup(mod,supplied)
+        except mod.WatchdogError:
+            raise AssertionError('Fixture must supply canonical paths to the unchanged host validator') from None
+        clock=Clock();api=Native(clock)
+        probe=mod.PreparedMsaaHelper(runtime,api,(41,(51,61),71),Descriptor(51,61,71),REQUEST,
+            values.__getitem__,root/'results')
+        probe.prepare();budget=OriginalWriterBudget.start(clock)
+        proof=probe.invoke_original(budget,pause=lambda seconds:None)
+        assert proof.completed is True and probe.numeric_result()['msaaVerified'] is False
+        assert runtime.host_python==base/'case/host/python.exe'
+        with raises(mod.WatchdogError):
+            mod.HostRuntime.validated(supplied/'host/python.exe',runtime.helper_script,
+                runtime.windows,runtime.temp,runtime.office_program)
 
 
 def test_fresh_host_environment_never_uses_office_python_home(helper,mod):

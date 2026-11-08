@@ -107,7 +107,8 @@ class Native:
 
 
 def setup(folder):
-    root=Path(folder)
+    root=Path(folder);root.mkdir(parents=True,exist_ok=True)
+    root=root.resolve(strict=True)
     for name in ('payload/Office/program/python-core-3.13.15/bin','payload/Office/program/python-core-3.13.15/lib/site-packages',
                  'baseline','Windows/System32','host','source/e2e','user/AppData/Roaming','user/AppData/Local'):
         (root/name).mkdir(parents=True,exist_ok=True)
@@ -151,6 +152,20 @@ def setup(folder):
 class Composition(unittest.TestCase):
     def setUp(self): runner._PENDING_CASES.clear();runner._CASE_STARTED=False
     def tearDown(self): runner._PENDING_CASES.clear();runner._CASE_STARTED=False
+
+    def test_fixture_canonicalizes_existing_parent_traversal_before_real_runner_preparation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base=Path(folder).resolve(strict=True)
+            (base/'hop').mkdir();(base/'case').mkdir()
+            supplied=base/'hop'/'..'/'case'
+            self.assertTrue(supplied.is_dir())
+            self.assertFalse(supplied.is_symlink())
+            self.assertNotEqual(supplied,supplied.resolve(strict=True))
+            obj,inputs,c,reads=setup(supplied);result=obj.execute(inputs)
+            self.assertEqual(result['failureCode'],0)
+            self.assertIs(result['runtime']['armed'],True)
+            self.assertIs(result['msaa']['msaaVerified'],False)
+            self.assertEqual(inputs.work_root.parent,base/'case')
 
     def test_actual_capture_lifecycle_cohort_and_watchdog_negative_join(self):
         with tempfile.TemporaryDirectory() as folder:
