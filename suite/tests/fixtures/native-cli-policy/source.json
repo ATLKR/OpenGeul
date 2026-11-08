@@ -1,0 +1,23 @@
+{
+  "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
+  "files": [
+    {
+      "path": "solenv/gbuild/CliAssembly.mk",
+      "size": 7146,
+      "sha256": "da616d706d48e9fd274be62bd177fe25239a654850d6c68f2769135c13c8bab7",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/solenv/gbuild/CliAssembly.mk"
+    },
+    {
+      "path": "solenv/gbuild/CliNativeLibrary.mk",
+      "size": 3693,
+      "sha256": "22b98aa8dcef01fb3355a38a8de642289191385ab4f352dbd2ed3ff87c2d3e19",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/solenv/gbuild/CliNativeLibrary.mk"
+    },
+    {
+      "path": "cli_ure/CliNativeLibrary_cli_cppuhelper.mk",
+      "size": 1009,
+      "sha256": "7c776454bb55e541da3a937c8edf44166cb3d3837789b95c0359ec52c8df9bba",
+      "url": "https://github.com/LibreOffice/core/blob/bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1/cli_ure/CliNativeLibrary_cli_cppuhelper.mk"
+    }
+  ]
+}

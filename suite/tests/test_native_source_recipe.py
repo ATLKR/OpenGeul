@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder'],
-          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'winAccFocusOrder']}
+          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
 GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
@@ -117,7 +117,7 @@ class RecipePolicyTests(unittest.TestCase):
         arm = module._select_plan(lock, policy, 'arm64'); x64 = module._select_plan(lock, policy, 'x64')
         self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
-        self.assertEqual((18, 4), (len(x64['sources']), len(x64['armGuardedSources'])))
+        self.assertEqual((19, 4), (len(x64['sources']), len(x64['armGuardedSources'])))
         self.assertNotIn(pin['path'], [r['path'] for r in x64['armGuardedSources']])
         for field, value in [('path', '../escape'), ('condition', 'WNT_AARCH64'), ('size', True),
                              ('afterSize', 1.5), ('sha256', '0' * 64), ('afterSha256', 'invalid'), ('extra', False)]:
@@ -142,9 +142,9 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
         selected = module._select_plan(lock, policy, 'x64')
-        self.assertEqual((18, 4), (len(selected['sources']), len(selected['armGuardedSources'])))
+        self.assertEqual((19, 4), (len(selected['sources']), len(selected['armGuardedSources'])))
         self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks',
-                          'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'winAccFocusOrder'], selected['recipe']['hooks'])
+                          'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder'], selected['recipe']['hooks'])
         guarded = {r['path'] for r in selected['armGuardedSources']}
         self.assertTrue(guarded.isdisjoint(r['path'] for r in original))
         for mutate in [lambda d: d.update(extra=False), lambda d: d.update(condition='WNT_AARCH64'),
@@ -224,7 +224,7 @@ class RecipePolicyTests(unittest.TestCase):
             self.assertEqual(ORDERS[architecture], plan['recipe']['hooks'])
             self.assertEqual(RECIPES[architecture], plan['recipeId'])
             self.assertEqual(13 if architecture == 'arm64' else 4, len(plan['armGuardedSources']))
-            self.assertEqual(17 if architecture == 'arm64' else 18, len(plan['sources']))
+            self.assertEqual(17 if architecture == 'arm64' else 19, len(plan['sources']))
             self.assertIn('sourceDependencies', plan)
             self.assertEqual(1 if architecture == 'arm64' else 0, len(plan['sourceDependencies']))
 
@@ -290,7 +290,7 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
             hashlib.sha256(json.dumps(arm,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest())
         self.assertEqual((17,13),(len(arm['sources']),len(arm['armGuardedSources'])))
-        self.assertEqual((18,4),(len(x64['sources']),len(x64['armGuardedSources'])))
+        self.assertEqual((19,4),(len(x64['sources']),len(x64['armGuardedSources'])))
         self.assertEqual(GPG_PATH,x64['sources'][6]['path'])
         self.assertNotIn(GPG_PATH,[row['path'] for row in arm['sources']])
         for field,value in [('path','../escape'),('condition','WNT_AARCH64'),('size',True),
@@ -342,8 +342,17 @@ class ActualSourceRecipeTests(unittest.TestCase):
             target = self.source / name; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(raw)
 
     def install(self, architecture):
-        if architecture == 'x64':self.gpg_input()
+        if architecture == 'x64':
+            self.gpg_input(); self.policy_input()
         return self.module.apply_native_source(self.source, self.evidence, architecture=architecture)
+
+    def policy_input(self):
+        relative = 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'
+        target = self.source / relative
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / 'suite/tests/fixtures/native-cli-policy' / relative).read_bytes())
+        return target
 
     def gpg_input(self):
         target=self.source/GPG_PATH
@@ -822,12 +831,14 @@ class ActualSourceRecipeTests(unittest.TestCase):
         gpg = self.module._install_gpg_build_compiler_path
         atl = self.module._install_atl_native_paths
         meson = self.module._install_harfbuzz_native_meson_paths
+        cli_policy = self.module._install_cli_policy_platform
         def common(*args): events.append('moduleBootstrap'); return bootstrap(*args)
         def loader_path(*args): events.append('firebirdLoaderPath'); return loader(*args)
         def zstd_links(*args): events.append('zstdSourceLinks'); return zstd(*args)
         def gpg_path(*args): events.append('gpgBuildCompilerPath'); return gpg(*args)
         def atl_paths(*args): events.append('atlNativePaths'); return atl(*args)
         def meson_paths(*args): events.append('harfbuzzNativeMesonPaths'); return meson(*args)
+        def cli_platform(*args): events.append('cliPublisherPolicyPlatform'); return cli_policy(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         with patch.object(self.module.ARM, 'install', side_effect=AssertionError('x64 selected full ARM installer')), \
                 patch.object(self.module.ARM, 'install_module_bootstrap', side_effect=common), \
@@ -836,11 +847,12 @@ class ActualSourceRecipeTests(unittest.TestCase):
                 patch.object(self.module, '_install_gpg_build_compiler_path', side_effect=gpg_path), \
                 patch.object(self.module, '_install_atl_native_paths', side_effect=atl_paths), \
                 patch.object(self.module, '_install_harfbuzz_native_meson_paths', side_effect=meson_paths), \
+                patch.object(self.module, '_install_cli_policy_platform', side_effect=cli_platform), \
                 patch.object(self.module.WINACC, 'install', side_effect=focus):
             result = self.install('x64')
         self.proof(result, 'x64'); self.assertEqual(ORDERS['x64'], events)
         hooks = result['sourceHooks']
-        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths',
+        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform',
                           'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
         self.assertEqual('native-windows-common-source-hooks', hooks['kind']); self.assertEqual('x64', hooks['architecture'])
         self.assertIs(hooks['nativeBuildVerified'], False); self.assertIs(hooks['basePersistenceVerified'], False)
@@ -864,11 +876,15 @@ class ActualSourceRecipeTests(unittest.TestCase):
         result = self.install('x64'); self.proof(result, 'x64')
         changed = {name for name, raw in self.inputs.items() if (self.source / name).read_bytes() != raw}
         if (self.source/GPG_PATH).read_bytes()!=GPG_FIXTURE.read_bytes():changed.add(GPG_PATH)
+        policy_path = 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'
+        if (self.source / policy_path).read_bytes() != (ROOT / 'suite/tests/fixtures/native-cli-policy' / policy_path).read_bytes():
+            changed.add(policy_path)
         self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path'],
                           self.lock['windowsFirebirdLoaderPath']['path'],
                           self.lock['windowsZstdSourceLinks']['path'], GPG_PATH, self.lock['windowsHarfbuzzNativeMesonPaths']['path'],
-                          *(pin['path'] for pin in self.lock['windowsAtlNativePaths']['recipes'])}, changed)
-        self.assertEqual(set(self.inputs)|{GPG_PATH}, {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
+                          *(pin['path'] for pin in self.lock['windowsAtlNativePaths']['recipes']),
+                          'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'}, changed)
+        self.assertEqual(set(self.inputs)|{GPG_PATH, 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'}, {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
 
     def test_every_input_drift_rejects_before_any_recipe_write(self):
         for name, raw in self.inputs.items():
@@ -928,7 +944,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             self.assertEqual(1, loader.call_count)
 
     def test_cli_and_repeat_application_fail_closed(self):
-        self.gpg_input()
+        self.gpg_input(); self.policy_input()
         command = [sys.executable, str(ENGINE / 'apply_native_source.py'), '--libreoffice-source', str(self.source),
                    '--evidence-directory', str(self.evidence), '--architecture', 'x64']
         result = subprocess.run(command, capture_output=True, timeout=20)

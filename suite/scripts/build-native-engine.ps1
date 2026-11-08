@@ -2122,9 +2122,45 @@ function Assert-NativeX64AtlSourceBinding($Proof,$Descriptor,[string]$EvidenceDi
     }
 }
 
+function Assert-NativeX64CliPolicySourceBinding($Proof,$Pin,[string]$EvidenceDirectory) {
+    Assert-NativeAtlKeys $Pin @('path','size','sha256','afterSize','afterSha256','condition')
+    $fields=@('schemaVersion','kind','path','condition','beforeBytes','afterBytes','beforeSha256','afterSha256','evidence',
+        'nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')
+    Assert-NativeAtlKeys $Proof $fields
+    foreach($name in @('path','sha256','afterSha256','condition')) {
+        if($Pin.$name -isnot [string]) {throw 'Source CLI policy descriptor requires scalar strings.'}
+    }
+    if(($Pin.size -isnot [int] -and $Pin.size -isnot [long]) -or ($Pin.afterSize -isnot [int] -and $Pin.afterSize -isnot [long]) -or
+       $Pin.path -cne 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk' -or $Pin.condition -cne 'WNT_X86_64' -or
+       $Pin.size -ne 1009 -or $Pin.afterSize -ne 1119 -or
+       $Pin.sha256 -cne '7c776454bb55e541da3a937c8edf44166cb3d3837789b95c0359ec52c8df9bba' -or
+       $Pin.afterSha256 -cne '6519e9014c32f8323e3501f49d189e6da428b3d3b1f85d7ad96471aedcfd051f') {throw 'Source CLI policy pinned descriptor differs.'}
+    foreach($name in @('kind','path','condition','beforeSha256','afterSha256')) {
+        if($Proof.$name -isnot [string]) {throw 'Source CLI policy identity requires scalar strings.'}
+    }
+    if(($Proof.schemaVersion -isnot [int] -and $Proof.schemaVersion -isnot [long]) -or $Proof.schemaVersion -ne 1 -or
+       $Proof.kind -cne 'windows-x64-cli-publisher-policy-platform-source-hook' -or $Proof.path -cne $Pin.path -or
+       $Proof.condition -cne $Pin.condition -or ($Proof.beforeBytes -isnot [int] -and $Proof.beforeBytes -isnot [long]) -or
+       ($Proof.afterBytes -isnot [int] -and $Proof.afterBytes -isnot [long]) -or $Proof.beforeBytes -ne $Pin.size -or
+       $Proof.afterBytes -ne $Pin.afterSize -or $Proof.beforeSha256 -cne $Pin.sha256 -or $Proof.afterSha256 -cne $Pin.afterSha256) {throw 'Source CLI policy proof differs.'}
+    foreach($name in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+        if($Proof.$name -isnot [bool] -or $Proof.$name) {throw 'Source CLI policy hook cannot qualify an engine.'}
+    }
+    Assert-NativeAtlKeys $Proof.evidence @('original','effective')
+    $directory=[IO.Path]::GetFullPath($EvidenceDirectory);Assert-UnlinkedPath $directory
+    foreach($phase in @('original','effective')) {
+        $path=$Proof.evidence.$phase
+        if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or $path -cne [IO.Path]::GetFullPath($path) -or
+           [IO.Path]::GetDirectoryName($path) -cne $directory -or
+           [IO.Path]::GetFileName($path) -cne ($phase+'-x64-CliNativeLibrary_cli_cppuhelper.mk')) {throw 'Source CLI policy evidence path differs.'}
+        if($phase -ceq 'original') {Confirm-FileIdentity $path $Pin.size SHA256 $Pin.sha256|Out-Null}
+        else {Confirm-FileIdentity $path $Pin.afterSize SHA256 $Pin.afterSha256|Out-Null}
+    }
+}
+
 function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','winAccFocusOrder')}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','winAccFocusOrder')}
     $guardCount=if($Architecture -ceq 'arm64'){13}else{4}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
@@ -2137,7 +2173,7 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
         if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
         $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
         $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe)
-        if($proof.recipeSha256 -cne 'cc8aa7c7aed29a5a8708e2aa860b7573a176419e71c05893e60045e8c27a55c6') {throw 'x64 canonical source recipe differs.'}
+        if($proof.recipeSha256 -cne 'e2ee50135f765384f994193419b3aa60b41812b09d9eeec491e4fa1201a0b036') {throw 'x64 canonical source recipe differs.'}
         for($i=0;$i -lt 4;$i++) {
             $row=$proof.armGuardedSources[$i]
             if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
@@ -2254,6 +2290,7 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
             if($phase -ceq 'original') {Confirm-FileIdentity $path $pin.size SHA256 $pin.sha256|Out-Null}
             else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
         }
+        Assert-NativeX64CliPolicySourceBinding $Receipt.sourceHooks.cliPublisherPolicyPlatform $manifest.windowsCliPublisherPolicyPlatform $directory
     }
 }
 
@@ -2587,6 +2624,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                     Confirm-FileIdentity (Join-Path $source $atlPin.path) $atlPin.afterSize SHA256 $atlPin.afterSha256|Out-Null
                 }
                 Confirm-FileIdentity (Join-Path $source $manifest.windowsHarfbuzzNativeMesonPaths.path) $manifest.windowsHarfbuzzNativeMesonPaths.afterSize SHA256 $manifest.windowsHarfbuzzNativeMesonPaths.afterSha256|Out-Null
+                Confirm-FileIdentity (Join-Path $source $manifest.windowsCliPublisherPolicyPlatform.path) $manifest.windowsCliPublisherPolicyPlatform.afterSize SHA256 $manifest.windowsCliPublisherPolicyPlatform.afterSha256|Out-Null
             }
             $receipt.stage='actual-native-uno-base-persistence';Assert-NativeBuildTimeRemaining
             $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe $Architecture

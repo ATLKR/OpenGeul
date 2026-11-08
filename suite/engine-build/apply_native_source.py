@@ -18,13 +18,14 @@ HERE = Path(__file__).resolve().parent
 CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'winAccFocusOrder'])}
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder'])}
 LOADER_PATH = 'external/firebird/ExternalProject_firebird.mk'
 ZSTD_PATH = 'external/zstd/UnpackedTarball_zstd.mk'
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
 GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
 HARFBUZZ_PATH = 'external/harfbuzz/ExternalProject_harfbuzz.mk'
 HARFBUZZ_CONDITION = 'WNT_X86_64_MSC_WNT && MAKE_HOST=%-cygwin'
+CLI_POLICY_PATH = 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'
 ARM_PATHS = ('configure.ac', 'external/firebird/UnpackedTarball_firebird.mk',
              'external/firebird/ExternalProject_firebird.mk', 'external/zstd/UnpackedTarball_zstd.mk',
              'external/mdds/UnpackedTarball_mdds.mk', 'external/python3/ExternalProject_python3.mk',
@@ -169,6 +170,11 @@ def _select_plan(lock, policy_raw, architecture):
                            for key in ('path', 'size', 'sha256'))):
                 raise ValueError('source-recipe-input')
             common.append(_pin(harfbuzz, HARFBUZZ_PATH))
+            cli_policy = lock['windowsCliPublisherPolicyPlatform']
+            if (set(cli_policy) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+                    or cli_policy['condition'] != 'WNT_X86_64'):
+                raise ValueError('source-recipe-input')
+            common.append(_pin(cli_policy, CLI_POLICY_PATH))
             guarded = [row for row in guarded if row['path'] not in (LOADER_PATH, ZSTD_PATH, *ATL_PATHS, HARFBUZZ_PATH)]
         payloads = [('winacc-focus-order.patch', winacc['patch'])]
         dependencies = []
@@ -194,6 +200,41 @@ def _select_plan(lock, policy_raw, architecture):
                 'sourceDependencies': dependencies, 'payloads': selected_payloads}
     except (KeyError, TypeError, IndexError, AttributeError):
         raise ValueError('source-recipe-input') from None
+
+
+def _cli_policy_bytes(original, pin):
+    old = b'$(eval $(call gb_CliNativeLibrary_CliNativeLibrary,cli_cppuhelper))\n'
+    new = old + (b'\nifeq ($(OS)_$(CPUNAME),WNT_X86_64)\n'
+                 b'$(eval $(call gb_CliNativeLibrary_set_platform,cli_cppuhelper,x64))\nendif\n')
+    if (set(pin) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+            or pin['path'] != CLI_POLICY_PATH or pin['condition'] != 'WNT_X86_64'
+            or type(pin['size']) is not int or type(pin['afterSize']) is not int
+            or len(original) != pin['size'] or _sha(original) != pin['sha256'] or original.count(old) != 1):
+        raise ValueError('source-recipe-input')
+    changed = original.replace(old, new, 1)
+    if len(changed) != pin['afterSize'] or _sha(changed) != pin['afterSha256']:
+        raise ValueError('source-recipe-input')
+    return changed
+
+
+def _install_cli_policy_platform(source, evidence, pin):
+    target = source / CLI_POLICY_PATH; original = _regular(target)
+    changed = _cli_policy_bytes(original, pin)
+    retained = {name: evidence / (name + '-x64-CliNativeLibrary_cli_cppuhelper.mk')
+                for name in ('original', 'effective')}
+    if any(path.exists() or path.is_symlink() for path in retained.values()):
+        raise ValueError('source-recipe-input')
+    for name, raw in [('original', original), ('effective', changed)]:
+        with retained[name].open('xb') as stream: stream.write(raw)
+    target.write_bytes(changed)
+    if _regular(target) != changed: raise ValueError('source-recipe-output')
+    return {'schemaVersion': 1, 'kind': 'windows-x64-cli-publisher-policy-platform-source-hook',
+            'path': CLI_POLICY_PATH, 'condition': 'WNT_X86_64',
+            'beforeBytes': len(original), 'afterBytes': len(changed),
+            'beforeSha256': _sha(original), 'afterSha256': _sha(changed),
+            'evidence': {name: str(path) for name, path in retained.items()},
+            'nativeBuildVerified': False, 'fullEngineQualified': False,
+            'acceptanceEligible': False, 'guiVerified': False}
 
 
 def _loader_bytes(original, pin):
@@ -464,6 +505,7 @@ def _validate_common(inputs, lock, payloads, architecture):
         _gpg_build_compiler_bytes(inputs[GPG_PATH], lock['windowsGpgBuildCompilerPath'])
         for pin in _atl_pins(lock): _atl_bytes(inputs[pin['path']], pin)
         _harfbuzz_bytes(inputs[HARFBUZZ_PATH], lock['windowsHarfbuzzNativeMesonPaths'])
+        _cli_policy_bytes(inputs[CLI_POLICY_PATH], lock['windowsCliPublisherPolicyPlatform'])
 
 
 def apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict:
@@ -507,6 +549,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
                  'gpgBuildCompilerPath': _install_gpg_build_compiler_path(source, evidence, lock['windowsGpgBuildCompilerPath']),
                  'atlNativePaths': _install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths']),
                  'harfbuzzNativeMesonPaths': _install_harfbuzz_native_meson_paths(source, evidence, lock['windowsHarfbuzzNativeMesonPaths']),
+                 'cliPublisherPolicyPlatform': _install_cli_policy_platform(source, evidence, lock['windowsCliPublisherPolicyPlatform']),
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
     if architecture == 'arm64':

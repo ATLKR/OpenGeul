@@ -31,7 +31,8 @@ class NativeEngineBuildTests(unittest.TestCase):
         for name, fixture in [('external/firebird/ExternalProject_firebird.mk', 'native-icu-path/ExternalProject_firebird.mk'),
                               ('external/zstd/UnpackedTarball_zstd.mk', 'native-zstd-unpack/UnpackedTarball_zstd.mk'),
                               ('solenv/gbuild/platform/com_MSC_defs.mk', 'native-gpg-build-compiler/com_MSC_defs.mk'),
-                              ('external/harfbuzz/ExternalProject_harfbuzz.mk', 'native-meson-path/ExternalProject_harfbuzz.mk')]:
+                              ('external/harfbuzz/ExternalProject_harfbuzz.mk', 'native-meson-path/ExternalProject_harfbuzz.mk'),
+                              ('cli_ure/CliNativeLibrary_cli_cppuhelper.mk', 'native-cli-policy/cli_ure/CliNativeLibrary_cli_cppuhelper.mk')]:
             target = source / name; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((SOURCE.parents[1] / 'tests/fixtures' / fixture).read_bytes())
         loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
@@ -45,11 +46,12 @@ class NativeEngineBuildTests(unittest.TestCase):
             target.write_bytes((SOURCE.parents[1]/'tests/fixtures'/fixture).read_bytes())
         atl = module._install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths'])
         harfbuzz = module._install_harfbuzz_native_meson_paths(source, evidence, lock['windowsHarfbuzzNativeMesonPaths'])
+        cli_policy = module._install_cli_policy_platform(source, evidence, lock['windowsCliPublisherPolicyPlatform'])
         good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
                     nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
                     sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
                                      firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg, atlNativePaths=atl,
-                                     harfbuzzNativeMesonPaths=harfbuzz),
+                                     harfbuzzNativeMesonPaths=harfbuzz, cliPublisherPolicyPlatform=cli_policy),
                     sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
                         recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
                         policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
@@ -94,6 +96,9 @@ class NativeEngineBuildTests(unittest.TestCase):
 
     def test_x64_harfbuzz_binding_rejects_malformed_proof_or_missing_evidence(self):
         self._assert_x64_source_hook_binding('harfbuzzNativeMesonPaths')
+
+    def test_x64_cli_policy_binding_rejects_malformed_proof_or_missing_evidence(self):
+        self._assert_x64_source_hook_binding('cliPublisherPolicyPlatform')
 
     def test_x64_harfbuzz_binding_requires_canonical_loader_parent_and_exact_plan(self):
         import copy

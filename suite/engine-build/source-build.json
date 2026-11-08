@@ -500,6 +500,7 @@
         "gpgBuildCompilerPath",
         "atlNativePaths",
         "harfbuzzNativeMesonPaths",
+        "cliPublisherPolicyPlatform",
         "winAccFocusOrder"
       ]
     }
@@ -582,5 +583,13 @@
         "afterSha256": "56894ac63dea26ace6629fbab6b7dcf04e640447b4a173045da2b7761fd265cb"
       }
     ]
+  },
+  "windowsCliPublisherPolicyPlatform": {
+    "afterSha256": "6519e9014c32f8323e3501f49d189e6da428b3d3b1f85d7ad96471aedcfd051f",
+    "afterSize": 1119,
+    "condition": "WNT_X86_64",
+    "path": "cli_ure/CliNativeLibrary_cli_cppuhelper.mk",
+    "sha256": "7c776454bb55e541da3a937c8edf44166cb3d3837789b95c0359ec52c8df9bba",
+    "size": 1009
   }
 }
