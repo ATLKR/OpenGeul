@@ -9,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from suite.tests.workflow_scope import normal_suite_source
 
 from suite.tests.test_portable_package_workflow import workflow_test_environment
 
@@ -49,7 +50,9 @@ BASE_NAMES = (
 
 
 def steps(path):
-    return re.split(r'^    - name: ', path.read_text(encoding='utf-8'), flags=re.M)[1:]
+    source=path.read_text(encoding='utf-8')
+    if path==MATRIX:source=normal_suite_source(source)
+    return re.split(r'^    - name: ', source, flags=re.M)[1:]
 
 
 def field(step, name):
@@ -108,7 +111,7 @@ class HomeWorkflowChecks:
 
     def check_matrix(self):
         self.check_inputs_and_route(MATRIX)
-        source = MATRIX.read_text(encoding='utf-8')
+        source = normal_suite_source(MATRIX.read_text(encoding='utf-8'))
         self.assertIn('- architecture: x64\n          runner: windows-2025', source)
         self.assertIn('- architecture: arm64\n          runner: windows-11-arm', source)
         original = [step.splitlines()[0] for step in steps(MATRIX)

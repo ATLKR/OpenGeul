@@ -1997,7 +1997,12 @@ class NativeMenuProbe(NativeControlProbe):
                 except BaseException:entry=None
                 note(diagnostic,phaseCode=2)
                 if comparison:
-                    row=_getter_call_site(self,9,self._chrome,cursor);result.append(row);returned(entry,row)
+                    try:row=_getter_call_site(self,9,self._chrome,cursor)
+                    except BaseException as primary:
+                        try:self._observe_failed_focus_cursor(cursor,depth,primary)
+                        except BaseException:pass
+                        raise
+                    result.append(row);returned(entry,row)
                     note(diagnostic,phaseCode=3)
                     file_same=self._same(cursor,self.file_element);bar_same=self._same(cursor,self.menu_bar_element)
                     assert not (file_same and bar_same), 'Focused native menu roles alias'
@@ -2025,6 +2030,83 @@ class NativeMenuProbe(NativeControlProbe):
         except BaseException:
             note(diagnostic,failed=1);note(entry,failed=1)
             raise
+    def _observe_failed_focus_cursor(self,cursor,depth,primary):
+        """Separate numeric facts after the unchanged retained-role rejection.
+
+        No identity retry, fresh element, role admission, window lookup or input.
+        Existing per-call provider timeouts/checks use the same action deadline;
+        they are not a claim that a synchronous COM call can be preempted.
+        """
+        value=None;saved=None;missing=object()
+        try:
+            if (type(primary) is not AssertionError or len(primary.args)!=1 or type(primary.args[0]) is not str
+                or primary.args[0]!='Native menu identity is unknown or ambiguous'
+                or getattr(self,'_native_identity_diagnostic',0)!=0 or type(depth) is not int or not 0<=depth<32):return
+            runtime=self.interop.get('lastRuntimeObservation');rows=self.interop.get('lastRoleComparisons')
+            refs=getattr(self,'_identity_refs',None)
+            if (type(runtime) is not dict or runtime.get('callSucceeded') is not True or runtime.get('empty') is not True
+                or runtime.get('length')!=0 or runtime.get('signed32Valid') is not True
+                or runtime.get('versionObserved') is not True or type(runtime.get('declaration')) is not dict
+                or runtime['declaration'].get('verified') is not True or type(refs) is not dict
+                or not 4<=len(refs)<=len(IDENTITY_ROLES) or type(rows) is not list or len(rows)!=len(refs)
+                or any(type(row) is not dict or row.get('areSame') is not False
+                    or type(row.get('roleCode')) is not int or not 1<=row['roleCode']<=len(IDENTITY_ROLES) for row in rows)):return
+            value=dict(schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,phaseCode=1,statusCode=0,
+                depth=depth,failed=0,complete=0,observedMask=0,ownerMatchesOriginalEngine=None,
+                kindCode=None,visible=None,enabled=None,remainingMicrosAtEntry=None)
+            self.interop['focusedBoundary']=value
+            scope=getattr(self,'_identity_scope',None)
+            expected=scope.get('binding',{}).get('officePid') if type(scope) is dict else None
+            upper=scope.get('deadline') if type(scope) is dict else None
+            deadline=self.deadline
+            if (type(expected) is not int or not 0<expected<2**32 or type(deadline) not in (int,float)
+                or type(upper) not in (int,float) or not math.isfinite(deadline) or not math.isfinite(upper)
+                or deadline>upper or getattr(self,'_provider_closed',False)
+                or getattr(self,'_uia',None) is None or getattr(self,'provider_client',None) is None
+                or self._uia.iuia is not self.provider_client):value['statusCode']=4;return
+            def budget():
+                if self.deadline!=deadline:value['statusCode']=2;return False
+                now=self.clock()
+                remaining=deadline-now if type(now) in (int,float) and math.isfinite(now) else 0
+                if not 0<remaining<=5 or not 1<=int((remaining*1000-1)//4)<=1250:
+                    value['statusCode']=2;return False
+                if value['remainingMicrosAtEntry'] is None:value['remainingMicrosAtEntry']=int(remaining*1000000)
+                if self._provider_pending():value['statusCode']=3;return False
+                return True
+            if not budget():return
+            # _call already isolates lastCall and exception recording when this
+            # separate sink is present. Restore exact original context/flags.
+            saved=[(name,getattr(self,name,missing)) for name in
+                ('_diagnostic_sink','_observed_call','_last_call_exception','provider_timeout_verified')]
+            self._diagnostic_sink=value;self._observed_call=None
+            value['phaseCode']=2
+            pid=self._uia_call(8,lambda:cursor.CurrentProcessId)
+            if type(pid) is not int or not 0<pid<2**32:value.update(statusCode=6,failed=1);return
+            value.update(ownerMatchesOriginalEngine=pid==expected,observedMask=1)
+            if pid!=expected:value['statusCode']=5;return
+            if not budget():return
+            value['phaseCode']=3
+            kind=self._uia_call(9,lambda:cursor.CurrentControlType)
+            if type(kind) is not int or not 50000<=kind<=50040:value.update(statusCode=6,failed=1);return
+            value.update(kindCode=kind,observedMask=3)
+            for phase,name,key,bit in ((4,'CurrentIsOffscreen','visible',4),(5,'CurrentIsEnabled','enabled',8)):
+                if not budget():return
+                value['phaseCode']=phase
+                raw=self._uia_call(11 if phase==4 else 12,lambda:getattr(cursor,name))
+                if type(raw) is not bool and not (type(raw) is int and raw in (0,1)):
+                    value.update(statusCode=6,failed=1);return
+                value[key]=int(not raw) if key=='visible' else int(raw)
+                value['observedMask']|=bit
+            if budget():value.update(phaseCode=6,statusCode=1,complete=1)
+        except BaseException:
+            if value is not None:value.update(statusCode=7,failed=1)
+        finally:
+            if saved is not None:
+                for name,old in saved:
+                    try:
+                        if old is missing:self.__dict__.pop(name,None)
+                        else:setattr(self,name,old)
+                    except BaseException:pass
     def _owners(self,hwnd,binding):
         rows=[]
         while hwnd:

@@ -455,3 +455,13 @@ extern "C" __declspec(dllexport) std::uint64_t ReadQuad(const std::uint64_t* wor
     return static_cast<std::uint64_t>(InterlockedCompareExchange64(
         reinterpret_cast<volatile LONG64*>(const_cast<std::uint64_t*>(word)),0,0));
 }
+
+// Generic numeric-only IPC CAS. No hook installation, message capture or
+// legacy ASCII protocol change. Returns the prior word, as Windows Interlocked.
+extern "C" __declspec(dllexport) unsigned int CompareExchangeWord(
+    std::uint32_t* word,unsigned int exchange,unsigned int comparand) {
+    static_assert(sizeof(LONG)==sizeof(std::uint32_t));
+    return static_cast<unsigned int>(InterlockedCompareExchange(
+        reinterpret_cast<volatile LONG*>(word),
+        static_cast<LONG>(exchange),static_cast<LONG>(comparand)));
+}

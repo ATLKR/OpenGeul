@@ -4,7 +4,21 @@ name: OpenGeul Office Suite 개발 검증
     branches:
     - work/opengeul-office-suite
     - work/opengeul-office-arm64
-  workflow_dispatch: null
+  workflow_dispatch:
+    inputs:
+      writer_server_observer:
+        description: 'Run only the owned Writer numeric diagnostic on its dedicated branch'
+        type: boolean
+        default: false
+        required: false
+      writer_observer_suite_head:
+        description: 'Exact reviewed Suite commit on the Writer branch; no default pin'
+        type: string
+        required: false
+      writer_observer_phase_seconds:
+        description: 'Explicit finite fresh-child total bound, canonical integer 6..1200; adequacy unverified'
+        type: string
+        required: false
 permissions:
   contents: read
   actions: read
@@ -20,7 +34,7 @@ env:
   DOTNET_NOLOGO: '1'
 jobs:
   windows-suite:
-    if: github.event.repository.private == false
+    if: github.event.repository.private == false && github.ref != 'refs/heads/work/opengeul-office-native-writer-observer'
     name: windows-suite (${{ matrix.architecture }})
     strategy:
       fail-fast: false
@@ -1211,3 +1225,124 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 0
+
+  writer-server-observer:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.writer_server_observer == true &&
+      github.ref == 'refs/heads/work/opengeul-office-native-writer-observer' &&
+      github.repository == 'ATLKR/OpenGeul' && github.repository_owner == 'ATLKR' &&
+      github.event.repository.private == false &&
+      github.actor == 'ATLKR' && github.actor_id == '65988341' &&
+      github.triggering_actor == 'ATLKR' && github.run_attempt == 1
+    name: Writer owned numeric diagnostic (arm64; never acceptance)
+    runs-on: windows-11-arm
+    timeout-minutes: 150
+    env:
+      WRITER_OBSERVER_ENABLED: ${{ inputs.writer_server_observer }}
+      WRITER_OBSERVER_SUITE_HEAD: ${{ inputs.writer_observer_suite_head }}
+      WRITER_OBSERVER_PHASE_SECONDS: ${{ inputs.writer_observer_phase_seconds }}
+    steps:
+    - name: Preserve exact checkout bytes
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+        ref: ${{ github.sha }}
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: arm64
+    - name: Bind exact public owner manual context and current source bytes
+      id: writer-context
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path .work/writer-observer-public -ErrorAction Stop | Out-Null
+        python -B suite/scripts/writer-server-observer-workflow.py admit --output .work/writer-observer-public/context.numeric.json
+        if ($LASTEXITCODE -ne 0) { throw 'Writer manual context/source admission failed.' }
+        if (-not (Test-Path -LiteralPath suite/config/writer-server-observer.arm64.lock.json -PathType Leaf)) {
+          throw 'Root must supply the reviewed authenticated Writer external lock; no placeholder is admitted.'
+        }
+    - name: Acquire existing qualified normal ARM64 engine baseline
+      id: normal-engine
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath suite/config/runtime.arm64.lock.json -Output .work/writer-normal-engine
+    - name: Build unchanged normal Suite baseline first
+      id: normal-build
+      shell: pwsh
+      run: |
+        ./suite/scripts/build-suite.ps1 -Architecture arm64 -OutputDirectory .work/writer-normal-baseline -EngineArchive .work/writer-normal-engine/OpenGeul-Office-engine-arm64.zip -EngineReceipt .work/writer-normal-engine/source-build-receipt.json
+    - name: Verify normal baseline through its original entry point
+      id: normal-verify
+      shell: pwsh
+      run: |
+        python -B suite/scripts/verify-suite.py .work/writer-normal-baseline
+        if ($LASTEXITCODE -ne 0) { throw 'Normal Suite baseline is not verified.' }
+    - name: Authenticate the separately pinned Writer outer artifact
+      id: writer-fetch
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-writer-server-observer.ps1 -DiagnosticLockPath suite/config/writer-server-observer.arm64.lock.json -Output .work/writer-engine-input
+    - name: Stage a new diagnostic copy without changing the normal baseline
+      id: writer-stage
+      timeout-minutes: 20
+      shell: pwsh
+      run: |
+        python -B suite/scripts/stage-writer-server-observer.py --baseline .work/writer-normal-baseline --artifact .work/writer-engine-input/github-artifact.zip --archive .work/writer-engine-input/OpenGeul-Office-engine-arm64-writer-server-observer.zip --receipt .work/writer-engine-input/writer-server-observer-source-build-receipt.json --source-lock suite/engine-build/writer-server-observer-diagnostic/source-lock.json --diagnostic-lock suite/config/writer-server-observer.arm64.lock.json --output .work/writer-diagnostic --expected-suite-source-commit $env:GITHUB_SHA
+        if ($LASTEXITCODE -ne 0) { throw 'Writer diagnostic staging rejected its authenticated inputs.' }
+    - name: Prepare the atomic library inside a fresh bounded Python child
+      id: atomic-prepare
+      timeout-minutes: 2
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path .work/writer-observer-private/temp -ErrorAction Stop | Out-Null
+        $hostPython = (Get-Command python -ErrorAction Stop).Source
+        $private = [IO.Path]::GetFullPath('.work/writer-observer-private')
+        $program = [IO.Path]::GetFullPath('.work/writer-diagnostic/Office/program')
+        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds 45 --receipt .work/writer-observer-public/compiler-phase.numeric.json -- atomic --work "$private/atomic" --descriptor "$private/atomic-descriptor.json"
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh compiler preparation is incomplete; original logs stay private.' }
+    - name: Observe one generated blank Writer in a fresh owned child
+      id: writer-observe
+      timeout-minutes: 22
+      shell: pwsh
+      run: |
+        $hostPython = (Get-Command python -ErrorAction Stop).Source
+        $private = [IO.Path]::GetFullPath('.work/writer-observer-private')
+        $program = [IO.Path]::GetFullPath('.work/writer-diagnostic/Office/program')
+        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds $env:WRITER_OBSERVER_PHASE_SECONDS --receipt .work/writer-observer-public/observe-phase.numeric.json -- observe --output ([IO.Path]::GetFullPath('.work/writer-diagnostic')) --baseline ([IO.Path]::GetFullPath('.work/writer-normal-baseline')) --artifact ([IO.Path]::GetFullPath('.work/writer-engine-input/github-artifact.zip')) --diagnostic-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer.arm64.lock.json')) --source-lock ([IO.Path]::GetFullPath('suite/engine-build/writer-server-observer-diagnostic/source-lock.json')) --expected-suite-source-commit $env:GITHUB_SHA --prepared-library "$private/atomic-descriptor.json" --host-python $hostPython --helper-script ([IO.Path]::GetFullPath('suite/e2e/writer_server_observer_msaa_helper.py')) --windows $env:SystemRoot --work-root "$private/owned-blank-writer" --report ([IO.Path]::GetFullPath('.work/writer-observer-public/report.numeric.json'))
+        $result = $LASTEXITCODE
+        exit $result
+    - name: Validate the exact numeric report before upload
+      id: writer-report
+      if: always() && steps.writer-observe.outcome != 'skipped'
+      shell: pwsh
+      run: |
+        python -B suite/scripts/writer-server-observer-workflow.py validate-report --input .work/writer-observer-public/report.numeric.json
+        if ($LASTEXITCODE -ne 0) { throw 'Writer report is absent or outside the numeric allowlist.' }
+    - name: Retain only explicit closed numeric observations
+      id: writer-upload
+      if: always() && steps.writer-context.outcome == 'success' && steps.writer-report.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-writer-server-observer-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/writer-observer-public/context.numeric.json
+          .work/writer-observer-public/report.numeric.json
+          .work/writer-observer-public/compiler-phase.numeric.json
+          .work/writer-observer-public/observe-phase.numeric.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Writer observation cannot qualify or deliver the Suite
+      id: writer-terminal
+      if: always()
+      shell: pwsh
+      run: |
+        throw 'Writer observation is diagnostic only: full acceptance and product delivery are prohibited.'

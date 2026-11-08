@@ -2,7 +2,7 @@
 import re
 import unittest
 
-from suite.tests.test_calc_matrix_workflow import WORKFLOW, workflow_steps, field, run_code
+from suite.tests.test_calc_matrix_workflow import WORKFLOW, workflow_source, workflow_steps, field, run_code
 from suite.tests.test_com_wait_workflow import evaluate, step
 from suite.tests.test_navigation_diagnostic_workflow import condition
 from suite.tests.test_notification_workflow import COMPARTMENT_STEPS, sequenced_prefix_steps
@@ -11,7 +11,7 @@ from suite.tests.test_notification_workflow import COMPARTMENT_STEPS, sequenced_
 class FullAcceptanceRestoreTests(unittest.TestCase):
     def setUp(self):
         self.steps = workflow_steps()
-        source = WORKFLOW.read_text(encoding='utf-8')
+        source = workflow_source()
         self.mode = re.search(r'^  OPENGEUL_SUITE_RUN_MODE: (\S+)$', source, re.M).group(1)
         self.architectures = re.findall(r'^        - architecture: (\S+)$', source, re.M)
         self.outcomes = {field(s, 'id'): 'success' for s in self.steps if field(s, 'id')}

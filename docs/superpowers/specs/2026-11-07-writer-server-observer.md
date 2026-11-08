@@ -24,12 +24,22 @@ sink ABI. The private sink ABI is version 2; the numeric shared-memory IPC is
 version 1. Their versions are independent. Source inputs, patch results and
 header payloads are authenticated before applying the patch.
 
+The authenticated normal WinAcc focus-order patch must be applied before the
+Writer patch. Its effective manager bytes are the Writer lock's input; accepting
+the pristine manager or weakening the Writer before-hash is not a substitute.
+
 The engine root and `program` directory carry Writer diagnostic markers that
 bind the source, lock, wire schema and both DLL hashes. A staged Suite also has
 a root marker. Normal payload verification and ordinary GUI test entry points
 reject this family. No diagnostic receipt can set `fullEngineQualified`,
 `acceptanceEligible` or `guiVerified` to true. Staging preserves the verified
 normal baseline and its HWP, shell and worker bytes.
+
+Admission authenticates the original outer artifact and derives its inner
+receipt and engine archive from those bytes. Revalidation independently
+reconstructs the complete branded Office inventory from that archive and the
+same normal baseline manifest. A self-resealed staged inventory cannot replace
+this comparison.
 
 ## Source and lifetime boundary
 
@@ -59,8 +69,18 @@ unchanged. Observer code cannot replace an original exception or return value.
 
 ## Runtime and ownership boundary
 
-Preparation has its own explicit bound and precedes runtime start S. This does
-not claim that complete application startup takes 30 seconds. Immediately
+Full file admission has a separate 300-second bound. It performs the complete
+consumer validation once in the same execution, validates the descriptor and
+finishes its temporary contexts before launch preparation begins. Its final
+valid QPC sample becomes the first launch-preparation sample without another
+clock read. This single-use clock handoff is neither an immutable filesystem
+lease nor permission to reuse a cached JSON admission result. Invalid clocks,
+changed frequency and a late admission result prohibit launch.
+
+Launch preparation has a 55-second work cutoff and 60-second deadline, preceding
+runtime start S. The actual Windows suitability of these preparation limits
+remains unverified. This does not claim that complete application startup takes
+30 seconds. Immediately
 before creating and arming the observation mapping, the controller captures S
 once. Runtime deadline D is S + 30 seconds; observation cutoff is D - 5 seconds.
 No later stage starts another 30-second budget.
@@ -104,6 +124,20 @@ HANDLE release under the original D. Closed admission, active count zero,
 local unmapping, job emptiness and a kill request do not prove remote retirement.
 Only matching original retained identity, a signaled HANDLE and observed exit
 within D establish that fact. Forced diagnostic disposal is not normal UI close.
+
+Every completion and retirement claim is checked against the original deadline;
+a late native return never establishes timely cleanup. Native calls are not
+claimed to be preemptible. Failed or unconfirmed release owners remain in private
+pending registries and cannot authorize another case.
+
+The dedicated manual workflow preserves ordinary paired acceptance and uses a
+separate Writer-only job. Compiler preparation and the observation runner run
+inside fresh restricted child environments with creation-time job membership
+and NUL stdio. The outer workflow Python still inherits its ambient environment;
+only the explicitly constructed inner child mapping is claimed to be restricted.
+Only four validated numeric files are uploaded. Missing input pins or a failed
+report prevent diagnostic upload, and the terminal step always marks the run as
+diagnostic rather than product acceptance or delivery.
 
 Pre-arm, pre-bind and pre-Ready intervals remain unknown. Later Ready cannot
 reconstruct earlier coverage. Other clients may also query the server, so a

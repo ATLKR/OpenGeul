@@ -1,0 +1,11 @@
+{
+  "normalJobTextSha256": "af42f45cd2930ffa6d7f322a7b1e561bd199c1c8374897f33598785d19f5566f",
+  "normalWorkflowSha256": "e5181479952de6a1453dfba6b1d557f2a9b22751cd7366e7049d8aa6eb0841e0",
+  "originalNormalIf": "github.event.repository.private == false",
+  "permissions": {
+    "actions": "read",
+    "contents": "read"
+  },
+  "pushPrefixSha256": "7544c6a01d716f41f48b97230d0d42d7962f823760da3c28a81f5325d7dc2626",
+  "schemaVersion": 1
+}
