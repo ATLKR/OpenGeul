@@ -9,6 +9,7 @@
 | HOP | 0.4.5 / `34bd15c97e0851627cb7f055042c5340198aeb7f` | 0.5.3 / `c298160120c9ffbfca7e72f13dc2e7060ddff7fe` |
 | rhwp | 0.8.7 / `1a76570e833917d15817415a53c09ad61ab3203f` | 0.9.0 / `c9095c5f67632e6721e800ccc7fb43ea49d26682` |
 | pnpm | 10.33.0 | 10.34.9 |
+| npm `@tauri-apps/api`·CLI | 2.10.1 | 2.12.4 |
 | Tauri Rust | 2.11.1 | 2.12.5 |
 | tauri-runtime-wry | 2.11.1 | 2.12.3 |
 | reqwest | 0.13.2 | 0.13.5 |
@@ -24,7 +25,7 @@ Tauri 2.11.1은 출처 혼동 수정만 포함합니다. 별도의 [채널 fetch
 
 Rust 고정값은 rhwp의 공식 1.93.1, Node는 기존 지원 계열 24를 유지합니다. 조사 당시 Rust stable은 1.99.1, Node 최신 LTS는 26.13.1이며 24 계열 최신 보안판은 24.22.3입니다. pnpm 전체 최신은 12.18.0이지만 이번에는 같은 10 계열을 선택했습니다. Rust 1.93.1과 1.99.1은 로컬 검사에서 구분해 기록합니다. 로컬 Node는 24.19.0이므로 24.22.3 실행 증거로 바꾸어 보고하지 않습니다.
 
-HOP의 frozen pnpm lock에 있는 npm `@tauri-apps/api`와 `@tauri-apps/cli`는 2.10.1입니다. 조사한 최신은 각각 2.12.4이며, 이번 Rust 보안 수정과 별도로 이 npm 잠금 변경의 호환성 검증은 남아 있습니다. 모든 의존성이 최신이라고 주장하지 않습니다. .NET·Pillow·PDF 검증 도구와 LibreOffice 엔진은 별도 작업 범위의 기록으로 확인합니다.
+HOP 원본 frozen lock의 npm `@tauri-apps/api`와 `@tauri-apps/cli`는 2.10.1입니다. 이번 후보는 [Tauri의 같은 minor 호환 지침](https://v2.tauri.app/develop/updating-dependencies/)에 따라 Rust 2.12.5와 npm 2.12.4를 함께 검증합니다. 최초 frozen install 전에 검토한 잠금 overlay와 두 manifest를 적용하고 notice selector의 전체 lock SHA도 함께 고정합니다. API·CLI 및 11개 platform package 외 나머지 98개 package block과 dialog/fs plugin 버전은 보존합니다. .NET·Pillow·PDF 검증 도구와 LibreOffice 엔진은 별도 작업 범위의 기록으로 확인합니다.
 
 공식 메타데이터: [Rust stable](https://static.rust-lang.org/dist/channel-rust-stable.toml), [Node 배포](https://nodejs.org/dist/index.json), [pnpm 10](https://registry.npmjs.org/pnpm/latest-10), [Tauri](https://crates.io/api/v1/crates/tauri), [reqwest](https://docs.rs/crate/reqwest/0.13.5/source/Cargo.toml.orig), [Tokio](https://github.com/tokio-rs/tokio/blob/tokio-1.54.1/tokio/CHANGELOG.md), [rustls](https://docs.rs/rustls/0.23.46/rustls/).
 
@@ -59,6 +60,8 @@ editor component v2는 payload 파일 목록만 별도 `payload-inventory.json`�
 표 geometry 입력은 정확한 합성 1×1 셀·5문단·스타일·수직 여백을 검사한 뒤, cache가 모두 없는 경우에만 원래 `Paragraph::new_empty`의 9개 속성으로 명시적 source cache를 만듭니다. 원래 기하 기대값은 바꾸지 않았습니다. 최종 실제 WASM에서 간격 -300/0/600의 열기·독립 재열기 6회가 통과했고 셀 높이는 54.4/70.4/102.4px입니다. namespace 왕복, 표 입력, 브라우저 검사에는 생성한 합성 문서만 사용했습니다.
 
 실제 새 WASM에서 검토한 공개 vendor 글꼴 4개의 전체 바이트가 없음을 확인했지만, 모든 내장 글꼴 프로그램의 부재나 native CLI/Windows PE 검증으로 확대하지 않습니다. Linux 네이티브 CLI release 빌드·도움말·글꼴 잔류 검사는 별도로 진행 중이며, 새 HWP의 실제 Windows x64/ARM64·MSIX·IME·접근성·설치 검증은 아직 이 로컬 결과로 대신할 수 없습니다.
+
+npm 2.12.4 후속 후보는 공개 Git blob으로 인증한 제품 frontend 부분 트리에 실제 준비 helper·namespace patch·현재 source-bound WASM을 적용해 Node 241개, Studio 248개와 TypeScript·Vite·frontend audit을 통과했습니다. 현재 runtime source 3,205개와의 바이트 일치도 확인했습니다. 이 부분 트리 검사는 전체 source parity나 새 Windows binary·전체 notice inventory·MSIX 수용 증거가 아닙니다. 해당 결과는 최종 같은 커밋의 CI에서 별도로 확인합니다.
 
 ## 고지와 남은 수용 게이트
 

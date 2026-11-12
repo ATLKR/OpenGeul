@@ -9,6 +9,7 @@ import re
 import stat
 import subprocess
 import tomllib
+from frontend_dependencies import PREPARED_LOCK_SHA256 as REVIEWED_NPM_LOCK_SHA256
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST_SKIA_NAMES = {'skia-safe', 'skia-bindings'}
@@ -96,10 +97,9 @@ REVIEWED_SOURCE_NOTICES = {
             'archiveMember':'package/formatstack.js'}}},
 }
 
-# pnpm's isolated graph from golbin/hop c2981601:pnpm-lock.yaml. These two
+# pnpm's isolated graph from HOP c2981601 plus the reviewed Tauri npm overlay. These two
 # source packages have no peer suffix. This adapter selects additional notices
 # only; it does not change the over-inclusive dependency inventory below.
-REVIEWED_NPM_LOCK_SHA256 = 'ed88ee7fcf037e64667c18fe2421f9010c543b066cdd423c47ad20235426cba2'
 REVIEWED_NPM_ROOTS = {
     ('rolldown', '1.2.16'): {
         'slot': 'rolldown@1.2.16', 'callerSlot': 'vite@8.3.6',

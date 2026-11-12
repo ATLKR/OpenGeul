@@ -21,6 +21,7 @@ from equation_dialog_focus import apply as apply_equation_dialog_focus
 from menu_clipboard import apply as apply_menu_clipboard
 from shape_creation_history import apply as apply_shape_creation_history
 from nested_line_navigation import apply as apply_nested_line_navigation
+from frontend_dependencies import pin_frontend_dependencies
 
 
 TAURI_VERSION = "2.12.5"
@@ -868,6 +869,7 @@ def main() -> None:
     # Corepack reads this before the first Windows pnpm install. Changing it
     # only in patch() leaves .modules.yaml on the old upstream installer.
     pin_package_manager(dest, lock['pnpm'])
+    pin_frontend_dependencies(dest)
     if not args.fetch_only:patch(dest,version)
     print(f'Prepared {dest}; fetch_only={args.fetch_only}. Compilation and runtime verification are separate gates.')
 

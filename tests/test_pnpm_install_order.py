@@ -23,6 +23,13 @@ class PnpmInstallOrderTests(unittest.TestCase):
             def git(*args, cwd):
                 if args[:2] == ('git', 'init'):
                     (source / 'package.json').write_text(json.dumps(original))
+                    for name, value in {
+                        'apps/desktop/package.json': {'name':'hop-desktop','devDependencies':{'@tauri-apps/cli':'^2.0.0'}},
+                        'apps/studio-host/package.json': {'name':'@golbin/hop-studio-host','dependencies':{'@tauri-apps/api':'^2.10.1'}},
+                    }.items():
+                        path=source/name;path.parent.mkdir(parents=True,exist_ok=True)
+                        path.write_text(json.dumps(value))
+                    (source/'pnpm-lock.yaml').write_bytes((ROOT/'tests/fixtures/tauri-npm/pnpm-lock.original.yaml').read_bytes())
                 if args[:3] == ('git', 'rev-parse', 'HEAD'):
                     return lock['rhwp' if cwd == source / 'third_party/rhwp' else 'hop']['commit']
                 return ''

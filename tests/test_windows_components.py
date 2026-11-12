@@ -74,7 +74,9 @@ class WindowsComponentsTests(unittest.TestCase):
         helpers = self.helper().configured()['helpers']
         self.assertTrue(name in helpers, 'Native advanced input stager must be included in component helpers')
         self.assertEqual(helpers[name], digest(ROOT/name))
-        self.assertEqual(len(helpers), 103)
+        self.assertEqual(len(helpers), 105)
+        for frontend_helper in ('scripts/frontend_dependencies.py', 'overlay/frontend-pnpm-lock.txt'):
+            self.assertEqual(helpers[frontend_helper], digest(ROOT/frontend_helper))
         budget_helper = 'scripts/normal_distribution_budget.py'
         self.assertEqual(helpers[budget_helper], digest(ROOT/budget_helper))
 

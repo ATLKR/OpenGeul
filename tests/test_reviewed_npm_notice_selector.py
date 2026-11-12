@@ -109,6 +109,21 @@ class ReviewedNpmNoticeSelectorTests(unittest.TestCase):
         self.assertTrue(self.select(self.manifest) == self.canonical, 'Regular source identity differs')
         self.assertTrue(self.select() == self.canonical, 'Dependency caller source identity differs')
 
+    def test_tauri_overlay_graph_is_required_for_unchanged_reviewed_notice_sources(self):
+        from frontend_dependencies import PREPARED_LOCK_SHA256
+        replacement=(Path(__file__).resolve().parents[1]/'overlay/frontend-pnpm-lock.txt').read_bytes()
+        previous=(Path(__file__).parent/'fixtures/tauri-npm/pnpm-lock.original.yaml').read_bytes()
+        paths=(self.source/'pnpm-lock.yaml',self.store/'lock.yaml')
+        with patch.object(notices,'REVIEWED_NPM_LOCK_SHA256',PREPARED_LOCK_SHA256):
+            for path in paths:path.write_bytes(replacement)
+            self.assertEqual(self.select(self.manifest),self.canonical)
+            for path in paths:
+                with self.subTest(input=path.name):
+                    path.write_bytes(previous)
+                    with self.assertRaises(ValueError):self.select(self.manifest)
+                    self.assertFalse(self.output.exists())
+                    path.write_bytes(replacement)
+
     def test_direct_reviewed_collector_still_rejects_the_dependency_alias(self):
         with self.assertRaises(notices.ReviewedNoticeAliasError):
             notices.collect_reviewed_notices('npm', self.item, self.alias, self.output)
