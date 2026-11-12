@@ -2,6 +2,8 @@
 import argparse
 import hashlib
 import json
+import ntpath
+import os
 from pathlib import Path
 import re
 import stat
@@ -92,6 +94,21 @@ REVIEWED_SOURCE_NOTICES = {
             'archiveUrl':'https://registry.npmjs.org/stackback/-/stackback-0.0.2.tgz',
             'archiveIntegrity':'sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw==',
             'archiveMember':'package/formatstack.js'}}},
+}
+
+# pnpm's isolated graph from golbin/hop c2981601:pnpm-lock.yaml. These two
+# source packages have no peer suffix. This adapter selects additional notices
+# only; it does not change the over-inclusive dependency inventory below.
+REVIEWED_NPM_LOCK_SHA256 = 'ed88ee7fcf037e64667c18fe2421f9010c543b066cdd423c47ad20235426cba2'
+REVIEWED_NPM_ROOTS = {
+    ('rolldown', '1.2.16'): {
+        'slot': 'rolldown@1.2.16', 'callerSlot': 'vite@8.3.6',
+        'callerName': 'vite', 'callerVersion': '8.3.6',
+        'callerManifestSha256': 'c190c4c3dadb457bedc5d756a2269cd648b134a293da9f4d873c01fc66f4186c'},
+    ('stackback', '0.0.2'): {
+        'slot': 'stackback@0.0.2', 'callerSlot': 'why-is-node-running@2.3.0',
+        'callerName': 'why-is-node-running', 'callerVersion': '2.3.0',
+        'callerManifestSha256': 'c762d49d3da5e8d8fdaa840ba1f18d68bb433e61c671b66b3127f8430d490fe2'},
 }
 
 # Exact inherited declarations and separately reviewed SDK bytes; not legal clearance.
@@ -187,6 +204,136 @@ def reviewed_file(location: Path, name: str, expected: str) -> bytes:
         raise ValueError('Reviewed notice source/manifest differs from the exact reviewed bytes')
     data.decode('utf-8')
     return data
+
+
+def _npm_selection_reject(reason):
+    # Reasons are fixed codes, never filesystem input or link target text.
+    raise ValueError('Reviewed npm notice selection rejected: ' + reason) from None
+
+
+def _npm_identity(info):
+    return tuple(getattr(info, field, 0) for field in (
+        'st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns',
+        'st_file_attributes', 'st_reparse_tag'))
+
+
+def _npm_alias(info):
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, 'st_file_attributes', 0) & 0x400)
+
+
+def _npm_bytes(path, expected=None):
+    with path.open('rb') as stream:
+        data = stream.read(2_000_001)
+    if len(data) > 2_000_000 or (expected is not None and hashlib.sha256(data).hexdigest() != expected):
+        _npm_selection_reject('fingerprint')
+    data.decode('utf-8')
+    return data
+
+
+def _npm_regular_input(source, relative, snapshots, expected=None):
+    path = reviewed_path(source, relative)
+    for component in (path, *path.parents):
+        info = component.lstat()
+        if _npm_alias(info) or not (stat.S_ISREG(info.st_mode) if component == path else stat.S_ISDIR(info.st_mode)):
+            _npm_selection_reject('nonregularInput')
+        identity = _npm_identity(info)
+        if component in snapshots and snapshots[component] != identity:
+            _npm_selection_reject('changedInput')
+        snapshots[component] = identity
+        if component == source:
+            break
+    return _npm_bytes(path, expected)
+
+
+def _npm_exact_link_target(location, target, canonical, *, windows):
+    target = str(target)
+    if not target or len(target) > 32767 or '\0' in target:
+        return False
+    if windows:
+        # CPython readlink returns the junction substitute name. Accept only
+        # the local-drive form pnpm creates, with its optional single slash.
+        if target.startswith('\\\\?\\'):
+            target = target[4:]
+        expected = str(canonical)
+        if not re.match(r'^[A-Za-z]:\\', target) or '/' in target:
+            return False
+        return ntpath.normcase(target) in (ntpath.normcase(expected), ntpath.normcase(expected + '\\'))
+    return target == os.path.relpath(canonical, location.parent)
+
+
+def reviewed_npm_notice_location(source: Path, manifest: Path, item: dict) -> Path:
+    """Select two frozen physical sources without granting alias input permission."""
+    key = (item.get('name'), item.get('version'))
+    binding = REVIEWED_NPM_ROOTS.get(key)
+    if binding is None:
+        return manifest.parent
+    pin = REVIEWED_SOURCE_NOTICES[('npm', key[0])][key[1]]
+    if item.get('license') != pin['license']:
+        _npm_selection_reject('packageIdentity')
+    store = source / 'node_modules/.pnpm'
+    canonical = store / binding['slot'] / 'node_modules' / key[0]
+    caller = store / binding['callerSlot'] / 'node_modules' / key[0]
+    if not source.is_absolute() or manifest not in (canonical / 'package.json', caller / 'package.json'):
+        _npm_selection_reject('caller')
+    snapshots = {}
+    try:
+        manager = json.loads(_npm_regular_input(source, 'package.json', snapshots))
+        modules = json.loads(_npm_regular_input(source, 'node_modules/.modules.yaml', snapshots))
+        if (type(manager) is not dict or manager.get('packageManager') != 'pnpm@10.34.9'
+                or type(modules) is not dict or modules.get('packageManager') != 'pnpm@10.34.9'
+                or type(modules.get('layoutVersion')) is not int or modules['layoutVersion'] != 5
+                or modules.get('nodeLinker') != 'isolated' or modules.get('enableGlobalVirtualStore', False) is not False):
+            _npm_selection_reject('layout')
+        virtual = modules.get('virtualStoreDir')
+        if (not isinstance(virtual, str) or (ntpath.normcase(virtual) != ntpath.normcase(str(store))
+                if os.name == 'nt' else virtual != '.pnpm')):
+            _npm_selection_reject('virtualStore')
+        _npm_regular_input(source, 'pnpm-lock.yaml', snapshots, REVIEWED_NPM_LOCK_SHA256)
+        _npm_regular_input(source, 'node_modules/.pnpm/lock.yaml', snapshots, REVIEWED_NPM_LOCK_SHA256)
+        for count, entry in enumerate(store.iterdir(), 1):
+            if count > 4096:
+                _npm_selection_reject('slotBound')
+            slot_name = entry.name.casefold()
+            own_slot = binding['slot'].casefold()
+            if ((slot_name == own_slot and entry.name != binding['slot'])
+                    or slot_name.startswith((own_slot + '_', own_slot + '('))):
+                _npm_selection_reject('ambiguousSlot')
+        raw = _npm_regular_input(source, (canonical / 'package.json').relative_to(source).as_posix(),
+                                 snapshots, pin['manifestSha256'])
+        identity = json.loads(raw)
+        if any(identity.get(field) != item.get(field) for field in ('name', 'version', 'license')):
+            _npm_selection_reject('packageIdentity')
+        target_before = None
+        if manifest.parent == caller:
+            host_path = store / binding['callerSlot'] / 'node_modules' / binding['callerName'] / 'package.json'
+            host = json.loads(_npm_regular_input(source, host_path.relative_to(source).as_posix(), snapshots,
+                                                 binding['callerManifestSha256']))
+            if host.get('name') != binding['callerName'] or host.get('version') != binding['callerVersion']:
+                _npm_selection_reject('callerIdentity')
+            link = caller.lstat()
+            if not _npm_alias(link) or (os.name == 'nt' and getattr(link, 'st_reparse_tag', None) != 0xA0000003):
+                _npm_selection_reject('rootAlias')
+            snapshots[caller] = _npm_identity(link)
+            target = os.readlink(caller)  # One raw step only; never resolve this alias.
+            if not _npm_exact_link_target(caller, target, canonical, windows=os.name == 'nt'):
+                _npm_selection_reject('linkTarget')
+            expected_identity = snapshots[canonical][:2]
+            target_before = _npm_identity(caller.stat())
+            if not all(type(n) is int and n > 0 for n in expected_identity) or target_before[:2] != expected_identity:
+                _npm_selection_reject('targetIdentity')
+            leaf = manifest.lstat()
+            if _npm_alias(leaf) or not stat.S_ISREG(leaf.st_mode):
+                _npm_selection_reject('manifestLeaf')
+            snapshots[manifest] = _npm_identity(leaf)
+            _npm_bytes(manifest, pin['manifestSha256'])
+        for path, before in snapshots.items():
+            if _npm_identity(path.lstat()) != before:
+                _npm_selection_reject('changedInput')
+        if target_before is not None and _npm_identity(caller.stat()) != target_before:
+            _npm_selection_reject('changedTarget')
+        return canonical
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _npm_selection_reject('inputUnavailable')
 
 
 def require_sdk_asset(location: Path, name: str, pin: dict) -> None:
@@ -404,7 +551,8 @@ def main():
         ident=re.sub(r'[^A-Za-z0-9._-]','_','npm-'+name+'-'+version)
         texts=collect(manifest.parent,out/ident)
         record={'ecosystem':'npm','name':name,'version':version,'declaredLicense':item.get('license'),'texts':texts}
-        additional=collect_reviewed_notices('npm',item,manifest.parent,out/ident)
+        notice_location=reviewed_npm_notice_location(source,manifest,item)
+        additional=collect_reviewed_notices('npm',item,notice_location,out/ident)
         if additional:record['additionalNotices']=additional
         inventory.append(record)
     (out/'inventory.json').write_text(json.dumps({'status':'requires-human-review','packages':inventory},ensure_ascii=False,indent=2),encoding='utf-8')
