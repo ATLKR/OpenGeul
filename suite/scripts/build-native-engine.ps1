@@ -2238,9 +2238,63 @@ function Assert-NativeFlexFatalSourceBinding($Proof,$Pin,[ValidateSet('arm64','x
     }
 }
 
+function Assert-NativeDotnetProjectGraphSourceBinding($Proof,$Pin,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture,[string]$EvidenceDirectory) {
+    Assert-NativeAtlKeys $Pin @('schemaVersion','coreCommit','sources')
+    if(($Pin.schemaVersion -isnot [int] -and $Pin.schemaVersion -isnot [long]) -or $Pin.schemaVersion -ne 1 -or
+       $Pin.coreCommit -isnot [string] -or $Pin.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
+       $Pin.sources -isnot [array] -or $Pin.sources.Count -ne 2) {throw 'Source dotnet graph descriptor differs.'}
+    Assert-NativeAtlKeys $Proof @('schemaVersion','kind','coreCommit','architecture','sources',
+        'nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')
+    if(($Proof.schemaVersion -isnot [int] -and $Proof.schemaVersion -isnot [long]) -or $Proof.schemaVersion -ne 1 -or
+       $Proof.kind -isnot [string] -or $Proof.kind -cne 'windows-dotnet-project-graph-source-hook' -or
+       $Proof.coreCommit -isnot [string] -or $Proof.coreCommit -cne $Pin.coreCommit -or
+       $Proof.architecture -isnot [string] -or $Proof.architecture -cne $Architecture -or
+       $Proof.sources -isnot [array] -or $Proof.sources.Count -ne 2) {throw 'Source dotnet graph proof differs.'}
+    foreach($field in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+        if($Proof.$field -isnot [bool] -or $Proof.$field) {throw 'Source dotnet graph hook cannot qualify a native engine.'}
+    }
+    if([string]::IsNullOrWhiteSpace($EvidenceDirectory) -or -not [IO.Path]::IsPathFullyQualified($EvidenceDirectory) -or
+       $EvidenceDirectory -cne [IO.Path]::GetFullPath($EvidenceDirectory)) {throw 'Source dotnet graph expected evidence directory differs.'}
+    Assert-UnlinkedPath $EvidenceDirectory
+    $expected=@(
+        @('solenv/gbuild/DotnetLibrary.mk',5315,'f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b',5728,'cc1e4a62d0d97681b1742ada794af15945e465af86d4d2f54b38b245c8889db3'),
+        @('solenv/gbuild/DotnetTest.mk',5154,'5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272',5555,'09987ad29eb2afac9f2ff7a973bd2b7c32ccd54f286a4281610b5bc89fe939f7'))
+    for($i=0;$i -lt 2;$i++) {
+        $pinRow=$Pin.sources[$i];$row=$Proof.sources[$i];$fixed=$expected[$i]
+        Assert-NativeAtlKeys $pinRow @('path','size','sha256','afterSize','afterSha256')
+        Assert-NativeAtlKeys $row @('path','beforeBytes','afterBytes','beforeSha256','afterSha256','evidence')
+        foreach($key in @('path','sha256','afterSha256')) {
+            if($pinRow.$key -isnot [string]) {throw 'Source dotnet graph descriptor needs scalar strings.'}
+        }
+        foreach($key in @('path','beforeSha256','afterSha256')) {
+            if($row.$key -isnot [string]) {throw 'Source dotnet graph proof needs scalar strings.'}
+        }
+        foreach($key in @('size','afterSize')) {
+            if($pinRow.$key -isnot [int] -and $pinRow.$key -isnot [long]) {throw 'Source dotnet graph descriptor needs exact integer sizes.'}
+        }
+        foreach($key in @('beforeBytes','afterBytes')) {
+            if($row.$key -isnot [int] -and $row.$key -isnot [long]) {throw 'Source dotnet graph proof needs exact integer sizes.'}
+        }
+        if($pinRow.path -cne $fixed[0] -or $pinRow.size -ne $fixed[1] -or $pinRow.sha256 -cne $fixed[2] -or
+           $pinRow.afterSize -ne $fixed[3] -or $pinRow.afterSha256 -cne $fixed[4] -or
+           $row.path -cne $pinRow.path -or $row.beforeBytes -ne $pinRow.size -or $row.afterBytes -ne $pinRow.afterSize -or
+           $row.beforeSha256 -cne $pinRow.sha256 -or $row.afterSha256 -cne $pinRow.afterSha256) {throw 'Source dotnet graph exact source tuple differs.'}
+        Assert-NativeAtlKeys $row.evidence @('original','effective')
+        foreach($phase in @('original','effective')) {
+            $path=$row.evidence.$phase
+            if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or
+               $path -cne [IO.Path]::GetFullPath($path) -or [IO.Path]::GetDirectoryName($path) -cne $EvidenceDirectory -or
+               [IO.Path]::GetFileName($path) -cne ($phase+'-'+[IO.Path]::GetFileName($pinRow.path))) {throw 'Source dotnet graph evidence belongs to another source run.'}
+            Assert-UnlinkedPath $path
+            if($phase -ceq 'original') {Confirm-FileIdentity $path $pinRow.size SHA256 $pinRow.sha256|Out-Null}
+            else {Confirm-FileIdentity $path $pinRow.afterSize SHA256 $pinRow.afterSha256|Out-Null}
+        }
+    }
+}
+
 function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[string]$SourceEvidenceDirectory) {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder','flexFatalCompatibility')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','winAccFocusOrder','flexFatalCompatibility')}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')}
     $guardCount=if($Architecture -ceq 'arm64'){13}else{4}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
@@ -2253,7 +2307,7 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
     $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
     if($Architecture -ceq 'x64') {
         $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe)
-        if($proof.recipeSha256 -cne '95c0bff970c3cc13f679f2dbaa226c4c4a45e236195efcdcd25e6ade6f94b2dc') {throw 'x64 canonical source recipe differs.'}
+        if($proof.recipeSha256 -cne '66704ff304812a3181912c38723e4d0333670055dbb0c879e46fcc1ea961324d') {throw 'x64 canonical source recipe differs.'}
         for($i=0;$i -lt 4;$i++) {
             $row=$proof.armGuardedSources[$i]
             if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
@@ -2373,6 +2427,8 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
         Assert-NativeX64CliPolicySourceBinding $Receipt.sourceHooks.cliPublisherPolicyPlatform $manifest.windowsCliPublisherPolicyPlatform $directory
     }
     Assert-NativeFlexFatalSourceBinding $Receipt.flexFatalCompatibilitySourcePatch $manifest.flexFatalCompatibility $Architecture $SourceEvidenceDirectory
+    if($Architecture -ceq 'arm64' -and $proof.recipeSha256 -cne '9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe') {throw 'ARM64 canonical source recipe differs.'}
+    Assert-NativeDotnetProjectGraphSourceBinding $Receipt.sourceHooks.dotnetProjectGraph $manifest.windowsDotnetProjectGraph $Architecture $SourceEvidenceDirectory
 }
 
 function Assert-WinAccBinaryProof($Proof,[string]$RuntimeRoot,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
@@ -2699,6 +2755,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.sourceHooks=$hooks.sourceHooks;$receipt.winAccFocusOrderSourcePatch=$hooks.winAccFocusOrderSourcePatch;$receipt.sourceRecipeProof=$hooks.sourceRecipeProof
         $receipt.flexFatalCompatibilitySourcePatch=$hooks.flexFatalCompatibilitySourcePatch
         Assert-NativeSourceRecipeBinding $receipt $Architecture $sourceEvidence
+        foreach($dotnetPin in $manifest.windowsDotnetProjectGraph.sources) {
+            Assert-UnlinkedPath (Join-Path $source $dotnetPin.path)
+            Confirm-FileIdentity (Join-Path $source $dotnetPin.path) $dotnetPin.afterSize SHA256 $dotnetPin.afterSha256|Out-Null
+        }
         Assert-WinAccFocusSourcePatchReceipt $receipt.winAccFocusOrderSourcePatch $manifest.winAccFocusOrder $pin.coreCommit $sourceEvidence
         if($CalcDispatchDiagnostic) {
             $receipt.stage='install-authenticated-calc-dispatch-diagnostic';Assert-NativeBuildTimeRemaining
@@ -2892,6 +2952,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 }
                 Confirm-FileIdentity (Join-Path $source $manifest.windowsHarfbuzzNativeMesonPaths.path) $manifest.windowsHarfbuzzNativeMesonPaths.afterSize SHA256 $manifest.windowsHarfbuzzNativeMesonPaths.afterSha256|Out-Null
                 Confirm-FileIdentity (Join-Path $source $manifest.windowsCliPublisherPolicyPlatform.path) $manifest.windowsCliPublisherPolicyPlatform.afterSize SHA256 $manifest.windowsCliPublisherPolicyPlatform.afterSha256|Out-Null
+            }
+            foreach($dotnetPin in $manifest.windowsDotnetProjectGraph.sources) {
+                Assert-UnlinkedPath (Join-Path $source $dotnetPin.path)
+                Confirm-FileIdentity (Join-Path $source $dotnetPin.path) $dotnetPin.afterSize SHA256 $dotnetPin.afterSha256|Out-Null
             }
             $receipt.stage='actual-native-uno-base-persistence';Assert-NativeBuildTimeRemaining
             $probe=Join-Path $evidence 'native-base-proof.py';Write-BaseProofScript $probe $Architecture

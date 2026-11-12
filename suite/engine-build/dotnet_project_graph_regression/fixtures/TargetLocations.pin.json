@@ -1,0 +1,15 @@
+{
+  "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+  "excerptSha256": "419ff55071ae55c753249efc5d4f25806efa1883ca78ef8a8d5183b67d14af75",
+  "fullBytes": 24547,
+  "fullFileRestored": false,
+  "fullSha256": "a5b0b1186c3bc5afa3a955887e14a9fdacfe7ab8dff1a40eca9de6b1767250ed",
+  "gitBlob": "f99db6521cd67cacb14b80a8505d4f3f14f4edc9",
+  "lines": [
+    67,
+    70
+  ],
+  "path": "solenv/gbuild/TargetLocations.mk",
+  "priorOfficialSingleReadVerified": true,
+  "schemaVersion": 1
+}

@@ -21,8 +21,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
 CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
-ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder', 'flexFatalCompatibility'],
-          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility']}
+ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph'],
+          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
 GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
@@ -115,9 +115,9 @@ class RecipePolicyTests(unittest.TestCase):
                          (pin['size'], pin['sha256'], pin['afterSize'], pin['afterSha256']))
         policy = (ENGINE / 'native-targets.json').read_bytes()
         arm = module._select_plan(lock, policy, 'arm64'); x64 = module._select_plan(lock, policy, 'x64')
-        self.assertEqual('a8080687422c3160b568be282b14812247bb34008b345665fc60153440ea36bf',
+        self.assertEqual('9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
-        self.assertEqual((20, 4), (len(x64['sources']), len(x64['armGuardedSources'])))
+        self.assertEqual((22, 4), (len(x64['sources']), len(x64['armGuardedSources'])))
         self.assertNotIn(pin['path'], [r['path'] for r in x64['armGuardedSources']])
         for field, value in [('path', '../escape'), ('condition', 'WNT_AARCH64'), ('size', True),
                              ('afterSize', 1.5), ('sha256', '0' * 64), ('afterSha256', 'invalid'), ('extra', False)]:
@@ -139,12 +139,12 @@ class RecipePolicyTests(unittest.TestCase):
             self.assertNotEqual(before['afterSha256'], row['afterSha256'])
         policy = (ENGINE / 'native-targets.json').read_bytes()
         arm = module._select_plan(lock, policy, 'arm64')
-        self.assertEqual('a8080687422c3160b568be282b14812247bb34008b345665fc60153440ea36bf',
+        self.assertEqual('9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
         selected = module._select_plan(lock, policy, 'x64')
-        self.assertEqual((20, 4), (len(selected['sources']), len(selected['armGuardedSources'])))
+        self.assertEqual((22, 4), (len(selected['sources']), len(selected['armGuardedSources'])))
         self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks',
-                          'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility'], selected['recipe']['hooks'])
+                          'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph'], selected['recipe']['hooks'])
         guarded = {r['path'] for r in selected['armGuardedSources']}
         self.assertTrue(guarded.isdisjoint(r['path'] for r in original))
         for mutate in [lambda d: d.update(extra=False), lambda d: d.update(condition='WNT_AARCH64'),
@@ -180,7 +180,7 @@ class RecipePolicyTests(unittest.TestCase):
                          plan['recipe']['hooks'])
         arm = module._select_plan(lock, raw, 'arm64')
         self.assertEqual(13, len(arm['armGuardedSources']))
-        self.assertEqual('a8080687422c3160b568be282b14812247bb34008b345665fc60153440ea36bf',
+        self.assertEqual('9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
 
     def test_x64_zstd_descriptor_and_raw_source_drift_are_rejected(self):
@@ -224,7 +224,7 @@ class RecipePolicyTests(unittest.TestCase):
             self.assertEqual(ORDERS[architecture], plan['recipe']['hooks'])
             self.assertEqual(RECIPES[architecture], plan['recipeId'])
             self.assertEqual(13 if architecture == 'arm64' else 4, len(plan['armGuardedSources']))
-            self.assertEqual(18 if architecture == 'arm64' else 20, len(plan['sources']))
+            self.assertEqual(20 if architecture == 'arm64' else 22, len(plan['sources']))
             self.assertIn('sourceDependencies', plan)
             self.assertEqual(1 if architecture == 'arm64' else 0, len(plan['sourceDependencies']))
 
@@ -287,11 +287,11 @@ class RecipePolicyTests(unittest.TestCase):
         policy=(ENGINE/'native-targets.json').read_bytes()
         self.assertEqual('ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc',hashlib.sha256(policy).hexdigest())
         arm=module._select_plan(lock,policy,'arm64');x64=module._select_plan(lock,policy,'x64')
-        self.assertEqual('a8080687422c3160b568be282b14812247bb34008b345665fc60153440ea36bf',
+        self.assertEqual('9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe',
             hashlib.sha256(json.dumps(arm,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest())
-        self.assertEqual((18,13),(len(arm['sources']),len(arm['armGuardedSources'])))
-        self.assertEqual((20,4),(len(x64['sources']),len(x64['armGuardedSources'])))
-        self.assertEqual(GPG_PATH,x64['sources'][7]['path'])
+        self.assertEqual((20,13),(len(arm['sources']),len(arm['armGuardedSources'])))
+        self.assertEqual((22,4),(len(x64['sources']),len(x64['armGuardedSources'])))
+        self.assertEqual(GPG_PATH,x64['sources'][9]['path'])
         self.assertNotIn(GPG_PATH,[row['path'] for row in arm['sources']])
         for field,value in [('path','../escape'),('condition','WNT_AARCH64'),('size',True),
                             ('afterSize',1.5),('sha256','invalid'),('afterSha256','invalid'),('extra',False)]:
@@ -664,9 +664,9 @@ class ActualSourceRecipeTests(unittest.TestCase):
         self.assertEqual([],list(self.evidence.iterdir()))
         self.assertEqual(before,{p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
-    def test_arm_has_exactly_twenty_two_outputs_with_shared_lexer(self):
+    def test_arm_has_exactly_twenty_four_outputs_with_shared_lexer_and_dotnet_graph(self):
         self.install('arm64')
-        self.assertEqual(22,sum(p.is_file() for p in self.source.rglob('*')))
+        self.assertEqual(24,sum(p.is_file() for p in self.source.rglob('*')))
         expected={row['path'] for row in self.plan['sources']+self.plan['sourceDependencies']}|set(self.module.ARM_OUTPUTS)
         self.assertEqual(expected,{p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
         self.assertEqual(self.lock['flexFatalCompatibility']['afterSha256'],
@@ -815,16 +815,21 @@ class ActualSourceRecipeTests(unittest.TestCase):
                     'winAccFocusOrderSourcePatch': load('apply_winacc_focus_order').install(direct, evidence, CORE)}
         expected['flexFatalCompatibilitySourcePatch'] = self.module._install_flex_fatal_compat(
             direct, evidence, self.lock['flexFatalCompatibility'], 'arm64')
+        expected['sourceHooks']['dotnetProjectGraph'] = self.module._install_dotnet_project_graph(
+            direct, evidence, self.lock['windowsDotnetProjectGraph'], 'arm64')
         events = []
         arm = self.module.ARM.install; winacc = self.module.WINACC.install
         flex = self.module._install_flex_fatal_compat
+        dotnet = self.module._install_dotnet_project_graph
         def full(*args): events.append('arm64Full'); return arm(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         def fatal(*args): events.append('flexFatalCompatibility'); return flex(*args)
+        def graph(*args): events.append('dotnetProjectGraph'); return dotnet(*args)
         with patch.object(self.module.ARM, 'install', side_effect=full), \
                 patch.object(self.module.ARM, 'install_module_bootstrap', wraps=self.module.ARM.install_module_bootstrap) as bootstrap, \
                 patch.object(self.module.WINACC, 'install', side_effect=focus), \
-                patch.object(self.module, '_install_flex_fatal_compat', side_effect=fatal):
+                patch.object(self.module, '_install_flex_fatal_compat', side_effect=fatal), \
+                patch.object(self.module, '_install_dotnet_project_graph', side_effect=graph):
             result = self.install('arm64')
         self.assertEqual(ORDERS['arm64'], events); self.assertEqual(1, bootstrap.call_count)
         actual = {key: result[key] for key in expected}
@@ -842,6 +847,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
         meson = self.module._install_harfbuzz_native_meson_paths
         cli_policy = self.module._install_cli_policy_platform
         flex = self.module._install_flex_fatal_compat
+        dotnet = self.module._install_dotnet_project_graph
         def common(*args): events.append('moduleBootstrap'); return bootstrap(*args)
         def loader_path(*args): events.append('firebirdLoaderPath'); return loader(*args)
         def zstd_links(*args): events.append('zstdSourceLinks'); return zstd(*args)
@@ -851,6 +857,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
         def cli_platform(*args): events.append('cliPublisherPolicyPlatform'); return cli_policy(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         def fatal(*args): events.append('flexFatalCompatibility'); return flex(*args)
+        def graph(*args): events.append('dotnetProjectGraph'); return dotnet(*args)
         with patch.object(self.module.ARM, 'install', side_effect=AssertionError('x64 selected full ARM installer')), \
                 patch.object(self.module.ARM, 'install_module_bootstrap', side_effect=common), \
                 patch.object(self.module, '_install_firebird_loader_path', side_effect=loader_path), \
@@ -860,12 +867,13 @@ class ActualSourceRecipeTests(unittest.TestCase):
                 patch.object(self.module, '_install_harfbuzz_native_meson_paths', side_effect=meson_paths), \
                 patch.object(self.module, '_install_cli_policy_platform', side_effect=cli_platform), \
                 patch.object(self.module.WINACC, 'install', side_effect=focus), \
-                patch.object(self.module, '_install_flex_fatal_compat', side_effect=fatal):
+                patch.object(self.module, '_install_flex_fatal_compat', side_effect=fatal), \
+                patch.object(self.module, '_install_dotnet_project_graph', side_effect=graph):
             result = self.install('x64')
         self.proof(result, 'x64'); self.assertEqual(ORDERS['x64'], events)
         hooks = result['sourceHooks']
         self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform',
-                          'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
+                          'dotnetProjectGraph', 'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
         self.assertEqual('native-windows-common-source-hooks', hooks['kind']); self.assertEqual('x64', hooks['architecture'])
         self.assertIs(hooks['nativeBuildVerified'], False); self.assertIs(hooks['basePersistenceVerified'], False)
         for row in self.plan['sources'][:5]:
@@ -893,6 +901,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             changed.add(policy_path)
         self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path'],
                           self.lock['flexFatalCompatibility']['path'],
+                          *(pin['path'] for pin in self.lock['windowsDotnetProjectGraph']['sources']),
                           self.lock['windowsFirebirdLoaderPath']['path'],
                           self.lock['windowsZstdSourceLinks']['path'], GPG_PATH, self.lock['windowsHarfbuzzNativeMesonPaths']['path'],
                           *(pin['path'] for pin in self.lock['windowsAtlNativePaths']['recipes']),

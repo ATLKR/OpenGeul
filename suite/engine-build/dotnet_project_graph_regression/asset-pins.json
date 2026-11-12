@@ -1,0 +1,141 @@
+{
+  "files": [
+    {
+      "bytes": 2284,
+      "path": "README.md",
+      "sha256": "98c9b2a611c6478359fdf22c3f50f9f3c016dfa46449d2f657994bb58c9295c6"
+    },
+    {
+      "bytes": 226,
+      "path": "fixtures/TargetLocations.excerpt.mk",
+      "sha256": "419ff55071ae55c753249efc5d4f25806efa1883ca78ef8a8d5183b67d14af75"
+    },
+    {
+      "bytes": 486,
+      "path": "fixtures/TargetLocations.pin.json",
+      "sha256": "eba4f1869ff784866aff8d929a291900ed571a2b82de73355a9dc11e7632bf50"
+    },
+    {
+      "bytes": 607023,
+      "path": "fixtures/extra-source-before/configure.ac",
+      "sha256": "a29d75952286370eb4b85b97d875b1a030207e17848c583df062eac54d50e3e2"
+    },
+    {
+      "bytes": 3512,
+      "path": "fixtures/extra-source-before/external/firebird/UnpackedTarball_firebird.mk",
+      "sha256": "8b66548039e92e12ee5ad728a8da3d578633d45b49a5ee8255ffae38663e6555"
+    },
+    {
+      "bytes": 3732,
+      "path": "fixtures/extra-source-before/external/mdds/gcc-12-silence-use-after-free.patch.1",
+      "sha256": "3411f0814815e06914ea1fbf50c5428af86cbed68c82c0481e09dd62bc8a22c6"
+    },
+    {
+      "bytes": 6216,
+      "path": "fixtures/recipe-originals.json",
+      "sha256": "2f69dc94ded483f86149040ba25c547328c164c9fe21d7824270837484719983"
+    },
+    {
+      "bytes": 2452,
+      "path": "fixtures/source-after/net_ure/CustomTarget_net_nuget_pkg.mk",
+      "sha256": "1015ccb28dba46cafc30842e8ccfd9b35e508c40bc893c87a44d8bc8ad3ab451"
+    },
+    {
+      "bytes": 955,
+      "path": "fixtures/source-after/net_ure/DotnetLibrary_net_basetypes.mk",
+      "sha256": "bdfdc49a9a2fbce2d552615e62e75b347ddf264025b463ae377ff3c36ed2f6af"
+    },
+    {
+      "bytes": 1754,
+      "path": "fixtures/source-after/net_ure/DotnetLibrary_net_bridge.mk",
+      "sha256": "4b75434ca42850650b2cc2334816d06a9fb72c66fdd143efa1fc0fd953f8af49"
+    },
+    {
+      "bytes": 801,
+      "path": "fixtures/source-after/net_ure/DotnetLibrary_net_oootypes.mk",
+      "sha256": "4f1ac8905639f44b31bc72b4ceaa5b5a159e826908cace6772800332ffba4437"
+    },
+    {
+      "bytes": 802,
+      "path": "fixtures/source-after/net_ure/DotnetLibrary_net_uretypes.mk",
+      "sha256": "6b5702367b60e766ff9ca571a051c79d1e84a6e32514ad385229bfbcb90ef71d"
+    },
+    {
+      "bytes": 984,
+      "path": "fixtures/source-after/net_ure/Module_net_ure.mk",
+      "sha256": "da85da18dbc52afddc5381d6d1c6230c6e17483959d52adf10c135f870c99ba2"
+    },
+    {
+      "bytes": 5728,
+      "path": "fixtures/source-after/solenv/gbuild/DotnetLibrary.mk",
+      "sha256": "cc1e4a62d0d97681b1742ada794af15945e465af86d4d2f54b38b245c8889db3"
+    },
+    {
+      "bytes": 5555,
+      "path": "fixtures/source-after/solenv/gbuild/DotnetTest.mk",
+      "sha256": "09987ad29eb2afac9f2ff7a973bd2b7c32ccd54f286a4281610b5bc89fe939f7"
+    },
+    {
+      "bytes": 2452,
+      "path": "fixtures/source-before/net_ure/CustomTarget_net_nuget_pkg.mk",
+      "sha256": "1015ccb28dba46cafc30842e8ccfd9b35e508c40bc893c87a44d8bc8ad3ab451"
+    },
+    {
+      "bytes": 955,
+      "path": "fixtures/source-before/net_ure/DotnetLibrary_net_basetypes.mk",
+      "sha256": "bdfdc49a9a2fbce2d552615e62e75b347ddf264025b463ae377ff3c36ed2f6af"
+    },
+    {
+      "bytes": 1754,
+      "path": "fixtures/source-before/net_ure/DotnetLibrary_net_bridge.mk",
+      "sha256": "4b75434ca42850650b2cc2334816d06a9fb72c66fdd143efa1fc0fd953f8af49"
+    },
+    {
+      "bytes": 801,
+      "path": "fixtures/source-before/net_ure/DotnetLibrary_net_oootypes.mk",
+      "sha256": "4f1ac8905639f44b31bc72b4ceaa5b5a159e826908cace6772800332ffba4437"
+    },
+    {
+      "bytes": 802,
+      "path": "fixtures/source-before/net_ure/DotnetLibrary_net_uretypes.mk",
+      "sha256": "6b5702367b60e766ff9ca571a051c79d1e84a6e32514ad385229bfbcb90ef71d"
+    },
+    {
+      "bytes": 984,
+      "path": "fixtures/source-before/net_ure/Module_net_ure.mk",
+      "sha256": "da85da18dbc52afddc5381d6d1c6230c6e17483959d52adf10c135f870c99ba2"
+    },
+    {
+      "bytes": 5315,
+      "path": "fixtures/source-before/solenv/gbuild/DotnetLibrary.mk",
+      "sha256": "f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b"
+    },
+    {
+      "bytes": 5154,
+      "path": "fixtures/source-before/solenv/gbuild/DotnetTest.mk",
+      "sha256": "5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272"
+    },
+    {
+      "bytes": 14492,
+      "path": "fixtures/source-context/solenv/gbuild/Helper.mk",
+      "sha256": "968bb797d966c4c75b77132e25ba1e42d762943b7c2e4a43593b0bddcc4e17f9"
+    },
+    {
+      "bytes": 277,
+      "path": "fixtures/source-context/solenv/gbuild/Helper.pin.json",
+      "sha256": "d321d9cf2700d1d9e640d2d0d90f93b1e3b47f8b7b577eeaa21f3624a7df8541"
+    },
+    {
+      "bytes": 6165,
+      "path": "tests/test_dotnet_project_graph_ps.py",
+      "sha256": "13af086894c92fbd9cb22624b4608bb45dd1bd3a94ac76f016e99e9865a09727"
+    },
+    {
+      "bytes": 19890,
+      "path": "tests/test_dotnet_project_graph_source.py",
+      "sha256": "a06d982626dd6afba830ad02a05154ebafdb084c6590ad3d608d781bf3ff65e0"
+    }
+  ],
+  "kind": "public-dotnet-source-regression-assets",
+  "schemaVersion": 1
+}

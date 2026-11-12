@@ -1,0 +1,143 @@
+{
+  "files": [
+    {
+      "bytes": 2401,
+      "path": "bin/unpack-sources",
+      "sha256": "912e88972e7fc7f61eb0b373187d80d2f2ab6e7462378dce979254fa31792715",
+      "source": "suite/tests/fixtures/native-source-tar/unpack-sources"
+    },
+    {
+      "bytes": 1009,
+      "path": "cli_ure/CliNativeLibrary_cli_cppuhelper.mk",
+      "sha256": "7c776454bb55e541da3a937c8edf44166cb3d3837789b95c0359ec52c8df9bba",
+      "source": "suite/tests/fixtures/native-cli-policy/cli_ure/CliNativeLibrary_cli_cppuhelper.mk"
+    },
+    {
+      "bytes": 607023,
+      "path": "configure.ac",
+      "sha256": "a29d75952286370eb4b85b97d875b1a030207e17848c583df062eac54d50e3e2",
+      "source": "suite/engine-build/dotnet_project_graph_regression/fixtures/extra-source-before/configure.ac"
+    },
+    {
+      "bytes": 37027,
+      "path": "connectivity/source/parse/sqlflex.l",
+      "sha256": "87e66cc9306322ca97c2e4ccbb41b0960fb8857aee4e536bf051c043ebf6c11a",
+      "source": "suite/tests/fixtures/native-flex-fatal/sqlflex.l"
+    },
+    {
+      "bytes": 1586,
+      "path": "embedserv/Library_emser.mk",
+      "sha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef",
+      "source": "suite/tests/fixtures/native-atl-consumers/embedserv/Library_emser.mk"
+    },
+    {
+      "bytes": 1639,
+      "path": "extensions/Library_oleautobridge.mk",
+      "sha256": "815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8",
+      "source": "suite/tests/fixtures/native-atl-consumers/extensions/Library_oleautobridge.mk"
+    },
+    {
+      "bytes": 1376,
+      "path": "extensions/Library_so_activex.mk",
+      "sha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c",
+      "source": "suite/tests/fixtures/native-atl-path/Library_so_activex.mk"
+    },
+    {
+      "bytes": 4655,
+      "path": "external/firebird/ExternalProject_firebird.mk",
+      "sha256": "416e06cd2b0210321c29f7ad2e8bece165641baa000ec5df9f6c8d5dc66ec3e4",
+      "source": "suite/tests/fixtures/native-icu-path/ExternalProject_firebird.mk"
+    },
+    {
+      "bytes": 3512,
+      "path": "external/firebird/UnpackedTarball_firebird.mk",
+      "sha256": "8b66548039e92e12ee5ad728a8da3d578633d45b49a5ee8255ffae38663e6555",
+      "source": "suite/engine-build/dotnet_project_graph_regression/fixtures/extra-source-before/external/firebird/UnpackedTarball_firebird.mk"
+    },
+    {
+      "bytes": 3074,
+      "path": "external/harfbuzz/ExternalProject_harfbuzz.mk",
+      "sha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+      "source": "suite/tests/fixtures/native-meson-path/ExternalProject_harfbuzz.mk"
+    },
+    {
+      "bytes": 645,
+      "path": "external/mdds/UnpackedTarball_mdds.mk",
+      "sha256": "f315da733c95aeeae29656318289fae9a90bff2eab46478972a9d8472a10208a",
+      "source": "suite/tests/fixtures/native-mdds-equality/UnpackedTarball_mdds.mk"
+    },
+    {
+      "bytes": 3732,
+      "path": "external/mdds/gcc-12-silence-use-after-free.patch.1",
+      "sha256": "3411f0814815e06914ea1fbf50c5428af86cbed68c82c0481e09dd62bc8a22c6",
+      "source": "suite/engine-build/dotnet_project_graph_regression/fixtures/extra-source-before/external/mdds/gcc-12-silence-use-after-free.patch.1"
+    },
+    {
+      "bytes": 10931,
+      "path": "external/python3/ExternalProject_python3.mk",
+      "sha256": "b31e4d779484a4d153155b025daf8b03678e1984abde4fe5c6c038ccb7d43445",
+      "source": "suite/tests/fixtures/native-python-host/ExternalProject_python3.mk"
+    },
+    {
+      "bytes": 779,
+      "path": "external/zstd/UnpackedTarball_zstd.mk",
+      "sha256": "3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909",
+      "source": "suite/tests/fixtures/native-zstd-unpack/UnpackedTarball_zstd.mk"
+    },
+    {
+      "bytes": 5315,
+      "path": "solenv/gbuild/DotnetLibrary.mk",
+      "sha256": "f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b",
+      "source": "suite/engine-build/dotnet_project_graph_regression/fixtures/source-before/solenv/gbuild/DotnetLibrary.mk"
+    },
+    {
+      "bytes": 5154,
+      "path": "solenv/gbuild/DotnetTest.mk",
+      "sha256": "5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272",
+      "source": "suite/engine-build/dotnet_project_graph_regression/fixtures/source-before/solenv/gbuild/DotnetTest.mk"
+    },
+    {
+      "bytes": 10340,
+      "path": "solenv/gbuild/platform/com_MSC_defs.mk",
+      "sha256": "c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14",
+      "source": "suite/tests/fixtures/native-gpg-build-compiler/com_MSC_defs.mk"
+    },
+    {
+      "bytes": 2200,
+      "path": "winaccessibility/Library_uacccom.mk",
+      "sha256": "d5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062",
+      "source": "suite/tests/fixtures/native-atl-consumers/winaccessibility/Library_uacccom.mk"
+    },
+    {
+      "bytes": 2478,
+      "path": "winaccessibility/Library_winaccessibility.mk",
+      "sha256": "0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4",
+      "source": "suite/tests/fixtures/native-atl-consumers/winaccessibility/Library_winaccessibility.mk"
+    },
+    {
+      "bytes": 803,
+      "path": "winaccessibility/WinResTarget_uacccom.mk",
+      "sha256": "9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00",
+      "source": "suite/tests/fixtures/native-atl-consumers/winaccessibility/WinResTarget_uacccom.mk"
+    },
+    {
+      "bytes": 90847,
+      "path": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+      "sha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad",
+      "source": "suite/tests/fixtures/winacc-focus-order/MAccessible.cxx"
+    },
+    {
+      "bytes": 26374,
+      "path": "winaccessibility/source/service/AccObject.cxx",
+      "sha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+      "source": "suite/tests/fixtures/winacc-focus-order/AccObject.cxx"
+    },
+    {
+      "bytes": 33670,
+      "path": "winaccessibility/source/service/AccObjectWinManager.cxx",
+      "sha256": "ab5ed31cac9b262461b1d7e45fbe4a5758fef852a0f51c08c0c6f8e25d1c9be0",
+      "source": "suite/tests/fixtures/winacc-focus-order/AccObjectWinManager.cxx"
+    }
+  ],
+  "schemaVersion": 1
+}

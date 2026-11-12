@@ -49,12 +49,16 @@ class NativeEngineBuildTests(unittest.TestCase):
         harfbuzz = module._install_harfbuzz_native_meson_paths(source, evidence, lock['windowsHarfbuzzNativeMesonPaths'])
         cli_policy = module._install_cli_policy_platform(source, evidence, lock['windowsCliPublisherPolicyPlatform'])
         flex = module._install_flex_fatal_compat(source, evidence, lock['flexFatalCompatibility'], 'x64')
+        for pin in lock['windowsDotnetProjectGraph']['sources']:
+            target=source/pin['path'];target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes((engine/'dotnet_project_graph_regression/fixtures/source-before'/pin['path']).read_bytes())
+        dotnet=module._install_dotnet_project_graph(source,evidence,lock['windowsDotnetProjectGraph'],'x64')
         good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
                     nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
                     flexFatalCompatibilitySourcePatch=flex,
                     sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
                                      firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg, atlNativePaths=atl,
-                                     harfbuzzNativeMesonPaths=harfbuzz, cliPublisherPolicyPlatform=cli_policy),
+                                     harfbuzzNativeMesonPaths=harfbuzz, cliPublisherPolicyPlatform=cli_policy, dotnetProjectGraph=dotnet),
                     sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
                         recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
                         policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),

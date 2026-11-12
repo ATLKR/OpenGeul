@@ -17,8 +17,13 @@ import stat
 HERE = Path(__file__).resolve().parent
 CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
-RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder', 'flexFatalCompatibility']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility'])}
+RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph']),
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph'])}
+DOTNET_GRAPH_SOURCES = (
+    ('solenv/gbuild/DotnetLibrary.mk', 5315, 'f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b',
+     5728, 'cc1e4a62d0d97681b1742ada794af15945e465af86d4d2f54b38b245c8889db3'),
+    ('solenv/gbuild/DotnetTest.mk', 5154, '5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272',
+     5555, '09987ad29eb2afac9f2ff7a973bd2b7c32ccd54f286a4281610b5bc89fe939f7'))
 FLEX_PATH = 'connectivity/source/parse/sqlflex.l'
 FLEX_BEFORE = (37027, '87e66cc9306322ca97c2e4ccbb41b0960fb8857aee4e536bf051c043ebf6c11a')
 FLEX_AFTER = (37161, 'f0890c54e65b52ac31a37a99b20a17fb9e9282985f25fa99ba4718490975200c')
@@ -143,6 +148,7 @@ def _select_plan(lock, policy_raw, architecture):
             raise ValueError('source-recipe-input')
         common[1]['afterBytes'] = winacc['afterBytes']
         common.append(_flex_pin(lock['flexFatalCompatibility']))
+        common.extend(_dotnet_graph_pins(lock['windowsDotnetProjectGraph']))
         arm_pins = [lock[key] for key in ['configureSource', 'sourceHook', 'icuBuildPath', 'zstdSourceLinks']]
         arm_pins += [lock[key]['recipe'] for key in ['mddsEquality', 'pythonNativeHost', 'atlNativePaths']]
         consumers = lock['atlConsumerNativePaths']['recipes']
@@ -204,6 +210,86 @@ def _select_plan(lock, policy_raw, architecture):
                 'sourceDependencies': dependencies, 'payloads': selected_payloads}
     except (KeyError, TypeError, IndexError, AttributeError):
         raise ValueError('source-recipe-input') from None
+
+
+def _dotnet_graph_pin(pin):
+    fields = ('path', 'size', 'sha256', 'afterSize', 'afterSha256')
+    if (type(pin) is not dict or set(pin) != set(fields)
+            or any(type(pin[key]) is not str for key in ('path', 'sha256', 'afterSha256'))
+            or any(type(pin[key]) is not int for key in ('size', 'afterSize'))
+            or tuple(pin[key] for key in fields) not in DOTNET_GRAPH_SOURCES):
+        raise ValueError('source-recipe-input')
+    return _pin(pin, pin['path'])
+
+
+def _dotnet_graph_pins(descriptor):
+    if (type(descriptor) is not dict or set(descriptor) != {'schemaVersion', 'coreCommit', 'sources'}
+            or type(descriptor['schemaVersion']) is not int or descriptor['schemaVersion'] != 1
+            or type(descriptor['coreCommit']) is not str or descriptor['coreCommit'] != CORE
+            or type(descriptor['sources']) is not list or len(descriptor['sources']) != 2):
+        raise ValueError('source-recipe-input')
+    pins = [_dotnet_graph_pin(pin) for pin in descriptor['sources']]
+    if [row['path'] for row in pins] != [row[0] for row in DOTNET_GRAPH_SOURCES]:
+        raise ValueError('source-recipe-input')
+    return pins
+
+
+def _dotnet_graph_bytes(original, pin):
+    _dotnet_graph_pin(pin)
+    if type(original) is not bytes or (len(original), _sha(original)) != (pin['size'], pin['sha256']):
+        raise ValueError('source-recipe-input')
+    kind = 'Library' if pin['path'] == DOTNET_GRAPH_SOURCES[0][0] else 'Test'
+    prefix = 'gb_Dotnet' + kind
+    command = b'build' if kind == 'Library' else b'test'
+    old_cli = b'"$$(DOTNET)" ' + command + b' $$< $$(DOTNET_BUILD_FLAGS) -o $$(dir $$@),'
+    new_cli = b'"$$(DOTNET)" ' + command + b' $$< $$(DOTNET_BUILD_FLAGS),'
+    owner = ('$$(' + prefix + '_$(1)_project) : DOTNET_PROPERTY_ELEMENTS += ').encode()
+    assembly = owner + b'<AssemblyName>$(1)</AssemblyName>\n'
+    # gbuild workdirs already use the same native path representation as the
+    # existing ProjectReference and original CLI -o. Do not call the deprecated
+    # gb_Helper_native_path or propagate a global SDK output override.
+    properties = (owner + ('<OutputPath>$(' + prefix + '_workdir)/$(1)/</OutputPath>\n').encode()
+                  + owner + b'<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>\n'
+                  + owner + b'<BuildProjectReferences>false</BuildProjectReferences>\n')
+    reference = b'<ProjectReference Include="$(gb_DotnetLibrary_$(2)_project)"/>'
+    scoped = b'<ProjectReference Include="$(gb_DotnetLibrary_$(2)_project)" GlobalPropertiesToRemove="OutputPath;OutDir"/>'
+    for before in (old_cli, assembly, reference):
+        if original.count(before) != 1: raise ValueError('source-recipe-input')
+    changed = original.replace(old_cli, new_cli, 1).replace(assembly, assembly + properties, 1).replace(reference, scoped, 1)
+    if (len(changed), _sha(changed)) != (pin['afterSize'], pin['afterSha256']):
+        raise ValueError('source-recipe-output')
+    return changed
+
+
+def _install_dotnet_project_graph(source, evidence, descriptor, architecture):
+    if type(architecture) is not str or architecture not in RECIPES:
+        raise ValueError('source-recipe-input')
+    _directory(source); _directory(evidence)
+    if source == evidence or source in evidence.parents or evidence in source.parents:
+        raise ValueError('source-recipe-input')
+    _dotnet_graph_pins(descriptor)
+    prepared = []
+    for pin in descriptor['sources']:
+        target = source / pin['path']; original = _regular(target)
+        changed = _dotnet_graph_bytes(original, pin)
+        retained = {phase: evidence / (phase + '-' + target.name) for phase in ('original', 'effective')}
+        if any(path.exists() or path.is_symlink() for path in retained.values()):
+            raise ValueError('source-recipe-input')
+        prepared.append((pin, target, original, changed, retained))
+    rows = []
+    for pin, target, original, changed, retained in prepared:
+        if _regular(target) != original: raise ValueError('source-recipe-input')
+        for phase, raw in (('original', original), ('effective', changed)):
+            with retained[phase].open('xb') as output: output.write(raw)
+            if _regular(retained[phase]) != raw: raise ValueError('source-recipe-output')
+        target.write_bytes(changed)
+        if _regular(target) != changed: raise ValueError('source-recipe-output')
+        rows.append(dict(path=pin['path'], beforeBytes=pin['size'], afterBytes=pin['afterSize'],
+                         beforeSha256=pin['sha256'], afterSha256=pin['afterSha256'],
+                         evidence={name: str(path) for name, path in retained.items()}))
+    return dict(schemaVersion=1, kind='windows-dotnet-project-graph-source-hook', coreCommit=CORE,
+                architecture=architecture, sources=rows, nativeBuildVerified=False,
+                fullEngineQualified=False, acceptanceEligible=False, guiVerified=False)
 
 
 def _flex_pin(pin):
@@ -541,6 +627,9 @@ def _install_atl_native_paths(source, evidence, descriptor):
 
 def _validate_common(inputs, lock, payloads, architecture):
     _flex_fatal_bytes(inputs[FLEX_PATH], lock['flexFatalCompatibility'])
+    _dotnet_graph_pins(lock['windowsDotnetProjectGraph'])
+    for pin in lock['windowsDotnetProjectGraph']['sources']:
+        _dotnet_graph_bytes(inputs[pin['path']], pin)
     bootstrap = lock['moduleBootstrap']
     original = inputs[COMMON_PATHS[0]]
     if original.count(b'-type d -path ') != 1 or _sha(original.replace(b'-type d -path ', b'-type d ! -path ')) != bootstrap['afterSha256']:
@@ -609,6 +698,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
     flex = _install_flex_fatal_compat(source, evidence, lock['flexFatalCompatibility'], architecture)
+    hooks['dotnetProjectGraph'] = _install_dotnet_project_graph(source, evidence, lock['windowsDotnetProjectGraph'], architecture)
     if architecture == 'arm64':
         for path, name in ARM_OUTPUTS.items():
             if _regular(source / path) != payloads[name]: raise ValueError('source-recipe-output')
