@@ -16,6 +16,14 @@ def condition(text,event,ref,**overrides):
     if any(not isinstance(n,allowed) for n in ast.walk(tree)):raise AssertionError('unsupported fixed expression')
     return bool(eval(compile(tree,'fixed-condition','eval'),{'__builtins__':{}},values))
 class PushRouting(unittest.TestCase):
+    def test_only_diagnostic_job_explicitly_enables_bootstrap_error_codes(self):
+        workflow=yaml.safe_load((ROOT.parents[2]/'.github/workflows/office-native-engine.yml').read_bytes())
+        diagnostic=workflow['jobs']['dotnet-graph-diagnostic']
+        commands=[step.get('run','') for step in diagnostic['steps']]
+        self.assertEqual(sum('--bootstrap-error-codes' in command for command in commands),1)
+        for name,job in workflow['jobs'].items():
+            if name!='dotnet-graph-diagnostic':
+                self.assertTrue(all('--bootstrap-error-codes' not in step.get('run','') for step in job['steps']))
     def test_actual_job_expressions_never_send_diagnostic_push_to_full(self):
         v=yaml.safe_load((ROOT.parents[2]/'.github/workflows/office-native-engine.yml').read_bytes());full=v['jobs']['native-firebird-and-office']['if'];diag=v['jobs']['dotnet-graph-diagnostic']['if']
         for event,ref,expected in [('push',DIAG,(False,True)),('push',NORMAL,(True,False)),('workflow_dispatch',NORMAL,(True,False)),('workflow_dispatch',DIAG,(True,False)),('pull_request',DIAG,(True,False))]:

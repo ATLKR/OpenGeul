@@ -179,7 +179,7 @@ jobs:
         shell: pwsh
         run: |
           # Diagnostic only: no engine build, qualification or delivery occurs.
-          python suite/engine-build/dotnet-graph-diagnostic.py --diagnostic-only --output .work/dotnet-graph-diagnostic
+          python suite/engine-build/dotnet-graph-diagnostic.py --diagnostic-only --bootstrap-error-codes --output .work/dotnet-graph-diagnostic
           if ($LASTEXITCODE -ne 0) { throw 'Bounded dotnet graph diagnostic failed.' }
       - name: Retain only the closed numeric diagnostic receipt
         if: always()

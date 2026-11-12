@@ -15,7 +15,7 @@ def main():
             result=unittest.TextTestRunner(stream=io.StringIO()).run(suite)
         value={'schemaVersion':1,'tests':result.testsRun,'failures':len(result.failures),'errors':len(result.errors),'skipped':len(result.skipped),'windowsSdkVerified':False,'sourceFullQualified':False}
         print(json.dumps(value,sort_keys=True))
-        return 0 if result.testsRun==46 and result.wasSuccessful() and not result.skipped else 1
+        return 0 if result.testsRun==74 and result.wasSuccessful() and not result.skipped else 1
     except BaseException:
         print('{"schemaVersion":1,"driverFailure":1,"windowsSdkVerified":false,"sourceFullQualified":false}')
         return 2

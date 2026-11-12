@@ -62,13 +62,14 @@ class Runner:
     """One original deadline for all roots and descendants, including cleanup."""
     def __init__(self,api,*,clock=time.monotonic,pause=time.sleep):
         self.api=api;self.clock=clock;self.pause=pause
-    def run(self,specs,deadline):
+    def run(self,specs,deadline,*,bootstrap_capture=False):
         start=self.clock()
-        if not 1<deadline-start<=60 or not 1<=len(specs)<=2:raise ProbeFailure(2)
+        if (not 1<deadline-start<=60 or not 1<=len(specs)<=2 or type(bootstrap_capture) is not bool
+                or (bootstrap_capture and len(specs)!=1)):raise ProbeFailure(2)
         controller=None;owned=[];failed=False;forced=False;clean=True;rows=[]
-        def native(name,*args):
+        def native(name,*args,**kwargs):
             if self.clock()>=deadline:raise ProbeFailure(2)
-            return getattr(self.api,name)(*args)
+            return getattr(self.api,name)(*args,**kwargs)
         result={'startedAt':start,'deadline':deadline,'completed':False,'cleanupProved':False,'forcedCleanup':False,'children':rows,'siblingOverlapObserved':False,'rootExitedWithLiveDescendantObserved':False}
         try:
             controller,identity=native('retain_current_controller')
@@ -76,7 +77,8 @@ class Runner:
             for argv,cwd,environment in specs:
                 if type(environment) is not dict or set(environment)!=ENV_KEYS or any(type(v) is not str or '\0' in v for v in environment.values()) or any(environment[k]!='false' for k in ENV_FALSE_KEYS):raise ProbeFailure(4)
                 if self.clock()>=deadline-1:raise ProbeFailure(2)
-                job=self.api.launch(argv,str(cwd),environment,controller_binding=binding)
+                launch=self.api.launch_captured if bootstrap_capture else self.api.launch
+                job=launch(argv,str(cwd),environment,controller_binding=binding)
                 owned.append(job)
                 row={'pid':0,'creation':0,'exitCode':0,'exitObserved':False,'launchFailureCode':int(job.failure_code),'identityRechecked':False};rows.append(row)
                 if job.identity:row.update(pid=job.identity[0],creation=job.identity[1])
@@ -86,6 +88,7 @@ class Runner:
                 for job,row in zip(owned,rows):
                     if native('identity',job.host)!=job.identity:failed=True;break
                     row['identityRechecked']=True
+                    if bootstrap_capture and not native('drain_capture',job,deadline-1,self.clock):failed=True;break
                     wait,code=native('state',job.host)
                     if wait==258 and not native('member',job.host,job.job):failed=True;break
                     if wait==0:row.update(exitCode=code,exitObserved=True)
@@ -97,7 +100,9 @@ class Runner:
                         result['rootExitedWithLiveDescendantObserved']=True
                     done=done and wait==0 and not pids
                 if len(owned)==2 and active==2:result['siblingOverlapObserved']=True
-                if done and not failed:result['completed']=True;break
+                if done and not failed:
+                    if bootstrap_capture and not all(native('drain_capture',job,deadline-1,self.clock,final=True) for job in owned):failed=True;break
+                    result['completed']=True;break
                 self.pause(min(.02,max(0.,deadline-1-self.clock())))
         except BaseException as error:
             failed=True
@@ -126,6 +131,13 @@ class Runner:
                     try:
                         if self.clock()>=deadline or not self.api.release_launch_local(job):clean=False
                     except BaseException:clean=False
+                if bootstrap_capture:
+                    try:
+                        if not self.api.close_capture(job):clean=False
+                        from .bootstrap_errors import validate_capture
+                        row['bootstrapErrorCodes']=validate_capture(self.api.capture_result(job))
+                        if not row['bootstrapErrorCodes']['complete']:failed=True
+                    except BaseException:clean=False;failed=True
                 for name in ('thread','host','job'):
                     h=getattr(job,name,None)
                     if h:

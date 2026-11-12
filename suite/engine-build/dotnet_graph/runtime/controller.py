@@ -111,10 +111,13 @@ def sdk_plan():
     return host,chosen,system,{'machine':n.value,'sdkVersion':list(map(int,chosen.name.split('.'))),'hostSha256':hashlib.sha256(host.read_bytes()).hexdigest(),'historicalFullSdkVersionMatched':False}
 
 class Probe:
-    def __init__(self,output,assets,host,sdk,system,api,report,overall):
+    def __init__(self,output,assets,host,sdk,system,api,report,overall,*,bootstrap_capture=False):
+        if type(bootstrap_capture) is not bool:raise ProbeFailure(4)
+        self.bootstrap_capture=bootstrap_capture
         self.output=output;self.assets=assets;self.host=host;self.sdk=sdk;self.system=system;self.api=api;self.report=report;self.overall=overall;self.phase=0
         self.environment=child_environment(output/'owned-cache',system,host.parent)
-    def run(self,args,root,*,logger=None,code=None,seconds=60,parallel=None):
+    def run(self,args,root,*,logger=None,code=None,seconds=60,parallel=None,bootstrap=False):
+        if type(bootstrap) is not bool or (bootstrap and (parallel is not None or logger is not None)):raise ProbeFailure(4)
         self.phase+=1;phase=self.phase
         deadline=phase_deadline(time.monotonic(),self.overall,seconds)
         commands=[];outputs=[]
@@ -125,7 +128,8 @@ class Probe:
                 outfile=root/'observations'/(str(phase)+'-'+str(projectcode)+'.json')
                 command.append('-logger:OpenGeulSynthetic.NumericLogger,'+str(logger)+';root='+str(root)+';output='+str(outfile)+';phase='+str(phase));outputs.append(outfile)
             commands.append((command,root,self.environment))
-        state=Runner(self.api).run(commands,deadline)
+        options={'bootstrap_capture':True} if bootstrap and self.bootstrap_capture else {}
+        state=Runner(self.api).run(commands,deadline,**options)
         row={'phase':phase,'kindCode':self.report.get('currentKindCode',0),**state,'logs':[]};self.report['phases'].append(row)
         if not state['completed']:raise ProbeFailure(20)
         for p in outputs:
@@ -147,10 +151,10 @@ class Probe:
     def variant(self,variant,shared_logger=None,shared_verifier=None):
         root=render(self.output/variant,variant,self.sdk.name,self.sdk,self.assets)
         self.report['currentKindCode']=1 if variant=='baseline' else 2
-        row=self.run(['restore',root/'Fixture.sln','--configfile',root/'NuGet.Config','--packages',self.environment['NUGET_PACKAGES'],'--disable-parallel','-v:quiet','-p:RestoreFallbackFolders='],root);self.require_zero(row)
+        row=self.run(['restore',root/'Fixture.sln','--configfile',root/'NuGet.Config','--packages',self.environment['NUGET_PACKAGES'],'--disable-parallel','-v:quiet','-p:RestoreFallbackFolders='],root,bootstrap=True);self.require_zero(row)
         observer=root/'SdkObserver'
         for name in ('NumericLogger','ApiVerifier'):
-            row=self.run(['build',observer/name/(name+'.csproj'),'--no-restore','--disable-build-servers','-c','Release','-o',observer/name,'-nologo','-v:quiet','-nodeReuse:false','-p:UseSharedCompilation=false'],root);self.require_zero(row)
+            row=self.run(['build',observer/name/(name+'.csproj'),'--no-restore','--disable-build-servers','-c','Release','-o',observer/name,'-nologo','-v:quiet','-nodeReuse:false','-p:UseSharedCompilation=false'],root,bootstrap=True);self.require_zero(row)
         logger=observer/'NumericLogger/NumericLogger.dll';verifier=observer/'ApiVerifier/ApiVerifier.dll'
         if not logger.is_file() or not verifier.is_file():raise ProbeFailure(22)
         initial_logs=[]
@@ -219,10 +223,26 @@ class Probe:
 
 def state_clean(row):return int(row['completed'] and row['cleanupProved'] and not row['forcedCleanup'])
 
+def bootstrap_pipe_preflight(api,output,environment,overall):
+    """Separate actual pipe proof; old NUL/held-descendant proof is insufficient."""
+    from .bootstrap_errors import validate_capture
+    source='import os;os.write(1,b"error NU900001: synthetic\\n");os.write(2,b"error CS900002: synthetic\\n")'
+    row=Runner(api).run([([sys.executable,'-I','-S','-c',source],output,environment)],
+        phase_deadline(time.monotonic(),overall,10),bootstrap_capture=True)
+    if (row.get('completed') is not True or row.get('cleanupProved') is not True
+            or row.get('forcedCleanup') is not False or len(row.get('children',[]))!=1):raise ProbeFailure(14)
+    child=row['children'][0]
+    if child.get('exitObserved') is not True or child.get('exitCode')!=0 or child.get('identityRechecked') is not True:raise ProbeFailure(14)
+    capture=validate_capture(child.get('bootstrapErrorCodes'))
+    if (capture['complete'] is not True or capture['streams'][0]['codes']!=[[1,900001,1]]
+            or capture['streams'][1]['codes']!=[[4,900002,1]]):raise ProbeFailure(14)
+    return row
+
 def main(argv=None):
     class SilentParser(argparse.ArgumentParser):
         def error(self,message):raise ProbeFailure(13)
     parser=SilentParser(add_help=False);parser.add_argument('--diagnostic-only',action='store_true');parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--bootstrap-error-codes',action='store_true')
     try:args=parser.parse_args(argv)
     except BaseException:return 2
     if not args.diagnostic_only:return 2
@@ -234,7 +254,12 @@ def main(argv=None):
         assets=Path(__file__).resolve().parent.parent
         verify_assets(assets)
         from .sdk_win32 import NativeApi
-        host,sdk,system,plan=sdk_plan();report['sdk']=plan;api=NativeApi();probe=Probe(output,assets,host,sdk,system,api,report,overall)
+        host,sdk,system,plan=sdk_plan();report['sdk']=plan
+        if args.bootstrap_error_codes:
+            from .bootstrap_errors import BootstrapApi
+            api=BootstrapApi()
+        else:api=NativeApi()
+        probe=Probe(output,assets,host,sdk,system,api,report,overall,bootstrap_capture=args.bootstrap_error_codes)
         environment=child_environment(output/'launcher-preflight',system,host.parent)
         no_op=Runner(api).run([([sys.executable,'-I','-c','raise SystemExit(0)'],output,environment)],phase_deadline(time.monotonic(),overall,10))
         report['launcherNoOp']=no_op
@@ -242,6 +267,8 @@ def main(argv=None):
         held='import subprocess,sys;subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(30)"],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);raise SystemExit(0)'
         negative=Runner(api).run([([sys.executable,'-I','-c',held],output,environment)],phase_deadline(time.monotonic(),overall,5));report['launcherHeldDescendant']=negative
         require_held_descendant_proof(negative)
+        if args.bootstrap_error_codes:
+            report['bootstrapPipePreflight']=bootstrap_pipe_preflight(api,output,environment,overall)
         try:probe.variant('baseline')
         except ProbeFailure as error:
             last=report['phases'][-1] if report['phases'] else {}
