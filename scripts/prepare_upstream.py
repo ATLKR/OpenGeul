@@ -71,6 +71,24 @@ def run(*args: str, cwd: Path) -> str:
     return result.stdout.strip()
 
 
+def pin_package_manager(source: Path, version: str) -> None:
+    """Select the reviewed installer before unpatched upstream tests install files."""
+    stable = r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)'
+    if type(version) is not str or not re.fullmatch(stable, version):
+        raise ValueError('The package manager requires an exact stable version')
+    path = source / 'package.json'
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('The package manager requires a regular upstream manifest')
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if (type(value) is not dict or type(value.get('packageManager')) is not str
+            or not re.fullmatch('pnpm@' + stable, value['packageManager'])):
+        raise ValueError('The upstream manifest must select pnpm')
+    selected = 'pnpm@' + version
+    if value['packageManager'] != selected:
+        value['packageManager'] = selected
+        path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+
 def replace_file(path: Path, old: str, new: str, expected: int = 1, *, newline: str | None = None) -> None:
     path.write_text(replace_once(path.read_text(encoding='utf-8'),old,new,expected=expected),encoding='utf-8',newline=newline)
 
@@ -847,6 +865,9 @@ def main() -> None:
     if run('git','rev-parse','HEAD',cwd=dest)!=lock['hop']['commit']:raise ValueError('HOP commit mismatch')
     if run('git','rev-parse','HEAD',cwd=dest/'third_party/rhwp')!=lock['rhwp']['commit']:raise ValueError('rhwp submodule mismatch')
     if not args.patch_only:port_windows_contract_test(dest)
+    # Corepack reads this before the first Windows pnpm install. Changing it
+    # only in patch() leaves .modules.yaml on the old upstream installer.
+    pin_package_manager(dest, lock['pnpm'])
     if not args.fetch_only:patch(dest,version)
     print(f'Prepared {dest}; fetch_only={args.fetch_only}. Compilation and runtime verification are separate gates.')
 
