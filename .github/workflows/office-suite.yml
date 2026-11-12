@@ -904,7 +904,27 @@ jobs:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
-        python suite/e2e/korean_ui_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui
+        $writerSameRootArgs = @()
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance' -and
+            $env:GITHUB_ACTIONS -ceq 'true' -and
+            $env:RUNNER_ENVIRONMENT -ceq 'github-hosted' -and
+            $env:RUNNER_OS -ceq 'Windows' -and
+            (('${{ matrix.architecture }}' -ceq 'arm64' -and $env:RUNNER_ARCH -ceq 'ARM64') -or ('${{ matrix.architecture }}' -ceq 'x64' -and $env:RUNNER_ARCH -ceq 'X64')) -and
+            $env:GITHUB_REPOSITORY -ceq 'ATLKR/OpenGeul' -and
+            $env:GITHUB_EVENT_NAME -ceq 'push' -and
+            $env:GITHUB_JOB -ceq 'windows-suite' -and
+            $env:GITHUB_REF -ceq 'refs/heads/work/opengeul-office-arm64' -and
+            $env:GITHUB_WORKFLOW_REF -ceq 'ATLKR/OpenGeul/.github/workflows/office-suite.yml@refs/heads/work/opengeul-office-arm64' -and
+            $env:GITHUB_RUN_ATTEMPT -ceq '1' -and
+            $env:GITHUB_ACTOR -ceq 'ATLKR' -and
+            $env:GITHUB_ACTOR_ID -ceq '65988341' -and
+            $env:GITHUB_SHA -cmatch '\A[0-9a-f]{40}\z' -and
+            $env:GITHUB_WORKFLOW_SHA -ceq $env:GITHUB_SHA -and
+            $env:GITHUB_RUN_ID -cmatch '\A[1-9][0-9]{0,19}\z' -and
+            "${{ github.event.repository.full_name == 'ATLKR/OpenGeul' && github.event.repository.private == false && github.event.repository.id > 0 && github.event.sender.login == 'ATLKR' && github.event.sender.id == 65988341 && github.event.sender.type == 'User' && github.event.ref == 'refs/heads/work/opengeul-office-arm64' && github.event.deleted == false && github.event.after == github.sha }}" -ceq 'true') {
+          $writerSameRootArgs = @('--writer-same-root-diagnostic', '${{ matrix.architecture }}')
+        }
+        python suite/e2e/korean_ui_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui @writerSameRootArgs
         if ($LASTEXITCODE -ne 0) { throw 'Actual Korean native Tabbed UI verification failed.' }
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: korean-ui 원본 검증 기록 즉시 보존

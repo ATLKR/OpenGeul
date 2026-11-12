@@ -46,6 +46,32 @@ REVIEWED_READER_COMMANDS = (
 )
 
 
+# One exact reviewed Writer failure-observation route; no legacy fallback.
+EXACT_WRITER_SAME_ROOT_SETUP = (
+    '        $writerSameRootArgs = @()\n'
+    "        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance' -and\n"
+    "            $env:GITHUB_ACTIONS -ceq 'true' -and\n"
+    "            $env:RUNNER_ENVIRONMENT -ceq 'github-hosted' -and\n"
+    "            $env:RUNNER_OS -ceq 'Windows' -and\n"
+    "            (('${{ matrix.architecture }}' -ceq 'arm64' -and $env:RUNNER_ARCH -ceq 'ARM64') -or ('${{ matrix.architecture }}' -ceq 'x64' -and $env:RUNNER_ARCH -ceq 'X64')) -and\n"
+    "            $env:GITHUB_REPOSITORY -ceq 'ATLKR/OpenGeul' -and\n"
+    "            $env:GITHUB_EVENT_NAME -ceq 'push' -and\n"
+    "            $env:GITHUB_JOB -ceq 'windows-suite' -and\n"
+    "            $env:GITHUB_REF -ceq 'refs/heads/work/opengeul-office-arm64' -and\n"
+    "            $env:GITHUB_WORKFLOW_REF -ceq 'ATLKR/OpenGeul/.github/workflows/office-suite.yml@refs/heads/work/opengeul-office-arm64' -and\n"
+    "            $env:GITHUB_RUN_ATTEMPT -ceq '1' -and\n"
+    "            $env:GITHUB_ACTOR -ceq 'ATLKR' -and\n"
+    "            $env:GITHUB_ACTOR_ID -ceq '65988341' -and\n"
+    "            $env:GITHUB_SHA -cmatch '\\A[0-9a-f]{40}\\z' -and\n"
+    '            $env:GITHUB_WORKFLOW_SHA -ceq $env:GITHUB_SHA -and\n'
+    "            $env:GITHUB_RUN_ID -cmatch '\\A[1-9][0-9]{0,19}\\z' -and\n"
+    '            "${{ github.event.repository.full_name == \'ATLKR/OpenGeul\' && github.event.repository.private == false && github.event.repository.id > 0 && github.event.sender.login == \'ATLKR\' && github.event.sender.id == 65988341 && github.event.sender.type == \'User\' && github.event.ref == \'refs/heads/work/opengeul-office-arm64\' && github.event.deleted == false && github.event.after == github.sha }}" -ceq \'true\') {\n'
+    "          $writerSameRootArgs = @('--writer-same-root-diagnostic', '${{ matrix.architecture }}')\n"
+    '        }\n'
+)
+WRITER_SAME_ROOT_COMMAND = '        python suite/e2e/korean_ui_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui'
+
+
 def original_normal_oracle_text(normal):
     if type(normal) is not str:
         raise ValueError('Historical normal-job oracle requires text')
@@ -62,4 +88,8 @@ def original_normal_oracle_text(normal):
         if normal.count(before) != 1:
             raise ValueError('Reviewed normal-job source-reader delta differs')
         normal = normal.replace(before, command + '\n', 1)
+    before = EXACT_WRITER_SAME_ROOT_SETUP + WRITER_SAME_ROOT_COMMAND + ' @writerSameRootArgs\n'
+    if normal.count(before) != 1:
+        raise ValueError('Reviewed normal-job Writer failure-observation delta differs')
+    normal = normal.replace(before, WRITER_SAME_ROOT_COMMAND + '\n', 1)
     return normal
