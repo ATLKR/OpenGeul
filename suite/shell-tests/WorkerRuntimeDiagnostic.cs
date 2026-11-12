@@ -54,7 +54,10 @@ assert request['command'] == 'inspect' and type(request['args']) is dict
 assert set(request['args']) == {'marker'}
 suite = Path(sys.argv[1])
 program = suite / 'Office' / 'program'
-core = program / 'python-core-3.13.15'
+assert len(sys.argv) == 4
+core_name = sys.argv[3]
+assert core_name in ('python-core-3.13.15', 'python-core-3.13.17')
+core = program / core_name
 def same(left, right):
     return os.path.normcase(os.path.realpath(left)) == os.path.normcase(os.path.realpath(right))
 import uno
@@ -83,6 +86,7 @@ sys.stdout.flush()
         nint handle = 0;
         bool admitted = false, released = false, disposed = false, normalExit = false;
         bool protocolVerified = false, consoleAbsent = false, valid = false;
+        byte stageCode = 0; // Last entered fixed boundary; this is never success authority.
         TimeSpan Remaining()
         {
             var remaining = TimeSpan.FromSeconds(Seconds) - clock.Elapsed;
@@ -91,31 +95,41 @@ sys.stdout.flush()
         }
         try
         {
+            stageCode = 1;
             Require(args.Length == 5 && args[0] == "--worker-runtime-probe" && args[1] == "--suite"
                 && args[3] == "--architecture" && args[4] is "x64" or "arm64");
             var architecture = args[4];
             var expected = architecture == "x64" ? Architecture.X64 : Architecture.Arm64;
+            stageCode = 2;
             Require(OperatingSystem.IsWindows() && IntPtr.Size == 8
                 && RuntimeInformation.OSArchitecture == expected && RuntimeInformation.ProcessArchitecture == expected);
             var suite = args[2];
+            stageCode = 3;
             Require(Path.IsPathFullyQualified(suite) && !suite.StartsWith(@"\\", StringComparison.Ordinal)
                 && string.Equals(Path.GetFullPath(suite), suite, StringComparison.OrdinalIgnoreCase));
             for (var part = new DirectoryInfo(suite); part is not null; part = part.Parent)
                 Require(part.Exists && (part.Attributes & FileAttributes.ReparsePoint) == 0);
+            stageCode = 4;
             var start = WorkerLaunch.Create(suite);
+            var expectedCore = Path.GetFileName(start.Environment["PYTHONHOME"]) ?? throw new InvalidOperationException();
+            Require(expectedCore is "python-core-3.13.15" or "python-core-3.13.17");
             start.ArgumentList.Clear();
-            foreach (var argument in new[] { "-u", "-c", Probe, suite, architecture }) start.ArgumentList.Add(argument);
+            foreach (var argument in new[] { "-u", "-c", Probe, suite, architecture, expectedCore }) start.ArgumentList.Add(argument);
             Remaining();
+            stageCode = 5;
             client = WorkerClient.Start(start, Remaining());
             // The constant child waits for this controller's first request.
+            stageCode = 6;
             handle = OpenProcess(QueryAndSynchronize, false, checked((uint)client.ProcessId));
             Require(handle != 0);
             admitted = true;
             Require(GetProcessId(handle) == client.ProcessId && WaitForSingleObject(handle, 0) == Pending);
             var created = Creation(handle);
             Remaining();
+            stageCode = 7;
             var result = await client.SendAsync("inspect", new { marker = Marker }, Remaining());
             Remaining();
+            stageCode = 8;
             Require(result.ValueKind == JsonValueKind.Object);
             var properties = result.EnumerateObject().Select(p => p.Name).ToArray();
             Require(properties.Length == BooleanFields.Length + 2
@@ -127,6 +141,7 @@ sys.stdout.flush()
             consoleAbsent = result.GetProperty("consoleAbsent").ValueKind == JsonValueKind.True;
             Require(BooleanFields.All(field => result.GetProperty(field).ValueKind == JsonValueKind.True));
             protocolVerified = true;
+            stageCode = 9;
             while (true)
             {
                 Remaining();
@@ -135,9 +150,11 @@ sys.stdout.flush()
                 Require(wait == Pending);
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(10, Remaining().TotalMilliseconds)));
             }
+            stageCode = 10;
             Require(GetExitCodeProcess(handle, out var exitCode) && exitCode == 0 && Creation(handle) == created);
             normalExit = true;
             Remaining();
+            stageCode = 11;
             valid = true;
         }
         catch (Exception) { valid = false; } // No native paths, environment values or raw failures leave this probe.
@@ -157,7 +174,7 @@ sys.stdout.flush()
         bool withinDeadline = clock.Elapsed < TimeSpan.FromSeconds(Seconds);
         bool success = valid && admitted && released && disposed && protocolVerified && normalExit && withinDeadline;
         Console.WriteLine(JsonSerializer.Serialize(new {
-            schemaVersion = 1, success, consoleAbsent, protocolVerified, normalExitObserved = normalExit,
+            schemaVersion = 1, stageCode, success, consoleAbsent, protocolVerified, normalExitObserved = normalExit,
             retainedHandleAdmitted = admitted, retainedHandleReleased = released, clientDisposed = disposed, withinDeadline
         }));
         return success ? 0 : 1;

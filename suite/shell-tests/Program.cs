@@ -161,7 +161,8 @@ Test("CLI rejects unknown arguments without shell interpretation", () =>
 Test("worker launch prepends bundled program to process-local PATH", () =>
 {
     var inheritedPath = Environment.GetEnvironmentVariable("PATH");
-    var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
+    using var runtime = new WorkerRuntimeFixture();
+    var root = runtime.Root;
     var start = WorkerLaunch.Create(root);
     var program = Path.Combine(root, "Office", "program");
     Equal(program + (string.IsNullOrEmpty(inheritedPath) ? "" : Path.PathSeparator + inheritedPath), start.Environment["PATH"]);
@@ -169,7 +170,8 @@ Test("worker launch prepends bundled program to process-local PATH", () =>
 });
 Test("worker launch preserves inherited environment without exposing values", () =>
 {
-    var start = WorkerLaunch.Create(Path.Combine(Path.GetTempPath(), "OpenGeul"));
+    using var runtime = new WorkerRuntimeFixture();
+    var start = WorkerLaunch.Create(runtime.Root);
     foreach (System.Collections.DictionaryEntry variable in Environment.GetEnvironmentVariables())
     {
         var name = (string)variable.Key;
@@ -179,7 +181,8 @@ Test("worker launch preserves inherited environment without exposing values", ()
 });
 Test("worker launch keeps unicode paths in structured arguments and UTF-8 protocol", () =>
 {
-    var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
+    using var runtime = new WorkerRuntimeFixture();
+    var root = runtime.Root;
     var start = WorkerLaunch.Create(root);
     Equal(Path.Combine(root, "Office", "program", "python-core-3.13.15", "bin", "python.exe"), start.FileName);
     Equal(root, start.WorkingDirectory);
@@ -198,7 +201,8 @@ Test("worker launch supplies packaged Python bootstrap only to the child", () =>
     try
     {
         foreach (var name in names) Environment.SetEnvironmentVariable(name, null);
-        var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & $raw");
+        using var runtime = new WorkerRuntimeFixture();
+    var root = runtime.Root;
         var program = Path.Combine(root, "Office", "program");
         var core = Path.Combine(program, "python-core-3.13.15");
         var start = WorkerLaunch.Create(root);
@@ -227,7 +231,8 @@ Test("worker launch preserves inherited bootstrap and Python path suffix without
     try
     {
         foreach (var name in names) Environment.SetEnvironmentVariable(name, inherited[name]);
-        var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & $raw");
+        using var runtime = new WorkerRuntimeFixture();
+    var root = runtime.Root;
         var program = Path.Combine(root, "Office", "program");
         var core = Path.Combine(program, "python-core-3.13.15");
         var start = WorkerLaunch.Create(root);
@@ -242,6 +247,87 @@ Test("worker launch preserves inherited bootstrap and Python path suffix without
         foreach (var name in names) Environment.SetEnvironmentVariable(name, previous[name]);
     }
 });
+Test("worker selects both exact bundled Python bootstrap profiles", () =>
+{
+    foreach (var version in new[] { "3.13.15", "3.13.17" })
+    {
+        using var runtime = new WorkerRuntimeFixture(version);
+        var start = WorkerLaunch.Create(runtime.Root);
+        Equal(Path.Combine(runtime.Core, "bin", "python.exe"), start.FileName);
+        Equal(runtime.Core, start.Environment["PYTHONHOME"]);
+        Equal(string.Join(Path.PathSeparator, runtime.Program, Path.Combine(runtime.Core, "lib"),
+            Path.Combine(runtime.Core, "lib", "site-packages")), start.Environment["PYTHONPATH"]);
+    }
+});
+Test("worker bootstrap supports only equivalent Windows and Unix line endings", () =>
+{
+    foreach (var version in new[] { "3.13.15", "3.13.17" })
+    {
+        using var runtime = new WorkerRuntimeFixture(version);
+        File.WriteAllText(runtime.Loader, File.ReadAllText(runtime.Loader).Replace("\n", "\r\n"));
+        Equal(Path.Combine(runtime.Core, "bin", "python.exe"), WorkerLaunch.Create(runtime.Root).FileName);
+    }
+});
+Test("worker rejects missing declared bootstrap inputs without a version fallback", () =>
+{
+    foreach (var slot in new[] { "loader", "version", "interpreter", "encodings" })
+    {
+        using var runtime = new WorkerRuntimeFixture("3.13.17");
+        File.Delete(slot switch { "loader" => runtime.Loader, "version" => runtime.VersionFile,
+            "interpreter" => Path.Combine(runtime.Core, "bin", "python.exe"),
+            _ => Path.Combine(runtime.Core, "lib", "encodings", "__init__.py") });
+        Throws<SuiteException>(() => WorkerLaunch.Create(runtime.Root));
+    }
+});
+Test("worker rejects unknown or injected loader metadata", () =>
+{
+    foreach (var damage in new[] { "unknown", "absolute", "traversal", "duplicate", "extra", "path", "bytes", "oversize" })
+    {
+        using var runtime = new WorkerRuntimeFixture("3.13.17");
+        var loader = File.ReadAllText(runtime.Loader);
+        if (damage == "bytes") File.WriteAllBytes(runtime.Loader, [0xff]);
+        else File.WriteAllText(runtime.Loader, damage switch {
+            "unknown" => loader.Replace("3.13.17", "3.13.99"),
+            "absolute" => loader.Replace("$ORIGIN/python-core-3.13.17", "C:/foreign/python-core-3.13.17"),
+            "traversal" => loader.Replace("$ORIGIN/python-core-3.13.17", "$ORIGIN/../python-core-3.13.17"),
+            "duplicate" => loader + "PYUNO_LOADER_PYTHONHOME=$ORIGIN/python-core-3.13.17\n",
+            "extra" => loader + "UNREVIEWED=1\n",
+            "path" => loader.Replace("/lib/site-packages", "/foreign"),
+            _ => new string('x', 4096) });
+        Throws<SuiteException>(() => WorkerLaunch.Create(runtime.Root));
+    }
+});
+Test("worker rejects source build id and Python bootstrap cross pairs", () =>
+{
+    foreach (var damage in new[] { "cross", "unknown", "duplicate", "section", "oversize" })
+    {
+        using var runtime = new WorkerRuntimeFixture("3.13.17");
+        File.WriteAllText(runtime.VersionFile, damage switch {
+            "cross" => "[Version]\nbuildid=bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1\n",
+            "unknown" => "[Version]\nbuildid=" + new string('0', 40) + "\n",
+            "duplicate" => File.ReadAllText(runtime.VersionFile) + "buildid=9dea406ab7695df6325b11b0e19fdca8db4b7276\n",
+            "section" => "[Version]\n[Other]\nbuildid=9dea406ab7695df6325b11b0e19fdca8db4b7276\n",
+            _ => new string('x', 16384) });
+        Throws<SuiteException>(() => WorkerLaunch.Create(runtime.Root));
+    }
+});
+Test("worker refuses ambiguous two-core layouts", () =>
+{
+    foreach (var version in new[] { "3.13.15", "3.13.17" })
+    {
+        using var runtime = new WorkerRuntimeFixture(version);
+        Directory.CreateDirectory(Path.Combine(runtime.Program, "python-core-" + (version == "3.13.15" ? "3.13.17" : "3.13.15")));
+        Throws<SuiteException>(() => WorkerLaunch.Create(runtime.Root));
+    }
+});
+Test("worker cannot substitute the other core for the declared missing core", () =>
+{
+    using var runtime = new WorkerRuntimeFixture("3.13.17");
+    Directory.Delete(runtime.Core, recursive: true);
+    Directory.CreateDirectory(Path.Combine(runtime.Program, "python-core-3.13.15"));
+    Throws<SuiteException>(() => WorkerLaunch.Create(runtime.Root));
+});
+
 Test("Base clean status preserves unverified connection readiness message", () =>
     Equal("저장됨 · 연결과 Java 사용 가능 여부가 확인되지 않았습니다.",
         DocumentStatusText.Format("base", false, true, "연결과 Java 사용 가능 여부가 확인되지 않았습니다.")));
@@ -260,14 +346,16 @@ Test("ordinary module status is unchanged by Base readiness metadata", () =>
 Test("HWP launch prepends shared CRT directory to process-local PATH", () =>
 {
     var inheritedPath = Environment.GetEnvironmentVariable("PATH");
-    var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
+    using var runtime = new WorkerRuntimeFixture();
+    var root = runtime.Root;
     var start = HwpLaunch.Create(root, null);
     Equal(Path.Combine(root, "Office", "program") + (string.IsNullOrEmpty(inheritedPath) ? "" : Path.PathSeparator + inheritedPath), start.Environment["PATH"]);
     Equal(inheritedPath, Environment.GetEnvironmentVariable("PATH"));
 });
 Test("HWP launch uses only fixed original executable and one structured document argument", () =>
 {
-    var root = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & local");
+    using var runtime = new WorkerRuntimeFixture();
+    var root = runtime.Root;
     var document = "C:\\문서 폴더\\a & b $(x).hwpx";
     var start = HwpLaunch.Create(root, document);
     Equal(Path.Combine(root, "HWP", "OpenGeul.exe"), start.FileName);
@@ -814,4 +902,26 @@ sealed class BlockingDiagnosticDetails(ManualResetEventSlim entered, ManualReset
     {
         get { entered.Set(); release.Wait(TimeSpan.FromSeconds(1)); return true; }
     }
+}
+
+sealed class WorkerRuntimeFixture : IDisposable
+{
+    public string Root { get; } = Path.Combine(Path.GetTempPath(), "OpenGeul 한글 & $raw " + Guid.NewGuid().ToString("N"));
+    public string Program => Path.Combine(Root, "Office", "program");
+    public string Core { get; }
+    public string Loader => Path.Combine(Program, "pythonloader.uno.ini");
+    public string VersionFile => Path.Combine(Program, "version.ini");
+    public WorkerRuntimeFixture(string version = "3.13.15")
+    {
+        Core = Path.Combine(Program, "python-core-" + version);
+        Directory.CreateDirectory(Path.Combine(Core, "bin"));
+        Directory.CreateDirectory(Path.Combine(Core, "lib", "encodings"));
+        File.WriteAllText(Path.Combine(Core, "bin", "python.exe"), "SYNTHETIC-INTERPRETER-PATH-ONLY");
+        File.WriteAllText(Path.Combine(Core, "lib", "encodings", "__init__.py"), "# synthetic path fixture\n");
+        File.WriteAllText(Loader, "[Bootstrap]\nPYUNO_LOADER_PYTHONHOME=$ORIGIN/python-core-" + version +
+            "\nPYUNO_LOADER_PYTHONPATH=$ORIGIN/python-core-" + version + "/lib $ORIGIN/python-core-" + version + "/lib/site-packages $ORIGIN\n");
+        File.WriteAllText(VersionFile, "[Version]\r\nbuildid=" + (version == "3.13.15" ?
+            "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1" : "9dea406ab7695df6325b11b0e19fdca8db4b7276") + "\r\n");
+    }
+    public void Dispose() => Directory.Delete(Root, recursive: true);
 }
