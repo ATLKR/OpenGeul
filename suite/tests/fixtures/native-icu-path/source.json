@@ -1,12 +1,12 @@
 {
-  "libreofficeVersion": "26.8.1.1",
-  "archiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+  "libreofficeVersion": "26.8.2.2",
+  "archiveSha256": "f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7",
   "members": [
     {
       "path": "external/firebird/ExternalProject_firebird.mk",
-      "sourceSha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
+      "sourceSha256": "416e06cd2b0210321c29f7ad2e8bece165641baa000ec5df9f6c8d5dc66ec3e4",
       "fixture": "ExternalProject_firebird.mk",
-      "fixtureSha256": "6ee6f3bf95f7f1c6f9cad6b7127809b095d5aabf752bca768bccfc63a6af40e9",
+      "fixtureSha256": "416e06cd2b0210321c29f7ad2e8bece165641baa000ec5df9f6c8d5dc66ec3e4",
       "sourceLines": "complete",
       "licenseHeaderLines": "complete"
     },

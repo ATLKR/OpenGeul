@@ -15,7 +15,7 @@ from unittest.mock import patch
 from suite.tests.test_native_engine_build import PWSH, SOURCE, quote
 
 PACKAGE = Path(__file__).resolve().parents[1]/'engine-build/calc-dispatch-diagnostic'
-CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
 PATHS = ('sc/source/ui/view/tabvwsha.cxx', 'sfx2/source/doc/objstor.cxx')
 PAYLOADS = tuple((name, 'include/opengeul_calc_dispatch/'+name)
                  for name in ('windows_runtime.h', 'recorder.h', 'wire.h'))
@@ -156,7 +156,7 @@ class CalcDispatchSourceTests(unittest.TestCase):
         self.assertEqual(CORE, lock['coreCommit'])
         self.assertEqual({'sc/source/ui/view/tabvwsha.cxx', 'sfx2/source/doc/objstor.cxx'}, {s['path'] for s in lock['sources']})
         self.assertEqual({'sc/source/ui/view/tabvwsha.cxx': 'bff1e750e6d778b0b8a5f13f69325a309fc7a1d6d95935d4b3579f9e497a0561',
-                          'sfx2/source/doc/objstor.cxx': '383efdebc4548969c1b64ae899f09cbd8ae622461508861de8b5db5119d1fee5'},
+                          'sfx2/source/doc/objstor.cxx': 'ae3359eb2b1a7d619b2e95cbda1ca0bbdd2bd806807021aace4666a6486dfb50'},
                          {s['path']: s['before']['sha256'] for s in lock['sources']})
         patch_bytes = (PACKAGE/'source.patch').read_bytes()
         self.assertEqual(digest(patch_bytes), {key: lock['patch'][key] for key in ('bytes', 'sha256')})
@@ -341,7 +341,7 @@ $mode.receipt
         self.assertEqual('2050-01-01T00:00:00Z', result['deadline'])
         self.assertEqual('.work/native-engine', result['work'])
         self.assertEqual('.work/native-engine-evidence', result['output'])
-        self.assertEqual('suite/config/runtime.arm64.lock.json', result['sourceLock'])
+        self.assertEqual('suite/engine-build/source-input.lock.json', result['sourceLock'])
         self.assertEqual('native-office-engine-source-build', result['mode']['kind'])
         self.assertEqual('OpenGeul-Office-engine-arm64.zip', result['mode']['archive'])
         self.assertEqual('source-build-receipt.json', result['mode']['receipt'])

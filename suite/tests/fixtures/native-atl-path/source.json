@@ -1,10 +1,10 @@
 {
-  "archive": "libreoffice-26.8.1.1.tar.xz",
-  "archiveBytes": 302435508,
-  "archiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+  "archive": "libreoffice-26.8.2.2.tar.xz",
+  "archiveBytes": 302823256,
+  "archiveSha256": "f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7",
   "members": [
     {
-      "member": "libreoffice-26.8.1.1/extensions/Library_so_activex.mk",
+      "member": "libreoffice-26.8.2.2/extensions/Library_so_activex.mk",
       "bytes": 1376,
       "sha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c",
       "fixture": "Library_so_activex.mk",
@@ -12,7 +12,7 @@
       "fixtureSha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c"
     },
     {
-      "member": "libreoffice-26.8.1.1/solenv/gbuild/platform/WNT_AARCH64_MSC.mk",
+      "member": "libreoffice-26.8.2.2/solenv/gbuild/platform/WNT_AARCH64_MSC.mk",
       "bytes": 1010,
       "sha256": "7fe0296418dd6637ff25e930a0a7d70d1439cc4d51dd951a4e1a8a2958e482aa",
       "fixture": "WNT_AARCH64_MSC.mk",
@@ -20,7 +20,7 @@
       "fixtureSha256": "7fe0296418dd6637ff25e930a0a7d70d1439cc4d51dd951a4e1a8a2958e482aa"
     },
     {
-      "member": "libreoffice-26.8.1.1/solenv/gbuild/LinkTarget.mk",
+      "member": "libreoffice-26.8.2.2/solenv/gbuild/LinkTarget.mk",
       "bytes": 111066,
       "sha256": "075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8",
       "physicalLfRanges": [
@@ -34,17 +34,17 @@
       "fixtureSha256": "834f6471da577aeee57f7f173fa8b11370c79edd3dbc42c1589099fa4e43a045"
     },
     {
-      "member": "libreoffice-26.8.1.1/configure.ac",
-      "bytes": 606697,
-      "sha256": "412040c7a2e84ab8305613b902dc5f0485f11d745e51a77969332aa058d6f31c",
+      "member": "libreoffice-26.8.2.2/configure.ac",
+      "bytes": 607023,
+      "sha256": "a29d75952286370eb4b85b97d875b1a030207e17848c583df062eac54d50e3e2",
       "physicalLfRanges": [
         [
           678,
           695
         ],
         [
-          16297,
-          16311
+          16306,
+          16320
         ]
       ],
       "fixture": "configure-atl-selection.sh",
@@ -52,7 +52,7 @@
       "fixtureSha256": "2c2f2a7ba147cc05ecf4eb614f1faa496535c672a05f8f3fa2973c36df20943e"
     },
     {
-      "member": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_class.mk",
+      "member": "libreoffice-26.8.2.2/solenv/gbuild/platform/com_MSC_class.mk",
       "bytes": 29428,
       "sha256": "e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada",
       "physicalLfRanges": [
@@ -66,7 +66,7 @@
       "fixtureSha256": "22c1cb581cfe8995cee49c1ceed55b2ac51f3c5848373c7b23ae605704a51414"
     },
     {
-      "member": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_class.mk",
+      "member": "libreoffice-26.8.2.2/solenv/gbuild/platform/com_MSC_class.mk",
       "bytes": 29428,
       "sha256": "e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada",
       "physicalLfRanges": [

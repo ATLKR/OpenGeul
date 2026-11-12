@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "sourceArchive": {
-    "url": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
-    "size": 302435508,
-    "sha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
-    "version": "26.8.1.1",
-    "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1"
+    "url": "https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz",
+    "size": 302823256,
+    "sha256": "f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7",
+    "version": "26.8.2.2",
+    "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276"
   },
   "sourceMembers": {
     "Makefile.in": {

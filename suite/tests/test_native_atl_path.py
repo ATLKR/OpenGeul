@@ -386,7 +386,7 @@ def assert_consumer_replays(case, root, make, bash, candidates, actual=False):
 class AtlSourceTests(unittest.TestCase):
     def test_pristine_recipe_and_profile_are_authenticated_and_plan_is_exact(self):
         manifest = json.loads((FIXTURE / 'source.json').read_text())
-        self.assertEqual('296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785', manifest['archiveSha256'])
+        self.assertEqual('f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7', manifest['archiveSha256'])
         for pin in manifest['members']:
             raw = (FIXTURE / pin['fixture']).read_bytes()
             self.assertEqual(pin['fixtureBytes'], len(raw))
@@ -756,7 +756,7 @@ class ActualAtlSourceTests(unittest.TestCase):
         source = Path(value)
         manifest = json.loads((FIXTURE/'source.json').read_text())
         for pin in manifest['members']:
-            actual = source / Path(pin['member']).relative_to('libreoffice-26.8.1.1')
+            actual = source / Path(pin['member']).relative_to('libreoffice-26.8.2.2')
             self.assertFalse(any(path.is_symlink() for path in (actual, *actual.parents)), 'Actual ATL source must be unlinked')
             raw = installer()._regular(actual)
             self.assertEqual(pin['bytes'], len(raw))

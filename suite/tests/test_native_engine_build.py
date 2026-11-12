@@ -354,6 +354,8 @@ Invoke-Expression $calls[0].Extent.Text|Out-Null
         changed = copy.deepcopy(good); changed['sourceRecipeProof']['hookOrder'] = ['moduleBootstrap', 'winAccFocusOrder']; bad.append(changed)
         changed = copy.deepcopy(good); changed['sourceRecipeProof']['armGuardedSources'].append(dict(good['sourceRecipeProof']['armGuardedSources'][0])); bad.append(changed)
         changed = copy.deepcopy(good); changed['sourceRecipeProof']['armGuardedSources'][0]['unchanged'] = False; bad.append(changed)
+        # The previous core's valid canonical plan must not certify this source.
+        changed = copy.deepcopy(good); changed['sourceRecipeProof']['recipeSha256'] = 'e2ee50135f765384f994193419b3aa60b41812b09d9eeec491e4fa1201a0b036'; bad.append(changed)
         for index, packet in enumerate(bad):
             with self.subTest(case=index):
                 path.write_text(json.dumps(packet)); self.rejected(call)
@@ -893,20 +895,20 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
         raw=self.ps("[pscustomobject]@{pins=@(Get-ExtraSourcePins);configure=@(Get-ConfigureArguments '/owned/source-cache')}|ConvertTo-Json -Depth 8 -Compress")
         data=json.loads(raw)
         self.assertEqual(3,len(data['pins']))
-        self.assertEqual([53513324,62319860,236160656],[pin['size'] for pin in data['pins']])
+        self.assertEqual([53513028,62318564,236276788],[pin['size'] for pin in data['pins']])
         for pin in data['pins']:
-            self.assertTrue(pin['url'].startswith('https://download.documentfoundation.org/libreoffice/src/26.8.1/'))
+            self.assertTrue(pin['url'].startswith('https://download.documentfoundation.org/libreoffice/src/26.8.2/'))
             self.assertEqual(64,len(pin['sha256']))
         self.assertIn('--with-external-tar=/owned/source-cache',data['configure'])
 
     def test_authenticated_source_uses_exact_official_url_size_and_hash(self):
-        lock=SOURCE.parents[1]/'config/runtime.lock.json'
+        lock=SOURCE.parents[1]/'engine-build/source-input.lock.json'
         data=json.loads(self.ps(f"Get-SourcePin {quote(lock)}|ConvertTo-Json -Compress"))
-        self.assertEqual(302435508,data['size'])
-        self.assertEqual('296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785',data['sha256'])
-        self.assertEqual(json.loads(lock.read_text())['runtime']['sourceUrl'],data['url'])
-        self.assertEqual('bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1',data.get('coreCommit'))
-        bad=json.loads(lock.read_text()); bad['runtime']['sourceUrl']='https://example.org/renamed.tar.xz'
+        self.assertEqual(302823256,data['size'])
+        self.assertEqual('f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7',data['sha256'])
+        self.assertEqual(json.loads(lock.read_text())['source']['url'],data['url'])
+        self.assertEqual('9dea406ab7695df6325b11b0e19fdca8db4b7276',data.get('coreCommit'))
+        bad=json.loads(lock.read_text()); bad['source']['url']='https://example.org/renamed.tar.xz'
         path=self.root/'bad.json';path.write_text(json.dumps(bad))
         self.rejected(f"Get-SourcePin {quote(path)}")
 
@@ -1624,10 +1626,10 @@ $receipt.cygwinSetup|ConvertTo-Json -Compress
             self.rejected(f"Assert-PythonTemplateAdmission {quote(path)} {machine} {quote(digest)}")
 
     def test_x64_templates_reuse_only_existing_foreign_payload_admissions(self):
-        from suite.payload import COMPANION_PE_ADMISSIONS
+        from suite.payload import _python_template_admissions
         pins=json.loads(self.ps('@(Get-PinnedPythonTemplates x64)|ConvertTo-Json -Compress'))
         foreign={pin['path']: {key:pin[key] for key in ('machine','sha256','role')} for pin in pins if pin['machine']!=0x8664}
-        expected={path.removeprefix('Office/'):value for path,value in COMPANION_PE_ADMISSIONS.items() if value['role']=='pythonLauncherTemplate'}
+        expected={path.removeprefix('Office/'):value for path,value in _python_template_admissions('9dea406ab7695df6325b11b0e19fdca8db4b7276','x64','26.8.2.2').items()}
         self.assertEqual(expected,foreign)
         for path,pin in foreign.items():
             self.ps(f"Assert-PythonTemplateAdmission {quote(path)} {pin['machine']} {quote(pin['sha256'])} x64|Out-Null")

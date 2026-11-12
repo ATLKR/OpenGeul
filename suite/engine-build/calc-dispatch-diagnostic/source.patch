@@ -62,7 +62,7 @@
  #include <sal/log.hxx>
  
  #include <cassert>
-@@ -1384,6 +1388,7 @@
+@@ -1417,6 +1421,7 @@
  */
  
  {
@@ -70,7 +70,7 @@
      SAL_INFO( "sfx.doc", "saving \"" << rMedium.GetName() << "\"" );
  
      UpdateDocInfoForSave();
-@@ -2025,7 +2030,9 @@
+@@ -2058,7 +2063,9 @@
          }
  
          const OUString sName( rMedium.GetName( ) );
@@ -80,7 +80,7 @@
          const OUString sNewName( rMedium.GetName( ) );
  
          if ( sName != sNewName )
-@@ -2836,6 +2843,7 @@
+@@ -2875,6 +2882,7 @@
  
  bool SfxObjectShell::DoSave_Impl( const SfxItemSet* pArgs )
  {

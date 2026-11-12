@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "kind": "calc-save-dispatch-diagnostic-source",
-  "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
+  "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
   "target": "windows-arm64",
   "acceptanceEligible": false,
   "patch": {
     "path": "source.patch",
     "bytes": 2856,
-    "sha256": "43cad7201d1c08960fc54ad326a797961d0ff8bafccac200ea7417797cbb3055"
+    "sha256": "788a777d81b36fbea199d3ac60790e2c4354e573f91cc5eacba6bb38852049cc"
   },
   "sources": [
     {
@@ -24,12 +24,12 @@
     {
       "path": "sfx2/source/doc/objstor.cxx",
       "before": {
-        "bytes": 158966,
-        "sha256": "383efdebc4548969c1b64ae899f09cbd8ae622461508861de8b5db5119d1fee5"
+        "bytes": 161316,
+        "sha256": "ae3359eb2b1a7d619b2e95cbda1ca0bbdd2bd806807021aace4666a6486dfb50"
       },
       "after": {
-        "bytes": 159271,
-        "sha256": "b9682218d39b8394c7efa4847deff4935d34295d71a3b1617cf3c9b488cd465e"
+        "bytes": 161621,
+        "sha256": "c78d053168f0f436baa695f6fd24abdc449fc4a10f97e64327abad32f42f5d29"
       }
     }
   ],

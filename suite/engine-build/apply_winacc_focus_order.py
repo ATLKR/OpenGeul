@@ -13,7 +13,7 @@ from pathlib import Path
 import stat
 
 HERE=Path(__file__).resolve().parent
-CORE='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+CORE='9dea406ab7695df6325b11b0e19fdca8db4b7276'
 SOURCE='winaccessibility/source/service/AccObjectWinManager.cxx'
 SOURCES={SOURCE,'winaccessibility/source/service/AccObject.cxx',
     'winaccessibility/source/UAccCOM/MAccessible.cxx'}

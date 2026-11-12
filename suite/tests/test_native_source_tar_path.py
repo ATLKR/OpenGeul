@@ -55,7 +55,7 @@ $write=@($ast.FindAll({{param($node) $node -is [Management.Automation.Language.C
  $node.Extent.Text.Contains('make -j$Jobs $target')}},$true))
 if($write.Count -ne 1) {{throw 'Expected one actual make-target recipe generation statement'}}
 Invoke-Expression $write[0].Extent.Text
-[pscustomobject]@{{pins=@(Get-ExtraSourcePins);sourcePin=(Get-SourcePin {quote(ROOT/'suite/config/runtime.arm64.lock.json')});configure=@(Get-ConfigureArguments)}}|ConvertTo-Json -Depth 6 -Compress
+[pscustomobject]@{{pins=@(Get-ExtraSourcePins);sourcePin=(Get-SourcePin {quote(ROOT/'suite/engine-build/source-input.lock.json')});configure=@(Get-ConfigureArguments)}}|ConvertTo-Json -Depth 6 -Compress
 """)
         data=json.loads(raw.splitlines()[-1]);self.assertEqual(self.manifest['sourceArchive'],data['sourcePin'])
         self.assertIn('--with-lang=en-US ko',data['configure'])

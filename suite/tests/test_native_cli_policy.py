@@ -30,7 +30,7 @@ class CliPublisherPolicyTests(unittest.TestCase):
 
     def test_public_source_fixture_is_pinned_to_the_core_commit(self):
         pins = json.loads((FIXTURE / 'source.json').read_bytes())
-        self.assertEqual('bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1', pins['coreCommit'])
+        self.assertEqual('9dea406ab7695df6325b11b0e19fdca8db4b7276', pins['coreCommit'])
         self.assertEqual(['solenv/gbuild/CliAssembly.mk', 'solenv/gbuild/CliNativeLibrary.mk', POLICY_PATH],
                          [row['path'] for row in pins['files']])
         for row in pins['files']:
@@ -136,7 +136,7 @@ class CliPublisherPolicyTests(unittest.TestCase):
         module = recipe(); lock = json.loads((ENGINE / 'source-build.json').read_bytes())
         policy = (ENGINE / 'native-targets.json').read_bytes()
         arm = module._select_plan(lock, policy, 'arm64'); x64 = module._select_plan(lock, policy, 'x64')
-        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+        self.assertEqual('453fa33f4f5e32c9772a386c890f27c8ffe083d9fa45a1a35b07049ad32c6456',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
         self.assertNotIn(POLICY_PATH, [row['path'] for row in arm['sources']])
         self.assertEqual(1, sum(row['path'] == POLICY_PATH for row in x64['sources']))

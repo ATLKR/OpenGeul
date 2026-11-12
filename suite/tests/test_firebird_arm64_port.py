@@ -22,7 +22,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 PORT = ROOT / 'suite/engine-build'
-SOURCE_SHA = 'bd263c4f685fb8fc3f1dcb8be8a411033cc31c5404d1dfce5d3849aa3f63a64d'
+SOURCE_SHA = 'dce3f26c0f015b3c40f36085f8cc21de58dd568e0f347fdd0fcc7942deda8cff'
 
 
 def module():
@@ -36,9 +36,9 @@ class PortInputs(unittest.TestCase):
     def test_source_and_patch_are_locked(self):
         self.assertTrue((PORT / 'source-build.json').is_file(), 'Authenticated source-build manifest is missing')
         lock = json.loads((PORT / 'source-build.json').read_text())
-        self.assertEqual(lock['libreoffice']['sha256'], '296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785')
+        self.assertEqual(lock['libreoffice']['sha256'], 'f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7')
         self.assertEqual(lock['firebird']['sha256'], SOURCE_SHA)
-        self.assertEqual(lock['firebird']['version'], '3.0.13.33818-0')
+        self.assertEqual(lock['firebird']['version'], '3.0.14.33856-0')
         patch = PORT / lock['portPatch']['filename']
         self.assertEqual(hashlib.sha256(patch.read_bytes()).hexdigest(), lock['portPatch']['sha256'])
         self.assertIn('--enable-firebird-sdbc', lock['configureOptions'])
@@ -467,7 +467,7 @@ class AuthenticatedSource(unittest.TestCase):
     def test_real_windows_icu_path_survives_both_make_levels_with_both_directories_and_old_x64_behavior(self):
         fixture=ROOT/'suite/tests/fixtures/native-icu-path'
         provenance=json.loads((fixture/'source.json').read_text())
-        self.assertEqual('296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785',provenance['archiveSha256'])
+        self.assertEqual('f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7',provenance['archiveSha256'])
         for item in provenance['members']:
             self.assertEqual(item['fixtureSha256'],hashlib.sha256((fixture/item['fixture']).read_bytes()).hexdigest())
         with tempfile.TemporaryDirectory() as folder:
@@ -525,14 +525,16 @@ class AuthenticatedSource(unittest.TestCase):
             before=replay(original,'AARCH64')
             self.assertNotIn(icu,before,'Pinned original no longer reproduces concatenated PATH assignments')
             self.assertTrue(any('icu/source/libPATH=' in entry for entry in before))
-            # Reproduce the intermediate ICU fix used in Native15: the mixed
+            # Replay the same flawed intermediate ICU edit on the newly pinned
+            # 3.0.14 recipe; this is not a relabelled Native15 artifact identity.
+            # As in Native15, the mixed
             # C:/ examples PATH does not supply a canonical Cygwin bin entry,
             # and appending Firebird/lib misses prefix.mingw's LIB=$(BIN).
             old=(b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib)'
                  b'$(call gb_Helper_extend_ld_path,$(firebird_BUILDDIR)/lib)')
             prior=original.replace(old,b'$(if $(filter WNT_AARCH64,$(OS)_$(CPUNAME)),'+
                 b'$(call gb_Helper_extend_ld_path,$(gb_UnpackedTarball_workdir)/icu/source/lib:$(firebird_BUILDDIR)/lib),'+old+b')')
-            self.assertEqual('94d52186250e98ced4237146faca6d0448c9562d74ce1c3cb3254bd9d351c5b2',hashlib.sha256(prior).hexdigest())
+            self.assertEqual('d5fc550a6a191606238d5ae5a06e592d3f1dd0db9f19a680bd1ea506037dbc00',hashlib.sha256(prior).hexdigest())
             prior_entries=replay(prior,'AARCH64')
             self.assertIn(icu,prior_entries)
             self.assertNotIn(firebird,prior_entries)

@@ -65,7 +65,7 @@ jobs:
       - name: Build and verify native x64 Firebird and the full Office engine
         shell: pwsh
         run: |
-          ./suite/scripts/build-native-engine.ps1 -Phase Full -Architecture x64 -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/config/runtime.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC
+          ./suite/scripts/build-native-engine.ps1 -Phase Full -Architecture x64 -WorkDirectory .work/native-engine -OutputDirectory .work/native-engine-evidence -SourceLockPath suite/engine-build/source-input.lock.json -DeadlineUtc $env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC
           if (-not $?) { throw 'Native x64 Office source build or functional verification failed.' }
       - name: Retain original source build diagnostics
         if: always()

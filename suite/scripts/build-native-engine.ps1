@@ -112,7 +112,7 @@ function Get-NativeEngineBuildMode([ValidateSet('Firebird','Full')][string]$Phas
 
 function Write-CalcDispatchRuntimeMarker([string]$RuntimeRoot,[string]$SourceCommit,$SourceReceipt) {
     if($SourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $SourceCommit -ceq ('0'*40) -or
-       $SourceReceipt.coreCommit -cne 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1' -or
+       $SourceReceipt.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
        $SourceReceipt.lockSha256 -cnotmatch '^[0-9a-f]{64}$' -or $SourceReceipt.acceptanceEligible -ne $false -or
        $SourceReceipt.fullEngineQualified -ne $false) {throw 'Calc dispatch source receipt does not bind this runtime.'}
     $path=Join-Path $RuntimeRoot 'program/opengeul-calc-dispatch-diagnostic.json'
@@ -220,13 +220,30 @@ function New-BuildDirectories([string]$WorkDirectory,[string]$OutputDirectory) {
 }
 
 function Get-SourcePin([string]$LockPath) {
-    $lock=Get-Content -LiteralPath $LockPath -Raw|ConvertFrom-Json
-    $url='https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz'
-    $sha='296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785'
-    if($lock.schemaVersion -ne 1 -or $lock.runtime.version -ne '26.8.1.1' -or $lock.runtime.sourceUrl -ne $url -or $lock.runtime.sourceSha256 -ne $sha) {throw 'The authenticated official LibreOffice26.8.1.1 source lock is required.'}
-    # Official 26.8.1.1 core identity, paired with the authenticated source tar.
-    # Never derive this identity from a parent OpenGeul Git checkout.
-    return [ordered]@{url=$lock.runtime.sourceUrl;size=302435508;sha256=$sha;version='26.8.1.1';coreCommit='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'}
+    # This descriptor authenticates source input only. An existing qualified
+    # runtime artifact is never relabelled as a build of a new upstream core.
+    $raw=Read-BoundedIdentityBytes $LockPath
+    $document=[System.Text.Json.JsonDocument]::Parse([Text.UTF8Encoding]::new($false,$true).GetString($raw))
+    try {
+        Assert-NativeTargetObject $document.RootElement @('schemaVersion','kind','nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified','source')
+        Assert-NativeTargetObject ($document.RootElement.GetProperty('source')) @('version','coreCommit','url','size','sha256')
+    } finally {$document.Dispose()}
+    $lock=[Text.UTF8Encoding]::new($false,$true).GetString($raw)|ConvertFrom-Json
+    if(($lock.schemaVersion -isnot [int] -and $lock.schemaVersion -isnot [long]) -or $lock.schemaVersion -ne 1 -or
+       $lock.kind -isnot [string] -or $lock.kind -cne 'native-office-engine-source-build-input') {throw 'The exact unqualified native source-build input descriptor is required.'}
+    foreach($field in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+        if($lock.$field -isnot [bool] -or $lock.$field -ne $false) {throw 'Source input cannot claim native, full-engine, GUI, or acceptance qualification.'}
+    }
+    $pin=$lock.source
+    foreach($field in @('version','coreCommit','url','sha256')) {
+        if($pin.$field -isnot [string]) {throw 'Source identity fields must be exact scalar strings.'}
+    }
+    $url='https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz'
+    $sha='f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7'
+    if($pin.version -cne '26.8.2.2' -or $pin.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
+       $pin.url -cne $url -or $pin.sha256 -cne $sha -or
+       ($pin.size -isnot [int] -and $pin.size -isnot [long]) -or $pin.size -ne 302823256) {throw 'The authenticated official LibreOffice26.8.2.2 source identity is required.'}
+    return [ordered]@{url=$url;size=302823256;sha256=$sha;version='26.8.2.2';coreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276'}
 }
 
 function Read-RuntimeBuildIdentity([string]$Path,[string]$Section) {
@@ -256,16 +273,21 @@ function Write-NewIdentityBytes([string]$Path,[byte[]]$Bytes) {
 }
 
 function Get-InstalledIdentityDerivation($Pin,$Configuration) {
-    # This is one source-authenticated installer formula, not a label allowlist.
-    if($Pin.version -cne '26.8.1.1' -or $Pin.coreCommit -cne 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1' -or
-       $Pin.url -cne 'https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz' -or
-       $Pin.size -ne 302435508 -or $Pin.sha256 -cne '296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785') {throw 'Installed fallback requires the exact authenticated source version/archive/core.'}
-    $expected=[ordered]@{LIBO_VERSION_MAJOR='26';LIBO_VERSION_MINOR='8';LIBO_VERSION_MICRO='1';LIBO_VERSION_PATCH='1';LIBO_VERSION_SUFFIX=''}
+    # Two exact source-authenticated historical formulas, never a version prefix.
+    $profiles=@(
+        @('26.8.1.1','bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1','https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz',302435508,'296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785','1','1'),
+        @('26.8.2.2','9dea406ab7695df6325b11b0e19fdca8db4b7276','https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz',302823256,'f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7','2','2')
+    )
+    $selected=@($profiles|Where-Object {$Pin.version -ceq $_[0] -and $Pin.coreCommit -ceq $_[1] -and $Pin.url -ceq $_[2] -and
+        ($Pin.size -is [int] -or $Pin.size -is [long]) -and $Pin.size -eq $_[3] -and $Pin.sha256 -ceq $_[4]})
+    if($selected.Count -ne 1) {throw 'Installed fallback requires the exact authenticated source version/archive/core.'}
+    $profile=$selected[0]
+    $expected=[ordered]@{LIBO_VERSION_MAJOR='26';LIBO_VERSION_MINOR='8';LIBO_VERSION_MICRO=$profile[5];LIBO_VERSION_PATCH=$profile[6];LIBO_VERSION_SUFFIX=''}
     foreach($key in $expected.Keys) {if($Configuration[$key] -cne $expected[$key]) {throw "Installed fallback configuration mismatch: $key"}}
     $build=$Configuration.LIBO_VERSION_MAJOR+$Configuration.LIBO_VERSION_MINOR+'0'
     $normal=[regex]::Match($build,'(\w+?)(\d+)')
     $local=$normal.Groups[2].Value
-    return [ordered]@{rule='libreoffice-26.8.1.1-installer-no-git-v1';configuration=$expected;
+    return [ordered]@{rule=('libreoffice-'+$profile[0]+'-installer-no-git-v1');configuration=$expected;
         build=$build;normalizedBuild=$local;installerBuildId=$Configuration.LIBO_VERSION_PATCH;
         buildid=($local+'(Build:'+$Configuration.LIBO_VERSION_PATCH+')')}
 }
@@ -872,13 +894,13 @@ int main(void) {
 }
 
 function Get-ExtraSourcePins {
-    $base='https://download.documentfoundation.org/libreoffice/src/26.8.1/'
+    $base='https://download.documentfoundation.org/libreoffice/src/26.8.2/'
     # Published .sha256 files and archive sizes, fetched from the official
     # version-pinned source distribution. Upstream fetches these unchecked.
     foreach($pin in @(
-        @('libreoffice-help-26.8.1.1.tar.xz',53513324,'f1de4054194e8718f699ddf2b269165613c8dd07c10c55b32968c977f0c6234f'),
-        @('libreoffice-dictionaries-26.8.1.1.tar.xz',62319860,'ce366c50178f5bdf6df1c6df4a0146899cf27a0017734190d00d90f0c5acac61'),
-        @('libreoffice-translations-26.8.1.1.tar.xz',236160656,'789519befa409d7eec24043cea41ddd318d9f1212f555d8b28d4982e35693bfc')
+        @('libreoffice-help-26.8.2.2.tar.xz',53513028,'e7e0270c30b13c4c52acae57e6c7529dc2146d9946123b5da17ae236e3bb4f68'),
+        @('libreoffice-dictionaries-26.8.2.2.tar.xz',62318564,'d1b206157ea69249d754cabd8e9213b9dc69fc072fca91f51a681e95228239e0'),
+        @('libreoffice-translations-26.8.2.2.tar.xz',236276788,'1a3b6077ebfac899f2c31666d283e29e94c2d30704dd162fda7ba06d77212dd2')
     )) { [ordered]@{filename=$pin[0];url=$base+$pin[0];size=$pin[1];sha256=$pin[2];checksumUrl=$base+$pin[0]+'.sha256'} }
 }
 
@@ -1200,11 +1222,16 @@ function Assert-MutexSymbolsConfiguration([Collections.IDictionary]$Values) {
     }
 }
 
-function Get-PinnedPythonTemplates([ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
-    # Exact nonexecuted launcher templates from authenticated official ARM64 MSI
-    # SHA256 97c2173752325af1da3d8731f41c8e09a7c4ad491cf55d9b1069fadb5668e6d7.
-    # A new source build must independently match every admitted byte/hash.
-    $prefix='program/python-core-3.13.15/lib/'
+function Get-PinnedPythonTemplates([ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[string]$CoreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276') {
+    # Exact nonexecuted launcher bytes independently extracted from authenticated
+    # Python-3.13.17.tar.xz SHA256 6020bd10aff3bf4821be16f088ebb1591beb7b811dcd8fab1da8f7c22a7b27e7:
+    # setuptools-79.0.1 and ensurepip's pip-26.2.2. LO's exact external/python3
+    # pre-action/package recipes bind these 14 paths. The historical 3.13.15
+    # MSI bytes were independently equal; a prefix is never a permission rule.
+    if($CoreCommit -ceq '9dea406ab7695df6325b11b0e19fdca8db4b7276') {$version='3.13.17'}
+    elseif($CoreCommit -ceq 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1') {$version='3.13.15'}
+    else {throw 'Python launcher templates require an exact reviewed upstream core.'}
+    $prefix='program/python-core-'+$version+'/lib/'
     foreach($pin in @(
         @('pip/_vendor/distlib/t32.exe',332,'6b4195e640a85ac32eb6f9628822a622057df1e459df7c17a12f97aeabc9415b'),
         @('pip/_vendor/distlib/t64.exe',34404,'81a618f21cb87db9076134e70388b6e9cb7c2106739011b6a51772d22cae06b7'),
@@ -1229,8 +1256,8 @@ function Get-PinnedPythonTemplates([ValidateSet('arm64','x64',IgnoreCase=$false)
     }
 }
 
-function Assert-PythonTemplateAdmission([string]$RelativePath,[int]$Machine,[string]$Hash,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
-    $pins=@(Get-PinnedPythonTemplates $Architecture|Where-Object {$_.path -ceq $RelativePath})
+function Assert-PythonTemplateAdmission([string]$RelativePath,[int]$Machine,[string]$Hash,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[string]$CoreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276') {
+    $pins=@(Get-PinnedPythonTemplates $Architecture $CoreCommit|Where-Object {$_.path -ceq $RelativePath})
     if($pins.Count -ne 1 -or $pins[0].machine -ne $Machine -or $pins[0].sha256 -cne $Hash) {throw "Unknown path/machine/hash for nonnative product code: $RelativePath"}
     return $pins[0]
 }
@@ -2173,7 +2200,7 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
         if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
         $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
         $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe)
-        if($proof.recipeSha256 -cne 'e2ee50135f765384f994193419b3aa60b41812b09d9eeec491e4fa1201a0b036') {throw 'x64 canonical source recipe differs.'}
+        if($proof.recipeSha256 -cne 'f1443e964597347e0e6967dca1fb248da579ac751545b47ffe0c0fba2b2ba442') {throw 'x64 canonical source recipe differs.'}
         for($i=0;$i -lt 4;$i++) {
             $row=$proof.armGuardedSources[$i]
             if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
@@ -2371,9 +2398,9 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $binding=Get-SourceRunBinding $repo (Join-Path $PSScriptRoot 'build-native-engine.ps1') (Join-Path $repo 'suite/engine-build/source-build.json') $evidence
         foreach($key in $binding.Keys) {$receipt[$key]=$binding[$key]}
         if($Architecture -ceq 'x64') {$receipt.workflowBinding=[ordered]@{workflow=$nativeTarget.workflow;workflowRef=$env:GITHUB_WORKFLOW_REF;ref=$env:GITHUB_REF;job=$env:GITHUB_JOB;sourceRun=$receipt.sourceRun;runAttempt=$receipt.runAttempt;sourceCommit=$receipt.sourceCommit;sourceTree=$receipt.sourceTree}}
-        if(-not $SourceLockPath) {$SourceLockPath=Join-Path $repo 'suite/config/runtime.lock.json'}
+        if(-not $SourceLockPath) {$SourceLockPath=Join-Path $repo 'suite/engine-build/source-input.lock.json'}
         $pin=Get-SourcePin $SourceLockPath;$receipt.sourcePin=$pin
-        Copy-Item -LiteralPath $SourceLockPath -Destination (Join-Path $evidence 'input-runtime.lock.json')
+        Copy-Item -LiteralPath $SourceLockPath -Destination (Join-Path $evidence 'input-source-build-input.json')
         # Windows configure otherwise searches only the JavaSoft registry. Bind
         # actual native hosted tools before any large source downloads instead.
         $receipt.stage='installed-java-build-prerequisites';Assert-NativeBuildTimeRemaining
@@ -2387,7 +2414,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $downloads=Join-Path $work 'downloads';New-Item -ItemType Directory $downloads|Out-Null
         $receipt.stage='authenticated-downloads';Assert-NativeBuildTimeRemaining
         $receipt.pkgconfTool=Get-AuthenticatedWindowsPkgconf $downloads $evidence $work
-        $archive=Join-Path $downloads 'libreoffice-26.8.1.1.tar.xz'
+        $archive=Join-Path $downloads 'libreoffice-26.8.2.2.tar.xz'
         $receipt.sourceArchive=Get-AuthenticatedDownload $pin.url $archive $pin.size SHA256 $pin.sha256 (Join-Path $evidence 'libreoffice-download.json')
         $receipt.extraSourceArchives=@()
         foreach($extra in Get-ExtraSourcePins) {
@@ -2401,9 +2428,9 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $manifestPath=Join-Path $repo 'suite/engine-build/source-build.json'
         $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
         Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $evidence 'input-source-build.json')
-        $fb=Join-Path $downloads 'Firebird-3.0.13.33818-0.tar.bz2'
-        if($manifest.firebird.url -ne 'https://github.com/FirebirdSQL/firebird/releases/download/v3.0.13/Firebird-3.0.13.33818-0.tar.bz2' -or $manifest.firebird.sha256 -ne 'bd263c4f685fb8fc3f1dcb8be8a411033cc31c5404d1dfce5d3849aa3f63a64d') {throw 'Pinned Firebird source manifest changed.'}
-        $receipt.firebirdArchive=Get-AuthenticatedDownload $manifest.firebird.url $fb 13343760 SHA256 $manifest.firebird.sha256 (Join-Path $evidence 'firebird-download.json')
+        $fb=Join-Path $downloads 'Firebird-3.0.14.33856-0.tar.bz2'
+        if($manifest.firebird.url -cne 'https://github.com/FirebirdSQL/firebird/releases/download/v3.0.14/Firebird-3.0.14.33856-0.tar.bz2' -or $manifest.firebird.sha256 -cne 'dce3f26c0f015b3c40f36085f8cc21de58dd568e0f347fdd0fcc7942deda8cff') {throw 'Pinned Firebird source manifest changed.'}
+        $receipt.firebirdArchive=Get-AuthenticatedDownload $manifest.firebird.url $fb 13343169 SHA256 $manifest.firebird.sha256 (Join-Path $evidence 'firebird-download.json')
         $mddsPin=$manifest.mddsEquality.archive
         if($mddsPin.filename -cne 'mdds-3.2.1.tar.xz' -or $mddsPin.size -ne 648256 -or $mddsPin.sha256 -cne '673f5bb94612dbba581fc92b99b5e5dd1a53e29496a5dbc936432f6b0687c112') {throw 'Pinned MDDS source manifest changed.'}
         $mdds=Join-Path $downloads $mddsPin.filename
@@ -2425,7 +2452,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $unixWork=&$convert $work 'work';$unixArchive=&$convert $archive 'archive';$unixRepo=&$convert $repo 'repo';$unixFb=&$convert $fb 'firebird';$unixMdds=&$convert $mdds 'mdds';$unixDownloads=&$convert $downloads 'downloads'
         $unixJdk=&$convert $receipt.javaTools.jdk.home 'jdk';$unixAnt=&$convert $receipt.javaTools.ant.home 'ant'
         $unixPkgconf=&$convert $receipt.pkgconfTool.identity.path 'pkgconf'
-        $source=Join-Path $work 'libreoffice-26.8.1.1';$unixSource=$unixWork+'/libreoffice-26.8.1.1'
+        $source=Join-Path $work 'libreoffice-26.8.2.2';$unixSource=$unixWork+'/libreoffice-26.8.2.2'
         $extract=Join-Path $commands 'extract.sh'
         Write-BashScript $extract @('set -euo pipefail',"cd $(Quote-Bash $unixWork)","/usr/bin/tar -xf $(Quote-Bash $unixArchive)")
         $receipt.stage='extract-authenticated-source';Assert-NativeBuildTimeRemaining

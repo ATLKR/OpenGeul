@@ -15,7 +15,7 @@ from pathlib import Path
 import stat
 
 HERE = Path(__file__).resolve().parent
-CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
            'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder'])}

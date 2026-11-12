@@ -17,7 +17,7 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[2]
 ENGINE=ROOT/'suite/engine-build'
 FIXTURE=Path(__file__).parent/'fixtures/winacc-focus-order'
-CORE='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+CORE='9dea406ab7695df6325b11b0e19fdca8db4b7276'
 ENV={'PATH':'/workspace/toolcache/opengeul-validation/powershell:/usr/bin:/bin',
     'XDG_CACHE_HOME':'/workspace/toolcache/opengeul-validation/cache',
     'XDG_CONFIG_HOME':'/workspace/toolcache/opengeul-validation/config',

@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
-CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
 ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder'],
           'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
@@ -115,7 +115,7 @@ class RecipePolicyTests(unittest.TestCase):
                          (pin['size'], pin['sha256'], pin['afterSize'], pin['afterSha256']))
         policy = (ENGINE / 'native-targets.json').read_bytes()
         arm = module._select_plan(lock, policy, 'arm64'); x64 = module._select_plan(lock, policy, 'x64')
-        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+        self.assertEqual('453fa33f4f5e32c9772a386c890f27c8ffe083d9fa45a1a35b07049ad32c6456',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
         self.assertEqual((19, 4), (len(x64['sources']), len(x64['armGuardedSources'])))
         self.assertNotIn(pin['path'], [r['path'] for r in x64['armGuardedSources']])
@@ -139,7 +139,7 @@ class RecipePolicyTests(unittest.TestCase):
             self.assertNotEqual(before['afterSha256'], row['afterSha256'])
         policy = (ENGINE / 'native-targets.json').read_bytes()
         arm = module._select_plan(lock, policy, 'arm64')
-        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+        self.assertEqual('453fa33f4f5e32c9772a386c890f27c8ffe083d9fa45a1a35b07049ad32c6456',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
         selected = module._select_plan(lock, policy, 'x64')
         self.assertEqual((19, 4), (len(selected['sources']), len(selected['armGuardedSources'])))
@@ -180,7 +180,7 @@ class RecipePolicyTests(unittest.TestCase):
                          plan['recipe']['hooks'])
         arm = module._select_plan(lock, raw, 'arm64')
         self.assertEqual(13, len(arm['armGuardedSources']))
-        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+        self.assertEqual('453fa33f4f5e32c9772a386c890f27c8ffe083d9fa45a1a35b07049ad32c6456',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
 
     def test_x64_zstd_descriptor_and_raw_source_drift_are_rejected(self):
@@ -287,7 +287,7 @@ class RecipePolicyTests(unittest.TestCase):
         policy=(ENGINE/'native-targets.json').read_bytes()
         self.assertEqual('ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc',hashlib.sha256(policy).hexdigest())
         arm=module._select_plan(lock,policy,'arm64');x64=module._select_plan(lock,policy,'x64')
-        self.assertEqual('db6802d871b226b31d0e55343307c4b4bd88a74e961cb12cb3cf8d56565a6989',
+        self.assertEqual('453fa33f4f5e32c9772a386c890f27c8ffe083d9fa45a1a35b07049ad32c6456',
             hashlib.sha256(json.dumps(arm,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest())
         self.assertEqual((17,13),(len(arm['sources']),len(arm['armGuardedSources'])))
         self.assertEqual((19,4),(len(x64['sources']),len(x64['armGuardedSources'])))

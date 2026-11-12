@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "native-office-engine-source-build-input",
+  "nativeBuildVerified": false,
+  "fullEngineQualified": false,
+  "acceptanceEligible": false,
+  "guiVerified": false,
+  "source": {
+    "version": "26.8.2.2",
+    "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+    "url": "https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz",
+    "size": 302823256,
+    "sha256": "f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7"
+  }
+}
