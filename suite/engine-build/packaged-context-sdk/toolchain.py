@@ -109,7 +109,7 @@ def verify_bundle(root):
 
 def sdk_members(version,arch):
     if not re.fullmatch(r'10\.0\.\d{4,6}\.\d{1,5}',version) or arch not in MACHINES:raise GateFailure(2)
-    headers=('um/Windows.h','um/appmodel.h','um/sddl.h','um/shlobj.h','um/knownfolders.h',
+    headers=('um/Windows.h','um/appmodel.h','shared/sddl.h','um/shlobj.h','um/knownfolders.h',
       'shared/sdkddkver.h','ucrt/stdio.h','cppwinrt/winrt/base.h','cppwinrt/winrt/Windows.Storage.h')
     libraries=('windowsapp.lib','shell32.lib','ole32.lib','advapi32.lib','uuid.lib','kernel32.lib')
     return tuple('Include/'+version+'/'+p for p in headers)+tuple('Lib/'+version+'/um/'+arch+'/'+p for p in libraries)+('Lib/'+version+'/ucrt/'+arch+'/libucrt.lib',)

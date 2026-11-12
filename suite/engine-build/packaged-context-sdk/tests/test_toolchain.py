@@ -140,3 +140,106 @@ class ToolchainTests(unittest.TestCase):
             with self.assertRaises(gate.GateFailure):gate.require_fresh_outputs(root,('observer.obj',))
             p.unlink();p.symlink_to(root/'absent')
             with self.assertRaises(gate.GateFailure):gate.require_fresh_outputs(root,('observer.obj',))
+
+
+"""Independent vendor directory contract; fake bytes, no installed Windows SDK.
+
+Source: microsoft/win32metadata commit15fc870a5e96df7c560877ff30136c0fb5a21e9b,
+generation/WinSDK/RecompiledIdlHeaders/shared/sddl.h.
+"""
+import hashlib
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import toolchain as tools
+
+HEADERS = ('um/Windows.h', 'um/appmodel.h', 'shared/sddl.h', 'um/shlobj.h',
+           'um/knownfolders.h', 'shared/sdkddkver.h', 'ucrt/stdio.h',
+           'cppwinrt/winrt/base.h', 'cppwinrt/winrt/Windows.Storage.h')
+LIBRARIES = ('windowsapp.lib', 'shell32.lib', 'ole32.lib', 'advapi32.lib', 'uuid.lib', 'kernel32.lib')
+
+
+def vendor_paths(version, architecture):
+    return tuple('Include/' + version + '/' + name for name in HEADERS) + tuple(
+        'Lib/' + version + '/um/' + architecture + '/' + name for name in LIBRARIES) + (
+        'Lib/' + version + '/ucrt/' + architecture + '/libucrt.lib',)
+
+
+def fixture(root, version, architecture):
+    rows = []
+    for slot, name in enumerate(vendor_paths(version, architecture), 1):
+        data = ('SYNTHETIC-SDK-MEMBER-' + str(slot)).encode('ascii')
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        rows.append({'slot': slot, 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+    return rows
+
+
+def observation():
+    return {'operations': [], 'failures': [], 'failureCount': 0, 'truncated': False}
+
+
+class SdkHeaderDirectoryTests(unittest.TestCase):
+    def test_two_native_architectures_and_observed_versions_read_all16_vendor_members(self):
+        for arch in ('x64', 'arm64'):
+            for version in ('10.0.26100.0', '10.0.22621.0'):
+                with self.subTest(architecture=arch, version=version), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    expected = fixture(root, version, arch)
+                    result = tools.installed_sdk(root, arch)
+                    self.assertEqual(result, {'root': str(root), 'version': version, 'files': expected})
+                    self.assertEqual(tools.sdk_members(version, arch), vendor_paths(version, arch))
+
+    def test_um_only_sddl_does_not_substitute_for_the_exact_shared_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, version = Path(directory), '10.0.26100.0'
+            fixture(root, version, 'x64')
+            shared = root / 'Include' / version / 'shared/sddl.h'
+            data = shared.read_bytes()
+            shared.unlink()
+            (root / 'Include' / version / 'um/sddl.h').write_bytes(data)
+            obs = observation()
+            with self.assertRaises(tools.GateFailure):
+                tools.installed_sdk(root, 'x64', observations=obs, operation=1)
+            self.assertEqual(obs['failures'][0]['memberSlot'], 3)
+
+    def test_absent_shared_member_remains_first_failure3(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, version = Path(directory), '10.0.26100.0'
+            fixture(root, version, 'arm64')
+            (root / 'Include' / version / 'shared/sddl.h').unlink()
+            obs = observation()
+            with self.assertRaises(tools.GateFailure):
+                tools.installed_sdk(root, 'arm64', observations=obs, operation=1)
+            self.assertEqual(obs['failures'][0]['memberSlot'], 3)
+            self.assertEqual(obs['failures'][0]['reason']['errno'], 2)
+
+    def test_hardlinked_shared_member_is_rejected_even_when_um_copy_exists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, version = Path(directory), '10.0.26100.0'
+            fixture(root, version, 'x64')
+            shared = root / 'Include' / version / 'shared/sddl.h'
+            (root / 'alias').hardlink_to(shared)
+            (root / 'Include' / version / 'um/sddl.h').write_bytes(shared.read_bytes())
+            obs = observation()
+            with self.assertRaises(tools.GateFailure):
+                tools.installed_sdk(root, 'x64', observations=obs, operation=1)
+            reason = obs['failures'][0]['reason']
+            self.assertEqual(obs['failures'][0]['memberSlot'], 3)
+            self.assertEqual(reason['filesystemCode'], 4)
+            self.assertEqual(reason['observedLinkCount'], 2)
+
+    def test_later_missing_member_is_reported_after_correct_shared_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, version = Path(directory), '10.0.26100.0'
+            fixture(root, version, 'x64')
+            (root / vendor_paths(version, 'x64')[8]).unlink()
+            obs = observation()
+            with self.assertRaises(tools.GateFailure):
+                tools.installed_sdk(root, 'x64', observations=obs, operation=1)
+            self.assertEqual(obs['failures'][0]['memberSlot'], 9)

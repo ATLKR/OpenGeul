@@ -46,3 +46,19 @@ This diagnostic supervisor is not the missing packaged-helper launcher/original 
 The command processor uses a separate lease for the exact `cmd.exe` selected by `GetSystemDirectoryW`. It requires WRP protection classification, ordinary non-reparse paths, native PE bytes and stable retained/fresh file identity, final path, metadata and digest. The noninheritable read handle shares only read access and remains held through the relevant controller/helper phases. Other source, SDK and tool inputs keep their original single-link policy.
 
 WRP is protection classification and this lease detects ordinary changes; neither establishes a Microsoft signature or cryptographic OS attestation. Generic canonical/read/PE guards, observer source pins and original Job budgets remain unchanged. Native calls check the original deadline individually; those checks do not make a synchronous OS call preemptible. Cleanup still attempts one close after expiry, and an uncertain close cannot pass.
+## Fixed SDK header directory
+
+SDK input slot3 is `Include/<version>/shared/sddl.h`. Microsoft's official
+win32metadata source places this header at
+[`generation/WinSDK/RecompiledIdlHeaders/shared/sddl.h`](https://github.com/microsoft/win32metadata/blob/15fc870a5e96df7c560877ff30136c0fb5a21e9b/generation/WinSDK/RecompiledIdlHeaders/shared/sddl.h),
+blob `f7e67f5a941a2737cd4eca0711c232356fafc903`.
+There is no alternate-directory search or `um/sddl.h` fallback. All16 member
+positions and hashes, strict regular/single-link checks, architecture/version
+selection, and30/180-second budgets remain unchanged.
+
+The6d9 run43312663925 records the previous `um/sddl.h` request failing with
+FILE_NOT_FOUND for x64 SDK10.0.26100.0 and ARM64 SDK10.0.26100.0/10.0.22621.0.
+Those records are historical failures, not success evidence for this correction.
+The new literal-layout tests use synthetic bytes only. Actual installed shared
+header availability and Windows compile/link/negative-smoke success still need
+the next owned diagnostic run; no servicing or product qualification is granted.
