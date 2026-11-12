@@ -2035,6 +2035,8 @@ class NativeMenuProbe(NativeControlProbe):
         self.menu_bar_element=self._discover_bar(root)
         return self._find(self.menu_bar_element,'file',scope='children')
     def _focused_menu(self,chain,file_index,bar_index):
+        if getattr(self,'source_selection',None) is not None and getattr(self,'_uses_comparison',False):
+            return self._source_focused_ancestry(chain,file_index,bar_index)
         diagnostic=None;entry=None
         try:
             diagnostic=dict(schemaVersion=1,phaseCode=1,failed=0,getFocusedReturned=0,parentReturned=0,rows=[])
@@ -2109,6 +2111,103 @@ class NativeMenuProbe(NativeControlProbe):
         except BaseException:
             note(diagnostic,failed=1);note(entry,failed=1)
             raise
+    def _source_focus_owned(self,popup):
+        """Read-only original generation/foreground fence, never activation."""
+        _source_bound_admission(self)
+        scope,continuity=self._menu_classification_context
+        binding=self._identity_scope['binding']
+        assert scope['binding']==binding and scope['shellPid']==self._identity_scope['shellPid']
+        continuity()
+        attachment=self.attachment_snapshot(binding);assert attachment['valid'] is True
+        child=self.window_snapshot(binding['child'])
+        assert (child['hwnd'],child['pid'],child['rootHwnd'])==(binding['child'],binding['officePid'],binding['document'])
+        assert child['visible'] is child['enabled'] is True
+        assert type(child['threadId']) is int and child['threadId']>0
+        assert attachment['windows']['child']['threadId']==child['threadId']
+        assert type(popup) is dict and popup['pid']==binding['officePid']
+        current=self.window_snapshot(popup['hwnd'])
+        assert all(current[key]==popup[key] for key in ('hwnd','pid','rootHwnd','threadId','rectangle'))
+        assert current['visible'] is current['enabled'] is True
+        assert self._owners(popup['hwnd'],binding)==popup['ownerChain']
+        foreground=self.foreground();assert foreground in (binding['document'],popup['hwnd'])
+        return dict(childHwnd=child['hwnd'],childPid=child['pid'],childRootHwnd=child['rootHwnd'],
+            childThreadId=child['threadId'],foreground=foreground,popupHwnd=popup['hwnd'],
+            popupThreadId=popup['threadId'],popupRectangle=list(popup['rectangle']),ownerChain=list(popup['ownerChain']))
+    def _source_focused_ancestry(self,chain,file_index,bar_index):
+        """Observe unretained MenuItems; only original retained File/bar authorizes keys.
+
+        No exception fallback, role synthesis, input, timeout cache or fresh budget.
+        Every parent edge and the initial focus is independently reacquired.
+        """
+        popup=self._source_focus_popup;before=self._source_focus_owned(popup)
+        cursor=self._uia_call(15,self.uia.iuia.GetFocusedElement);assert cursor
+        initial=cursor;fresh=self._uia_call(15,self.uia.iuia.GetFocusedElement)
+        assert fresh and self._same(cursor,fresh), 'Source focus changed before ancestry observation'
+        proof=dict(schemaVersion=1,scope=copy.deepcopy(self._identity_scope),before=before,after=None,
+            focusFreshEquals=True,focusEndEquals=False,rows=[],edges=[],terminalRole=None)
+        result=[];seen=[];unknown=False;self._focus_identity=None
+        refs=self._identity_refs
+        assert {'file','bar','peer','contrast-edit'}<=set(refs)<=set(IDENTITY_ROLES)
+        for depth in range(32):
+            runtime,observation=self._runtime(cursor)
+            assert observation['versionObserved'] is observation['declaration']['verified'] is True
+            matches={role:self._same(cursor,original) for role,original in refs.items()}
+            roles=[role for role,same in matches.items() if same]
+            assert len(roles)<=1 and (not roles or roles[0]!='contrast-edit'), 'Source focus roles alias'
+            distinct=[self._same(cursor,prior) for prior in seen]
+            assert all(value is False for value in distinct), 'Source focus ancestry cycles'
+            role=roles[0] if roles else None
+            if role is not None:
+                assert role in ('file','bar') or role.startswith('target:'), 'Source focus did not reach its retained menu'
+                row=_getter_call_site(self,9,self._chrome,cursor)
+                assert row['pid']==self._identity_scope['binding']['officePid'] and row['visible'] is row['enabled'] is True
+                result.append(row)
+            else:
+                # Unretained MenuItems are read-only ancestry observations with
+                # either verified empty or bounded signed-int runtime IDs. A valid
+                # ID does not grant a retained role or input target identity.
+                pid=self._uia_call(8,lambda:cursor.CurrentProcessId)
+                assert type(pid) is int and pid==self._identity_scope['binding']['officePid']
+                kind=self._uia_call(9,lambda:cursor.CurrentControlType);assert type(kind) is int and kind==50011
+                offscreen=self._uia_call(11,lambda:cursor.CurrentIsOffscreen)
+                enabled=self._uia_call(12,lambda:cursor.CurrentIsEnabled)
+                assert all(type(value) is bool or type(value) is int and value in (0,1) for value in (offscreen,enabled))
+                assert not bool(offscreen) and bool(enabled)
+                hwnd=self._uia_call(7,lambda:cursor.CurrentNativeWindowHandle)
+                assert hwnd is None or type(hwnd) is int and -(1<<31)<=hwnd<1<<32
+                hwnd=0 if hwnd is None else hwnd&0xffffffff
+                assert hwnd in (0,popup['hwnd'])
+                box=self._uia_call(10,lambda:cursor.CurrentBoundingRectangle)
+                rect=[getattr(box,key) for key in ('left','top','right','bottom')]
+                assert all(type(number) is int and -(1<<31)<=number<1<<31 for number in rect)
+                outer=popup['rectangle']
+                assert outer[0]<=rect[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<rect[3]<=outer[3]
+                row=dict(runtimeId=list(runtime),runtimeObservation=observation,pid=pid,kindCode=kind,nativeHwnd=hwnd,
+                    visible=True,enabled=True,rectangle=rect)
+                unknown=True
+            proof['rows'].append(dict(observation=copy.deepcopy(row),retainedRole=role,differentFrom=matches,
+                differentFromPrior=distinct))
+            if role in ('file','bar'):
+                assert self._same(cursor,self.file_element if role=='file' else self.menu_bar_element)
+                self._focus_identity=dict(scope=copy.deepcopy(self._identity_scope),role=role,
+                    fileEquals=role=='file',barEquals=role=='bar',retainedEquals=True)
+                proof['terminalRole']=role
+                fresh=self._uia_call(15,self.uia.iuia.GetFocusedElement)
+                assert fresh and self._same(initial,fresh), 'Source focus changed during ancestry observation'
+                proof['focusEndEquals']=True;proof['after']=self._source_focus_owned(popup)
+                assert proof['after']==proof['before']
+                self._source_focus_proof=proof
+                self._source_focus_branch=2 if unknown else 1
+                return result,True
+            assert depth<31, 'Source focus ancestry exceeded bound'
+            parent=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor);assert parent
+            repeated=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
+            assert repeated and self._same(parent,repeated), 'Source focus parent changed'
+            negatives=[self._same(parent,prior) for prior in (*seen,cursor)]
+            assert all(value is False for value in negatives), 'Source focus parent cycles'
+            proof['edges'].append(dict(parentFreshEquals=True,differentFromEarlier=negatives))
+            seen.append(cursor);cursor=parent
+        raise AssertionError('Source focus did not reach its retained menu')
     def _observe_failed_focus_cursor(self,cursor,depth,primary):
         """Separate numeric facts after the unchanged retained-role rejection.
 
@@ -2486,6 +2585,7 @@ class NativeMenuProbe(NativeControlProbe):
         permitted={0,child}
         if popup:permitted.add(popup['hwnd'])
         gui.update(captureOwned=gui['captureHwnd'] in permitted,menuOwnerOwned=gui['menuOwnerHwnd'] in permitted)
+        if getattr(self,'source_selection',None) is not None:self._source_focus_popup=popup
         focused,matched=(self._focused_menu(chain,file_index,bar_index) if target!='file' and not _menu_key_owner(gui,popup,child) and file_index is not None and bar_index is not None else ([],False))
         fg=self.window_snapshot(self.foreground())
         shell=self._root(doc)
@@ -2882,16 +2982,35 @@ def _bind_source_generation(probe,process,suite,binding,shell,engine,handle,rece
     # bound source-selected instance installs the extra expiry admission.
     source_send=getattr(probe,'_source_send',None)
     if source_send is not None:probe.send=source_send
-    receipt['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,admission=summary,generation=generation)
+    receipt['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,focusProtocolVersion=1,admission=summary,generation=generation)
+    # Each newly generated source snapshot carries the current mandatory focus
+    # protocol, including snapshots that need no focused-ancestry walk. Removing
+    # the new proof cannot silently select a historical retained-only contract.
+    original=getattr(probe,'_source_snapshot_original',None)
+    if original is None:
+        original=probe.snapshot;probe._source_snapshot_original=original
+    scope=_menu_scope(binding,shell,engine,receipt['startedAt'],receipt['deadline'])
+    def snapshot(*args,**kwargs):
+        probe._source_focus_proof=None;probe._source_focus_branch=0
+        measured=original(*args,**kwargs)
+        focused=measured.get('focusMenuElementEquals') is True
+        branch=getattr(probe,'_source_focus_branch',0)
+        # Any compared focused path must have been produced by the closed walker.
+        assert not focused or branch in (1,2)
+        measured['sourceFocus']=dict(protocolVersion=1,admissionSha256=summary['admissionSha256'],
+            scope=copy.deepcopy(scope),branchCode=branch,proof=copy.deepcopy(probe._source_focus_proof))
+        return measured
+    probe.snapshot=snapshot
     receipt['pointUses']=[]
     probe._source_point_uses=receipt['pointUses'];probe._source_input_points=[];probe._source_input_receipt=None
 
 
 def _require_source_header(value,admission):
     summary=_source_admission_summary(admission);header=value['sourceMenu']
-    assert type(header) is dict and set(header)=={'schemaVersion','pointProfileVersion','admission','generation'}
+    assert type(header) is dict and set(header)=={'schemaVersion','pointProfileVersion','focusProtocolVersion','admission','generation'}
     assert type(header['schemaVersion']) is int and header['schemaVersion']==1
     assert type(header['pointProfileVersion']) is int and header['pointProfileVersion']==4
+    assert type(header['focusProtocolVersion']) is int and header['focusProtocolVersion']==1
     assert json.dumps(header['admission'],sort_keys=True,separators=(',',':'),ensure_ascii=True)==json.dumps(summary,sort_keys=True,separators=(',',':'),ensure_ascii=True)
     shell,engine=value['originalProcess'],value['originalEngine']
     root=Path(admission.suite_root)
@@ -2914,8 +3033,107 @@ def _require_source_header(value,admission):
     return summary
 
 
+def _require_source_focus_snapshot(snapshot,value,admission):
+    marker=snapshot['sourceFocus']
+    assert type(marker) is dict and set(marker)=={'protocolVersion','admissionSha256','scope','branchCode','proof'}
+    assert type(marker['protocolVersion']) is int and marker['protocolVersion']==1
+    assert marker['admissionSha256']==admission.admission_sha256
+    binding=value['binding'];shell_pid=value['shellPid']
+    scope=_menu_scope(binding,value['originalProcess'],value['originalEngine'],value['startedAt'],value['deadline'])
+    assert marker['scope']==scope
+    branch=marker['branchCode'];assert type(branch) is int and branch in (0,1,2)
+    if branch==0:
+        assert marker['proof'] is None and snapshot.get('focusMenuPath',[])==[]
+        assert snapshot.get('focusMenuElementEquals',False) is False
+        return
+    identity=snapshot['identityProof'];_comparison_proof(identity,binding,shell_pid,'file')
+    proof=marker['proof']
+    assert type(proof) is dict and set(proof)=={'schemaVersion','scope','before','after','focusFreshEquals','focusEndEquals','rows','edges','terminalRole'}
+    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==1
+    assert proof['scope']==identity['scope']==value['elementIdentityScope']
+    assert proof['focusFreshEquals'] is proof['focusEndEquals'] is True
+    before=proof['before'];popup=snapshot['popup'];assert popup is not None
+    fields={'childHwnd','childPid','childRootHwnd','childThreadId','foreground','popupHwnd','popupThreadId','popupRectangle','ownerChain'}
+    assert type(before) is dict and set(before)==fields and proof['after']==before
+    for key in fields-{'popupRectangle','ownerChain'}:_int(before[key])
+    assert before['childHwnd']==binding['child'] and before['childPid']==binding['officePid']
+    assert before['childRootHwnd']==binding['document']
+    assert before['childThreadId']==popup['threadId']==before['popupThreadId']
+    assert before['foreground']==snapshot['foreground']['hwnd'] and before['foreground'] in (binding['document'],popup['hwnd'])
+    assert before['popupHwnd']==popup['hwnd'] and before['ownerChain']==popup['ownerChain']
+    assert before['popupRectangle']==popup['rectangle']
+    outer=before['popupRectangle'];assert type(outer) is list and len(outer)==4
+    assert all(type(n) is int and -(1<<31)<=n<1<<31 for n in outer)
+    assert outer[0]<outer[2] and outer[1]<outer[3]
+    rows=proof['rows'];edges=proof['edges']
+    assert type(rows) is list and 0<len(rows)<=32 and type(edges) is list and len(edges)==len(rows)-1
+    retained=[];unknown=0;roles=identity['roles']
+    for index,item in enumerate(rows):
+        assert type(item) is dict and set(item)=={'observation','retainedRole','differentFrom','differentFromPrior'}
+        comparisons=item['differentFrom'];role=item['retainedRole'];row=item['observation']
+        assert type(comparisons) is dict and set(comparisons)==set(roles)
+        assert all(type(same) is bool for same in comparisons.values())
+        previous=item['differentFromPrior']
+        assert type(previous) is list and len(previous)==index and all(same is False for same in previous)
+        assert type(row) is dict and type(row['pid']) is int and row['pid']==binding['officePid']
+        assert row['visible'] is row['enabled'] is True
+        if role is None:
+            unknown+=1;assert all(same is False for same in comparisons.values())
+            assert set(row)=={'runtimeId','runtimeObservation','pid','kindCode','nativeHwnd','visible','enabled','rectangle'}
+            runtime=row['runtimeId']
+            assert type(runtime) is list and len(runtime)<=64
+            assert all(type(n) is int and -(1<<31)<=n<1<<31 for n in runtime)
+            assert type(row['kindCode']) is int and row['kindCode']==50011
+            observed=row['runtimeObservation']
+            assert observed['callSucceeded'] is observed['signed32Valid'] is observed['versionObserved'] is True
+            assert observed['empty'] is (not runtime)
+            assert type(observed['rawTypeCode']) is int and observed['rawTypeCode'] in (1,2)
+            assert type(observed['length']) is int and observed['length']==len(runtime)
+            types=observed['elementTypeCodes']
+            assert type(types) is list and len(types)==len(runtime) and all(type(n) is int and n==1 for n in types)
+            version=observed['versionTuple']
+            assert type(version) is list and len(version)==3 and all(type(n) is int and 0<=n<=65535 for n in version)
+            declaration=observed['declaration'];assert declaration['verified'] is True
+            assert all(declaration[key] is True for key in ('interfaceKnown','methodUnique','hresultDeclared',
+                'singleOutArgument','outFlag','retvalFlag','exactFlags','safeArrayInt32'))
+            assert declaration['hresultValueObserved'] is declaration['safeArrayPointerObserved'] is declaration['safeArrayDimensionsObserved'] is False
+            assert type(row['nativeHwnd']) is int and row['nativeHwnd'] in (0,popup['hwnd'])
+            rect=row['rectangle'];assert type(rect) is list and len(rect)==4
+            assert all(type(n) is int and -(1<<31)<=n<1<<31 for n in rect)
+            assert outer[0]<=rect[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<rect[3]<=outer[3]
+        else:
+            assert type(role) is str and (role in ('file','bar') or role.startswith('target:')) and role in roles
+            assert all(same is (name==role) for name,same in comparisons.items())
+            _element_anchor(row,identity,binding,shell_pid)
+            if not row['runtimeId']:assert row['identity']['role']==role
+            retained.append(row)
+        if index<len(edges):
+            edge=edges[index]
+            assert type(edge) is dict and set(edge)=={'parentFreshEquals','differentFromEarlier'}
+            assert edge['parentFreshEquals'] is True
+            negatives=edge['differentFromEarlier']
+            assert type(negatives) is list and len(negatives)==index+1 and all(same is False for same in negatives)
+    assert (unknown==0 if branch==1 else unknown>0)
+    assert retained==snapshot['focusMenuPath'] and snapshot['focusMenuElementEquals'] is True
+    assert rows[-1]['retainedRole']==proof['terminalRole']==snapshot['focusIdentity']['role']
+    assert proof['terminalRole'] in ('file','bar')
+
+
+def _require_source_focus_protocol(value,admission):
+    pending=[value];count=0;snapshots=0
+    while pending:
+        node=pending.pop();count+=1;assert count<=1_000_000
+        if type(node) is dict:
+            if {'binding','control','ancestry','attachmentValid','gui'}<=set(node):
+                _require_source_focus_snapshot(node,value,admission);snapshots+=1
+            pending.extend(node.values())
+        elif type(node) is list:pending.extend(node)
+    assert snapshots>0
+
+
 def require_source_qualified_native_menu_action(value,shell_pid,document,*,admission,command=None):
     _require_source_header(value,admission)
+    _require_source_focus_protocol(value,admission)
     # Only this public actual-object check supplies authority. The shared record
     # validator itself proves structural/history consistency, never source trust.
     result=_require_native_menu_action_record(value,shell_pid,document,command,source_admission=admission)

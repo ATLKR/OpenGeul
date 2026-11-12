@@ -27,6 +27,31 @@ CORE_COMMANDS = ['new-hwp', 'home', 'new', 'open', 'save', 'saveAs', 'close']
 
 
 class SourceQualifiedMenuArchiveTests(unittest.TestCase):
+    def stamp_synthetic_source_action(self,action,selection):
+        """Migrate the existing no-focus-walk synthetic archive through the binder.
+
+        This does not invent a native focus comparison or Windows execution.
+        A real focused path must come from source_qualified_action_fixture.
+        """
+        from types import SimpleNamespace
+        import owned_native_menu as menu
+        admission=selection.prepared.admission
+        shell,engine=action['originalProcess'],action['originalEngine']
+        process=SimpleNamespace(pid=shell['pid'],_handle=shell['handleValue'],
+            opengeul_suite_root=admission.suite_root,opengeul_source_menu_selection=selection,poll=lambda:None)
+        current=[None]
+        probe=SimpleNamespace(source_selection=selection,snapshot=lambda *_args:current[0])
+        # The original synthetic action already recorded this retained handle.
+        bound_engine=dict(engine,handleValue=action['engineHandleValue'])
+        menu._bind_source_generation(probe,process,admission.suite_root,action['binding'],shell,
+            bound_engine,action['engineHandleValue'],action)
+        for node in list(self.archive_module._nodes(action)):
+            if type(node) is dict and {'binding','control','ancestry','attachmentValid','gui'}<=set(node):
+                self.assertFalse(node.get('focusMenuPath',[]))
+                self.assertIs(node.get('focusMenuElementEquals',False),False)
+                current[0]=node
+                self.assertIs(probe.snapshot(node['binding'],'file'),node)
+
     def test_source_cli_prepares_one_fresh_actual_gate_and_calls_the_source_entry(self):
         legacy,old_admission=self.fixture();module=legacy.implementation()
         import inspect
@@ -119,6 +144,7 @@ class SourceQualifiedMenuArchiveTests(unittest.TestCase):
         self.enterContext(patch.object(gate,'_HARNESS_ROOT',source.trusted))
         prepared=selected.prepare_source_menu_runtime(legacy.suite,'arm64',deadline=time.monotonic()+30)
         legacy.source_selection=selected.source_menu_for_launch(prepared,deadline=time.monotonic()+30)
+        self.archive_module=legacy.implementation()
         admission=prepared.admission
         summary=dict(admission.summary());summary['providers']=[dict(item) for item in summary['providers']]
         legacy.report.update(nativePointProfileVersion=4,sourceMenuAdmission=summary)
@@ -126,12 +152,7 @@ class SourceQualifiedMenuArchiveTests(unittest.TestCase):
             row.update(nativePointProfileVersion=4,sourceMenuAdmission=copy.deepcopy(summary))
             for action in legacy.implementation()._nodes(row):
                 if type(action) is not dict or action.get('kind')!='owned-native-menu-action':continue
-                binding=action['binding'];shell=action['originalProcess'];engine=action['originalEngine']
-                action['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,admission=copy.deepcopy(summary),
-                    generation=dict(binding,shellPid=shell['pid'],shellCreationTime=shell['creationTime'],
-                        shellHandleValue=shell['handleValue'],engineCreationTime=engine['creationTime'],
-                        engineHandleValue=action['engineHandleValue']))
-                action['pointUses']=[]
+                self.stamp_synthetic_source_action(action,legacy.source_selection)
             if row['module'] in VIEW_MODULES:
                 view=row['nativeViewRoundtrip']
                 for field in ('observations','fullscreenActions'):
@@ -271,6 +292,20 @@ class SourceQualifiedMenuArchiveTests(unittest.TestCase):
                 elif site=='case':row['nativePointProfileVersion']=3
                 elif site=='action-generation':row['nativeMenuActions'][0]['sourceMenu']['generation']['engineCreationTime']+=1
                 else:del row['nativeMenuActions'][0]['sourceMenu']
+                legacy.save_report()
+                with self.assertRaises(ValueError):self.verify(legacy,admission)
+
+    def test_source_archive_rejects_removed_current_focus_protocol_without_legacy_fallback(self):
+        legacy,admission=self.fixture();original=copy.deepcopy(legacy.report)
+        self.verify(legacy,admission)
+        for site in ('old-header','old-snapshots'):
+            with self.subTest(site=site):
+                legacy.report=copy.deepcopy(original)
+                for node in legacy.implementation()._nodes(legacy.report):
+                    if type(node) is not dict:continue
+                    if site=='old-header' and 'sourceMenu' in node:
+                        node['sourceMenu'].pop('focusProtocolVersion',None)
+                    elif site=='old-snapshots':node.pop('sourceFocus',None)
                 legacy.save_report()
                 with self.assertRaises(ValueError):self.verify(legacy,admission)
 
@@ -495,6 +530,7 @@ class NativeMenuArchiveCompletenessTests(unittest.TestCase):
         replacements={77:row['shellPid'],88:row['officePid'],11:row['windowHwnd'],55:row['parentHwnd'],
             56:row['childHwnd'],99:row['windowHwnd']+10000,8:shell['handleValue'],100:shell['creationTime'],200:generation['creationTime']}
         identity_fields={'pid','shellPid','officePid','documentHwnd','document','parent','child',
+            'childHwnd','childPid','childRootHwnd','popupHwnd',
             'hwnd','nativeHwnd','hitHwnd','rootHwnd','focusPid','focusHwnd','focusRootHwnd','activeHwnd',
             'captureHwnd','menuOwnerHwnd','foreground','handleValue','engineHandleValue',
             'creationTime','shellCreationTime','officeCreationTime','engine_pid','shell_pid',

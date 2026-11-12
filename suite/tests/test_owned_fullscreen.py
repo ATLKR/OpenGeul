@@ -20,6 +20,11 @@ class Probe:
         value=copy.deepcopy(self.shell)
         if self.bad=='shell':value['creationTime']+=1
         return value
+    def snapshot(self,binding,target):
+        # NativeMenuProbe's source binder retains this actual API even when a
+        # fullscreen toggle never asks for a menu snapshot. A new call must not
+        # receive fabricated menu/identity evidence from this fullscreen fake.
+        raise AssertionError('Fullscreen fixture cannot synthesize native menu snapshots')
     def open_engine(self,pid):
         self.calls.append(('open',pid))
         if self.bad=='late-open':self.clock.now+=5
@@ -235,6 +240,8 @@ class FullscreenTests(unittest.TestCase):
         self.assertEqual(value['sourceMenu']['admission']['admissionSha256'],admission.admission_sha256)
         self.assertEqual(value['sourceMenu']['generation']['engineHandleValue'],10)
         self.assertEqual(value['sourceMenu']['generation']['shellHandleValue'],8)
+        self.assertEqual(value['sourceMenu']['focusProtocolVersion'],1)
+        self.assertTrue(callable(probe._source_snapshot_original))
         self.assertTrue(value['success'])
 
     def test_selected_factory_rejection_never_replays_origin_opens_or_inputs(self):

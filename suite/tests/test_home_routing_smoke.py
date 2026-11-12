@@ -326,9 +326,13 @@ class HomeRoutingContracts(unittest.TestCase):
         from types import SimpleNamespace as NS
         from test_base_save_readiness import NativeBoundary
         from test_native_menu_source_selection import SourceMenuSelectionTests
+        from test_native_menu_archive_completeness import SourceQualifiedMenuArchiveTests
+        import native_menu_archive_completeness
         import owned_native_menu as menu
         selected=SourceMenuSelectionTests();selected.setUp();self.addCleanup(selected.doCleanups)
         prepared=selected.prepared();selection=selected.selected(prepared);admission=prepared.admission
+        stamper=SourceQualifiedMenuArchiveTests(methodName='runTest');self.addCleanup(stamper.doCleanups)
+        stamper.archive_module=native_menu_archive_completeness
         boundary=NativeBoundary([lambda b:[b.edit,b.save]]);boundary.menu_root=selected.suite
         folder=selected.output/'generated';folder.mkdir();boundary.target=folder/'New-OpenGeul-base.odb'
         case=object.__new__(self.api.HomeCase);case.suite=selected.suite;case.output=selected.output;case.folder=folder
@@ -340,12 +344,10 @@ class HomeRoutingContracts(unittest.TestCase):
                 nativeCreation=dict(fileTime=200),nativeImage=str(executable),expectedImage=str(executable))
         def source_action(api,process,document,record,command,**options):
             action=boundary.measured_native_menu(api,process,document,record,command,**options)
-            shell,engine=action['originalProcess'],action['originalEngine']
-            action['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,
-                admission=menu._source_admission_summary(admission),generation=dict(action['binding'],
-                    shellPid=shell['pid'],shellCreationTime=shell['creationTime'],shellHandleValue=shell['handleValue'],
-                    engineCreationTime=engine['creationTime'],engineHandleValue=action['engineHandleValue']))
-            action['pointUses']=[];process.opengeul_source_menu_selection=selection
+            # Keep the native calls synthetic, but exercise the current actual
+            # source binder/wrapper rather than relabel an old four-field header.
+            process.opengeul_source_menu_selection=selection
+            stamper.stamp_synthetic_source_action(action,selection)
             menu.require_native_menu_action(action,77,11,'save',source_admission=admission)
             return action
         original=self.api.native.require_base_save_dialog_readiness
@@ -397,6 +399,16 @@ class HomeRoutingContracts(unittest.TestCase):
                 patch.object(self.api,'_require_exit_and_closure'):
             try:self.api.require_case_result(record,case.suite,source_admission=admission)
             except (AssertionError,ValueError):self.fail('Home case replay lost the actual Gate before nested v4 replay')
+
+    def test_source_home_base_readiness_rejects_old_header_after_all_copies_match(self):
+        import native_menu_archive_completeness
+        import windows_smoke
+        case,_,admission,_,_=self.source_base_replay_fixture()
+        for node in native_menu_archive_completeness._nodes(case.record):
+            if type(node) is dict and node.get('kind')=='owned-native-menu-action':
+                node['sourceMenu'].pop('focusProtocolVersion',None)
+        with self.assertRaises((AssertionError,KeyError)):
+            windows_smoke.require_base_save_menu_record(case.record,77,11,source_admission=admission)
 
     def source_epoch_failure_fixture(self):
         """Keep actual preparation/epoch guards; the fixture owns every changed byte."""
