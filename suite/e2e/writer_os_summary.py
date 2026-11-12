@@ -86,6 +86,50 @@ def valid_gui_focus(value, focus_call=None):
     return True
 
 
+_POST_MAXIMA = dict(schemaVersion=1, diagnosticOnly=1, acceptanceEligible=0,
+    sameRetainedRoot=1, known=1, attemptedMask=7, observedMask=7, stopCode=7,
+    rootState=0x7fffffff, ia2Supported=1, textSupported=1,
+    ownerBefore=1, ownerAfter=1, officePid=0xffffffff,
+    officeCreationTime=2**64-1, childHwnd=2**64-1,
+    generationBefore=2**64-1, generationAfter=2**64-1,
+    startedMicros=2**63-1, finishedMicros=2**63-1, deadlineMicros=2**63-1,
+    hresultObserved=1, hresult=0xffffffff)
+
+
+def valid_post_failure(value, original):
+    """Same-root diagnostic only; zero outside observedMask remains unknown."""
+    if (type(value) is not dict or value.keys() != _POST_MAXIMA.keys()
+            or any(type(value[k]) is not int or not 0 <= value[k] <= limit
+                for k, limit in _POST_MAXIMA.items())
+            or (value['schemaVersion'], value['diagnosticOnly'], value['acceptanceEligible'],
+                value['sameRetainedRoot']) != (1, 1, 0, 1)):
+        return False
+    if (original.get('verified') != 0 or original.get('stageCode') != 4
+            or original.get('hresult') != 0 or original.get('focusVariantType') != 0
+            or original.get('focusCall') != dict(attempted=1, returned=1,
+                hrObserved=1, hr=0, vtObserved=1, rejectCode=3)
+            or any(value[k] != original.get(k) for k in
+                ('officePid', 'officeCreationTime', 'childHwnd'))):
+        return False
+    a, m = value['attemptedMask'], value['observedMask']
+    if (a not in (0,1,3,7) or m not in (0,1,3,7) or m & ~a
+            or a & 2 and not m & 1 or a & 4 and not m & 2
+            or not m & 1 and value['rootState']
+            or value['ia2Supported'] != int(bool(m & 2))
+            or value['textSupported'] != int(bool(m & 4))
+            or value['generationBefore'] != (value['officeCreationTime'] if value['ownerBefore'] else 0)
+            or value['generationAfter'] != (value['officeCreationTime'] if value['ownerAfter'] else 0)
+            or value['ownerAfter'] > value['ownerBefore']
+            or a and not value['ownerBefore']
+            or not value['hresultObserved'] and value['hresult']):
+        return False
+    complete = (m == 7 and value['ownerBefore'] == value['ownerAfter'] == 1
+        and 0 <= value['startedMicros'] <= value['finishedMicros'] < value['deadlineMicros']
+        and value['hresultObserved'] == value['hresult'] == 0 and value['stopCode'] == 0)
+    return (bool(value['known']) == complete and
+        (value['stopCode'] != 0 or complete))
+
+
 def valid(value):
     """Validate a failure vector without importing producer/native modules."""
     if (type(value) is not list or len(value) != len(FIELDS)
@@ -107,12 +151,14 @@ def project(record):
     result = record.get('writerOsAccessibility')
     base = {'schemaVersion', *FIELDS}
     if (type(result) is not dict or not base <= result.keys()
-            or not result.keys() <= base | {'focusCall', 'guiFocus'}
+            or not result.keys() <= base | {'focusCall', 'guiFocus', 'postFailureDiagnostic'}
             or type(result['schemaVersion']) is not int or result['schemaVersion'] != 1):
         return None
     if 'focusCall' in result and not valid_focus_call(result['focusCall'], result['focusVariantType']):
         return None
     if 'guiFocus' in result and not valid_gui_focus(result['guiFocus'], result.get('focusCall')):
+        return None
+    if 'postFailureDiagnostic' in result and not valid_post_failure(result['postFailureDiagnostic'], result):
         return None
     value = [result[key] for key in FIELDS]
     if not valid(value) or record.get('stage') != STAGE_NAMES[result['stageCode']]:

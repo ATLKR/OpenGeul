@@ -58,7 +58,7 @@ def failure(request, stage=13):
 def validate(value, request):
     _request(request)
     if (type(value) is not dict or not _MAXIMA.keys() <= value.keys()
-            or not value.keys() <= _MAXIMA.keys() | {'focusCall', 'guiFocus'}):
+            or not value.keys() <= _MAXIMA.keys() | {'focusCall', 'guiFocus', 'postFailureDiagnostic'}):
         raise ValueError('Closed Writer OS result required')
     if any(type(value[key]) is not int or not 0 <= value[key] <= maximum
            for key, maximum in _MAXIMA.items()):
@@ -82,6 +82,13 @@ def validate(value, request):
             from writer_os_summary import valid_gui_focus
         if not valid_gui_focus(value['guiFocus'], value.get('focusCall')):
             raise ValueError('Invalid Writer GUI focus observation')
+    if 'postFailureDiagnostic' in value:
+        if __package__:
+            from .writer_os_summary import valid_post_failure
+        else:
+            from writer_os_summary import valid_post_failure
+        if not valid_post_failure(value['postFailureDiagnostic'], value):
+            raise ValueError('Invalid same-root post-failure observation')
     if value['verified'] and not (
             value['stageCode'] == 12 and value['documentRole'] == 15
             and value['rootRole'] > 0 and value['focusedRole'] > 0
@@ -235,7 +242,7 @@ def observe_root_diagnostic(request, *, owner_factory=None, backend_factory=None
     return validate_root_diagnostic(record,request)
 
 
-def observe(request, *, owner_factory=None, backend_factory=None, gui_deadline=None, clock=None):
+def observe(request, *, owner_factory=None, backend_factory=None, gui_deadline=None, clock=None, primary_checkpoint=None, post_failure_diagnostic=False):
     """Hold every probe failure; the caller enforces it after the original VCL gate."""
     record = failure(request, 1)
     owner = backend = None
@@ -305,6 +312,23 @@ def observe(request, *, owner_factory=None, backend_factory=None, gui_deadline=N
         primary = True
         if type(exc) is ProbeFailure:
             record['hresult'] = exc.hresult
+        committed = False
+        if primary_checkpoint is not None:
+            try:
+                committed = commit_primary_checkpoint(primary_checkpoint, record, request,
+                    deadline=gui_deadline, clock=clock or time.monotonic)
+            except BaseException:
+                pass  # Checkpoint failure cannot replace the original probe failure.
+        if (committed is True and post_failure_diagnostic is True
+                and type(backend) is RawComBackend):
+            # Only the closed original VT_EMPTY checkpoint authorizes this
+            # opt-in. The root and canonical identity are still retained here.
+            try:
+                record['postFailureDiagnostic'] = _post_failure_diagnostic(
+                    owner, backend, root, record, request, gui_deadline,
+                    clock or time.monotonic)
+            except BaseException:
+                pass  # Diagnostic failure cannot replace the first rejection.
     finally:
         if backend is not None:
             try:
@@ -324,6 +348,86 @@ def observe(request, *, owner_factory=None, backend_factory=None, gui_deadline=N
             if not primary:
                 record['stageCode'] = 11
     return validate(record, request)
+
+
+class _DiagnosticStop(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def _post_failure_diagnostic(owner, backend, root, original, request, deadline, clock):
+    """Self state + IServiceProvider QI/QueryService; never Text or focus.
+
+    Calls remain synchronous. The original parent watchdog, not COM, limits
+    observation. A late return is unknown, and never authorizes a later call.
+    """
+    if __package__:
+        from .writer_os_summary import _POST_MAXIMA
+    else:
+        from writer_os_summary import _POST_MAXIMA
+    result = {key: 0 for key in _POST_MAXIMA}
+    result.update(schemaVersion=1, diagnosticOnly=1, sameRetainedRoot=1,
+        stopCode=7, **{k: request[k] for k in
+            ('officePid', 'officeCreationTime', 'childHwnd')})
+    previous = None
+    original_guard = backend.guard
+    def budget():
+        nonlocal previous
+        now = clock()
+        if (type(now) not in (int,float) or not math.isfinite(now)
+                or type(deadline) not in (int,float) or not math.isfinite(deadline)
+                or not 0 <= now < deadline or previous is not None and now < previous
+                or not 0 < deadline*1000000 < 2**63
+                or int(now*1000000) >= int(deadline*1000000)):
+            raise _DiagnosticStop(6)
+        previous = now
+        return int(now*1000000)
+    def owned(full=False):
+        budget()
+        try:
+            owner.check(full=full)
+        except BaseException:
+            raise _DiagnosticStop(2) from None
+        budget()
+    def guard():
+        owned()
+    try:
+        result['startedMicros'] = budget()
+        result['deadlineMicros'] = int(deadline*1000000)
+        owned(full=True)
+        result.update(ownerBefore=1, generationBefore=request['officeCreationTime'])
+        # The original guard mutates the primary stage on owner failure.
+        # Restore it after this separate diagnostic, including every error path.
+        backend.guard = guard
+        for bit, stop, operation in (
+                (1,3,lambda: backend.state(root)),
+                (2,4,lambda: backend.support(root,'ia2')),
+                (4,5,lambda: backend.support(root,'text'))):
+            budget()
+            result['attemptedMask'] |= bit
+            result['stopCode'] = stop
+            value = operation()
+            budget()
+            if bit == 1:
+                result['rootState'] = value
+            elif value is True:
+                result['ia2Supported' if bit == 2 else 'textSupported'] = 1
+            else:
+                raise _DiagnosticStop(stop)
+            result['observedMask'] |= bit
+        owned(full=True)
+        result.update(ownerAfter=1, generationAfter=request['officeCreationTime'])
+        result['finishedMicros'] = budget()
+        result.update(known=1, stopCode=0)
+    except _DiagnosticStop as exc:
+        result['stopCode'] = exc.code
+    except ProbeFailure as exc:
+        result.update(hresultObserved=1, hresult=exc.hresult)
+    except BaseException:
+        result['stopCode'] = 7
+    finally:
+        backend.guard = original_guard
+    return result
 
 
 class WindowsOwner:
@@ -771,3 +875,95 @@ class RootCapabilityBackend(RawComBackend):
         self.record[operation+'Hresult']=hr & 0xffffffff
         self.record[operation+'Completed']=1
         return output.value if hr==0 else 0
+
+
+# First-failure checkpoint core for opt-in bounded Writer observation.
+def _primary_checkpoint_shape(value, request, deadline):
+    if (type(deadline) not in (int,float) or not math.isfinite(deadline) or deadline<=0
+            or type(value)is not dict or value.keys()!= {
+                'schemaVersion','diagnosticOnly','acceptanceEligible','primaryCaptured',
+                'cleanupObserved','capturedMicros','deadlineMicros','primary'}):
+        raise ValueError('Closed primary checkpoint required')
+    for key,expected in (('schemaVersion',1),('diagnosticOnly',1),('acceptanceEligible',0),
+                         ('primaryCaptured',1),('cleanupObserved',0)):
+        if type(value[key])is not int or value[key]!=expected:raise ValueError('Primary checkpoint scope differs')
+    start,limit=value['capturedMicros'],value['deadlineMicros']
+    if (type(start)is not int or type(limit)is not int or not 0<=start<limit<2**63
+            or limit!=int(deadline*1000000)):raise ValueError('Primary checkpoint original budget differs')
+    primary=validate(value['primary'],request)
+    call=primary.get('focusCall')
+    if (primary['verified']!=0 or primary['stageCode']!=4 or primary['rootRole']<=0
+            or primary['hresult']!=0 or primary['focusVariantType']!=0 or primary['ownerBefore']!=1
+            or any(primary[k] for k in ('ownerAfter','ownerReleased','referencesReleased','variantsCleared','cleanupFailure','cleanupHresult'))
+            or call!={'attempted':1,'returned':1,'hrObserved':1,'hr':0,'vtObserved':1,'rejectCode':3}):
+        raise ValueError('Original empty-focus failure checkpoint required')
+    return dict(value,primary=primary)
+
+
+def _primary_checkpoint_path(path):
+    import stat
+    path=Path(path)
+    if not path.is_absolute() or '..' in path.parts:raise ValueError('Owned absolute checkpoint path required')
+    for current in (path,*path.parents):
+        try:info=current.lstat()
+        except FileNotFoundError:
+            if current==path:continue
+            raise ValueError('Missing checkpoint parent') from None
+        if (stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0)&0x400
+                or (current!=path and not stat.S_ISDIR(info.st_mode))
+                or (current==path and not stat.S_ISREG(info.st_mode))):
+            raise ValueError('Linked or irregular checkpoint path')
+    return path
+
+
+def commit_primary_checkpoint(path, primary, request, *, deadline, clock=time.monotonic):
+    """Close a <=4096-byte exclusive failure file before authorizing extra COM.
+
+    The close may itself be non-preemptible. A late return raises and cannot
+    authorize a diagnostic call. This is not cleanup or native retirement proof.
+    """
+    now=clock()
+    if (type(now)not in(int,float) or not math.isfinite(now) or type(deadline)not in(int,float)
+            or not math.isfinite(deadline) or not 0<=now<deadline):
+        raise ValueError('Original checkpoint budget unavailable')
+    started=now
+    value=dict(schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,primaryCaptured=1,
+        cleanupObserved=0,capturedMicros=int(now*1000000),deadlineMicros=int(deadline*1000000),primary=primary)
+    value=_primary_checkpoint_shape(value,request,deadline)
+    raw=json.dumps(value,separators=(',',':'),allow_nan=False).encode('ascii')
+    if not 0<len(raw)<=4096:raise ValueError('Checkpoint exceeds numeric bound')
+    path=_primary_checkpoint_path(path)
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0),0o600)
+    try:
+        if os.write(fd,raw)!=len(raw):raise ValueError('Incomplete checkpoint write')
+    finally:os.close(fd)
+    now=clock()
+    if type(now)not in(int,float) or not math.isfinite(now) or not started<=now<deadline:
+        raise ValueError('Checkpoint close violated original clock interval')
+    return True
+
+
+def read_primary_checkpoint(path, request, *, deadline):
+    """Parent reads only after its original child is retired; no new time budget."""
+    import stat
+    path=_primary_checkpoint_path(path)
+    fd=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+    try:
+        before=os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or not 0<before.st_size<=4096:
+            raise ValueError('Invalid checkpoint file bound')
+        raw=os.read(fd,4097)
+        after=os.fstat(fd);current=path.lstat()
+        identity=lambda x:(x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns)
+        if identity(before)!=identity(after) or identity(before)!=identity(current) or len(raw)!=before.st_size:
+            raise ValueError('Checkpoint changed during read')
+    finally:os.close(fd)
+    def unique(pairs):
+        value={}
+        for key,number in pairs:
+            if key in value:raise ValueError('Duplicate numeric checkpoint key')
+            value[key]=number
+        return value
+    try:value=json.loads(raw,object_pairs_hook=unique)
+    except (UnicodeError,json.JSONDecodeError):raise ValueError('Malformed numeric checkpoint') from None
+    return _primary_checkpoint_shape(value,request,deadline)

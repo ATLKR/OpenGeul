@@ -83,6 +83,7 @@ def _writer_checkpoint(stdout):
 
 
 def capture_bounded(child, office_pid, destination, *, writer_request=None):
+    if _WRITER_CAPTURE_PENDING:raise WriterCapturePending()
     command = [sys.executable, str(Path(__file__).resolve()), '--capture-child', str(child),
                '--office-pid', str(office_pid), '--snapshot', str(destination)]
     if writer_request is None:
@@ -120,6 +121,7 @@ def capture_bounded(child, office_pid, destination, *, writer_request=None):
 
 def capture_writer_msaa_after_native(request, deadline):
     """One numeric-only observation within the original native reader budget."""
+    if _WRITER_CAPTURE_PENDING:raise WriterCapturePending()
     evidence = dict(schemaVersion=1, acceptanceEligible=False, attempted=False,
         completedWithinBudget=False, timeoutSeconds=0,
         result=writer_access.failure(request))
@@ -160,6 +162,7 @@ def capture_writer_root_diagnostic(request, deadline, *, enabled=True):
     outcomes stay unknown. Unretired child/file pairs remain caller-reachable
     in the bounded module registry and prevent another diagnostic launch.
     """
+    if _WRITER_CAPTURE_PENDING:raise WriterCapturePending()
     evidence = dict(schemaVersion=1, diagnosticOnly=True, acceptanceEligible=False,
         freshRootLater=True, attempted=False, completedWithinBudget=False, timeoutSeconds=0,
         requestValid=False, cleanupConfirmed=True, retainedPending=False, launchOutcomeUnknown=False, result={})
@@ -273,7 +276,10 @@ def prepare_korean_ui_focus(api,process,hwnd,parent,child,office_pid,module,reco
     return focus
 
 
-def run_case(suite, fixtures, output, module, *, probe_only=False):
+def run_case(suite, fixtures, output, module, *, probe_only=False, writer_regular_capture=False, writer_same_root_diagnostic=False):
+    if _WRITER_CAPTURE_PENDING:raise WriterCapturePending()
+    if type(writer_same_root_diagnostic)is not bool or writer_same_root_diagnostic and not writer_regular_capture:
+        raise ValueError('Same-root observation requires bounded Writer transport')
     case = 'korean-ui-' + module
     record = dict(case=case, module=module, success=False, stage='verify-fixture',
                   koreanUiVerified=False, tabbedUiVerified=False, cleanClose=False,
@@ -313,7 +319,13 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         if module == 'writer':
             writer_request = dict(officePid=office_pid, officeCreationTime=engine.creation_time,
                 childHwnd=child, expectedImage=str(suite/'Office/program/soffice.bin'))
-            os_snapshot = capture_bounded(child, office_pid, output / os_name, writer_request=writer_request)
+            if writer_regular_capture:
+                options={'same_root_diagnostic':True} if writer_same_root_diagnostic else {}
+                os_snapshot = capture_writer_regular_checkpoint(child,office_pid,output/os_name,writer_request=writer_request,**options)
+                record['writerPrimaryCheckpoint']=os_snapshot['writerPrimaryCheckpoint']
+                record['writerCaptureTransport']=os_snapshot['writerCaptureTransport']
+            else:
+                os_snapshot = capture_bounded(child, office_pid, output / os_name, writer_request=writer_request)
             record['writerOsAccessibility'] = os_snapshot.get('writerOsAccessibility',
                 writer_access.failure(writer_request))
         else:
@@ -380,6 +392,10 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
         record['originalFixtureUnchanged'] = hashlib.sha256(original.read_bytes()).hexdigest() == before
         assert record['fixtureUnchanged'] and record['originalFixtureUnchanged'], 'Read-only UI observation changed a generated fixture'
         record.update(success=True, cleanClose=True, stage='complete')
+    except WriterCapturePending as pending:
+        record.update(success=False,writerProbePending=1)
+        pending.record=record
+        raise
     except Exception as exc:
         native.capture_failure(output, case, record, exc)
         accessible.attach_child_failure(record, exc)
@@ -404,11 +420,23 @@ def run_case(suite, fixtures, output, module, *, probe_only=False):
     return record
 
 
-def run_modules(suite, fixtures, output, modules, *, probe_only=False):
+def run_modules(suite, fixtures, output, modules, *, probe_only=False, writer_regular_capture=False, writer_same_root_diagnostic=False):
+    if type(writer_same_root_diagnostic)is not bool or writer_same_root_diagnostic and not writer_regular_capture:
+        raise ValueError('Same-root observation requires bounded Writer transport')
     records = []
+    pending_cohort = bool(_WRITER_CAPTURE_PENDING)
     for module in modules:
+        if pending_cohort or _WRITER_CAPTURE_PENDING:
+            pending_cohort=True;break
         try:
-            record = run_case(suite, fixtures, output, module, probe_only=probe_only)
+            options={'writer_regular_capture':True} if writer_regular_capture and module=='writer' else {}
+            if writer_same_root_diagnostic and module=='writer':options['writer_same_root_diagnostic']=True
+            record = run_case(suite, fixtures, output, module, probe_only=probe_only,**options)
+        except WriterCapturePending as pending:
+            record=pending.record if type(pending.record)is dict else dict(case='korean-ui-'+module,module=module,success=False)
+            record.update(success=False,writerProbePending=1)
+            native.write_result(output,record['case'],record)
+            records.append(record);pending_cohort=True;break
         except Exception as exc:
             record = dict(case='korean-ui-' + module, module=module, success=False)
             native.capture_failure(output, record['case'], record, exc)
@@ -419,11 +447,233 @@ def run_modules(suite, fixtures, output, modules, *, probe_only=False):
     verified = [record['module'] for record in records if record.get('success') is True
                 and record.get('koreanUiVerified') is True and record.get('tabbedUiVerified') is True]
     report = dict(schemaVersion=1, kind='native-korean-ui-probe' if probe_only else 'native-korean-tabbed-ui',
-                  success=all(record.get('success') is True for record in records), probeOnly=probe_only,
+                  success=len(records)==len(modules) and all(record.get('success') is True for record in records), probeOnly=probe_only,
                   koreanUiVerified=not probe_only and len(verified) == len(modules),
                   expectedModules=list(modules), verifiedModules=verified, tests=records)
+    if pending_cohort:report['writerProbePending']=1
     (output/'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     return report
+
+
+_WRITER_CAPTURE_PENDING = []  # Owned child/HANDLE/file/dir; no automatic relaunch.
+
+
+def _writer_capture_environment(folder):
+    """Only five existing public OS/profile path values; never copy host environ."""
+    values={}
+    for key in ('SystemRoot','WINDIR','USERPROFILE','APPDATA','LOCALAPPDATA'):
+        value=os.environ.get(key)
+        if type(value)is not str or not value or any(c in value for c in ('\0',';','\r','\n')):
+            raise ValueError('Writer child public environment unavailable')
+        path=Path(value)
+        writer_access._primary_checkpoint_path(path/'environment-path-check')
+        if not path.is_dir():raise ValueError('Writer child public directory unavailable')
+        values[key]=path.resolve(strict=True)
+    if (values['SystemRoot']!=values['WINDIR'] or not (values['SystemRoot']/'System32').is_dir()
+            or any(not values[k].is_relative_to(values['USERPROFILE'])for k in ('APPDATA','LOCALAPPDATA'))):
+        raise ValueError('Writer child public environment differs')
+    result={k:str(v)for k,v in values.items()}
+    result.update(TEMP=str(folder),TMP=str(folder),
+        PATH=';'.join(map(str,(Path(sys.executable).resolve(strict=True).parent,
+            values['SystemRoot']/'System32',values['SystemRoot']))),
+        PYTHONNOUSERSITE='1',PYTHONDONTWRITEBYTECODE='1',PYTHONUTF8='1',PYTHONIOENCODING='utf-8')
+    return result
+
+
+def _capture_writer_regular_file(command, *, deadline, checkpoint_folder,
+                                 clock=time.monotonic, pause=time.sleep):
+    """Scratch opt-in transport core; direct child only, never PIPE/communicate.
+
+    The original absolute 45-second observation deadline is not restarted.
+    A synchronous OS operation can return late. At deadline only this original
+    creation HANDLE is terminated, then zero-polled; uncertain resources remain
+    retained. This does not prove process-tree retirement or hard OS preemption.
+    """
+    proof=dict(schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,statusCode=0,
+        failureCode=0,launched=0,creationHandleKnown=0,pollCount=0,retired=0,
+        naturalExit=0,exitObserved=0,exitCode=0,terminateRequested=0,
+        stdoutRead=0,stdoutBytes=0,stdoutPostHashVerified=0,creationHandleClosed=0,
+        stdoutClosed=0,pendingRetained=0,withinOriginalDeadline=0,directChildOnly=1,nativeBirthMeasured=0)
+    if _WRITER_CAPTURE_PENDING:
+        proof.update(statusCode=4,pendingRetained=1,failureCode=1);return proof,None
+    if os.name!='nt':proof.update(statusCode=4,failureCode=2);return proof,None
+    child=stream=handle=None;original_pid=None;handle_value=None;raw=None;last=None;entered_launch=False
+    def now():
+        nonlocal last
+        value=clock()
+        if (type(value)not in(int,float) or not math.isfinite(value)
+                or last is not None and value<last):raise ValueError()
+        last=value;return value
+    def original():
+        return (child is not None and handle is not None and child._handle is handle
+            and isinstance(handle,int) and type(handle)is not bool and int(handle)==handle_value
+            and type(getattr(handle,'closed',None))is bool and not handle.closed
+            and type(child.pid)is int and child.pid==original_pid)
+    try:
+        first=now()
+        if type(deadline)not in(int,float) or not math.isfinite(deadline) or not first<deadline<=first+45:raise ValueError()
+        writer_access._primary_checkpoint_path(Path(checkpoint_folder)/'stdout-path-check')
+        environment=_writer_capture_environment(checkpoint_folder)
+        stream=tempfile.TemporaryFile('w+b',dir=checkpoint_folder)
+        if now()>=deadline:raise ValueError()
+        entered_launch=True
+        child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=stream,stderr=subprocess.DEVNULL,
+            shell=False,env=environment,creationflags=0x08000000)  # CREATE_NO_WINDOW: this new diagnostic path only.
+        proof['launched']=1;handle=child._handle;original_pid=child.pid
+        if (not isinstance(handle,int) or type(handle)is bool or int(handle)<=0
+                or type(getattr(handle,'closed',None))is not bool or handle.closed
+                or type(original_pid)is not int or original_pid<=0):raise ValueError()
+        handle_value=int(handle)
+        proof['creationHandleKnown']=1
+        while True:
+            if not original():proof['failureCode']=3;break
+            if now()>=deadline:
+                proof['terminateRequested']=1
+                child.kill()  # Popen.kill uses this retained creation HANDLE on Windows.
+                if not original():proof['failureCode']=3;break
+                code=child.poll();proof['pollCount']+=1
+                if not original():proof['failureCode']=3;break
+                if type(code)is int:
+                    proof.update(retired=1,exitObserved=1,exitCode=code)
+                proof['statusCode']=3;break
+            code=child.poll();proof['pollCount']+=1
+            if not original():proof['failureCode']=3;break
+            if type(code)is int:
+                proof.update(retired=1,naturalExit=1,exitObserved=1,exitCode=code)
+                if now()>=deadline:proof['statusCode']=3;break
+                import os as file_os
+                before=file_os.fstat(stream.fileno())
+                if not 0<before.st_size<=4101:raise ValueError()
+                stream.seek(0);value=stream.read(4102)
+                if len(value)!=before.st_size:raise ValueError()
+                digest=hashlib.sha256(value).digest()
+                if now()>=deadline:proof['statusCode']=3;break
+                stream.seek(0);again=stream.read(4102);after=file_os.fstat(stream.fileno())
+                if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=
+                    (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)
+                        or hashlib.sha256(again).digest()!=digest):raise ValueError()
+                if not original():proof['failureCode']=3;break
+                if now()>=deadline:proof['statusCode']=3;break
+                raw=value;proof.update(stdoutRead=1,stdoutBytes=len(value),stdoutPostHashVerified=1,
+                    statusCode=2,withinOriginalDeadline=1);break
+            if proof['pollCount']>=8192:proof['failureCode']=4;break
+            remaining=deadline-now()
+            if remaining>0:pause(min(.01,remaining))
+    except BaseException:
+        proof['failureCode']=proof['failureCode'] or 5;proof['statusCode']=4;raw=None
+    finally:
+        if proof['retired'] and original():
+            try:handle.Close();proof['creationHandleClosed']=1
+            except BaseException:proof['failureCode']=6
+            try:stream.close();proof['stdoutClosed']=1
+            except BaseException:proof['failureCode']=6
+        elif not entered_launch and stream is not None:
+            try:stream.close();proof['stdoutClosed']=1
+            except BaseException:proof['failureCode']=6
+        if ((entered_launch and not (proof['retired'] and proof['creationHandleClosed'] and proof['stdoutClosed']))
+                or stream is not None and not proof['stdoutClosed']):
+            _WRITER_CAPTURE_PENDING.append(dict(process=child,handle=handle,stdout=stream,
+                checkpointFolder=checkpoint_folder,originalPid=original_pid))
+            proof['pendingRetained']=1
+        if entered_launch:
+            try:
+                if now()>=deadline:
+                    proof['withinOriginalDeadline']=0
+                    if proof['statusCode']==2:proof['statusCode']=3;raw=None
+            except BaseException:proof['failureCode']=5
+        if proof['failureCode']:proof['statusCode']=4;raw=None
+    return proof,raw
+
+
+class WriterCapturePending(BaseException):
+    """Terminal diagnostic cohort state; carries no input or cleanup authority."""
+    def __init__(self):
+        super().__init__('Owned Writer diagnostic retirement is pending')
+        self.record=None
+
+
+def capture_writer_regular_checkpoint(child, office_pid, destination, *, writer_request, same_root_diagnostic=False):
+    """Explicit bounded transport; optional same-root diagnosis is never acceptance."""
+    if _WRITER_CAPTURE_PENDING:raise WriterCapturePending()
+    if type(same_root_diagnostic)is not bool:raise ValueError('Explicit diagnostic selection required')
+    writer_access._request(writer_request)
+    if (type(child)is not int or type(office_pid)is not int or child!=writer_request['childHwnd']
+            or office_pid!=writer_request['officePid']):
+        raise ValueError('Exact original Writer owner tuple required')
+    destination=Path(destination)
+    writer_access._primary_checkpoint_path(destination.parent/'primary-path-check')
+    folder=Path(tempfile.mkdtemp(prefix='.writer-primary-',dir=destination.parent))
+    checkpoint=folder/'primary.json'
+    deadline=time.monotonic()+45
+    command=[sys.executable,str(Path(__file__).resolve()),'--capture-child',str(child),
+        '--office-pid',str(office_pid),'--snapshot',str(destination),'--writer-msaa-deadline',repr(deadline),
+        '--writer-office-creation-time',str(writer_request['officeCreationTime']),
+        '--writer-office-image',writer_request['expectedImage'],'--writer-msaa',
+        '--writer-primary-checkpoint',str(checkpoint)]
+    if same_root_diagnostic:command.append('--writer-same-root-after-failure')
+    transport,raw=_capture_writer_regular_file(command,deadline=deadline,checkpoint_folder=folder)
+    # A pending child may still own both files. Neither file is read or removed.
+    if transport.get('pendingRetained')==1:raise WriterCapturePending()
+    if transport.get('retired')!=1:raise RuntimeError('Owned Writer collector unavailable')
+    metadata=dict(schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,
+        primaryPreserved=0,cleanupObserved=0,postDiagnosticObserved=0)
+    evidence=writer_access.failure(writer_request,14)
+    if (transport.get('statusCode')==2 and transport.get('naturalExit')==1
+            and transport.get('exitCode')==0 and type(raw)is bytes):
+        prefix=3 if raw.startswith(b'1\r\n')else 2 if raw.startswith(b'1\n')else 0
+        if prefix:
+            body=raw[prefix:]
+            if body.endswith(b'\r\n'):body=body[:-2]
+            elif body.endswith(b'\n'):body=body[:-1]
+            try:evidence=writer_access.decode(body.decode('ascii'),writer_request)
+            except (UnicodeError,ValueError):evidence=writer_access.failure(writer_request)
+        else:evidence=writer_access.failure(writer_request)
+    if 'postFailureDiagnostic'in evidence and not same_root_diagnostic:
+        evidence=writer_access.failure(writer_request)
+    try:
+        original=writer_access.read_primary_checkpoint(checkpoint,writer_request,deadline=deadline)
+        initial=original['primary']
+        cleanup={'referencesAcquired','referencesReleased','variantsCreated','variantsCleared',
+            'cleanupFailure','cleanupHresult','ownerReleased'}
+        facts=writer_access._MAXIMA.keys()-cleanup
+        if (any(evidence.get(k)!=initial[k] for k in facts)
+                or any(evidence.get(k)!=initial.get(k)for k in ('focusCall','guiFocus'))):
+            evidence=initial;metadata['primaryPreserved']=1
+        elif same_root_diagnostic and 'postFailureDiagnostic'in evidence:
+            metadata['postDiagnosticObserved']=1
+    except BaseException:
+        pass  # Missing/partial checkpoint never becomes a fabricated primary.
+    if 'postFailureDiagnostic'in evidence and not metadata['postDiagnosticObserved']:
+        evidence=writer_access.failure(writer_request)
+    try:
+        snapshot=json.loads(destination.read_text(encoding='utf-8'))
+        if type(snapshot)is not dict:raise ValueError()
+    except BaseException:
+        raise RuntimeError('Owned Writer snapshot unavailable after retirement') from None
+    snapshot.update(writerOsAccessibility=evidence,writerPrimaryCheckpoint=metadata,
+        writerCaptureTransport=transport)
+    return snapshot
+
+
+def _writer_context_module():
+    # Same public owner-push/attempt/source admission used by Korean IME.
+    import importlib.util
+    path=Path(__file__).resolve().parents[2]/'e2e/native31_suite_prepare.py'
+    spec=importlib.util.spec_from_file_location('writer_same_root_ci_admission',path)
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _admit_writer_same_root(suite, architecture):
+    admission=_writer_context_module()
+    binding=admission.validate_context(os.environ,admission.read_event(),architecture,os.name)
+    # Read the same Suite architecture metadata as the existing Korean IME CLI.
+    inventory=json.loads((suite/'suite-inventory.json').read_text(encoding='utf-8-sig'))
+    if (type(inventory)is not dict or type(inventory.get('schemaVersion'))is not int
+            or inventory['schemaVersion']!=1 or inventory.get('architecture')!=architecture):
+        raise ValueError('Writer diagnostic architecture differs from Suite inventory')
+    return binding
 
 
 def main():
@@ -433,6 +683,7 @@ def main():
     parser.add_argument('--output', type=Path)
     parser.add_argument('--modules', choices=tuple(MODULES), nargs='+', default=list(MODULES))
     parser.add_argument('--probe-only', action='store_true')
+    parser.add_argument('--writer-same-root-diagnostic', choices=('x64','arm64'))
     parser.add_argument('--capture-child', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--office-pid', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--snapshot', type=Path, help=argparse.SUPPRESS)
@@ -442,6 +693,8 @@ def main():
     parser.add_argument('--writer-office-creation-time', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--writer-office-image', help=argparse.SUPPRESS)
     parser.add_argument('--writer-msaa-deadline', help=argparse.SUPPRESS)
+    parser.add_argument('--writer-primary-checkpoint', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--writer-same-root-after-failure', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     # Invalid/missing diagnostic metadata preserves the legacy probe seam.
     try:
@@ -451,6 +704,25 @@ def main():
     except (TypeError, ValueError, OverflowError):
         gui_deadline = None
     gui_options = {'gui_deadline': gui_deadline} if gui_deadline is not None else {}
+    if getattr(args,'writer_primary_checkpoint',None) is not None:
+        if not gui_options or not (args.writer_msaa or args.writer_msaa_only) or args.writer_root_capabilities_only:
+            raise ValueError('Primary checkpoint requires the original Writer collector')
+        gui_options['primary_checkpoint']=args.writer_primary_checkpoint
+    if getattr(args,'writer_same_root_after_failure',False):
+        if (not args.writer_msaa or args.writer_msaa_only or args.writer_root_capabilities_only
+                or args.writer_primary_checkpoint is None or not gui_options
+                or not args.capture_child or not args.office_pid or args.snapshot is None):
+            raise ValueError('Same-root observation requires the original bounded collector and checkpoint')
+        now=time.monotonic()
+        if (type(now)not in(int,float) or not math.isfinite(now)
+                or not 0 < gui_deadline-now <= 45):
+            raise ValueError('Same-root observation exceeds the original 45-second interval')
+        gui_options['post_failure_diagnostic']=True
+    if getattr(args,'writer_same_root_diagnostic',None) is not None and (
+            args.probe_only or 'writer' not in args.modules or args.capture_child is not None
+            or args.writer_msaa or args.writer_msaa_only or args.writer_root_capabilities_only
+            or args.writer_primary_checkpoint is not None):
+        raise ValueError('Explicit Writer observation requires the original cohort path')
     if os.name != 'nt' or not __debug__:
         raise RuntimeError('Actual Windows GUI execution with assertions enabled is required')
     if getattr(args, 'writer_root_capabilities_only', False):
@@ -501,8 +773,12 @@ def main():
     assert fixtures != output and fixtures not in output.parents, 'Evidence must be outside generated fixtures'
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
     assert len(args.modules) == len(set(args.modules)), 'Each module may be observed once'
+    options={}
+    if getattr(args,'writer_same_root_diagnostic',None) is not None:
+        _admit_writer_same_root(suite,args.writer_same_root_diagnostic)
+        options=dict(writer_regular_capture=True,writer_same_root_diagnostic=True)
     output.mkdir(parents=True, exist_ok=False)
-    report = run_modules(suite, fixtures, output, args.modules, probe_only=args.probe_only)
+    report = run_modules(suite, fixtures, output, args.modules, probe_only=args.probe_only,**options)
     return 0 if report['success'] else 1
 
 
