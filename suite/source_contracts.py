@@ -42,6 +42,43 @@ def core_python_reader_path(pin):
     contract=contract_for_source_pin(pin)
     return 'Office/program/python-core-'+contract.python_version+'/bin/python.exe'
 
+@dataclass(frozen=True,slots=True)
+class SourceCompanionIntent:
+    core: str
+    architecture: str
+    path: str
+    role: str
+    qualifies_runtime: bool=field(default=False,init=False)
+
+_SPSUPP_INTENT=SourceCompanionIntent(NEW.core,'x64','program/spsupp_x86.dll','x86CompatibilityHelper')
+
+def source_companion_intent(pin,architecture):
+    """Source intent only; no compiled bytes, receipt or runtime is admitted."""
+    if (contract_for_source_pin(pin) is not NEW or type(architecture) is not str
+            or architecture!='x64'):
+        raise ValueError('Source companion intent requires the exact reviewed x64 source profile')
+    return _SPSUPP_INTENT
+
+@dataclass(frozen=True,slots=True)
+class SourceTwainIntent:
+    core: str
+    architecture: str
+    path: str
+    role: str
+    kind: str
+    source_intent: str
+    qualifies_runtime: bool=field(default=False,init=False)
+
+_TWAIN_INTENT=SourceTwainIntent(NEW.core,'x64','program/twain32shim.exe','x86CompatibilityHelper',
+    'source-built-x86-twain-companion','twain-32bit-driver-process-bridge')
+
+def source_twain_intent(pin,architecture):
+    """Separate TWAIN source intent; compiled bytes still require Full admission."""
+    if (contract_for_source_pin(pin) is not NEW or type(architecture) is not str
+            or architecture!='x64'):
+        raise ValueError('TWAIN source intent requires the exact reviewed x64 source profile')
+    return _TWAIN_INTENT
+
 def fallback_identity_expectation(pin):
     contract=contract_for_source_pin(pin)
     configuration=dict(LIBO_VERSION_MAJOR='26',LIBO_VERSION_MINOR='8',
@@ -49,6 +86,19 @@ def fallback_identity_expectation(pin):
     return dict(rule='libreoffice-'+contract.version+'-installer-no-git-v1',
         configuration=configuration,build='2680',normalizedBuild='680',
         installerBuildId=contract.patch,buildid='680(Build:'+contract.patch+')')
+
+
+def dotnet_project_graph_expectation(pin):
+    """Exact source metadata only; no build output or runtime is qualified."""
+    if contract_for_source_pin(pin) is not NEW:
+        raise ValueError('.NET project graph expectations require the exact reviewed new source')
+    return dict(schemaVersion=1,coreCommit=NEW.core,sources=[
+        dict(path='solenv/gbuild/DotnetLibrary.mk',size=5315,
+            sha256='f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b',
+            afterSize=5728,afterSha256='cc1e4a62d0d97681b1742ada794af15945e465af86d4d2f54b38b245c8889db3'),
+        dict(path='solenv/gbuild/DotnetTest.mk',size=5154,
+            sha256='5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272',
+            afterSize=5555,afterSha256='09987ad29eb2afac9f2ff7a973bd2b7c32ccd54f286a4281610b5bc89fe939f7')])
 
 @dataclass(frozen=True,slots=True)
 class SourceOnlyExpectations:
@@ -65,18 +115,18 @@ def new_source_only_expectations(pin,architecture):
     contract=contract_for_source_pin(pin)
     if contract is not NEW or type(architecture) is not str or architecture not in ('arm64','x64'):
         raise ValueError('Exact new source and reviewed native architecture are required')
-    manifest='3c21739690aa8dc53c0b6a333aee81af845c9c913e11a9338948923d9fe24c89'
+    manifest='9bf183e354ee1f68158233bad959ac8a756c3e667cb0892760b98c44aabb8e50'
     targets='ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
     if architecture=='arm64':
-        hooks=('arm64Full','winAccFocusOrder','flexFatalCompatibility')
+        hooks=('arm64Full','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')
         recipe_id='windows-arm64-v1';guarded=13
-        recipe_sha='a8080687422c3160b568be282b14812247bb34008b345665fc60153440ea36bf'
+        recipe_sha='9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe'
     else:
         hooks=('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath',
                'atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform',
-               'winAccFocusOrder','flexFatalCompatibility')
+               'winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')
         recipe_id='windows-x64-common-v2';guarded=4
-        recipe_sha='95c0bff970c3cc13f679f2dbaa226c4c4a45e236195efcdcd25e6ade6f94b2dc'
+        recipe_sha='66704ff304812a3181912c38723e4d0333670055dbb0c879e46fcc1ea961324d'
     flags=dict(nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
     recipe=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture=architecture,
         recipeId=recipe_id,policySha256=targets,manifestSha256=manifest,

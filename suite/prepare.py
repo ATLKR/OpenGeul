@@ -27,9 +27,9 @@ except ModuleNotFoundError:
     from crt import crt_names, is_vc_crt_file
 
 try:
-    from suite.source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations
+    from suite.source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation
 except ModuleNotFoundError:
-    from source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations
+    from source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation
 
 # Compatibility name retains the existing public x64 family.
 MSI_VC_DEPENDENCIES = frozenset(crt_names())
@@ -504,6 +504,15 @@ def _source_x64_harfbuzz_source(value,manifest,*,evidence_parent: PureWindowsPat
             raise ValueError('x64 HarfBuzz evidence basename or shared loader parent differs')
 
 
+def _source_new_dotnet_pins(manifest: dict) -> list:
+    """Require the exact ordered source pair, never receipt-selected graph pins."""
+    expected=dotnet_project_graph_expectation(dict(NEW_SOURCE))
+    if (type(manifest) is not dict
+            or not _source_exact(manifest.get('windowsDotnetProjectGraph'),expected)):
+        raise ValueError('New .NET source graph descriptor differs from its reviewed core/pins')
+    return [dict(row) for row in expected['sources']]
+
+
 def _source_new_plan(manifest: dict, architecture: str) -> dict:
     """Reconstruct only the separate, reviewed 9dea source-only recipe."""
     expected=new_source_only_expectations(dict(NEW_SOURCE),architecture)
@@ -523,6 +532,7 @@ def _source_new_plan(manifest: dict, architecture: str) -> dict:
         for value in winacc['sources']:
             common.append(pin(value,winacc['afterSha256'] if value['path']==winacc['path'] else value['sha256']))
         common[1]['afterBytes']=winacc['afterBytes'];common.append(pin(manifest['flexFatalCompatibility']))
+        common.extend(pin(value) for value in _source_new_dotnet_pins(manifest))
         guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
         guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
         guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
@@ -575,6 +585,28 @@ def _source_new_evidence(value, names: dict, *, parent: PureWindowsPath | None =
     return parent
 
 
+def _source_new_dotnet_hook(value,manifest,architecture,*,parent: PureWindowsPath) -> None:
+    """Source-only graph evidence shares the already retained producer parent."""
+    if type(architecture) is not str or architecture not in ('arm64','x64'):
+        raise ValueError('New .NET source graph architecture differs')
+    pins=_source_new_dotnet_pins(manifest)
+    fields=dict(schemaVersion=1,kind='windows-dotnet-project-graph-source-hook',
+        coreCommit=NEW.core,architecture=architecture,nativeBuildVerified=False,
+        fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+    if (type(value) is not dict or set(value)!=set(fields)|{'sources'}
+            or not _source_exact({key:value[key] for key in fields},fields)
+            or type(value['sources']) is not list or len(value['sources'])!=len(pins)):
+        raise ValueError('New .NET source graph hook/source-only fields differ')
+    for row,pin in zip(value['sources'],pins):
+        expected=dict(path=pin['path'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],
+            beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'])
+        if (type(row) is not dict or set(row)!=set(expected)|{'evidence'}
+                or not _source_exact({key:row[key] for key in expected},expected)):
+            raise ValueError('New .NET source graph ordered recipe pins differ')
+        name=pin['path'].rsplit('/',1)[-1]
+        _source_new_evidence(row['evidence'],{side:side+'-'+name for side in ('original','effective')},parent=parent)
+
+
 def _source_new_arm_hooks(hooks: dict, manifest: dict, parent: PureWindowsPath) -> None:
     """Replay the actual ARM producer's closed hook fields and retained paths."""
     fields=dict(schemaVersion=1,status='source-hook-installed-native-build-pending',architecture='arm64',
@@ -584,7 +616,7 @@ def _source_new_arm_hooks(hooks: dict, manifest: dict, parent: PureWindowsPath) 
         configureBeforeSha256=manifest['configureSource']['sha256'],configureAfterSha256=manifest['configureSource']['afterSha256'],
         nativeBuildVerified=False,basePersistenceVerified=False)
     names=('icuBuildPath','zstdSourceLinks','mddsEquality','pythonNativeHost','atlNativePaths','atlConsumerNativePaths','harfbuzzNativeMesonPaths')
-    if (set(hooks)!=set(fields)|{'moduleBootstrap',*names}
+    if (set(hooks)!=set(fields)|{'moduleBootstrap','dotnetProjectGraph',*names}
             or not _source_exact({key:hooks[key] for key in fields},fields)):
         raise ValueError('New ARM source hook group/pinned source identities differ')
     for field in names:
@@ -671,6 +703,7 @@ def _source_new_recipe(proof: dict, architecture: str) -> None:
                 or not _source_exact({key:flex[key] for key in fields},fields)):
             raise ValueError('New Flex source-only proof differs')
         _source_new_evidence(flex['evidence'],{side:side+'-'+architecture+'-sqlflex.l' for side in ('original','effective')},parent=parent)
+        _source_new_dotnet_hook(hooks.get('dotnetProjectGraph'),manifest,architecture,parent=parent)
         if architecture=='arm64':
             _source_new_arm_hooks(hooks,manifest,parent)
             return
@@ -679,7 +712,7 @@ def _source_new_recipe(proof: dict, architecture: str) -> None:
             ('gpgBuildCompilerPath','windowsGpgBuildCompilerPath','windows-gpg-build-compiler-path-source-hook'),
             ('harfbuzzNativeMesonPaths','windowsHarfbuzzNativeMesonPaths','windows-x64-harfbuzz-native-meson-source-hook'),
             ('cliPublisherPolicyPlatform','windowsCliPublisherPolicyPlatform','windows-x64-cli-publisher-policy-platform-source-hook'))
-        if (set(hooks)!={'kind','architecture','moduleBootstrap','atlNativePaths','nativeBuildVerified','basePersistenceVerified',*(row[0] for row in pairs)}
+        if (set(hooks)!={'kind','architecture','moduleBootstrap','atlNativePaths','dotnetProjectGraph','nativeBuildVerified','basePersistenceVerified',*(row[0] for row in pairs)}
                 or hooks.get('kind')!='native-windows-common-source-hooks'):
             raise ValueError('New x64 common hook group differs')
         for field,pin_name,kind in pairs:
@@ -834,12 +867,48 @@ def _source_python_templates(proof: dict | None = None) -> dict:
             if pin['role']=='pythonLauncherTemplate'}
 
 
-def _source_x64_inventory(proof: dict) -> dict:
+def _source_x64_companions(proof: dict, runtime: dict | None = None) -> dict:
+    """Consume a validated component under the original externally pinned runtime.
+
+    The common wrapper is not a Full factory. Callers authenticate the normal
+    Full receipt first and pass that original runtime object, never a source-pin
+    reconstruction or a candidate binary hash allowlist.
+    """
+    if type(proof) is not dict:raise ValueError('Source companion context must be an object')
+    source=proof.get('sourcePin')
+    if type(source) is not dict or source.get('coreCommit')!=NEW.core:
+        if (type(runtime) is dict and runtime.get('sourceCoreCommit')==NEW.core
+                or proof.get('sourceCompanionProof') is not None or proof.get('sourceTwainProof') is not None):
+            raise ValueError('Source companion cannot be relabelled under a legacy source profile')
+        return {}
+    intents=(source_companion_intent(source,'x64'),source_twain_intent(source,'x64'))
+    if type(runtime) is not dict:
+        raise ValueError('New source companion requires the original externally pinned runtime')
+    try:
+        from suite.payload import _source_companion_admissions
+    except ModuleNotFoundError:
+        from payload import _source_companion_admissions
+    companions=_source_companion_admissions(runtime,proof,architecture='x64')
+    if type(companions) is not dict or set(companions)!={intent.path for intent in intents}:
+        raise ValueError('Source companion family differs from its exact source intent')
+    for intent in intents:
+        value=companions[intent.path]
+        if (type(value) is not dict or set(value)!={'machine','role','size','sha256'}
+                or type(value['machine']) is not int or value['machine']!=0x14c
+                or type(value['role']) is not str or value['role']!=intent.role
+                or not _source_positive(value['size']) or not _source_digest(value['sha256'])):
+            raise ValueError('Source companion admitted identity differs')
+    return {intent.path:dict(companions[intent.path]) for intent in intents}
+
+
+def _source_x64_inventory(proof: dict, runtime: dict | None = None) -> dict:
     root=_source_windows_path(proof['appLocalCrt']['programDirectory']).parent
     inventory=proof.get('productInventory');templates=_source_python_templates(proof)
+    companions=_source_x64_companions(proof,runtime)
     if not isinstance(inventory,list) or not 0 < len(inventory) <= 100_000:
         raise ValueError('x64 source product inventory is missing or exceeds bounds')
     result={};counts=dict(nativeX64=0,managedAnyCpu=0,pythonLauncherTemplate=0)
+    if companions:counts['x86CompatibilityHelper']=0
     for record in inventory:
         _source_file_identity(record)
         try:name=archive_path(_source_windows_path(record['path']).relative_to(root).as_posix())
@@ -850,16 +919,36 @@ def _source_x64_inventory(proof: dict) -> dict:
             raise ValueError('x64 source product role/machine is invalid')
         if (role=='nativeX64' and machine != 0x8664 or role=='managedAnyCpu' and machine != 0x14c
                 or role=='pythonLauncherTemplate' and (name not in templates or
-                    any(record.get(key) != templates[name][key] for key in ('machine','role','sha256')))):
+                    any(record.get(key) != templates[name][key] for key in ('machine','role','sha256')))
+                or role=='x86CompatibilityHelper' and (name not in companions or
+                    any(record.get(key) != companions[name][key] for key in ('machine','role','size','sha256')))):
             raise ValueError('x64 source product native/managed/pinned template identity differs')
         result[name.casefold()]=(name,record);counts[role]+=1
-    if (any(type(proof.get(key)) is not int or proof[key] != value for key,value in
-            dict(productPeCount=len(inventory),nativePeCount=counts['nativeX64'],
-                 managedAnyCpuCount=counts['managedAnyCpu'],pinnedTemplateCount=counts['pythonLauncherTemplate']).items())
-            or {name for name,record in result.values() if record['role']=='pythonLauncherTemplate'} != set(templates)):
+    expected_counts=dict(productPeCount=len(inventory),nativePeCount=counts['nativeX64'],
+        managedAnyCpuCount=counts['managedAnyCpu'],pinnedTemplateCount=counts['pythonLauncherTemplate'])
+    if companions:expected_counts['companionPeCount']=counts['x86CompatibilityHelper']
+    if (any(type(proof.get(key)) is not int or proof[key] != value for key,value in expected_counts.items())
+            or {name for name,record in result.values() if record['role']=='pythonLauncherTemplate'} != set(templates)
+            or {name for name,record in result.values() if record['role']=='x86CompatibilityHelper'} != set(companions)):
         raise ValueError('x64 source product counts/template family are incomplete')
     if proof.get('crtImportClosure',{}).get('checkedPeCount') != counts['nativeX64']:
         raise ValueError('x64 source import closure does not cover the full native PE inventory')
+    if companions:
+        helper=proof['sourceCompanionProof']['nativeHelper']
+        item=result.get('program/spsupp_helper.exe')
+        if (type(helper) is not dict or set(helper)!={'path','machine','role','size','sha256'}
+                or helper.get('path')!='program/spsupp_helper.exe' or item is None
+                or item[0]!='program/spsupp_helper.exe' or item[1]['role'] != 'nativeX64'
+                or any(item[1].get(key)!=helper.get(key) for key in ('machine','role','size','sha256'))):
+            raise ValueError('Source companion native helper differs from its original inventory')
+        twain=proof.get('sourceTwainProof')
+        peer=twain.get('nativePeer') if type(twain) is dict else None
+        item=result.get('program/scnlo.dll')
+        if (type(peer) is not dict or set(peer)!={'path','machine','role','size','sha256'}
+                or peer.get('path')!='program/scnlo.dll' or item is None
+                or item[0]!='program/scnlo.dll' or item[1]['role'] != 'nativeX64'
+                or any(item[1].get(key)!=peer.get(key) for key in ('machine','role','size','sha256'))):
+            raise ValueError('TWAIN native peer differs from its original inventory')
     for crt in proof['crtPreflight']['files']:
         item=result.get(('program/'+crt['name']).casefold())
         if item is None or any(item[1].get(key) != crt.get(key) for key in ('machine','size','sha256')):
@@ -904,7 +993,7 @@ def _source_build_x64(proof: dict, runtime: dict, target: dict) -> None:
     if proof.get('sourcePin',{}).get('coreCommit')==NEW.core:_source_new_recipe(proof,'x64')
     else:_source_x64_recipe(proof)
     _source_x64_retirement(proof['baseProof'])
-    _source_x64_inventory(proof)
+    _source_x64_inventory(proof,runtime=runtime)
     external=proof.get('externalSources');stage=proof.get('installedRuntimeStage')
     if (not isinstance(external,dict) or type(external.get('schemaVersion')) is not int or external['schemaVersion'] != 1
             or external.get('pythonSourceVerified') is not True
@@ -942,9 +1031,11 @@ def _source_build_x64(proof: dict, runtime: dict, target: dict) -> None:
     _source_windows_path(reference.get('path'))
 
 
-def _source_x64_runtime(runtime_root: Path, proof: dict) -> None:
+def _source_x64_runtime(runtime_root: Path, proof: dict, runtime: dict | None = None) -> None:
     """Replay every PE against the authenticated producer, including disguised PEs."""
-    expected=_source_x64_inventory(proof);templates=_source_python_templates(proof);actual=set()
+    expected=_source_x64_inventory(proof,runtime=runtime);templates=_source_python_templates(proof);actual=set()
+    companions=_source_x64_companions(proof,runtime)
+    admitted=dict(templates,**companions)
     try:
         from suite.payload import _pe
         from suite.pe_imports import read_pe_imports
@@ -964,7 +1055,7 @@ def _source_x64_runtime(runtime_root: Path, proof: dict) -> None:
             raise ValueError('x64 source runtime PE was added, renamed or case aliased')
         actual.add(key);record=expected[key][1]
         check_asset(record,path)
-        _pe(path,companion=templates.get(name) if record['role']=='pythonLauncherTemplate' else None,architecture='x64')
+        _pe(path,companion=admitted.get(name) if record['role'] in ('pythonLauncherTemplate','x86CompatibilityHelper') else None,architecture='x64')
         with path.open('rb') as stream:
             stream.seek(60);offset=struct.unpack('<I',stream.read(4))[0];stream.seek(offset+4)
             machine=struct.unpack('<H',stream.read(2))[0]
@@ -978,6 +1069,13 @@ def _source_x64_runtime(runtime_root: Path, proof: dict) -> None:
                 raise ValueError('x64 WinAcc DLL/import bytes differ from authenticated source proof')
     if actual != expected.keys():
         raise ValueError('x64 source runtime lacks inventoried native/managed/template PE bytes')
+    if companions:
+        try:
+            from suite.payload import _source_companion_runtime, _source_twain_runtime
+        except ModuleNotFoundError:
+            from payload import _source_companion_runtime, _source_twain_runtime
+        _source_companion_runtime(runtime_root,proof['sourceCompanionProof'])
+        _source_twain_runtime(runtime_root,proof['sourceTwainProof'])
 
 
 def validate_source_build_lock(runtime: dict, *, architecture: str) -> dict:
@@ -1345,7 +1443,7 @@ def _source_build_import_closure(proof: dict, *, architecture: str = 'arm64') ->
     return closure
 
 
-def validate_source_build_runtime(runtime_root: Path, proof: dict, *, architecture: str = 'arm64', branding: dict | None = None) -> None:
+def validate_source_build_runtime(runtime_root: Path, proof: dict, *, architecture: str = 'arm64', branding: dict | None = None, runtime: dict | None = None) -> None:
     """Replay metadata and CRT bytes after authenticating the receipt against its lock.
 
     Only the final Suite payload supplies branding; preparation checks the exact
@@ -1413,7 +1511,7 @@ def validate_source_build_runtime(runtime_root: Path, proof: dict, *, architectu
     if validate_crt_imports(runtime_root, architecture=architecture) != _source_build_import_closure(proof, architecture=architecture):
         raise ValueError('Source-build CRT normal/delay import closure differs from authenticated receipt')
     if architecture == 'x64':
-        _source_x64_runtime(runtime_root, proof)
+        _source_x64_runtime(runtime_root, proof, runtime=runtime)
 
 
 def extract_source_engine_zip(archive: Path, destination: Path, *, runtime: dict, receipt: Path,
@@ -1470,7 +1568,7 @@ def extract_source_engine_zip(archive: Path, destination: Path, *, runtime: dict
                         if size > member.file_size: raise ValueError('Source engine ZIP member exceeds declared size')
                         writer.write(chunk)
                     if size != member.file_size: raise ValueError('Source engine ZIP member size mismatch')
-    validate_source_build_runtime(destination, proof, architecture=architecture)
+    validate_source_build_runtime(destination, proof, architecture=architecture, runtime=runtime)
     with receipt.open('rb') as reader, (destination/'opengeul-source-build.json').open('xb') as writer:
         shutil.copyfileobj(reader, writer)
     return destination

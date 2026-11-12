@@ -49,7 +49,7 @@ def assemble(*, runtime: Path, hwp: Path, shell: Path, output: Path, lock: dict)
         receipt = runtime/'opengeul-source-build.json'
         if not receipt.is_file(): raise ValueError('Source-built runtime requires its pinned source-build receipt')
         proof = validate_source_build_receipt(lock['runtime'], receipt, architecture=lock['architecture'])
-        validate_source_build_runtime(runtime, proof, architecture=lock['architecture'])
+        validate_source_build_runtime(runtime, proof, architecture=lock['architecture'], runtime=lock['runtime'])
     check_asset(lock['hwp'], hwp)
     product_path = ROOT/'suite/config/product.json'
     product = json.loads(product_path.read_text(encoding='utf-8'))

@@ -92,21 +92,61 @@ class Python17ProfileTests(unittest.TestCase):
             self.assertNotIn(name.replace('setuptools', 'Setuptools'), selected)
 
     def test_validate_routes_only_the_validated_source_profile_on_both_architectures(self):
+        from suite import prepare
         self.admissions(source_profile(), 'x64')
         name = PREFIX+'setuptools/cli.exe';raw = pe(0x14c)
         synthetic_pin = dict(machine=0x14c, role='pythonLauncherTemplate', sha256=hashlib.sha256(raw).hexdigest())
-        # A routing-unit stub, not a source-build receipt or runtime qualification.
+        # Replace both upstream authentication boundaries for this routing unit.
+        # This opaque value is not a receipt and is never serialized or qualified.
+        runtime = source_profile();authenticated_context = object()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory);path=root/name;path.parent.mkdir(parents=True);path.write_bytes(raw)
             with patch.object(payload, 'PYTHON17_PE_TEMPLATES', {name: synthetic_pin}), \
-                 patch.object(payload, '_metadata', return_value=source_profile()):
+                 patch.object(payload, '_metadata', return_value=runtime), \
+                 patch.object(prepare, 'validate_source_build_receipt', return_value=authenticated_context) as full, \
+                 patch.object(payload, '_source_companion_admissions', return_value={}) as companion:
                 for architecture in ['x64', 'arm64']:
                     payload._validate(root, {name: {}}, architecture=architecture)
-            with patch.object(payload, '_metadata', return_value=source_profile()):
+                self.assertEqual(full.call_count, 1)
+                self.assertIs(full.call_args.args[0], runtime)
+                self.assertEqual(full.call_args.args[1], root/'Office/opengeul-source-build.json')
+                self.assertEqual(full.call_args.kwargs, {'architecture': 'x64'})
+                self.assertEqual(companion.call_count, 1)
+                self.assertIs(companion.call_args.args[0], runtime)
+                self.assertIs(companion.call_args.args[1], authenticated_context)
+                self.assertEqual(companion.call_args.kwargs, {'architecture': 'x64'})
+            # Keep the byte-rejection check beyond the same authentication seam.
+            with patch.object(payload, '_metadata', return_value=runtime), \
+                 patch.object(prepare, 'validate_source_build_receipt', return_value=authenticated_context), \
+                 patch.object(payload, '_source_companion_admissions', return_value={}):
                 for architecture in ['x64', 'arm64']:
                     with self.assertRaises(ValueError):payload._validate(root, {name: {}}, architecture=architecture)
             with patch.object(payload, '_metadata', return_value={'format':'msi'}):
                 with self.assertRaises(ValueError):payload._validate(root, {name: {}}, architecture='x64')
+
+    def test_routing_metadata_stub_cannot_replace_the_required_real_x64_full_receipt(self):
+        name = PREFIX+'setuptools/cli.exe';raw = pe(0x14c)
+        pin = dict(machine=0x14c, role='pythonLauncherTemplate', sha256=hashlib.sha256(raw).hexdigest())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory);path=root/name;path.parent.mkdir(parents=True);path.write_bytes(raw)
+            with patch.object(payload, 'PYTHON17_PE_TEMPLATES', {name: pin}), \
+                 patch.object(payload, '_metadata', return_value=source_profile()), \
+                 patch.object(payload, '_source_companion_admissions') as companion:
+                with self.assertRaises(ValueError):payload._validate(root, {name: {}}, architecture='x64')
+                self.assertEqual(companion.call_count, 0)
+
+    def test_companion_rejection_cannot_fall_through_to_python_template_acceptance(self):
+        from suite import prepare
+        name = PREFIX+'setuptools/cli.exe'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory);path=root/name;path.parent.mkdir(parents=True);path.write_bytes(pe(0x14c))
+            with patch.object(payload, '_metadata', return_value=source_profile()), \
+                 patch.object(prepare, 'validate_source_build_receipt', return_value=object()), \
+                 patch.object(payload, '_source_companion_admissions', side_effect=ValueError('synthetic companion rejection')) as companion, \
+                 patch.object(payload, '_pe') as binary:
+                with self.assertRaises(ValueError):payload._validate(root, {name: {}}, architecture='x64')
+                self.assertEqual(companion.call_count, 1)
+                self.assertEqual(binary.call_count, 0)
 
     def test_source_profile_does_not_bypass_missing_package_metadata(self):
         self.admissions(source_profile(), 'x64')

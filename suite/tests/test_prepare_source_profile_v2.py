@@ -10,7 +10,7 @@ from suite.source_contracts import NEW_SOURCE, LEGACY_SOURCE, new_source_only_ex
 
 ROOT=Path(__file__).resolve().parents[2]
 MANIFEST=ROOT/'suite/engine-build/source-build.26.8.2.2.json'
-MANIFEST_SHA='3c21739690aa8dc53c0b6a333aee81af845c9c913e11a9338948923d9fe24c89'
+MANIFEST_SHA='9bf183e354ee1f68158233bad959ac8a756c3e667cb0892760b98c44aabb8e50'
 PARENT='C:\\build\\evidence\\source-recipe'
 FLAGS=dict(nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
 
@@ -80,6 +80,13 @@ class PrepareSourceProfileV2Tests(unittest.TestCase):
                 dict(path=pin['path'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],
                     evidence=evidence({side:side+'-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')}))
                 for pin in manifest['atlConsumerNativePaths']['recipes']])
+        graph=manifest['windowsDotnetProjectGraph']
+        hooks['dotnetProjectGraph']=dict(schemaVersion=1,kind='windows-dotnet-project-graph-source-hook',
+            coreCommit=graph['coreCommit'],architecture=architecture,sources=[
+                dict(path=pin['path'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],
+                    beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],
+                    evidence=evidence({side:side+'-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')}))
+                for pin in graph['sources']],**FLAGS)
         pin=manifest['winAccFocusOrder'];winacc=dict(expected.winacc_fields)
         winacc['sourceFiles']=[dict(path=row['path'],beforeBytes=row['size'],
             afterBytes=pin['afterBytes'] if row['path']==pin['path'] else row['size'],beforeSha256=row['sha256'],
@@ -97,8 +104,8 @@ class PrepareSourceProfileV2Tests(unittest.TestCase):
         self.manifest();self.assertEqual(hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),MANIFEST_SHA)
 
     def test_both_canonical_plans_and_source_only_proofs(self):
-        for architecture,count,guards,digest in [('arm64',18,13,'a8080687422c3160b568be282b14812247bb34008b345665fc60153440ea36bf'),
-                ('x64',20,4,'95c0bff970c3cc13f679f2dbaa226c4c4a45e236195efcdcd25e6ade6f94b2dc')]:
+        for architecture,count,guards,digest in [('arm64',20,13,'9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe'),
+                ('x64',22,4,'66704ff304812a3181912c38723e4d0333670055dbb0c879e46fcc1ea961324d')]:
             with self.subTest(architecture=architecture):
                 plan=self.require('_source_new_plan')(self.manifest(),architecture)
                 self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(count,guards))

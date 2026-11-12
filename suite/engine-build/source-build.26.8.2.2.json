@@ -481,7 +481,8 @@
       "hooks": [
         "arm64Full",
         "winAccFocusOrder",
-        "flexFatalCompatibility"
+        "flexFatalCompatibility",
+        "dotnetProjectGraph"
       ]
     },
     "windows-x64-common-v2": {
@@ -497,7 +498,8 @@
         "harfbuzzNativeMesonPaths",
         "cliPublisherPolicyPlatform",
         "winAccFocusOrder",
-        "flexFatalCompatibility"
+        "flexFatalCompatibility",
+        "dotnetProjectGraph"
       ]
     }
   },
@@ -595,5 +597,25 @@
     "afterSize": 37161,
     "afterSha256": "f0890c54e65b52ac31a37a99b20a17fb9e9282985f25fa99ba4718490975200c",
     "condition": "WNT"
+  },
+  "windowsDotnetProjectGraph": {
+    "schemaVersion": 1,
+    "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+    "sources": [
+      {
+        "path": "solenv/gbuild/DotnetLibrary.mk",
+        "size": 5315,
+        "sha256": "f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b",
+        "afterSize": 5728,
+        "afterSha256": "cc1e4a62d0d97681b1742ada794af15945e465af86d4d2f54b38b245c8889db3"
+      },
+      {
+        "path": "solenv/gbuild/DotnetTest.mk",
+        "size": 5154,
+        "sha256": "5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272",
+        "afterSize": 5555,
+        "afterSha256": "09987ad29eb2afac9f2ff7a973bd2b7c32ccd54f286a4281610b5bc89fe939f7"
+      }
+    ]
   }
 }
