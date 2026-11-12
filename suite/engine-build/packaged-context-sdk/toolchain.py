@@ -18,16 +18,22 @@ MACHINES={'x64':0x8664,'arm64':0xaa64}
 
 def cmd_path(value):return win_path(value)
 
+def _file_failure(code,links=None):
+    error=GateFailure(2);error.filesystem_code=code
+    if type(links) is int and 0<=links<=1048576:error.observed_link_count=links
+    return error
+
 def canonical(path,*,directory=False):
     p=Path(path)
-    if not p.is_absolute() or '..' in p.parts:raise GateFailure(2)
+    if not p.is_absolute() or '..' in p.parts:raise _file_failure(1)
     for q in (p,*p.parents):
         s=q.lstat()
-        if stat.S_ISLNK(s.st_mode) or getattr(s,'st_file_attributes',0)&0x400:raise GateFailure(2)
+        if stat.S_ISLNK(s.st_mode) or getattr(s,'st_file_attributes',0)&0x400:raise _file_failure(2)
     s=p.stat()
     if directory:
-        if not stat.S_ISDIR(s.st_mode):raise GateFailure(2)
-    elif not stat.S_ISREG(s.st_mode) or s.st_nlink!=1:raise GateFailure(2)
+        if not stat.S_ISDIR(s.st_mode):raise _file_failure(5)
+    elif not stat.S_ISREG(s.st_mode):raise _file_failure(3)
+    elif s.st_nlink!=1:raise _file_failure(4,s.st_nlink)
     return p
 
 def _identity(s):return s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_nlink
@@ -52,6 +58,13 @@ def pe(path,machine):
     actual=struct.unpack_from('<H',b,offset+4)[0];flags=struct.unpack_from('<H',b,offset+22)[0]
     if actual!=machine or not flags&2 or flags&0x2000 or struct.unpack_from('<H',b,offset+24)[0]!=0x20b:raise GateFailure(2)
     return {'machine':actual,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}
+
+def installed_pe(path,machine,role):
+    if type(role) is not int or role not in (1,2):raise GateFailure(2)
+    try:return pe(path,machine)
+    except GateFailure as error:
+        error.file_role_code=role
+        raise
 
 def coff(path,machine):
     b=read(path,32*1024*1024)
@@ -153,7 +166,7 @@ def system_locations(arch):
     system=cmd_path(buf.value.rstrip('\\'))
     buf=C.create_unicode_buffer(32768);length=k.GetModuleFileNameW(None,buf,len(buf))
     if not 0<length<len(buf):raise GateFailure(12)
-    controller=pe(buf.value,MACHINES[arch])
+    controller=installed_pe(buf.value,MACHINES[arch],1)
     def registry(key,name):
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,key,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as h:value,kind=winreg.QueryValueEx(h,name)
         if kind!=winreg.REG_SZ or type(value) is not str:raise GateFailure(12)
@@ -163,11 +176,14 @@ def system_locations(arch):
     sdk=registry(r'SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0','InstallationFolder')
     vswhere=Path(pf86)/'Microsoft Visual Studio/Installer/vswhere.exe'
     # vswhere may be an installed x86 tool on both hosts; it is metadata discovery only.
-    raw=read(vswhere)
+    try:raw=read(vswhere)
+    except GateFailure as error:
+        error.file_role_code=3
+        raise
     offset=struct.unpack_from('<I',raw,0x3c)[0] if len(raw)>=64 else 0
     if not 64<=offset<=len(raw)-26 or raw[offset:offset+4]!=b'PE\0\0':raise GateFailure(12)
     vs_machine=struct.unpack_from('<H',raw,offset+4)[0]
     if vs_machine not in (0x14c,MACHINES[arch]):raise GateFailure(12)
-    cmd=Path(system)/'System32/cmd.exe';command=pe(cmd,MACHINES[arch])
+    cmd=Path(system)/'System32/cmd.exe';command=installed_pe(cmd,MACHINES[arch],2)
     return {'system':system,'programFiles':pf,'programFilesX86':pf86,'sdk':sdk,'vswhere':str(vswhere),'command':str(cmd),
       'controller':controller,'commandRecord':command,'vswhereSha256':hashlib.sha256(raw).hexdigest()}

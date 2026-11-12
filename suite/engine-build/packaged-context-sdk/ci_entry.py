@@ -10,6 +10,7 @@ import re
 import stat
 import sys
 import time
+import types
 import uuid
 
 REF='refs/heads/work/opengeul-office-package-context-sdk'
@@ -21,6 +22,43 @@ KEYS=('GITHUB_ACTIONS','GITHUB_REPOSITORY','GITHUB_REPOSITORY_ID','GITHUB_REPOSI
 class CiFailure(RuntimeError):
     def __init__(self,code=1):self.code=int(code);super().__init__('sdk_ci_rejected')
     def __repr__(self):return '<CiFailure>'
+
+def failure_observation(error,stage):
+    """Closed codes only; never error text, arguments, filename or environment."""
+    if type(stage) is not int or not 0<=stage<=13:raise CiFailure(1)
+    root=Path(__file__).absolute().parent
+    candidates=(('supervisor','GateFailure',2),('owned_job_win32','NativeCallError',3),('approved_launch','ApprovalFailure',4))
+    kind=1 if type(error) is CiFailure else 5 if isinstance(error,OSError) else 0
+    if kind==0:
+        for module_name,class_name,code in candidates:
+            module=sys.modules.get(module_name)
+            if type(module) is not types.ModuleType:continue
+            values=module.__dict__
+            if values.get('__file__')==str(root/(module_name+'.py')) and values.get(class_name) is type(error):kind=code;break
+    def integer(value,low=0,high=65535):return value if type(value) is int and low<=value<=high else None
+    value={'stageCode':stage,'exceptionKnown':kind!=0,'exceptionTypeCode':kind,'nativeCode':None,
+      'errno':None,'winerror':None,'filesystemCode':None,'fileRoleCode':None,'observedLinkCount':None,
+      'sourceFrames':[],'sourceLocationKnown':False,'sourceFramesTruncated':False}
+    if kind in (1,2,3,4):value['nativeCode']=integer(getattr(error,'code',None))
+    if kind==3:
+        module=sys.modules.get('owned_job_win32');code=getattr(error,'code',None)
+        if type(module) is types.ModuleType and type(code) is module.__dict__.get('FailureCode'):value['nativeCode']=int(code)
+    if kind==2:
+        value['filesystemCode']=integer(getattr(error,'filesystem_code',None),1,5)
+        value['fileRoleCode']=integer(getattr(error,'file_role_code',None),1,3)
+        value['observedLinkCount']=integer(getattr(error,'observed_link_count',None),0,1048576)
+    if kind==5:
+        value['errno']=integer(error.errno,-2147483648,4294967295)
+        value['winerror']=integer(getattr(error,'winerror',None),-2147483648,4294967295)
+    names=('ci_entry.py','toolchain.py','supervisor.py','owned_job_win32.py','approved_launch.py','run_sdk_gate.py')
+    paths={os.path.normcase(str(root/name)):index for index,name in enumerate(names,1)}
+    tb=error.__traceback__;frames=[]
+    while tb is not None:
+        code=paths.get(os.path.normcase(tb.tb_frame.f_code.co_filename))
+        if code is not None and type(tb.tb_lineno) is int and 0<tb.tb_lineno<=100000:frames.append({'fileCode':code,'line':tb.tb_lineno})
+        tb=tb.tb_next
+    value['sourceLocationKnown']=bool(frames);value['sourceFramesTruncated']=len(frames)>8;value['sourceFrames']=frames[-8:]
+    return value
 
 def require_context(env,architecture):
     if type(env) is not dict or set(env)!=set(KEYS) or architecture not in ('x64','arm64'):raise CiFailure(1)
@@ -137,8 +175,8 @@ def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs
             previous=row['finishedAt']
     return value
 
-def public_report(binding,outer,raw,*,failure=0):
-    return {'schemaVersion':1,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,
+def public_report(binding,outer,raw,*,failure=0,observation=None):
+    return {'schemaVersion':2,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
       'sdkReportKnown':raw is not None,'sdkStage':None if raw is None else raw['stage'],
       'sdkGatePassed':bool(raw and outer and raw['sdkGatePassed'] and outer['completed'] and failure==0),
       'nativeSdkCompiled':None if raw is None else raw['nativeSdkCompiled'],
@@ -165,29 +203,32 @@ class Parser(argparse.ArgumentParser):
     def error(self,message):raise CiFailure(1)
 
 def main(argv=None):
-    start=time.monotonic();deadline=start+180.;outer=None;raw=None;binding=None;public=None;failure=0
+    start=time.monotonic();deadline=start+180.;outer=None;raw=None;binding=None;public=None;failure=0;stage=0;observation=None
     try:
+        stage=1
         if not sys.flags.isolated or not sys.dont_write_bytecode:raise CiFailure(1)
         p=Parser(add_help=False);p.add_argument('--architecture',choices=('x64','arm64'),required=True)
         p.add_argument('--expected-entry-sha256',required=True);p.add_argument('--expected-bootstrap-sha256',required=True)
         p.add_argument('--expected-approved-manifest-sha256',required=True);args=p.parse_args(argv)
-        root=Path(__file__).absolute().parent;repo=root.parents[2]
+        root=Path(__file__).absolute().parent;repo=root.parents[2];stage=2
         if not _sha(args.expected_entry_sha256) or hashlib.sha256(_read(Path(__file__).absolute(),1024*1024)).hexdigest()!=args.expected_entry_sha256:raise CiFailure(3)
-        env={name:os.environ.get(name) for name in KEYS};binding=require_context(env,args.architecture)
+        stage=3;env={name:os.environ.get(name) for name in KEYS};binding=require_context(env,args.architecture)
         if Path(os.environ.get('GITHUB_WORKSPACE',''))!=repo:raise CiFailure(2)
         check_checkout(repo,binding)
-        public=create_public_directory(repo,env['SDK_MATRIX_RUNNER'])
-        context=_code(root,args.expected_bootstrap_sha256,args.expected_approved_manifest_sha256)
+        stage=4;public=create_public_directory(repo,env['SDK_MATRIX_RUNNER'])
+        stage=5;context=_code(root,args.expected_bootstrap_sha256,args.expected_approved_manifest_sha256)
+        stage=6
         if sys.platform!='win32' or sys.version_info[:2]!=(3,12):raise CiFailure(11)
         import toolchain
         from owned_job_win32 import NativeApi
         from supervisor import child_environment
-        toolchain.verify_bundle(root/'frozen-v2')
+        stage=7;toolchain.verify_bundle(root/'frozen-v2')
         expected_inputs=[]
         for index,name in enumerate(('context_observer.hpp','context_observer_windows.cpp','sdk_smoke.hpp','windows_sdk_smoke.cpp'),1):
             b=toolchain.read(root/'frozen-v2'/name,1024*1024) if index<=2 else context.read_approved(name)
             expected_inputs.append({'slot':index,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
-        locations=toolchain.system_locations(args.architecture);temp=_regular(os.environ.get('RUNNER_TEMP',''),True)
+        stage=8;locations=toolchain.system_locations(args.architecture)
+        stage=9;temp=_regular(os.environ.get('RUNNER_TEMP',''),True)
         work=temp/('opengeul-sdk-gate-'+uuid.uuid4().hex)
         envelope=temp/('opengeul-sdk-envelope-'+uuid.uuid4().hex);envelope.mkdir()
         for name in ('temp','profile','appdata','local'):(envelope/name).mkdir()
@@ -198,16 +239,20 @@ def main(argv=None):
           '--overall-start',repr(start),'--overall-deadline',repr(deadline)]
         remaining=deadline-time.monotonic()
         if remaining<=1:raise CiFailure(10)
-        outer=EnvelopeRunner(NativeApi()).run(command,str(repo),child_env,deadline)
+        stage=10;outer=EnvelopeRunner(NativeApi()).run(command,str(repo),child_env,deadline)
+        stage=11
         path=work/'sdk-gate.numeric.json'
         if path.exists():raw=validate_sdk_report(json.loads(_read(path,16384)),args.architecture,args.expected_approved_manifest_sha256,deadline,expected_inputs)
-        context.require_root(root);check_checkout(repo,binding)
+        stage=12;context.require_root(root);check_checkout(repo,binding)
         if not outer['completed'] or raw is None or not raw['sdkGatePassed']:raise CiFailure(5)
-    except BaseException as error:failure=error.code if isinstance(error,CiFailure) else 31
+        stage=13
+    except BaseException as error:
+        failure=error.code if isinstance(error,CiFailure) else 31
+        observation=failure_observation(error,stage)
     finally:
         if time.monotonic()>deadline:failure=10
         if public is not None and public.is_dir():
-            report=public_report(binding,outer,raw,failure=failure)
+            report=public_report(binding,outer,raw,failure=failure,observation=observation)
             encoded=json.dumps(report,sort_keys=True,separators=(',',':')).encode()+b'\n'
             if len(encoded)<=8192:
                 try:
