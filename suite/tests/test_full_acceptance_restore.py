@@ -36,7 +36,7 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
         # Require the complete commands, so a targeted diagnostic cannot stand in
         # for the full IME, UI, document lifecycle, or either independent GUI run.
         for fragment in (
-            '--output .work/suite-korean-ime\n', 'korean_ui_smoke.py --suite',
+            '--output .work/suite-korean-ime @sourceReaderArgs\n', 'korean_ui_smoke.py --suite',
             'writer_style_smoke.py --suite', 'lifecycle_smoke.py --suite',
             '--output .work/suite-startup --attempts 40\n',
             '--output .work/suite-native @sourceMenuArgs\n', '--output .work/suite-native-2 @sourceMenuArgs\n',
@@ -93,7 +93,7 @@ class FullAcceptanceRestoreTests(unittest.TestCase):
                 self.assertEqual(self.selected(gate, architecture, mode=self.mode), expected)
 
     def test_acceptance_prerequisites_and_package_handoff_still_fail_closed(self):
-        ime = self.command('--output .work/suite-korean-ime\n')
+        ime = self.command('--output .work/suite-korean-ime @sourceReaderArgs\n')
         integrity = self.command('def check_all_native_archives(')
         evidence = [candidate for candidate in self.steps
                     if 'name: opengeul-suite-evidence-${{ matrix.architecture }}-' in candidate]

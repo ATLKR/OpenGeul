@@ -564,7 +564,7 @@ class NumericNoticeTests(unittest.TestCase):
     def test_product_compartment_and_privacy_steps_opt_in_and_unit_steps_never_do(self):
         from suite.tests.test_calc_matrix_workflow import WORKFLOW, workflow_steps, field, run_code
         fragments = ('calc_close_probe.py --suite', 'home_routing_smoke.py --suite',
-                     '--output .work/suite-korean-ime\n', 'korean_ui_smoke.py --suite',
+                     '--output .work/suite-korean-ime @sourceReaderArgs\n', 'korean_ui_smoke.py --suite',
                      'writer_style_smoke.py --suite', 'lifecycle_smoke.py --suite',
                      '--output .work/suite-native @sourceMenuArgs\n', '--output .work/suite-native-2 @sourceMenuArgs\n',
                      '--diagnose-calc-dispatch --expected-engine-source-commit',

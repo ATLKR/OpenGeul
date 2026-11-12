@@ -1,4 +1,4 @@
-"""Normalize only reviewed dependency edits for the frozen historical test oracle.
+"""Normalize only reviewed dependency and reader edits for the historical oracle.
 
 Actual workflow readers and source receipts keep their original, current bytes.
 Any other edit remains visible to the independent original-job SHA256 check.
@@ -15,6 +15,36 @@ CURRENT_PILLOW_INSTALL = "        python -m pip install Pillow==13.0.0\n"
 EXACT_YAML_SETUP = ("        python -m pip install PyYAML==6.0.3\n"
     "        if ($LASTEXITCODE -ne 0) { throw 'Pinned YAML workflow tooling installation failed.' }\n")
 
+# These are exact source-only reader deltas, not a generic legacy fallback.
+# Each prologue must remain adjacent to its one original command. Missing,
+# duplicate or modified current routes cannot be treated as historical support.
+EXACT_CALC_READER_SETUP = (
+    "        $sourceReaderArgs = @()\n"
+    "        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {\n"
+    "          if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {\n"
+    "            if ('${{ matrix.architecture }}' -cnotin @('x64', 'arm64')) { throw 'Unsupported source reader architecture.' }\n"
+    "            $sourceReaderArgs = @('--source-qualified-reader', '${{ matrix.architecture }}')\n"
+    "          } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {\n"
+    "            throw 'Unsupported Suite runtime format for the model reader.'\n"
+    "          }\n"
+    "        }\n")
+EXACT_IME_READER_SETUP = (
+    "        $sourceReaderArgs = @()\n"
+    "        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {\n"
+    "          if ('${{ matrix.architecture }}' -cnotin @('x64', 'arm64')) { throw 'Unsupported source reader architecture.' }\n"
+    "          $sourceReaderArgs = @('--source-qualified-reader', '${{ matrix.architecture }}')\n"
+    "        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {\n"
+    "          throw 'Unsupported Suite runtime format for the model reader.'\n"
+    "        }\n")
+REVIEWED_READER_COMMANDS = (
+    (EXACT_CALC_READER_SETUP,
+     '        python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save'),
+    (EXACT_CALC_READER_SETUP,
+     '        python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close'),
+    (EXACT_IME_READER_SETUP,
+     '        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime'),
+)
+
 
 def original_normal_oracle_text(normal):
     if type(normal) is not str:
@@ -27,4 +57,9 @@ def original_normal_oracle_text(normal):
         if normal.count(before) != 1:
             raise ValueError('Reviewed normal-job dependency delta differs')
         normal = normal.replace(before, after, 1)
+    for setup, command in REVIEWED_READER_COMMANDS:
+        before = setup + command + ' @sourceReaderArgs\n'
+        if normal.count(before) != 1:
+            raise ValueError('Reviewed normal-job source-reader delta differs')
+        normal = normal.replace(before, command + '\n', 1)
     return normal

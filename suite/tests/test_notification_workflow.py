@@ -31,7 +31,7 @@ class NotificationWorkflowTests(unittest.TestCase):
     def test_one_writer_callback_follows_original_prefix_before_normal_ime(self):
         steps = workflow_steps()
         by_id = {field(s, 'id'): s for s in steps if field(s, 'id')}
-        normal = next(s for s in steps if '--output .work/suite-korean-ime\n' in s)
+        normal = next(s for s in steps if '--output .work/suite-korean-ime @sourceReaderArgs\n' in s)
         ordered = [by_id[name] for name in ('native31-privacy-prepare', 'fixtures')]
         ordered += sequenced_prefix_steps(steps)
         ordered += [by_id[name] for name in COMPARTMENT_STEPS] + [normal]

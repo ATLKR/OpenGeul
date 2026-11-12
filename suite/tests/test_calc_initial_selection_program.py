@@ -268,6 +268,7 @@ class ProgramTransportTests(unittest.TestCase):
         self.assertEqual(save.PENDING_GETTERS,PROGRAM)
         for folder,expected in [('before-close-reader',PROGRAM),('after-cancel-reader',api.CALC_PENDING_GETTER_CONTRACT)]:
             case=object.__new__(close.CalcCloseCase);case.suite=Path('C:/Suite');case.output=Path('C:/out')
+            case.source_admission=None;case._source_inventory_sha256=None  # Actual constructor defaults.
             case.process=NS(pid=77);case.creation=111;case.hwnd=11;case.parent=12;case.child=22;case.office_pid=88
             case.source=Path(__file__).resolve().with_name('owned.xlsx');case.observer_never_started=True;seen=[]
             fake=NS(start=lambda deadline:{'start':True},close=lambda deadline:{'closed':True})
