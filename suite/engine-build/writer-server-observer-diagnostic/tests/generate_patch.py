@@ -68,8 +68,15 @@ def modify():
     s=replace_once(s,'public:\n    AccObjectWinManager();','public:\n    bool ObserverInstall(opengeul::writer_observer::Sink sink) noexcept\n    {\n        auto expected = static_cast<opengeul::writer_observer::Sink>(nullptr);\n        return m_observerSink.compare_exchange_strong(expected, sink, std::memory_order_acq_rel) || expected == sink;\n    }\n    opengeul::writer_observer::Sink ObserverSink() const noexcept\n    { return m_observerSink.load(std::memory_order_acquire); }\n    AccObjectWinManager();')
     after[name]=s
     for name,library in [(SOURCES[3],'UAccCOM'),(SOURCES[4],'winaccessibility')]:
-        s=before[name];s=replace_once(s,f'$(eval $(call gb_Library_Library,{library}))',f'$(eval $(call gb_Library_Library,{library}))\n\n$(eval $(call gb_Library_add_defs,{library},-DOPENGEUL_WRITER_SERVER_OBSERVER_DIAGNOSTIC))')
-        if library=='UAccCOM':s=replace_once(s,'\twinaccessibility/source/UAccCOM/MAccessible \\\n','\twinaccessibility/source/UAccCOM/MAccessible \\\n\twinaccessibility/source/UAccCOM/OpenGeulWriterObserver \\\n')
+        s=before[name]
+        if library=='UAccCOM':
+            s=replace_once(s,f'$(eval $(call gb_Library_Library,{library}))',f'$(eval $(call gb_Library_Library,{library}))\n\n$(eval $(call gb_Library_add_defs,{library},-DOPENGEUL_WRITER_SERVER_OBSERVER_DIAGNOSTIC))')
+            s=replace_once(s,'\twinaccessibility/source/UAccCOM/MAccessible \\\n','\twinaccessibility/source/UAccCOM/MAccessible \\\n\twinaccessibility/source/UAccCOM/OpenGeulWriterObserver \\\n')
+        else:
+            s=replace_once(s,'$(eval $(call gb_Library_use_common_precompiled_header,winaccessibility))',
+                '# OpenGeul: observer hooks are source-locked; only the UAccCOM producer needs a define.\n'
+                '# Preserve this library\'s common system-PCH compile definitions.\n'
+                '$(eval $(call gb_Library_use_common_precompiled_header,winaccessibility))')
         after[name]=s
     patch=''.join(''.join(difflib.unified_diff(before[n].splitlines(True),after[n].splitlines(True),fromfile='a/'+n,tofile='b/'+n,n=3)) for n in SOURCES)
     (HERE/'source.patch').write_text(patch)

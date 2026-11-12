@@ -274,12 +274,12 @@
  	winaccessibility/source/UAccCOM/UNOXWrapper \
 --- a/winaccessibility/Library_winaccessibility.mk
 +++ b/winaccessibility/Library_winaccessibility.mk
-@@ -25,6 +25,8 @@
- endif
+@@ -38,6 +38,8 @@
  
- $(eval $(call gb_Library_Library,winaccessibility))
-+
-+$(eval $(call gb_Library_add_defs,winaccessibility,-DOPENGEUL_WRITER_SERVER_OBSERVER_DIAGNOSTIC))
+ $(eval $(call gb_Library_set_componentfile,winaccessibility,winaccessibility/source/service/winaccessibility,services))
  
- $(eval $(call gb_Library_use_custom_headers,winaccessibility,winaccessibility/ia2/idl))
++# OpenGeul: observer hooks are source-locked; only the UAccCOM producer needs a define.
++# Preserve this library's common system-PCH compile definitions.
+ $(eval $(call gb_Library_use_common_precompiled_header,winaccessibility))
  
+ $(eval $(call gb_Library_add_exception_objects,winaccessibility,\

@@ -16,8 +16,8 @@
   ],
   "patch": {
     "path": "source.patch",
-    "bytes": 9937,
-    "sha256": "cdc6b653b1d1df6e724d696eb5cea80e2de91ed96ae7b0c1c42452b541832391"
+    "bytes": 10105,
+    "sha256": "7cdab1afebc8c83ea2a50e8b36bff98fda1b5e7de101607e2e41774c41fb4825"
   },
   "wireSchema": {
     "path": "wire-schema.json",
@@ -76,8 +76,8 @@
         "sha256": "c99e623c082accaa84efebf254876ee083effc071a1bd8de63ee10bcf6f45e6d"
       },
       "after": {
-        "bytes": 3493,
-        "sha256": "2aaa75c859526e587dbf2a40703566bbaf9e36f149cef7be332edf33c1e2ba73"
+        "bytes": 3547,
+        "sha256": "28f92bfdc0688fd03355ba1879f35471d63e092591ba47b0f50163e0e06816ee"
       }
     }
   ],
