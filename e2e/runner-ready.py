@@ -9,9 +9,11 @@ import ntpath
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 MAX_WINDOWS = 64
@@ -136,6 +138,110 @@ def product_version():
     return version
 
 
+def source_git_environment():
+    names=('SystemRoot','WINDIR','SystemDrive','ComSpec','PATH','PATHEXT','TEMP','TMP')
+    env={key:value for key in names if (value:=os.environ.get(key)) is not None}
+    env.update(GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0',
+               GIT_NO_REPLACE_OBJECTS='1',GIT_NO_LAZY_FETCH='1',GIT_OPTIONAL_LOCKS='0')
+    return env
+
+
+def source_git(root, operation, source, deadline):
+    """One fixed, local read; bounded RAM, wait and cleanup, no stream logging."""
+    commit_sha(source)
+    operations={'identity':(('rev-parse','--show-toplevel','--verify','HEAD'),32768),
+                'type':(('cat-file','-t',source),16), 'size':(('cat-file','-s',source),16),
+                'content':(('cat-file','commit',source),MAX_JSON)}
+    require(operation in operations,'고정 source Git read가 아닙니다')
+    arguments,limit=operations[operation];git=shutil.which('git')
+    require(git is not None and Path(git).is_absolute() and time.monotonic()<deadline,'설치된 source Git read 시간이 없습니다')
+    command=[git,'--no-pager','--no-replace-objects','--no-lazy-fetch','-C',str(root),*arguments]
+    try:
+        process=subprocess.Popen(command,env=source_git_environment(),stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0) if os.name=='nt' else 0)
+    except Exception:raise ValueError('고정 source Git process를 시작하지 못했습니다') from None
+    output=bytearray();failed=threading.Event();overflow=threading.Event()
+    def read():
+        try:
+            for block in iter(lambda:process.stdout.read(4096),b''):
+                left=limit-len(output);output.extend(block[:left])
+                if len(block)>left:
+                    overflow.set()
+                    try:process.kill()
+                    except Exception:failed.set()
+                    break
+        except Exception:failed.set()
+        finally:
+            try:process.stdout.close()
+            except Exception:failed.set()
+    worker=threading.Thread(target=read,name='opengeul-source-git',daemon=True);started=False
+    try:
+        worker.start();started=True
+        remaining=deadline-time.monotonic()-.25
+        require(remaining>0,'source Git read 시간이 초과했습니다')
+        process.wait(timeout=remaining)
+    except Exception:failed.set()
+    finally:
+        if process.poll() is None:
+            try:process.kill()
+            except Exception:failed.set()
+            try:process.wait(timeout=max(0,deadline-time.monotonic()))
+            except Exception:failed.set()
+        if started:worker.join(max(0,deadline-time.monotonic()))
+        else:
+            try:process.stdout.close()
+            except Exception:failed.set()
+    require(process.returncode==0 and not failed.is_set() and not overflow.is_set()
+            and not worker.is_alive() and time.monotonic()<deadline,'고정 source Git read가 완료되지 않았습니다')
+    return bytes(output)
+
+
+def source_commit_parents(raw, source):
+    commit_sha(source)
+    require(type(raw) is bytes and 0<len(raw)<=MAX_JSON,'원 commit 객체 크기가 다릅니다')
+    require(hashlib.sha1(b'commit '+str(len(raw)).encode('ascii')+b'\0'+raw).hexdigest()==source,
+            '원 commit 객체 SHA가 다릅니다')
+    header,separator,_=raw.partition(b'\n\n')
+    require(separator and len(header)<=16384 and b'\r' not in header and b'\0' not in header,'원 commit header가 다릅니다')
+    rows=header.split(b'\n')
+    require(len(rows)<=256 and re.fullmatch(rb'tree [0-9a-f]{40}',rows[0]) is not None
+            and sum(row.startswith(b'tree ') for row in rows)==1,'원 commit tree header가 다릅니다')
+    parents=[]
+    for row in rows:
+        if row.startswith(b'parent'):
+            require(re.fullmatch(rb'parent [0-9a-f]{40}',row) is not None,'원 commit parent 형식이 다릅니다')
+            parents.append(commit_sha(row[7:].decode('ascii')))
+    require(len(parents)==2 and len(set(parents))==2,'원 commit의 서로 다른 두 부모가 필요합니다')
+    return tuple(parents)
+
+
+def checkout_merge_context(source, base, head, *, root=None):
+    """Separate source admission budget; never extends an OS/input deadline."""
+    deadline=time.monotonic()+10
+    for value in (source,base,head):commit_sha(value)
+    root=Path(ROOT if root is None else root).absolute()
+    require('..' not in root.parts and not any(c in str(root) for c in '\r\n'),'source root 별칭을 허용하지 않습니다')
+    for path in (root,*root.parents):
+        value=path.lstat()
+        require(not stat.S_ISLNK(value.st_mode) and not getattr(value,'st_file_attributes',0)&0x400,'source root 링크를 허용하지 않습니다')
+    before=root.lstat();require(stat.S_ISDIR(before.st_mode),'source root directory가 필요합니다')
+    def identity():
+        raw=source_git(root,'identity',source,deadline)
+        rows=raw.decode('utf-8','strict').splitlines()
+        require(len(rows)==2 and Path(rows[0])==root and rows[1]==source,'실제 checkout root/HEAD가 source SHA와 다릅니다')
+    identity()
+    require(source_git(root,'type',source,deadline)==b'commit\n','source 객체 종류가 commit이 아닙니다')
+    size=source_git(root,'size',source,deadline)
+    require(re.fullmatch(rb'[1-9][0-9]{0,6}\n',size) is not None and int(size)<=MAX_JSON,'원 source commit 크기 상한이 다릅니다')
+    raw=source_git(root,'content',source,deadline)
+    require(len(raw)==int(size) and source_commit_parents(raw,source)==(base,head),'실제 checkout merge의 두 부모가 event base/head와 다릅니다')
+    identity();after=root.lstat()
+    require(stat.S_ISDIR(after.st_mode) and not getattr(after,'st_file_attributes',0)&0x400
+            and (before.st_dev,before.st_ino)==(after.st_dev,after.st_ino)
+            and time.monotonic()<deadline,'source checkout root 세대 또는 검증 시간이 다릅니다')
+
+
 def pull_request_context(event, env):
     pr = event.get('pull_request')
     require(type(pr) is dict, 'pull request 객체가 없습니다')
@@ -158,8 +264,8 @@ def pull_request_context(event, env):
         key = 'GITHUB_' + side.upper() + '_REF'
         if key in env: require(env[key] == ref, 'PR head/base env 바인딩이 다릅니다')
     merge = pr.get('merge_commit_sha')
-    if merge is not None:
-        require(commit_sha(merge) == env['GITHUB_SHA'], 'PR merge source SHA가 다릅니다')
+    if merge is not None:commit_sha(merge)
+    checkout_merge_context(env['GITHUB_SHA'],pr['base']['sha'],pr['head']['sha'])
 
 
 def binding(env):

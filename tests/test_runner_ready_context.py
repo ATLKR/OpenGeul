@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = 'ATLKR/OpenGeul'
@@ -29,6 +30,8 @@ class ContextTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / 'event.json'
         self.value = module()
+        proof=mock.patch.object(self.value,'checkout_merge_context',return_value=None)
+        proof.start();self.addCleanup(proof.stop)
 
     def context(self, *, event='push', ref='refs/heads/main', actor=USER,
                 job='native-e2e-arm64', workflow='msix.yml', attempt='1', payload=None):
@@ -141,7 +144,7 @@ class ContextTests(unittest.TestCase):
         self.path.write_text(json.dumps(body)); self.value.binding(env)
 
     def test_pr_number_base_head_and_sha_mismatches_are_rejected(self):
-        for change in ('number', 'pr-number', 'base-owner', 'base-private', 'head-private', 'head-sha', 'base-sha', 'merge-sha', 'head-shape', 'base-id'):
+        for change in ('number', 'pr-number', 'base-owner', 'base-private', 'head-private', 'head-sha', 'base-sha', 'merge-sha-shape', 'head-shape', 'base-id'):
             env=self.pr(); body=json.loads(self.path.read_text()); pr=body['pull_request']
             if change=='number': body['number']=18
             elif change=='pr-number': pr['number']=18
@@ -150,7 +153,7 @@ class ContextTests(unittest.TestCase):
             elif change=='head-private': pr['head']['repo']['private']=True
             elif change=='head-sha': pr['head']['sha']='0'*40
             elif change=='base-sha': pr['base']['sha']='bad'
-            elif change=='merge-sha': pr['merge_commit_sha']='d'*40
+            elif change=='merge-sha-shape': pr['merge_commit_sha']='not-a-commit'
             elif change=='head-shape': pr['head']=None
             elif change=='base-id': pr['base']['repo']['id']=1234
             self.path.write_text(json.dumps(body)); self.reject(env)
