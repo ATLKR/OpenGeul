@@ -21,6 +21,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     private readonly SaveDiagnosticsTrace saveDiagnostics = new("suite.documentSave");
     private readonly SaveDiagnosticsTrace editorFocusDiagnostics = new("suite.editorFocus");
     private readonly SaveDiagnosticsTrace initialFocusFlowDiagnostics = new("suite.initialEditorFocusFlow");
+    private readonly SaveDiagnosticsTrace initialFocusStatusDiagnostics = new("suite.initialEditorFocusStatus");
     private int initialFocusObservationCount;
     private InitialFocusCounters? initialFocusCounters;
     private readonly int[] initialFocusPreOwnerCounts = new int[3];
@@ -269,6 +270,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 statusSurface.ObserveStatus(result, statusToken, !closing && !busy, ApplyStatus,
                     () => PublishNativeMenuStatus(statusSurface));
                 WriteInitialFocusPrefix(statusFocusCounters);
+                WriteInitialFocusStatus(statusFocusCounters);
             }
         }
         catch (Exception e)
@@ -948,6 +950,34 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             }, counters.WorkerPid, counters.TraceId);
         }
         catch (Exception) { counters.UpdateFailed = 1; }
+    }
+
+    private void WriteInitialFocusStatus(InitialFocusCounters? counters)
+    {
+        try
+        {
+            if (!initialFocusStatusDiagnostics.Enabled || counters is null ||
+                Environment.CurrentManagedThreadId != uiThreadId || counters.ManagedThread != uiThreadId ||
+                !ReferenceEquals(initialFocusCounters, counters) || !ReferenceEquals(editorFocus, counters.Owner) ||
+                counters.Generation != initialFocusOwnerGeneration || counters.IdentityKnown != 1 ||
+                counters.OwnerChanged != 0 || counters.Retired != 0 || counters.DisposeReturned != 0 ||
+                counters.UpdateFailed != 0 || counters.OverflowMask != 0 || counters.SnapshotRevision <= 0 ||
+                counters.Form <= 0 || counters.Panel <= 0 || counters.Child <= 0 ||
+                counters.Form == counters.Panel || counters.Form == counters.Child || counters.Panel == counters.Child ||
+                counters.Form != editorFocusFormHwnd.ToInt64() || counters.Panel != editorFocusPanelHwnd.ToInt64() ||
+                counters.WorkerPid is null || counters.TraceId is null) return;
+            // Sample only the managed comparison after the existing status prefix.
+            // This value never participates in a focus, queue, availability or counter decision.
+            var activeFormIsThis = ReferenceEquals(ActiveForm, this) ? 1 : 0;
+            initialFocusStatusDiagnostics.Write("status.completed", new
+            {
+                schemaVersion = 1, ownerGeneration = counters.Generation,
+                prefixSnapshotRevision = counters.SnapshotRevision,
+                originalFormHwnd = counters.Form, originalPanelHwnd = counters.Panel, originalChildHwnd = counters.Child,
+                activeFormIsThis
+            }, counters.WorkerPid, counters.TraceId);
+        }
+        catch (Exception) { /* Independent observations cannot change status or focus behavior. */ }
     }
 
     private void ReleaseEditorFocus()

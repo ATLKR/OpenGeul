@@ -19,6 +19,8 @@ import re
 import stat
 import time
 
+from initial_focus_status import initial_focus_status_unknown, parse_initial_focus_status
+
 MODULES = ('writer', 'calc', 'impress', 'draw', 'math', 'base')
 GESTURES = ('open-escape', 'open-outside', 'keyboard-escape', 'open-escape')
 VIEW_MODULES = ('writer', 'calc')
@@ -194,7 +196,7 @@ def _initial_focus_flow(lines, original, *, trace, worker, managed, budget):
         return unknown(code)
 
 
-def capture_initial_focus_trace(session, record, *, retired=False, expected_identity=None, flow_out=None,counter_out=None):
+def capture_initial_focus_trace(session, record, *, retired=False, expected_identity=None, flow_out=None,counter_out=None,status_out=None):
     """One bounded, numeric-only read of this launch's existing C# stderr.
 
     Unknown codes: 1=owner context, 2=path, 3=bound, 4=unstable/read,
@@ -210,6 +212,8 @@ def capture_initial_focus_trace(session, record, *, retired=False, expected_iden
         flow_out.clear();flow_out.update(_initial_focus_retired_unknown(1) if retired is True else _initial_focus_unknown(1))
     if type(counter_out) is dict:
         counter_out.clear();counter_out.update(_initial_focus_counters_unknown(9))
+    if type(status_out) is dict:
+        status_out.clear();status_out.update(initial_focus_status_unknown(9))
     retirement_confirmed = False
     deadline = time.monotonic() + 1
     def budget():
@@ -453,6 +457,15 @@ def capture_initial_focus_trace(session, record, *, retired=False, expected_iden
             except Exception:
                 counter=_initial_focus_counters_unknown(11)
             counter_out.clear();counter_out.update(counter)
+        if type(status_out) is dict:
+            # Existing projections are fixed before this independent observer spends
+            # the same read's remaining original deadline. It cannot revoke them.
+            try:
+                status = parse_initial_focus_status(lines, original=value, trace=trace,
+                    worker=worker, managed=initial_managed, budget=budget)
+            except Exception:
+                status = initial_focus_status_unknown(11, value)
+            status_out.clear();status_out.update(status)
         return value
     except TimeoutError:
         return unknown(10)
@@ -1179,7 +1192,8 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession,
         hwpLauncherCompleted=False, nativeHwpMenuLaunchExecuted=False,
         initialFocusTraceAfterRetirement=_initial_focus_retired_unknown(12,attempted=False),
         initialFocusFlowAfterRetirement=_initial_focus_retired_unknown(12,attempted=False),
-        initialFocusCountersAfterRetirement=_initial_focus_counters_unknown(12))
+        initialFocusCountersAfterRetirement=_initial_focus_counters_unknown(12),
+        initialFocusStatusAfterRetirement=initial_focus_status_unknown(12))
     started = time.monotonic()
     session = None
     try:
@@ -1255,12 +1269,14 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession,
         if session is not None:
             flow=_initial_focus_unknown(1)
             counter=_initial_focus_counters_unknown(9)
+            status=initial_focus_status_unknown(9)
             try:
-                record['initialFocusTrace'] = capture_initial_focus_trace(session, record,flow_out=flow,counter_out=counter)
+                record['initialFocusTrace'] = capture_initial_focus_trace(session, record,flow_out=flow,counter_out=counter,status_out=status)
             except Exception:
                 record['initialFocusTrace'] = _initial_focus_unknown(11)
             record['initialFocusFlow']=flow
             record['initialFocusCounters']=counter
+            record['initialFocusStatus']=status
             expected_retirement_identity=None
             try:
                 original=session._opening_focus_identity
@@ -1274,13 +1290,15 @@ def run_case(suite, fixtures, output, module, *, session_factory=WindowsSession,
             if record['cleanupConfirmed']:
                 flow=_initial_focus_retired_unknown(1)
                 counter=_initial_focus_counters_unknown(9)
+                status=initial_focus_status_unknown(9)
                 try:
                     record['initialFocusTraceAfterRetirement'] = capture_initial_focus_trace(session,record,
-                        retired=True,expected_identity=expected_retirement_identity,flow_out=flow,counter_out=counter)
+                        retired=True,expected_identity=expected_retirement_identity,flow_out=flow,counter_out=counter,status_out=status)
                 except Exception:
                     record['initialFocusTraceAfterRetirement'] = _initial_focus_retired_unknown(11)
                 record['initialFocusFlowAfterRetirement']=flow
                 record['initialFocusCountersAfterRetirement']=counter
+                record['initialFocusStatusAfterRetirement']=status
         if not record['cleanupConfirmed']:
             record['success'] = False
         if record.get('diagnosticProfile')==3:

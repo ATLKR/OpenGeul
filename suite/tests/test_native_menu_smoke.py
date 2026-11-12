@@ -1917,7 +1917,7 @@ class InitialFocusStderrTests(unittest.TestCase):
         guard=queue[:queue.index('private sealed class InitialFocusFlow')]
         self.assertEqual(guard.count(' ||'),6)
         self.assertIn('return value;',source[source.index('private static bool InitialFocusGate('):])
-        for name,count in [('IsHandleCreated',21),('InitialFocusPending',9),('ActiveForm',2),('Visible',2),
+        for name,count in [('IsHandleCreated',21),('InitialFocusPending',9),('ActiveForm',3),('Visible',2),
                            ('Modal',1),('IsDisposed',22),('Disposing',18),('BeginInvoke',4),
                            ('QueueInitialEditorFocus',3),('TryInitialEditorFocus',2)]:
             self.assertEqual(len(re.findall(r'\b'+name+r'\b',source)),count,name)
