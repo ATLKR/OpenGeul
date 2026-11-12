@@ -229,7 +229,15 @@ class FocusedBoundaryTests(unittest.TestCase):
                     visit(child,path)
             visit(ast.parse(text));return result
         self.assertEqual(len(baseline['functionAstSha256']),14)
-        self.assertEqual(baseline['functionAstSha256'],functions((BASE/'suite/e2e/owned_native_menu.py').read_text()))
+        expected=dict(baseline['functionAstSha256'])
+        # Reviewed numerical observation-only additions; the original fixture
+        # remains immutable. Exact clock/order/five-second behavior is also
+        # checked separately by the native-menu interop totals tests.
+        expected.update({
+            'NativeMenuProbe._call':'623593105c52e0ca55123a5657219db5c4f8d5185df633410061fdc529eed8bf',
+            'NativeMenuProbe._provider_timeout':'59f21ee61a2f3b1db167293603a1b1bf9e2d5e06e530c7453792ba1606ea434b',
+        })
+        self.assertEqual(expected,functions((BASE/'suite/e2e/owned_native_menu.py').read_text()))
 
 
 

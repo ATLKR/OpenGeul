@@ -2248,3 +2248,179 @@ class SourceSelectedMenuCoreTests(unittest.TestCase):
                 changed=copy.deepcopy(action);change(changed)
                 with self.assertRaises(AssertionError):
                     module.require_native_menu_action(changed,77,11,'save',source_admission=self.prepared.admission)
+
+
+class UiaInteropTotalsTests(unittest.TestCase):
+    """Numeric observations reuse existing clock reads and never grant admission."""
+    def fixture(self, *, provider=True, setter_error=None, readback_error=None):
+        owner=OwnedNativeMenuTests();module,_,_,_,clock,boundary=owner.real_chrome_fixture()
+        self.addCleanup(owner.doCleanups);probe=boundary.probe;trace=[];events=[]
+        def observed_clock():trace.append(clock.now);return clock.now
+        probe.clock=observed_clock
+        class Provider:
+            connection=transaction=0
+            def write(self,name,value):
+                events.append(('set',name,value));clock.now+=.125
+                if setter_error is not None:raise setter_error
+                setattr(self,name,value)
+            def read(self,name):
+                events.append(('read',name));clock.now+=.25
+                if readback_error is not None:raise readback_error
+                return getattr(self,name)
+            ConnectionTimeout=property(lambda p:p.read('connection'),lambda p,v:p.write('connection',v))
+            TransactionTimeout=property(lambda p:p.read('transaction'),lambda p,v:p.write('transaction',v))
+        probe.provider_client=Provider() if provider else None
+        return module,probe,clock,trace,events
+    def totals(self,probe):
+        result=probe.interop['callTotals']
+        self.assertEqual(set(result),{'schemaVersion','diagnosticOnly','acceptanceEligible',
+            'apiIncludesProviderSetup','intervalsOverlap','apiCalls','providerSetup','providerSteps'})
+        self.assertEqual((result['schemaVersion'],result['diagnosticOnly'],result['acceptanceEligible'],
+            result['apiIncludesProviderSetup'],result['intervalsOverlap']),(1,1,0,1,1))
+        self.assertLessEqual(len(result['apiCalls']),19);self.assertLessEqual(len(result['providerSteps']),4)
+        for row in [*result['apiCalls'],result['providerSetup'],*result['providerSteps']]:
+            self.assertEqual(set(row),{'code','callCount','enteredCount','completedCount','failedCount',
+                'timedCount','elapsedInclusiveMicros','clipped'})
+            self.assertTrue(all(type(value) is int for value in row.values()))
+            self.assertTrue(all(0<=row[key]<=65535 for key in ('callCount','enteredCount','completedCount','failedCount','timedCount')))
+            self.assertTrue(0<=row['elapsedInclusiveMicros']<=5000000);self.assertIn(row['clipped'],(0,1))
+        self.assertTrue(all(0<=row['code']<=18 for row in result['apiCalls']))
+        self.assertTrue(all(1<=row['code']<=4 for row in result['providerSteps']))
+        return result
+    def api_row(self,probe,code=5):
+        return next(row for row in self.totals(probe)['apiCalls'] if row['code']==code)
+
+    def test_interop_totals_preserve_exact_clock_trace_timeout_values_deadline_and_last_call(self):
+        _,probe,clock,trace,events=self.fixture();deadline=probe.deadline
+        def comparison():clock.now+=.125;return 'synthetic-result'
+        self.assertEqual(probe._uia_call(5,comparison),'synthetic-result')
+        self.assertEqual(trace,[1.,1.,1.,1.125,1.375,1.375,1.5,1.75,1.75,1.875])
+        self.assertEqual(events,[('set','connection',1249),('read','connection'),('set','transaction',1249),('read','transaction')])
+        self.assertEqual(probe.deadline,deadline);self.assertEqual(deadline,6.)
+        last=probe.interop['lastCall']
+        self.assertEqual((last['apiCode'],last['phaseCode'],last['providerStep']),(5,4,4))
+        self.assertTrue(last['calleeEntered'] and last['callCompleted']);self.assertFalse(last['failed'])
+        row=self.api_row(probe)
+        self.assertEqual(row,dict(code=5,callCount=1,enteredCount=1,completedCount=1,failedCount=0,timedCount=1,elapsedInclusiveMicros=875000,clipped=0))
+        totals=self.totals(probe)
+        self.assertEqual(totals['providerSetup']['elapsedInclusiveMicros'],750000)
+        self.assertEqual([row['elapsedInclusiveMicros'] for row in totals['providerSteps']],[125000,250000,125000,250000])
+        self.assertTrue(probe.close_provider());self.assertIs(probe.interop['callTotals'],totals)
+
+    def test_interop_totals_failed_callee_has_unknown_time_without_an_extra_clock_read(self):
+        class COMError(Exception):
+            hresult=-2146233083
+            def __str__(self):raise AssertionError('Exception text is not diagnostic input')
+        primary=COMError();_,probe,clock,trace,_=self.fixture()
+        def fail():clock.now+=.125;raise primary
+        with self.assertRaises(COMError) as caught:probe._uia_call(5,fail)
+        self.assertIs(caught.exception,primary);self.assertIs(probe._last_call_exception,primary)
+        self.assertEqual(trace,[1.,1.,1.,1.125,1.375,1.375,1.5,1.75,1.75])
+        last=copy.deepcopy(probe.interop['lastCall']);probe.capture_primary_failure(primary)
+        self.assertEqual(probe.interop['primaryFailureCall'],last)
+        self.assertEqual((last['apiCode'],last['phaseCode'],last['hresult']),(5,2,-2146233083))
+        row=self.api_row(probe)
+        self.assertEqual((row['callCount'],row['enteredCount'],row['completedCount'],row['failedCount'],row['timedCount'],row['elapsedInclusiveMicros']),(1,1,0,1,0,0))
+        self.assertEqual(self.totals(probe)['providerSetup']['timedCount'],1)
+        self.assertEqual(probe.deadline,6.)
+
+    def test_interop_totals_setter_and_readback_failures_keep_the_primary_and_unentered_callee(self):
+        class COMError(Exception):
+            hresult=-2147024809
+            def __str__(self):raise AssertionError('Exception text is not diagnostic input')
+        for stage in ('setter','readback'):
+            primary=COMError();_,probe,_,trace,events=self.fixture(**{stage+'_error':primary})
+            called=[]
+            with self.subTest(stage=stage),self.assertRaises(COMError) as caught:
+                probe._uia_call(5,lambda:called.append(True))
+            self.assertIs(caught.exception,primary);self.assertEqual(called,[])
+            self.assertEqual(len(trace),3 if stage=='setter' else 4)
+            self.assertEqual(probe.interop['lastCall']['providerStep'],1 if stage=='setter' else 2)
+            self.assertEqual(probe.interop['lastCall']['hresult'],-2147024809)
+            row=self.api_row(probe)
+            self.assertEqual((row['enteredCount'],row['failedCount'],row['timedCount']),(0,1,0))
+            totals=self.totals(probe);self.assertEqual((totals['providerSetup']['failedCount'],totals['providerSetup']['timedCount']),(1,0))
+            failed=totals['providerSteps'][-1]
+            self.assertEqual((failed['code'],failed['failedCount'],failed['timedCount'],failed['elapsedInclusiveMicros']),(1 if stage=='setter' else 2,1,0,0))
+            self.assertEqual(len(events),1 if stage=='setter' else 2)
+
+    def test_interop_totals_late_return_is_measured_without_extending_the_deadline(self):
+        for finish in (6.,8.):
+            _,probe,clock,trace,_=self.fixture(provider=False)
+            def late():clock.now=finish;return True
+            with self.subTest(finish=finish),self.assertRaisesRegex(AssertionError,'exceeded original deadline'):
+                probe._uia_call(5,late)
+            self.assertEqual(trace,[1.,finish]);self.assertEqual(probe.deadline,6.)
+            self.assertEqual((probe.interop['lastCall']['phaseCode'],probe.interop['lastCall']['callCompleted']),(3,True))
+            row=self.api_row(probe)
+            self.assertEqual((row['completedCount'],row['failedCount'],row['timedCount'],row['elapsedInclusiveMicros']),(1,1,1,5000000))
+            self.assertEqual(row['clipped'],int(finish>6.))
+
+    def test_interop_totals_backward_or_nonfinite_clocks_do_not_invent_a_duration_or_new_guard(self):
+        for finish in (.5,float('-inf'),float('inf'),float('nan')):
+            _,probe,clock,trace,_=self.fixture(provider=False)
+            def callee():clock.now=finish;return 23
+            if finish<6.:self.assertEqual(probe._uia_call(5,callee),23)
+            else:
+                with self.assertRaises(AssertionError) as caught:probe._uia_call(5,callee)
+                self.assertIs(probe._last_call_exception,caught.exception)
+            self.assertEqual(len(trace),2);self.assertEqual(probe.deadline,6.)
+            row=self.api_row(probe);self.assertEqual((row['timedCount'],row['elapsedInclusiveMicros']),(0,0))
+
+    def test_interop_totals_diagnostic_sink_stays_separate_and_does_not_change_the_primary(self):
+        _,probe,clock,_,_=self.fixture(provider=False)
+        self.assertTrue(probe._uia_call(5,lambda:True));original=copy.deepcopy(probe.interop)
+        primary=RuntimeError('synthetic-primary');probe._last_call_exception=primary
+        sink={};probe._diagnostic_sink=sink
+        def observation():clock.now+=.125;return False
+        self.assertFalse(probe._uia_call(4,observation))
+        self.assertEqual(probe.interop,original);self.assertIs(probe._last_call_exception,primary)
+        self.assertEqual([(row['code'],row['callCount']) for row in sink['callTotals']['apiCalls']],[(4,1)])
+        self.assertEqual(sink['lastCall']['apiCode'],4)
+
+    def test_interop_totals_observation_write_failure_does_not_mask_success_or_the_primary(self):
+        class Refusing(dict):
+            def setdefault(self,key,value):
+                if key=='callTotals':raise KeyboardInterrupt()
+                return super().setdefault(key,value)
+        for failure in (False,True):
+            _,probe,_,trace,_=self.fixture(provider=False);probe.interop=Refusing()
+            primary=RuntimeError('synthetic-primary')
+            def callee():
+                if failure:raise primary
+                return 17
+            if failure:
+                with self.assertRaises(RuntimeError) as caught:probe._uia_call(5,callee)
+                self.assertIs(caught.exception,primary);self.assertIs(probe._last_call_exception,primary)
+            else:self.assertEqual(probe._uia_call(5,callee),17)
+            self.assertNotIn('callTotals',probe.interop);self.assertEqual(len(trace),1 if failure else 2)
+            self.assertEqual(probe.interop['lastCall']['failed'],failure)
+        primary=RuntimeError('synthetic-setter-primary')
+        _,probe,_,trace,events=self.fixture(setter_error=primary);probe.interop=Refusing()
+        with self.assertRaises(RuntimeError) as caught:probe._uia_call(5,lambda:17)
+        self.assertIs(caught.exception,primary);self.assertIs(probe._last_call_exception,primary)
+        self.assertNotIn('callTotals',probe.interop);self.assertEqual(len(trace),3)
+        self.assertEqual(len(events),1);self.assertEqual(probe.interop['lastCall']['providerStep'],1)
+
+    def test_interop_totals_codes_have_fixed_allowlists_without_new_query_guards(self):
+        _,probe,_,trace,_=self.fixture(provider=False)
+        for code in (-1,19,True,'5'):
+            self.assertEqual(probe._uia_call(code,lambda:17),17)
+            self.assertNotIn('callTotals',probe.interop)
+        for code in range(19):self.assertEqual(probe._uia_call(code,lambda:17),17)
+        totals=self.totals(probe)
+        self.assertEqual([row['code'] for row in totals['apiCalls']],list(range(19)))
+        self.assertEqual(len(trace),46);self.assertEqual(probe.deadline,6.)
+        for code in (0,5,True,'1'):probe._observe_call_totals('providerSteps',code,1.,1.,False,True,True)
+        self.assertEqual(totals['providerSteps'],[])
+
+    def test_interop_totals_counts_and_times_saturate_in_fixed_numeric_rows(self):
+        _,probe,clock,trace,_=self.fixture(provider=False)
+        self.assertTrue(probe._uia_call(5,lambda:True));row=self.api_row(probe)
+        for key in ('callCount','enteredCount','completedCount','failedCount','timedCount'):row[key]=65535
+        row['elapsedInclusiveMicros']=5000000
+        def callee():clock.now+=.125;return True
+        self.assertTrue(probe._uia_call(5,callee));row=self.api_row(probe)
+        self.assertTrue(all(row[key]==65535 for key in ('callCount','enteredCount','completedCount','failedCount','timedCount')))
+        self.assertEqual((row['elapsedInclusiveMicros'],row['clipped']),(5000000,1))
+        self.assertEqual(len(trace),4);self.assertEqual(probe.deadline,6.)

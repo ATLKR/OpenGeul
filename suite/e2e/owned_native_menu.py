@@ -1386,60 +1386,133 @@ class NativeMenuProbe(NativeControlProbe):
         return proof,fresh
     def _fresh_proof(self,target):
         return self._fresh_proof_with_refs(target)[0]
-    def _provider_timeout(self):
-        remaining=self.deadline-self.clock()
-        # Connection and transaction timeouts can both be consumed by a request.
-        # Reserve half the remaining time for readback, validation and cleanup.
-        milliseconds=int((remaining*1000-1)//4)
-        # Only values already computed/read by this exact call are diagnostic.
-        # Mask bits1/2 cover remaining/request;4/8 cover typed readbacks.
-        budget=None;context=getattr(self,'_observed_call',None)
-        if isinstance(context,dict):
+    def _observe_call_totals(self,group,code,started,finished,failed,entered,completed):
+        """Optional fixed numeric aggregates; no clock read or admission consequence.
+
+        API intervals include provider setup; provider intervals overlap them and
+        must not be added to API totals. A throwing callee has no existing final
+        clock read, so its timedCount stays zero rather than inventing a duration.
+        """
+        try:
+            if group=='apiCalls':
+                code=code.get('apiCode') if type(code) is dict else 0
+                if type(code) is not int or not 0<=code<=18:return
+            elif group=='providerSteps':
+                if type(code) is not int or not 1<=code<=4:return
+            elif group!='providerSetup' or type(code) is not int or code!=0:return
+            def row(number):
+                return dict(code=number,callCount=0,enteredCount=0,completedCount=0,
+                    failedCount=0,timedCount=0,elapsedInclusiveMicros=0,clipped=0)
+            sink=getattr(self,'_diagnostic_sink',None)
+            target=sink if isinstance(sink,dict) else self.interop
+            totals=target.setdefault('callTotals',dict(schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,
+                apiIncludesProviderSetup=1,intervalsOverlap=1,apiCalls=[],providerSetup=row(0),providerSteps=[]))
+            if type(totals) is not dict:return
+            if group=='providerSetup':current=totals[group]
+            else:
+                rows=totals[group];limit=19 if group=='apiCalls' else 4
+                if type(rows) is not list or len(rows)>limit:return
+                if any(type(item) is not dict or type(item.get('code')) is not int for item in rows):return
+                found=[item for item in rows if item['code']==code]
+                if len(found)>1:return
+                if found:current=found[0]
+                else:
+                    if len(rows)==limit:return
+                    current=row(code);rows.append(current);rows.sort(key=lambda item:item['code'])
+            keys=('callCount','enteredCount','completedCount','failedCount','timedCount')
+            if (type(current) is not dict or any(type(current.get(key)) is not int or not 0<=current[key]<=65535 for key in keys)
+                    or type(current.get('elapsedInclusiveMicros')) is not int or not 0<=current['elapsedInclusiveMicros']<=5000000
+                    or type(current.get('clipped')) is not int or current['clipped'] not in (0,1)):return
+            timed=False;micros=0;clipped=current['clipped']
             try:
-                budget=dict(schemaVersion=1,remainingMicros=int(remaining*1000000),requestedMs=milliseconds,
-                    connectionReadbackMs=0,transactionReadbackMs=0,observedMask=3,verifiedMask=0,setupComplete=0)
-                context['providerBudget']=budget
-            except Exception:budget=None
-        assert 1<=milliseconds<=1250, 'Native UIA provider query budget expired'
-        for index,name in enumerate(('ConnectionTimeout','TransactionTimeout')):
-            assert self.clock()<self.deadline, 'Native UIA timeout setup deadline expired'
-            context=getattr(self,'_observed_call',None)
-            if isinstance(context,dict):context['providerStep']=index*2+1
-            setattr(self.provider_client,name,milliseconds)
-            assert self.clock()<self.deadline, 'Native UIA timeout setter exceeded deadline'
-            if isinstance(context,dict):context['providerStep']=index*2+2
-            observed=getattr(self.provider_client,name)
-            if budget is not None and type(observed) is int:
-                budget['connectionReadbackMs' if index==0 else 'transactionReadbackMs']=observed
-                budget['observedMask']|=4<<index
-            assert self.clock()<self.deadline, 'Native UIA timeout readback exceeded deadline'
-            assert type(observed) is int and observed==milliseconds, 'Native UIA provider timeout was not accepted'
-            if budget is not None:budget['verifiedMask']|=1<<index
-        assert 2*milliseconds<(self.deadline-self.clock())*1000, \
-            'Native UIA timeout setup exhausted the original query budget'
-        self.provider_timeout_verified=True
-        if budget is not None:budget['setupComplete']=1
+                if (type(started) in (int,float) and type(finished) in (int,float)
+                        and math.isfinite(started) and math.isfinite(finished)):
+                    duration=finished-started
+                    if math.isfinite(duration) and duration>=0:
+                        timed=True;micros=5000000 if duration>=5 else int(duration*1000000)
+                        clipped|=int(duration>5)
+            except (OverflowError,ValueError):pass
+            for key,increment in zip(keys,(1,int(bool(entered)),int(bool(completed)),int(bool(failed)),int(timed))):
+                value=current[key]+increment;clipped|=int(value>65535);current[key]=min(value,65535)
+            value=current['elapsedInclusiveMicros']+micros
+            current.update(elapsedInclusiveMicros=min(value,5000000),clipped=clipped|int(value>5000000))
+        except BaseException:pass  # Observation must not replace a result or primary exception.
+    def _provider_timeout(self):
+        started=self.clock();remaining=self.deadline-started;finished=None;failed=True
+        try:
+            # Connection and transaction timeouts can both be consumed by a request.
+            # Reserve half the remaining time for readback, validation and cleanup.
+            milliseconds=int((remaining*1000-1)//4)
+            # Only values already computed/read by this exact call are diagnostic.
+            # Mask bits1/2 cover remaining/request;4/8 cover typed readbacks.
+            budget=None;context=getattr(self,'_observed_call',None)
+            if isinstance(context,dict):
+                try:
+                    budget=dict(schemaVersion=1,remainingMicros=int(remaining*1000000),requestedMs=milliseconds,
+                        connectionReadbackMs=0,transactionReadbackMs=0,observedMask=3,verifiedMask=0,setupComplete=0)
+                    context['providerBudget']=budget
+                except Exception:budget=None
+            assert 1<=milliseconds<=1250, 'Native UIA provider query budget expired'
+            for index,name in enumerate(('ConnectionTimeout','TransactionTimeout')):
+                step_started=self.clock()
+                assert step_started<self.deadline, 'Native UIA timeout setup deadline expired'
+                context=getattr(self,'_observed_call',None)
+                if isinstance(context,dict):context['providerStep']=index*2+1
+                step_finished=None;step_failed=True;completed=False
+                try:
+                    setattr(self.provider_client,name,milliseconds);completed=True
+                    step_finished=self.clock()
+                    assert step_finished<self.deadline, 'Native UIA timeout setter exceeded deadline'
+                    step_failed=False
+                finally:self._observe_call_totals('providerSteps',index*2+1,step_started,step_finished,step_failed,True,completed)
+                if isinstance(context,dict):context['providerStep']=index*2+2
+                step_started=step_finished;step_finished=None;step_failed=True;completed=False
+                try:
+                    observed=getattr(self.provider_client,name);completed=True
+                    if budget is not None and type(observed) is int:
+                        budget['connectionReadbackMs' if index==0 else 'transactionReadbackMs']=observed
+                        budget['observedMask']|=4<<index
+                    step_finished=self.clock()
+                    assert step_finished<self.deadline, 'Native UIA timeout readback exceeded deadline'
+                    assert type(observed) is int and observed==milliseconds, 'Native UIA provider timeout was not accepted'
+                    if budget is not None:budget['verifiedMask']|=1<<index
+                    step_failed=False
+                finally:self._observe_call_totals('providerSteps',index*2+2,step_started,step_finished,step_failed,True,completed)
+            finished=self.clock()
+            assert 2*milliseconds<(self.deadline-finished)*1000, \
+                'Native UIA timeout setup exhausted the original query budget'
+            self.provider_timeout_verified=True
+            if budget is not None:budget['setupComplete']=1
+            failed=False
+        finally:
+            # completedCount here means all property operations returned and the
+            # existing final clock was reached, not that setup passed its guards.
+            self._observe_call_totals('providerSetup',0,started,finished,failed,True,finished is not None)
     def _call(self,function,*args):
         previous=getattr(self,'_observed_call',None);sink=getattr(self,'_diagnostic_sink',None)
         context=previous if isinstance(previous,dict) else self._call_record(0)
         native_only=(previous is None or type(previous) is dict) and self._native_timeout_exempt(function,context)
         if native_only and context is previous:context=self._call_record(0)
         self._observed_call=context
+        started=finished=None;failed=True;entered=completed=False
         try:
             if not isinstance(sink,dict):self._last_call_exception=None
             if context is not None:
                 try:(sink if isinstance(sink,dict) else self.interop)['lastCall']=context
                 except BaseException:pass
-            assert self.clock()<self.deadline, 'Native menu query deadline expired'
+            started=self.clock()
+            assert started<self.deadline, 'Native menu query deadline expired'
             if context is not None:context['phaseCode']=1
             if getattr(self,'provider_client',None) is not None and not (native_only and self._native_timeout_exempt(function,context)):self._provider_timeout()
             if function is getattr(getattr(self,'user',None),'SendMessageTimeoutW',None):
                 assert type(args[5]) is int and 1<=args[5]<=int((self.deadline-self.clock())*1000), 'Owned hit-test wait exceeds remaining query budget'
             if context is not None:context.update(phaseCode=2,calleeEntered=True)
-            value=function(*args)
+            entered=True;value=function(*args);completed=True
             if context is not None:context.update(phaseCode=3,callCompleted=True)
-            assert self.clock()<self.deadline, 'Native menu query exceeded original deadline'
+            finished=self.clock()
+            assert finished<self.deadline, 'Native menu query exceeded original deadline'
             if context is not None:context['phaseCode']=4
+            failed=False
             return value
         except BaseException as exc:
             if context is not None:
@@ -1448,7 +1521,9 @@ class NativeMenuProbe(NativeControlProbe):
                 except BaseException:pass
             if not isinstance(sink,dict):self._last_call_exception=exc
             raise
-        finally:self._observed_call=previous
+        finally:
+            self._observed_call=previous
+            self._observe_call_totals('apiCalls',context,started,finished,failed,entered,completed)
     def _call_record(self,code):
         target=getattr(self,'_active_target',None)
         record=dict(apiCode=code,targetCode=tuple(LABELS).index(target)+1 if target in LABELS else 0,
@@ -1999,7 +2074,11 @@ class NativeMenuProbe(NativeControlProbe):
                 if comparison:
                     try:row=_getter_call_site(self,9,self._chrome,cursor)
                     except BaseException as primary:
-                        try:self._observe_failed_focus_cursor(cursor,depth,primary)
+                        try:
+                            previous_boundary=self.interop.get('focusedBoundary')
+                            self._observe_failed_focus_cursor(cursor,depth,primary)
+                            if self.interop.get('focusedBoundary') is not previous_boundary:
+                                self._observe_failed_focus_new(cursor,depth,primary)
                         except BaseException:pass
                         raise
                     result.append(row);returned(entry,row)
@@ -2107,6 +2186,141 @@ class NativeMenuProbe(NativeControlProbe):
                         if old is missing:self.__dict__.pop(name,None)
                         else:setattr(self,name,old)
                     except BaseException:pass
+    def _observe_failed_focus_new(self,cursor,depth,primary):
+        """Observe fixed New comparisons; never admit focus or replace failure."""
+        value=None;saved=None;missing=object()
+        class Halt(Exception):pass
+        try:
+            boundary=self.interop.get('focusedBoundary')
+            if (type(primary) is not AssertionError or primary.args!=('Native menu identity is unknown or ambiguous',)
+                or getattr(self,'_native_identity_diagnostic',0)!=0 or type(depth) is not int or depth!=0
+                or type(boundary) is not dict or boundary.get('depth')!=depth
+                or boundary.get('complete')!=1 or boundary.get('ownerMatchesOriginalEngine') is not True
+                or boundary.get('kindCode')!=50011 or boundary.get('visible')!=1 or boundary.get('enabled')!=1):return
+            value=dict(schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,conclusionCode=0,
+                statusCode=0,phaseCode=1,failed=0,complete=0,remainingMicrosAtEntry=None,
+                continuityBefore=0,continuityAfter=0,windowBindingUnchanged=None,
+                firstFind={},freshFind={},focusEqualsCandidate=None,freshEqualsCandidate=None,
+                negativeComparisons=[],directParentEqualsFile=None)
+            self.interop['focusedNewComparison']=value
+            scope=getattr(self,'_identity_scope',None);context=getattr(self,'_menu_classification_context',None)
+            refs=getattr(self,'_identity_refs',None);base=('file','bar','peer','contrast-edit','target:save')
+            keys=('version','binding','shellPid','shellCreationTime','officeCreationTime','startedAt','deadline')
+            if (type(scope) is not dict or scope.get('operation')!='keyboard-escape' or scope.get('gesture') is not True
+                or type(context) is not tuple or len(context)!=2 or type(context[0]) is not dict
+                or set(context[0])!=set(keys) or not callable(context[1])
+                or any(context[0][key]!=scope.get(key) for key in keys)
+                or type(refs) is not dict or set(refs)!=set(base)
+                or getattr(self,'_provider_closed',False) or getattr(self,'_uia',None) is None
+                or getattr(self,'provider_client',None) is None or self._uia.iuia is not self.provider_client):
+                value['statusCode']=4;return
+            deadline=self.deadline;binding=scope['binding'];continuity=context[1]
+            if (type(binding) is not dict or set(binding)!={'document','parent','child','officePid'}
+                or any(type(n) is not int or n<=0 for n in binding.values())
+                or any(type(scope.get(k)) is not int or scope[k]<=0 for k in
+                    ('version','shellPid','shellCreationTime','officeCreationTime'))
+                or scope['version']!=1 or scope['officeCreationTime']<scope['shellCreationTime']
+                or scope['shellPid']==binding['officePid']
+                or any(type(scope.get(k)) not in (int,float) or not math.isfinite(scope[k]) for k in ('startedAt','deadline'))
+                or not scope['startedAt']<scope['deadline']<=scope['startedAt']+5 or deadline!=scope['deadline']):
+                value['statusCode']=4;return
+            original_scope=dict(scope,binding=dict(binding));original_refs=dict(refs)
+            original_menu_scope=dict(context[0],binding=dict(binding))
+            def stop(code):
+                value['statusCode']=code;raise Halt()
+            def budget():
+                if self.deadline!=deadline:stop(2)
+                now=self.clock()
+                if type(now) not in (int,float) or not math.isfinite(now):stop(2)
+                remaining=deadline-now
+                if not 0<remaining<=5 or not 1<=int((remaining*1000-1)//4)<=1250:stop(2)
+                if value['remainingMicrosAtEntry'] is None:value['remainingMicrosAtEntry']=int(remaining*1000000)
+                if self._provider_pending():stop(3)
+            def checked(function,*args):
+                budget();result=function(*args);budget();return result
+            def read(code,function,*args):return checked(self._uia_call,code,function,*args)
+            def same(left,right):return checked(self._same,left,right)
+            def windows():
+                attachment=checked(self.attachment_snapshot,binding)
+                if (type(attachment) is not dict or attachment.get('binding')!=binding or attachment.get('valid') is not True
+                    or attachment.get('exported')!=[binding['parent'],binding['child']]):stop(4)
+                rows=attachment.get('windows')
+                if type(rows) is not dict or set(rows)!={'document','parent','child'}:stop(4)
+                result=[]
+                for role in ('document','parent','child'):
+                    row=rows[role];pid=binding['officePid'] if role=='child' else scope['shellPid']
+                    if (type(row) is not dict or set(row)!={'hwnd','pid','threadId','rootHwnd'}
+                        or any(type(n) is not int or n<=0 for n in row.values())
+                        or (row['hwnd'],row['pid'],row['rootHwnd'])!=(binding[role],pid,binding['document'])):stop(4)
+                    result.append(tuple(row[k] for k in ('hwnd','pid','threadId','rootHwnd')))
+                return result
+            def find(packet):
+                packet.update(candidateCount=0,examinedCount=0,visibleCount=0,matchedCount=0,scanComplete=0)
+                client=self._uia.iuia
+                condition=read(13,client.CreatePropertyCondition,30003,50011)
+                found=read(2,refs['file'].FindAll,self._uia.tree_scope['descendants'],condition)
+                count=read(17,lambda:found.Length)
+                if type(count) is not int or not 0<=count<=512:stop(6)
+                packet['candidateCount']=count;matches=[]
+                for index in range(count):
+                    element=read(18,found.GetElement,index);packet['examinedCount']=index+1
+                    pid=read(8,lambda:element.CurrentProcessId)
+                    if type(pid) is not int or pid!=binding['officePid']:stop(5)
+                    kind=read(9,lambda:element.CurrentControlType)
+                    if type(kind) is not int or kind!=50011:stop(6)
+                    offscreen=read(11,lambda:element.CurrentIsOffscreen)
+                    if type(offscreen) is not bool and not (type(offscreen) is int and offscreen in (0,1)):stop(6)
+                    if offscreen:continue
+                    packet['visibleCount']+=1
+                    name=read(16,lambda:element.CurrentName)
+                    if type(name) is not str or len(name)>256:stop(6)
+                    if _label(name) in LABELS['new']:matches.append(element)
+                    packet['matchedCount']=len(matches)
+                packet['scanComplete']=1
+                if len(matches)!=1:stop(6)
+                enabled=read(12,lambda:matches[0].CurrentIsEnabled)
+                if enabled is not True and not (type(enabled) is int and enabled==1):stop(6)
+                return matches[0]
+            budget()
+            saved=[(name,getattr(self,name,missing)) for name in
+                ('_diagnostic_sink','_observed_call','_last_call_exception','provider_timeout_verified')]
+            self._diagnostic_sink=value;self._observed_call=None
+            value['phaseCode']=2;checked(continuity);before=windows();value['continuityBefore']=1
+            value['phaseCode']=3;candidate=find(value['firstFind'])
+            value['phaseCode']=4;value['focusEqualsCandidate']=same(cursor,candidate)
+            if not value['focusEqualsCandidate']:stop(6)
+            value['phaseCode']=5;fresh=find(value['freshFind'])
+            value['freshEqualsCandidate']=same(fresh,candidate)
+            if not value['freshEqualsCandidate']:stop(6)
+            for index,role in enumerate(base,1):
+                equal=same(fresh,refs[role]);value['negativeComparisons'].append(dict(roleCode=index,areSame=equal))
+                if equal:stop(6)
+            value['phaseCode']=6;walker=read(0,lambda:self._uia.iuia.ControlViewWalker)
+            parent=read(6,walker.GetParentElement,fresh)
+            value['directParentEqualsFile']=same(parent,refs['file']) if parent else False
+            if not value['directParentEqualsFile']:stop(6)
+            value['phaseCode']=7;checked(continuity)
+            value['windowBindingUnchanged']=windows()==before
+            if not value['windowBindingUnchanged']:stop(4)
+            current_context=self._menu_classification_context
+            if (self._identity_scope!=original_scope or type(current_context) is not tuple or len(current_context)!=2
+                or current_context[0]!=original_menu_scope or current_context[1] is not continuity
+                or set(self._identity_refs)!=set(original_refs)
+                or any(self._identity_refs[k] is not v for k,v in original_refs.items())):stop(4)
+            budget();value.update(phaseCode=8,statusCode=1,continuityAfter=1,complete=1)
+        except Halt:pass
+        except BaseException:
+            if value is not None:
+                try:value.update(statusCode=7,failed=1,complete=0)
+                except BaseException:pass
+        finally:
+            if saved is not None:
+                for name,old in saved:
+                    try:
+                        if old is missing:self.__dict__.pop(name,None)
+                        else:setattr(self,name,old)
+                    except BaseException:pass
+
     def _owners(self,hwnd,binding):
         rows=[]
         while hwnd:
