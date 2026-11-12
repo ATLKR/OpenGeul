@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes as C
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -150,6 +151,41 @@ def installed_vs(metadata,arch):
     for name in ('libcmt.lib','libcpmt.lib','libvcruntime.lib'):read(root/'VC/Tools/MSVC'/ver/'lib'/arch/name)
     return {'root':str(root),'version':ver,'installationVersion':metadata['version'],'cl':str(cl),'link':str(link),'devcmd':str(dev),'records':rows,'devcmdSha256':hashlib.sha256(read(dev,1024*1024)).hexdigest()}
 
+_REGISTRY_PATHS=(
+    (r'SOFTWARE\Microsoft\Windows\CurrentVersion','ProgramFilesDir',64),
+    (r'SOFTWARE\Microsoft\Windows\CurrentVersion','ProgramFilesDir (x86)',64),
+    (r'SOFTWARE\Microsoft\Windows Kits\Installed Roots','KitsRoot10',32),
+    (r'SOFTWARE\Microsoft\Windows Kits\Installed Roots','KitsRoot10',64),
+    (r'SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0','InstallationFolder',64))
+
+def _registry_path(registry,slot,*,optional=False):
+    if type(slot) is not int or not 1<=slot<=5 or type(optional) is not bool or optional and slot not in (3,4,5):raise GateFailure(12)
+    key,name,view=_REGISTRY_PATHS[slot-1]
+    flags=registry.KEY_READ|(registry.KEY_WOW64_32KEY if view==32 else registry.KEY_WOW64_64KEY)
+    try:handle=registry.OpenKey(registry.HKEY_LOCAL_MACHINE,key,0,flags)
+    except FileNotFoundError as error:
+        if optional and type(error) is FileNotFoundError and getattr(error,'winerror',None)==2:return None,1
+        raise
+    with handle:
+        try:value,kind=registry.QueryValueEx(handle,name)
+        except FileNotFoundError as error:
+            if optional and type(error) is FileNotFoundError and getattr(error,'winerror',None)==2:return None,2
+            raise
+    if type(kind) is not int or kind!=registry.REG_SZ or type(value) is not str:raise GateFailure(12)
+    return cmd_path(value.rstrip('\\')),0
+
+def sdk_registry_root(registry):
+    # CsWinRT open_sdk() explicitly tries the32-bit Installed Roots view.
+    # Check both exact modern views and the original legacy64 contract.
+    rows=tuple(_registry_path(registry,slot,optional=True) for slot in (3,4,5))
+    present=[root for root,missing in rows if root is not None]
+    if not present:
+        # Bits4/2/1 denote missing VALUE rather than KEY in modern32/64/legacy64.
+        # All eight shapes fit the existing native/public failureCode bound31.
+        raise GateFailure(24+sum(bit for (root,missing),bit in zip(rows,(4,2,1)) if missing==2))
+    if any(ntpath.normcase(root)!=ntpath.normcase(present[0]) for root in present[1:]):raise GateFailure(13)
+    return present[0]
+
 def system_locations(arch):
     if sys.platform!='win32':raise GateFailure(1)
     import winreg
@@ -167,13 +203,8 @@ def system_locations(arch):
     buf=C.create_unicode_buffer(32768);length=k.GetModuleFileNameW(None,buf,len(buf))
     if not 0<length<len(buf):raise GateFailure(12)
     controller=installed_pe(buf.value,MACHINES[arch],1)
-    def registry(key,name):
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,key,0,winreg.KEY_READ|winreg.KEY_WOW64_64KEY) as h:value,kind=winreg.QueryValueEx(h,name)
-        if kind!=winreg.REG_SZ or type(value) is not str:raise GateFailure(12)
-        return cmd_path(value.rstrip('\\'))
-    key=r'SOFTWARE\Microsoft\Windows\CurrentVersion'
-    pf=registry(key,'ProgramFilesDir');pf86=registry(key,'ProgramFilesDir (x86)')
-    sdk=registry(r'SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0','InstallationFolder')
+    pf,_=_registry_path(winreg,1);pf86,_=_registry_path(winreg,2)
+    sdk=sdk_registry_root(winreg)
     vswhere=Path(pf86)/'Microsoft Visual Studio/Installer/vswhere.exe'
     # vswhere may be an installed x86 tool on both hosts; it is metadata discovery only.
     try:raw=read(vswhere)

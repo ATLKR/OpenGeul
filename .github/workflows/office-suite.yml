@@ -1435,7 +1435,7 @@ jobs:
           $base = Join-Path (Get-Location).Path 'suite/engine-build/packaged-context-sdk'
           $entryPin = 'd2d58f493793962ecb85951038fe5387b698bacaf119405cbdda6bacaf3dd2cf'
           $bootstrapPin = '828cef4233ac7e2186c3ca5f112c10ca682a905ca3587fa6867a609046796c2d'
-          $manifestPin = '0dae96112d6133301e2b3d6de7f3919c27080dbb7f7617f8b88af4ee53bfdfe1'
+          $manifestPin = '3a37916d78b92d3169934dc12b5876481ec9eb47abbf53e44755877182740c89'
           foreach ($item in @(@('ci_entry.py',$entryPin),@('approved_launch.py',$bootstrapPin),@('approved-sdk-code.json',$manifestPin))) {
             $file = Join-Path $base $item[0]
             $info = Get-Item -LiteralPath $file -Force
