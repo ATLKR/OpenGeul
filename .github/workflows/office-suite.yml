@@ -1426,7 +1426,9 @@ jobs:
         $code = 1
         $publicExisted = $true
         try {
-          $architecture = switch ('${{ matrix.os }}') {
+          $sdkRunner = $env:SDK_MATRIX_RUNNER
+          if ($sdkRunner -cnotin @('windows-2025','windows-11-arm')) { throw 'Unsupported fixed SDK runner.' }
+          $architecture = switch -CaseSensitive ($sdkRunner) {
             'windows-2025' { 'x64' }
             'windows-11-arm' { 'arm64' }
             default { throw 'Unsupported fixed SDK runner.' }
@@ -1466,7 +1468,7 @@ jobs:
             $characteristics = $reader.ReadUInt16()
             if (($characteristics -band 2) -eq 0 -or ($characteristics -band 0x2000) -ne 0 -or $reader.ReadUInt16() -ne 0x20b) { throw 'Native interpreter PE32+ rejected.' }
           } finally { $stream.Dispose() }
-          $public = Join-Path (Get-Location).Path '.work/packaged-context-sdk-public/${{ matrix.os }}'
+          $public = Join-Path (Get-Location).Path ('.work/packaged-context-sdk-public/' + $sdkRunner)
           $publicExisted = Test-Path -LiteralPath $public
           if ($publicExisted) { throw 'Preserve existing SDK diagnostic output.' }
           & $python -I -B (Join-Path $base 'ci_entry.py') --architecture $architecture --expected-entry-sha256 $entryPin --expected-bootstrap-sha256 $bootstrapPin --expected-approved-manifest-sha256 $manifestPin 1>$null 2>$null
