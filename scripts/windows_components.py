@@ -42,7 +42,11 @@ from wasm_artifacts import FILES as WASM_FILES
 from windows_arch import SUPPORTED_ARCHITECTURES, component_artifact_name, require_architecture, target_triple
 
 CAPS = {'editor': 64*1024*1024, 'cli': 32*1024*1024}
+# The individual decoded CLI bound is independent of the joined raw payload.
 MAX_PAYLOAD = 96*1024*1024
+# Explicit local restoration budget; compressed transport/dist caps stay separate.
+# MakeAppx verification retains a second raw payload: up to 2*128 MiB, plus metadata.
+MAX_COMBINED_RESTORED_PAYLOAD = 128*1024*1024
 CLI_RUNTIME = 'Tools/rhwp.exe'
 CLI_GZIP = 'payload/'+CLI_RUNTIME+'.gz'
 BLOCK = 1024*1024
@@ -775,7 +779,7 @@ def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None, a
         raise ValueError('Prepared source ledger hash mismatch')
     validate_ledger(parity, contract, config)
     editor_size = sum(record['size'] for name, record in records['editor']['files'].items() if name.startswith('payload/'))
-    if editor_size+records['cli']['runtime']['size'] > MAX_PAYLOAD:
+    if editor_size+records['cli']['runtime']['size'] > MAX_COMBINED_RESTORED_PAYLOAD:
         raise ValueError('Combined restored payload exceeds size cap')
     receipt = {'formatVersion': 1, **current,
                'sourceContractSha256': hashlib.sha256(encoded(contract)).hexdigest(),

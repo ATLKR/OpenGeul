@@ -1940,7 +1940,7 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertEqual(c.read_json(cli/'provenance.json')['formatVersion'],2)
         self.assertEqual(c.read_json(cli/'provenance.json')['source'],actual['source'])
         c.combine(out,cli,self.root/'combined',self.root/'package-source',env=self.env)
-        combined,_=c.tree(self.root/'combined',c.MAX_PAYLOAD)
+        combined,_=c.tree(self.root/'combined',c.MAX_COMBINED_RESTORED_PAYLOAD)
         self.assertEqual(combined,{**inventory,c.CLI_RUNTIME:{'size':len(pe()),'sha256':hashlib.sha256(pe()).hexdigest()}})
         self.assertEqual(c.read_json(self.root/'package-source/.opengeul-windows-components.json')['sourceContractSha256'],
             hashlib.sha256((json.dumps(actual['source'],indent=2,sort_keys=True)+'\n').encode()).hexdigest())
@@ -2053,7 +2053,7 @@ class WindowsComponentsTests(unittest.TestCase):
         cli = self.root/'large-source-matching-cli'
         c.capture('cli', self.payload('cli'), source, cli, env=self.env)
         c.combine(out, cli, self.root/'combined', self.root/'package-source', env=self.env)
-        restored, _ = c.tree(self.root/'combined', c.MAX_PAYLOAD)
+        restored, _ = c.tree(self.root/'combined', c.MAX_COMBINED_RESTORED_PAYLOAD)
         self.assertEqual({name: item for name, item in restored.items() if not name.startswith('Tools/')}, files)
 
     def test_compact_encoding_preserves_default_source_contract_bytes_and_hash(self):
@@ -2127,8 +2127,41 @@ class WindowsComponentsTests(unittest.TestCase):
         folders = self.pair_from_source(source)
         editor = json.loads((folders['editor']/'provenance.json').read_text())
         editor_size = sum(v['size'] for n, v in editor['files'].items() if n.startswith('payload/'))
-        with patch.object(c, 'MAX_PAYLOAD', editor_size+255), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Combined cap must precede staging')):
+        with patch.object(c, 'MAX_COMBINED_RESTORED_PAYLOAD', editor_size+255), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Combined cap must precede staging')):
             self.assert_rejected_without_outputs(folders, 'combined|cap')
+
+    def test_combined_restored_budget_is_separate_from_cli_and_transport_limits(self):
+        c = self.helper()
+        self.assertEqual(c.MAX_PAYLOAD, 96*1024*1024)
+        self.assertEqual(c.MAX_COMBINED_RESTORED_PAYLOAD, 128*1024*1024)
+        self.assertEqual(c.CAPS, {'editor': 64*1024*1024, 'cli': 32*1024*1024})
+
+    def test_combined_restored_boundary_accepts_exact_limit_for_both_architectures(self):
+        c = self.helper(); original_root = self.root
+        for architecture in ('x64', 'arm64'):
+            with self.subTest(architecture=architecture):
+                self.root = original_root/architecture; self.root.mkdir()
+                folders = self.pair(architecture)
+                editor = c.validate_component(folders['editor'], 'editor', c.identity(self.env),
+                                              c.configured(), architecture=architecture)
+                size = sum(v['size'] for n, v in editor['files'].items() if n.startswith('payload/'))+len(pe())
+                with patch.object(c, 'MAX_COMBINED_RESTORED_PAYLOAD', size-1), patch.object(
+                        c.tempfile, 'mkdtemp', side_effect=AssertionError('Combined cap must precede staging')):
+                    self.assert_rejected_without_outputs(folders, 'combined|cap', architecture=architecture)
+                with patch.object(c, 'MAX_COMBINED_RESTORED_PAYLOAD', size):
+                    self.combine(folders, architecture=architecture)
+                actual, _ = c.tree(self.root/'combined', size)
+                self.assertEqual(sum(v['size'] for v in actual.values()), size)
+                self.assertEqual((self.root/'combined/Tools/rhwp.exe').read_bytes(),
+                                 pe(windows_arch.machine_for(architecture)))
+        self.root = original_root
+
+    def test_larger_combined_budget_cannot_admit_cli_over_its_own_limit(self):
+        c = self.helper(); folders = self.pair()
+        with patch.object(c, 'MAX_PAYLOAD', len(pe())-1), patch.object(
+                c, 'MAX_COMBINED_RESTORED_PAYLOAD', 128*1024*1024), patch.object(
+                c.tempfile, 'mkdtemp', side_effect=AssertionError('CLI cap must precede staging')):
+            self.assert_rejected_without_outputs(folders, 'runtime|cap')
 
     def test_capture_rechecks_cli_input_size_and_hash_after_inventory(self):
         c = self.helper()
