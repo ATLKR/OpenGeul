@@ -509,14 +509,14 @@ function Get-CommandCreationIdentity($Process) {
         creationIdentityUnavailableReason=$reason}
 }
 
-function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350,[hashtable]$EnvironmentOverrides=@{},[switch]$NativeEnvironment,[switch]$NativeUnitEnvironment) {
+function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$WorkingDirectory,[string]$LogPrefix,[ValidateRange(0.000001,350)][double]$TimeoutMinutes=350,[hashtable]$EnvironmentOverrides=@{},[switch]$NativeEnvironment,[switch]$NativeUnitEnvironment,[switch]$NumericOnly) {
     $receipt=[ordered]@{file=$FilePath;arguments=@($Arguments);workingDirectory=$WorkingDirectory;startedUtc=[DateTime]::UtcNow.ToString('o');passed=$false;exitCode=$null;
         timeoutMinutes=$TimeoutMinutes;pipeDrainComplete=$false;forcedTermination=$false;directProcessDeathVerified=$false;processTreeCleanup='not-requested';cleanupErrors=@()}
     $stdout=$LogPrefix+'.stdout.log';$stderr=$LogPrefix+'.stderr.log'
     foreach($path in @($stdout,$stderr,$LogPrefix+'.command.json')) {if(Test-Path -LiteralPath $path){throw 'Command evidence already exists.'}}
     $outStream=$null;$errStream=$null;$process=$null;$started=$false;$failure=$null
     $cancel=[Threading.CancellationTokenSource]::new();$watch=[Diagnostics.Stopwatch]::StartNew()
-    Write-Host ('Starting: '+[IO.Path]::GetFileName($FilePath)+' '+($Arguments -join ' '))
+    if(-not $NumericOnly) {Write-Host ('Starting: '+[IO.Path]::GetFileName($FilePath)+' '+($Arguments -join ' '))}
     try {
         $timeoutMilliseconds=Get-NativeBuildRemaining ([int][Math]::Floor($TimeoutMinutes*60000))
         $receipt.effectiveTimeoutMilliseconds=$timeoutMilliseconds
@@ -560,8 +560,8 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
             }
         }
         $process=[Diagnostics.Process]::new();$process.StartInfo=$info
-        $outStream=[IO.File]::Open($stdout,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
-        $errStream=[IO.File]::Open($stderr,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
+        $outStream=if($NumericOnly){[IO.Stream]::Null}else{[IO.File]::Open($stdout,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)}
+        $errStream=if($NumericOnly){[IO.Stream]::Null}else{[IO.File]::Open($stderr,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)}
         if(-not $process.Start()) {throw 'Command process did not start.'}
         $started=$true;$receipt.pid=$process.Id
         $creation=Get-CommandCreationIdentity $process
@@ -569,15 +569,15 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         $outTask=$process.StandardOutput.BaseStream.CopyToAsync($outStream,81920,$cancel.Token)
         $errTask=$process.StandardError.BaseStream.CopyToAsync($errStream,81920,$cancel.Token)
         while($true) {
-            $remaining=[int][Math]::Floor($timeoutMilliseconds-$watch.Elapsed.TotalMilliseconds)
+            $remaining=[int][Math]::Floor($timeoutMilliseconds-$watch.Elapsed.TotalMilliseconds-$(if($NumericOnly){1000}else{0}))
             if($remaining -le 0) {throw 'Owned command exceeded its original time budget.'}
             if($process.WaitForExit([Math]::Min(15000,$remaining))) {break}
-            Write-Host ("Still running {0}: {1}s; stdout={2} bytes stderr={3} bytes" -f [IO.Path]::GetFileName($FilePath),[int]$watch.Elapsed.TotalSeconds,$outStream.Length,$errStream.Length)
+            if(-not $NumericOnly) {Write-Host ("Still running {0}: {1}s; stdout={2} bytes stderr={3} bytes" -f [IO.Path]::GetFileName($FilePath),[int]$watch.Elapsed.TotalSeconds,$outStream.Length,$errStream.Length)}
         }
         $receipt.exitCode=$process.ExitCode;$receipt.directProcessDeathVerified=$true
         # Descendants can retain inherited output handles after the direct
         # command exits. EOF must fit this same deadline, not a fresh budget.
-        $remaining=[int][Math]::Floor($timeoutMilliseconds-$watch.Elapsed.TotalMilliseconds)
+        $remaining=[int][Math]::Floor($timeoutMilliseconds-$watch.Elapsed.TotalMilliseconds-$(if($NumericOnly){1000}else{0}))
         if($remaining -le 0 -or -not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($outTask,$errTask),$remaining)) {
             throw 'Owned command output pipes exceeded the original time budget.'
         }
@@ -585,8 +585,10 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         $receipt.pipeDrainComplete=$true
         if($process.ExitCode -ne 0) {
             $outStream.Flush();$errStream.Flush()
-            try {Write-CommandFailureTail $stdout 'stdout';Write-CommandFailureTail $stderr 'stderr'}
-            catch {Write-Host ('Owned failure tail unavailable: '+$_.Exception.Message)}
+            if(-not $NumericOnly) {
+                try {Write-CommandFailureTail $stdout 'stdout';Write-CommandFailureTail $stderr 'stderr'}
+                catch {Write-Host ('Owned failure tail unavailable: '+$_.Exception.Message)}
+            }
             throw "Command failed with exit $($process.ExitCode); inspect $stdout and $stderr"
         }
         $receipt.passed=$true
@@ -597,7 +599,7 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
                 if(-not $process.HasExited) {
                     $receipt.forcedTermination=$true;$receipt.processTreeCleanup='entire-process-tree-kill-requested'
                     $process.Kill($true)
-                    if(-not $process.WaitForExit(5000)) {throw 'Owned direct command death remains unproved after termination.'}
+                    if(-not $process.WaitForExit($(if($NumericOnly){1000}else{5000}))) {throw 'Owned direct command death remains unproved after termination.'}
                 }
                 $receipt.directProcessDeathVerified=$process.HasExited
                 if($process.HasExited) {$receipt.exitCode=$process.ExitCode}
@@ -618,10 +620,17 @@ function Invoke-LoggedCommand([string]$FilePath,[string[]]$Arguments,[string]$Wo
         if($receipt.cleanupErrors.Count -gt 0) {$receipt.passed=$false;if(-not $receipt.error){$receipt.error='Owned command resource cleanup failed.'}}
         $receipt.elapsedSeconds=[Math]::Round($watch.Elapsed.TotalSeconds,3)
         $receipt.finishedUtc=[DateTime]::UtcNow.ToString('o')
+        if($NumericOnly) {
+            $receipt=[ordered]@{schemaVersion=1;kind='numeric-source-component-command';startedUtc=$receipt.startedUtc;finishedUtc=$receipt.finishedUtc;
+                passed=[bool]$receipt.passed;exitCode=$receipt.exitCode;effectiveTimeoutMilliseconds=$receipt.effectiveTimeoutMilliseconds;
+                pipeDrainComplete=[bool]$receipt.pipeDrainComplete;forcedTermination=[bool]$receipt.forcedTermination;
+                directProcessDeathVerified=[bool]$receipt.directProcessDeathVerified;cleanupErrorCount=@($receipt.cleanupErrors).Count;
+                elapsedSeconds=$receipt.elapsedSeconds;failureObserved=[bool]$failure}
+        }
         Write-BuildJson ($LogPrefix+'.command.json') $receipt
     }
-    if($failure) {throw $failure}
-    if(-not $receipt.passed) {throw $receipt.error}
+    if($failure) {if($NumericOnly){throw 'Numeric source companion command failed.'};throw $failure}
+    if(-not $receipt.passed) {if($NumericOnly){throw 'Numeric source companion command failed.'};throw $receipt.error}
     return [pscustomobject]@{stdout=$stdout;stderr=$stderr;receipt=$LogPrefix+'.command.json';exitCode=$receipt.exitCode}
 }
 
@@ -2387,7 +2396,142 @@ function Get-WinAccBinaryProof([string]$Python,[string]$Repo,[string]$RuntimeRoo
     return $pe
 }
 
-function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot,[string]$SourceEvidenceDirectory) {
+
+# Component consistency only. Normal Full capture and final revalidation remain mandatory.
+function Get-OwnedSourceCompanionProduct($Receipt,[string]$RuntimeRoot,[string]$EvidenceDirectory) {
+    $p=$Receipt.sourceCompanionProof
+    if(-not $EvidenceDirectory -or -not [IO.Path]::IsPathFullyQualified($EvidenceDirectory)) {throw 'Source companion requires this-run evidence directory.'}
+    Assert-UnlinkedPath $EvidenceDirectory
+    $proofPath=Join-Path ([IO.Path]::GetFullPath($EvidenceDirectory)) 'source-companion-proof.json';Assert-UnlinkedPath $proofPath
+    if((Get-Item -LiteralPath $proofPath).Length -gt 65536) {throw 'Source companion proof exceeds its bound.'}
+    $original=[IO.File]::ReadAllBytes($proofPath)
+    $serialized=[Text.UTF8Encoding]::new($false,$true).GetBytes(($p|ConvertTo-Json -Depth 30 -Compress)+"`n")
+    if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($original)) -cne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($serialized))) {
+        throw 'Source companion embedded object differs from this-run proof.'
+    }
+    if($null -eq $p -or $Receipt.architecture -isnot [string] -or $Receipt.architecture -cne 'x64' -or $Receipt.sourcePin.coreCommit -isnot [string] -or $Receipt.sourcePin.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
+       ($p.schemaVersion -isnot [long] -and $p.schemaVersion -isnot [int])) {throw 'Source companion profile is absent.'}
+    if($p.schemaVersion -ne 1 -or $p.kind -cne 'source-built-x86-sharepoint-companion' -or $p.architecture -cne 'x64' -or
+       $p.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or $p.path -cne 'program/spsupp_x86.dll' -or $p.role -cne 'x86CompatibilityHelper' -or
+       ($p.machine -isnot [long] -and $p.machine -isnot [int])) {throw 'Source companion role is not reviewed.'}
+    if($p.machine -ne 332 -or $p.configuredX86 -isnot [bool] -or -not $p.configuredX86 -or
+       $p.fullEngineQualified -isnot [bool] -or $p.fullEngineQualified -or $p.acceptanceEligible -isnot [bool] -or $p.acceptanceEligible -or
+       $p.guiVerified -isnot [bool] -or $p.guiVerified -or @($p.sourceProofs).Count -ne 13) {throw 'Source companion metadata cannot qualify an engine.'}
+    foreach($name in @('sourceCommit','sourceTree')) {
+        if($p.buildBinding.$name -isnot [string] -or $Receipt.$name -isnot [string] -or $p.buildBinding.$name -cnotmatch '^[0-9a-f]{40}$' -or
+           $p.buildBinding.$name -cne $Receipt.$name) {throw 'Source companion belongs to a different source tree.'}
+    }
+    if(($p.buildBinding.sourceRun -isnot [long] -and $p.buildBinding.sourceRun -isnot [int]) -or $p.buildBinding.sourceRun -le 0 -or
+       $p.buildBinding.sourceRun -ne $Receipt.sourceRun -or ($p.buildBinding.runAttempt -isnot [long] -and $p.buildBinding.runAttempt -isnot [int]) -or
+       $p.buildBinding.runAttempt -ne 1 -or $p.buildBinding.runAttempt -ne $Receipt.runAttempt -or
+       $p.buildBinding.recipeSha256 -isnot [string] -or $p.buildBinding.recipeSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $p.buildBinding.recipeSha256 -cne $Receipt.sourceRecipeProof.recipeSha256) {throw 'Source companion run or recipe differs.'}
+    foreach($identity in @($p,$p.nativeHelper)) {
+        if(($identity.size -isnot [long] -and $identity.size -isnot [int]) -or $identity.size -lt 64 -or $identity.size -gt 16777216 -or
+           $identity.sha256 -isnot [string] -or $identity.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Source companion binary identity is invalid.'}
+    }
+    if(($p.nativeHelper.machine -isnot [long] -and $p.nativeHelper.machine -isnot [int]) -or $p.nativeHelper.path -isnot [string] -or $p.nativeHelper.path -cne 'program/spsupp_helper.exe' -or $p.nativeHelper.machine -ne 34404 -or $p.nativeHelper.role -cne 'nativeX64' -or
+       $p.linkTarget.path -cne 'workdir/LinkTarget/Library/spsupp_x86.dll' -or $p.linkTarget.size -ne $p.size -or $p.linkTarget.sha256 -cne $p.sha256) {
+        throw 'Source companion source target or native helper differs.'
+    }
+    $root=[IO.Path]::GetFullPath($RuntimeRoot);$path=Join-Path $root 'program/spsupp_x86.dll';Assert-UnlinkedPath $root;Assert-UnlinkedPath $path
+    $data=[IO.File]::ReadAllBytes($path)
+    if($data.Length -ne $p.size -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($data)).ToLowerInvariant() -cne $p.sha256 -or
+       $data[0] -ne 77 -or $data[1] -ne 90) {throw 'Source companion product bytes changed.'}
+    $offset=[BitConverter]::ToUInt32($data,60)
+    if($offset -lt 64 -or $offset+248 -gt $data.Length -or [BitConverter]::ToUInt32($data,[int]$offset) -ne 17744 -or
+       [BitConverter]::ToUInt16($data,[int]$offset+4) -ne 332 -or [BitConverter]::ToUInt16($data,[int]$offset+24) -ne 267 -or
+       -not([BitConverter]::ToUInt16($data,[int]$offset+22) -band 8192) -or [BitConverter]::ToUInt32($data,[int]$offset+232) -ne 0 -or
+       [BitConverter]::ToUInt32($data,[int]$offset+236) -ne 0) {throw 'Source companion is not the proven native x86 DLL.'}
+    $helper=Get-ProductPeIdentity (Join-Path $root 'program/spsupp_helper.exe') -Architecture x64
+    if($helper.role -cne 'nativeX64' -or $helper.machine -ne 34404 -or $helper.size -ne $p.nativeHelper.size -or $helper.sha256 -cne $p.nativeHelper.sha256) {
+        throw 'Source companion native helper bytes changed.'
+    }
+    return [ordered]@{path=$path;machine=332;role='x86CompatibilityHelper';sha256=$p.sha256;size=$p.size}
+}
+
+function Get-OwnedSourceTwainProduct($Receipt,[string]$RuntimeRoot,[string]$EvidenceDirectory) {
+    $p=$Receipt.sourceTwainProof
+    if(-not $EvidenceDirectory -or -not [IO.Path]::IsPathFullyQualified($EvidenceDirectory)) {throw 'Source TWAIN requires this-run evidence directory.'}
+    Assert-UnlinkedPath $EvidenceDirectory
+    $proofPath=Join-Path ([IO.Path]::GetFullPath($EvidenceDirectory)) 'source-twain-proof.json';Assert-UnlinkedPath $proofPath
+    if((Get-Item -LiteralPath $proofPath).Length -gt 65536) {throw 'Source TWAIN proof exceeds its bound.'}
+    $original=[IO.File]::ReadAllBytes($proofPath)
+    $serialized=[Text.UTF8Encoding]::new($false,$true).GetBytes(($p|ConvertTo-Json -Depth 30 -Compress)+"`n")
+    if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($original)) -cne [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($serialized))) {
+        throw 'Source TWAIN embedded object differs from this-run proof.'
+    }
+    if($null -eq $p -or $Receipt.architecture -isnot [string] -or $Receipt.architecture -cne 'x64' -or
+       $Receipt.sourcePin.coreCommit -isnot [string] -or $Receipt.sourcePin.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
+       ($p.schemaVersion -isnot [long] -and $p.schemaVersion -isnot [int]) -or $p.schemaVersion -ne 1 -or
+       $p.kind -cne 'source-built-x86-twain-companion' -or $p.architecture -cne 'x64' -or
+       $p.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or $p.path -cne 'program/twain32shim.exe' -or
+       $p.sourceIntent -cne 'twain-32bit-driver-process-bridge' -or $p.role -cne 'x86CompatibilityHelper' -or
+       ($p.machine -isnot [long] -and $p.machine -isnot [int]) -or $p.machine -ne 332) {throw 'Source TWAIN role is not reviewed.'}
+    if($p.configuredX86 -isnot [bool] -or -not $p.configuredX86 -or
+       $p.fullEngineQualified -isnot [bool] -or $p.fullEngineQualified -or $p.acceptanceEligible -isnot [bool] -or $p.acceptanceEligible -or
+       $p.guiVerified -isnot [bool] -or $p.guiVerified -or @($p.sourceProofs).Count -ne 25 -or @($p.exports).Count -ne 0 -or
+       $p.dependencyPolicy -cne 'x86-twain-os-only-no-private-shadow-v1') {throw 'Source TWAIN metadata cannot qualify an engine.'}
+    foreach($name in @('sourceCommit','sourceTree')) {
+        if($p.buildBinding.$name -isnot [string] -or $Receipt.$name -isnot [string] -or $p.buildBinding.$name -cnotmatch '^[0-9a-f]{40}$' -or
+           $p.buildBinding.$name -cne $Receipt.$name) {throw 'Source TWAIN belongs to a different source tree.'}
+    }
+    if(($p.buildBinding.sourceRun -isnot [long] -and $p.buildBinding.sourceRun -isnot [int]) -or $p.buildBinding.sourceRun -le 0 -or
+       $p.buildBinding.sourceRun -ne $Receipt.sourceRun -or ($p.buildBinding.runAttempt -isnot [long] -and $p.buildBinding.runAttempt -isnot [int]) -or
+       $p.buildBinding.runAttempt -ne 1 -or $p.buildBinding.runAttempt -ne $Receipt.runAttempt -or
+       $p.buildBinding.recipeSha256 -isnot [string] -or $p.buildBinding.recipeSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $p.buildBinding.recipeSha256 -cne $Receipt.sourceRecipeProof.recipeSha256 -or $p.installedArchive.kind -cne 'main' -or
+       $p.installedArchive.stageReceiptSha256 -isnot [string] -or $p.installedArchive.stageReceiptSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $p.installedArchive.stageReceiptSha256 -cne $Receipt.installedRuntimeStage.receipt.sha256) {throw 'Source TWAIN run, recipe or installed stage differs.'}
+    foreach($identity in @($p,$p.nativePeer)) {
+        if(($identity.size -isnot [long] -and $identity.size -isnot [int]) -or $identity.size -lt 64 -or $identity.size -gt 16777216 -or
+           $identity.sha256 -isnot [string] -or $identity.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Source TWAIN binary identity is invalid.'}
+    }
+    if(($p.nativePeer.machine -isnot [long] -and $p.nativePeer.machine -isnot [int]) -or $p.nativePeer.machine -ne 34404 -or
+       $p.nativePeer.path -cne 'program/scnlo.dll' -or $p.nativePeer.role -cne 'nativeX64' -or
+       $p.linkTarget.path -cne 'workdir/LinkTarget/Executable/twain32shim.exe' -or $p.linkTarget.size -ne $p.size -or
+       $p.linkTarget.sha256 -cne $p.sha256) {throw 'Source TWAIN source target or native scanner peer differs.'}
+    $root=[IO.Path]::GetFullPath($RuntimeRoot);$path=Join-Path $root 'program/twain32shim.exe';Assert-UnlinkedPath $root;Assert-UnlinkedPath $path
+    if((Get-Item -LiteralPath $path).Length -ne $p.size) {throw 'Source TWAIN product size changed.'}
+    $data=[IO.File]::ReadAllBytes($path)
+    if($data.Length -ne $p.size -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($data)).ToLowerInvariant() -cne $p.sha256 -or
+       $data[0] -ne 77 -or $data[1] -ne 90) {throw 'Source TWAIN product bytes changed.'}
+    $offset=[BitConverter]::ToUInt32($data,60)
+    if($offset -lt 64 -or $offset -gt 1048576 -or $offset+248 -gt $data.Length -or [BitConverter]::ToUInt32($data,[int]$offset) -ne 17744) {throw 'Source TWAIN PE headers are invalid.'}
+    $optional=[int]$offset+24;$optionalSize=[BitConverter]::ToUInt16($data,[int]$offset+20)
+    $flags=[BitConverter]::ToUInt16($data,[int]$offset+22);$sections=[BitConverter]::ToUInt16($data,[int]$offset+6)
+    if([BitConverter]::ToUInt16($data,[int]$offset+4) -ne 332 -or [BitConverter]::ToUInt16($data,$optional) -ne 267 -or
+       $optionalSize -lt 224 -or $optional+$optionalSize -gt $data.Length -or -not($flags -band 2) -or ($flags -band 8192) -or
+       [BitConverter]::ToUInt16($data,$optional+68) -ne 2 -or [BitConverter]::ToUInt32($data,$optional+92) -lt 15 -or
+       [BitConverter]::ToUInt32($data,$optional+96) -ne 0 -or [BitConverter]::ToUInt32($data,$optional+100) -ne 0 -or
+       [BitConverter]::ToUInt32($data,$optional+208) -ne 0 -or [BitConverter]::ToUInt32($data,$optional+212) -ne 0 -or
+       $sections -lt 1 -or $sections -gt 96 -or $optional+$optionalSize+$sections*40 -gt $data.Length) {throw 'Source TWAIN is not the proven native x86 GUI executable.'}
+    $entry=[BitConverter]::ToUInt32($data,$optional+16);$mapped=$false
+    for($i=0;$i -lt $sections;$i++) {
+        $section=$optional+$optionalSize+$i*40;$rva=[BitConverter]::ToUInt32($data,$section+12)
+        $rawSize=[BitConverter]::ToUInt32($data,$section+16);$raw=[BitConverter]::ToUInt32($data,$section+20)
+        if($entry -gt 0 -and $entry -ge $rva -and [long]$entry -lt [long]$rva+$rawSize -and
+           [long]$raw+$rawSize -le $data.Length -and ([BitConverter]::ToUInt32($data,$section+36) -band 0x20000000)) {$mapped=$true}
+    }
+    if(-not $mapped) {throw 'Source TWAIN entry point is not mapped to executable product bytes.'}
+    $peerPath=Join-Path $root 'program/scnlo.dll';Assert-UnlinkedPath $peerPath
+    if((Get-Item -LiteralPath $peerPath).Length -ne $p.nativePeer.size) {throw 'Source TWAIN scanner peer size changed.'}
+    $peer=[IO.File]::ReadAllBytes($peerPath)
+    if($peer.Length -lt 64 -or $peer.Length -ne $p.nativePeer.size -or $peer[0] -ne 77 -or $peer[1] -ne 90 -or
+       [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($peer)).ToLowerInvariant() -cne $p.nativePeer.sha256) {throw 'Source TWAIN scanner peer bytes changed.'}
+    $peerOffset=[BitConverter]::ToUInt32($peer,60)
+    if($peerOffset -lt 64 -or $peerOffset -gt 1048576 -or $peerOffset+264 -gt $peer.Length -or [BitConverter]::ToUInt32($peer,[int]$peerOffset) -ne 17744 -or
+       [BitConverter]::ToUInt16($peer,[int]$peerOffset+4) -ne 34404 -or [BitConverter]::ToUInt16($peer,[int]$peerOffset+24) -ne 523 -or
+       [BitConverter]::ToUInt16($peer,[int]$peerOffset+20) -lt 240 -or
+       -not([BitConverter]::ToUInt16($peer,[int]$peerOffset+22) -band 2) -or -not([BitConverter]::ToUInt16($peer,[int]$peerOffset+22) -band 8192) -or
+       [BitConverter]::ToUInt32($peer,[int]$peerOffset+132) -lt 15 -or
+       [BitConverter]::ToUInt32($peer,[int]$peerOffset+248) -ne 0 -or [BitConverter]::ToUInt32($peer,[int]$peerOffset+252) -ne 0) {throw 'Source TWAIN scanner peer is not the proven native x64 DLL.'}
+    $native=Get-ProductPeIdentity $peerPath -Architecture x64
+    if($native.role -cne 'nativeX64' -or $native.machine -ne 34404 -or $native.size -ne $p.nativePeer.size -or $native.sha256 -cne $p.nativePeer.sha256) {throw 'Source TWAIN scanner identity changed.'}
+    return [ordered]@{path=$path;machine=332;role='x86CompatibilityHelper';sha256=$p.sha256;size=$p.size}
+}
+
+function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot,[string]$SourceEvidenceDirectory,[string]$CompanionEvidenceDirectory="") {
     $target=Get-NativeEngineTarget x64
     if($Receipt.schemaVersion -ne 2 -or $Receipt.architecture -cne 'x64' -or $Receipt.phase -ine 'Full' -or $Receipt.kind -cne 'native-office-engine-source-build' -or
        $Receipt.passed -ne $false -or $Receipt.fullEngineQualified -ne $false -or $Receipt.acceptanceEligible -ne $false -or $Receipt.guiVerified -ne $false -or
@@ -2402,6 +2546,23 @@ function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot,[string]$So
     Assert-NativeBuildHost $Receipt.host x64
     Assert-NativeSourceRecipeBinding $Receipt x64 $SourceEvidenceDirectory
     Assert-WinAccBinaryProof $Receipt.winAccBinary $RuntimeRoot x64
+    if($Receipt.sourcePin.coreCommit -ceq '9dea406ab7695df6325b11b0e19fdca8db4b7276') {
+        $companion=Get-OwnedSourceCompanionProduct $Receipt $RuntimeRoot $CompanionEvidenceDirectory
+        $twain=Get-OwnedSourceTwainProduct $Receipt $RuntimeRoot $CompanionEvidenceDirectory
+        $rows=@($Receipt.productInventory|Where-Object {$_.role -ceq 'x86CompatibilityHelper'})
+        if($Receipt.companionPeCount -ne 2 -or $rows.Count -ne 2) {throw 'Source companion inventory is incomplete.'}
+        foreach($owned in @($companion,$twain)) {
+            $matches=@($rows|Where-Object {$_.path -ceq $owned.path})
+            if($matches.Count -ne 1 -or $matches[0].machine -ne 332 -or $matches[0].sha256 -cne $owned.sha256 -or
+               $matches[0].size -ne $owned.size) {throw 'Source companion inventory differs from the two owned products.'}
+        }
+        foreach($peer in @($Receipt.sourceCompanionProof.nativeHelper,$Receipt.sourceTwainProof.nativePeer)) {
+            $peerPath=Join-Path $RuntimeRoot $peer.path
+            $matches=@($Receipt.productInventory|Where-Object {$_.path -ceq $peerPath})
+            if($matches.Count -ne 1 -or $matches[0].role -cne 'nativeX64' -or $matches[0].machine -ne 34404 -or
+               $matches[0].sha256 -cne $peer.sha256 -or $matches[0].size -ne $peer.size) {throw 'Source companion native peer inventory is incomplete.'}
+        }
+    }
     $binding=$Receipt.workflowBinding
     if($binding.workflow -cne $target.workflow -or $binding.workflowRef -cne ('ATLKR/OpenGeul/'+$target.workflow+'@'+$target.ref) -or $binding.ref -cne $target.ref -or $binding.job -cne $target.job -or
        $binding.sourceRun -ne $Receipt.sourceRun -or $binding.runAttempt -ne $Receipt.runAttempt -or $binding.sourceCommit -cne $Receipt.sourceCommit -or $binding.sourceTree -cne $Receipt.sourceTree) {throw 'x64 workflow/source/run binding differs.'}
@@ -2664,6 +2825,34 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             $receipt.stage='stage-authenticated-native-app-local-crt';Assert-NativeBuildTimeRemaining
             $receipt.appLocalCrt=Install-AppLocalCrt $receipt.crtPreflight (Join-Path $instdir 'program') $crtTerms $Architecture
             Write-BuildJson (Join-Path $evidence 'app-local-crt-installed.json') $receipt.appLocalCrt
+            $ownedCompanion=$null;$ownedTwain=$null
+            if($Architecture -ceq 'x64' -and $receipt.sourcePin.coreCommit -ceq '9dea406ab7695df6325b11b0e19fdca8db4b7276') {
+                $receipt.stage='source-companion-audit';Assert-NativeBuildTimeRemaining
+                $companionScript=Join-Path $repo 'suite/engine-build/capture_source_companion.py'
+                $companionContext=Join-Path $commands 'source-companion-context.json'
+                Write-BuildJson $companionContext ([ordered]@{schemaVersion=1;architecture='x64';coreCommit=$receipt.sourcePin.coreCommit;
+                    buildBinding=[ordered]@{sourceCommit=$receipt.sourceCommit;sourceTree=$receipt.sourceTree;sourceRun=$receipt.sourceRun;runAttempt=$receipt.runAttempt;recipeSha256=$receipt.sourceRecipeProof.recipeSha256};
+                    stageReceiptSha256=$receipt.installedRuntimeStage.receipt.sha256})
+                $companionArguments=@('-I','-B',$companionScript,'--source',$source,'--runtime',$instdir,'--stage',(Join-Path $evidence 'installed-runtime-stage.json'),'--context',$companionContext,'--evidence',$evidence)
+                Invoke-LoggedCommand $python $companionArguments $repo (Join-Path $evidence 'source-companion-capture') -TimeoutMinutes 1 -NativeEnvironment -NumericOnly|Out-Null
+                $companionProofPath=Join-Path $evidence 'source-companion-proof.json'
+                if((Get-Item -LiteralPath $companionProofPath).Length -gt 65536) {throw 'Source companion proof exceeds its bound.'}
+                $receipt.sourceCompanionProof=Get-Content -LiteralPath $companionProofPath -Raw|ConvertFrom-Json
+                $ownedCompanion=Get-OwnedSourceCompanionProduct $receipt $instdir $evidence
+                $receipt.stage='source-twain-audit';Assert-NativeBuildTimeRemaining
+                $twainScript=Join-Path $repo 'suite/engine-build/capture_source_twain.py'
+                $twainContext=Join-Path $commands 'source-twain-context.json'
+                Write-BuildJson $twainContext ([ordered]@{schemaVersion=1;architecture='x64';coreCommit=$receipt.sourcePin.coreCommit;
+                    buildBinding=[ordered]@{sourceCommit=$receipt.sourceCommit;sourceTree=$receipt.sourceTree;sourceRun=$receipt.sourceRun;runAttempt=$receipt.runAttempt;recipeSha256=$receipt.sourceRecipeProof.recipeSha256};
+                    stageReceiptSha256=$receipt.installedRuntimeStage.receipt.sha256;sourceEvidenceDirectory=$sourceEvidence;
+                    cliPolicyEvidence=[ordered]@{original=$receipt.sourceHooks.cliPublisherPolicyPlatform.evidence.original;effective=$receipt.sourceHooks.cliPublisherPolicyPlatform.evidence.effective}})
+                $twainArguments=@('-I','-B',$twainScript,'--source',$source,'--runtime',$instdir,'--stage',(Join-Path $evidence 'installed-runtime-stage.json'),'--context',$twainContext,'--evidence',$evidence)
+                Invoke-LoggedCommand $python $twainArguments $repo (Join-Path $evidence 'source-twain-capture') -TimeoutMinutes 1 -NativeEnvironment -NumericOnly|Out-Null
+                $twainProofPath=Join-Path $evidence 'source-twain-proof.json'
+                if((Get-Item -LiteralPath $twainProofPath).Length -gt 65536) {throw 'Source TWAIN proof exceeds its bound.'}
+                $receipt.sourceTwainProof=Get-Content -LiteralPath $twainProofPath -Raw|ConvertFrom-Json
+                $ownedTwain=Get-OwnedSourceTwainProduct $receipt $instdir $evidence
+            }
             $receipt.stage='native-product-pe-audit';Assert-NativeBuildTimeRemaining
             foreach($relative in @('program/soffice.bin','program/python.exe','program/pyuno.pyd','program/ifbclient.dll','program/Engine12.dll','program/intl/fbintl.dll')) {
                 $critical=Get-AuditedProductPeIdentity (Join-Path $instdir $relative) $instdir $evidence $Architecture -RequireNative
@@ -2672,13 +2861,18 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             foreach($file in Get-ChildItem -LiteralPath $instdir -File -Recurse) {
                 Assert-NativeBuildTimeRemaining
                 $stream=$file.OpenRead();try {$first=$stream.ReadByte();$second=$stream.ReadByte()} finally {$stream.Dispose()}
-                if(($first -eq 77 -and $second -eq 90) -or $file.Extension -in @('.exe','.dll','.pyd') -or $file.Name -eq 'soffice.bin') {$inventory+=Get-AuditedProductPeIdentity $file.FullName $instdir $evidence $Architecture}
+                if(($first -eq 77 -and $second -eq 90) -or $file.Extension -in @('.exe','.dll','.pyd') -or $file.Name -eq 'soffice.bin') {
+                    if($ownedCompanion -and $file.FullName -ceq $ownedCompanion.path) {$inventory+=Get-OwnedSourceCompanionProduct $receipt $instdir $evidence}
+                    elseif($ownedTwain -and $file.FullName -ceq $ownedTwain.path) {$inventory+=Get-OwnedSourceTwainProduct $receipt $instdir $evidence}
+                    else {$inventory+=Get-AuditedProductPeIdentity $file.FullName $instdir $evidence $Architecture}
+                }
             }
             if($inventory.Count -eq 0) {throw 'Native PE inventory is empty.'}
             Write-BuildJson (Join-Path $evidence 'native-pe-inventory.json') $inventory
             $receipt.productPeCount=$inventory.Count
             $receipt.nativePeCount=@($inventory|Where-Object {$_.role -eq $nativeRole}).Count
             $receipt.managedAnyCpuCount=@($inventory|Where-Object {$_.role -eq 'managedAnyCpu'}).Count
+            if($ownedCompanion) {$receipt.companionPeCount=@($inventory|Where-Object {$_.role -ceq 'x86CompatibilityHelper'}).Count}
             $receipt.pinnedTemplateCount=@($inventory|Where-Object {$_.role -eq 'pythonLauncherTemplate'}).Count
             $receipt.stage='native-normal-delay-crt-import-closure';Assert-NativeBuildTimeRemaining
             $receipt.crtImportClosure=Invoke-CrtImportAudit (Join-Path $instdir 'program/python.exe') $repo $instdir $evidence $Architecture
@@ -2722,7 +2916,15 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 if((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configurationSha256 -or
                    (Get-FileHash -LiteralPath (Join-Path $source 'autogen.input') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configureArgumentsSha256) {throw 'Native configuration changed during compilation.'}
                 Assert-CygwinNasmConfiguration $receipt.configuration $receipt.nasmBuildTool
-                Assert-NativeX64Qualification $receipt $instdir $sourceEvidence
+                if($ownedCompanion) {
+                    $receipt.stage='revalidate-source-companion';Assert-NativeBuildTimeRemaining
+                    Invoke-LoggedCommand $python @($companionArguments+'--validate') $repo (Join-Path $evidence 'source-companion-revalidate') -TimeoutMinutes 1 -NativeEnvironment -NumericOnly|Out-Null
+                }
+                if($ownedTwain) {
+                    $receipt.stage='revalidate-source-twain';Assert-NativeBuildTimeRemaining
+                    Invoke-LoggedCommand $python @($twainArguments+'--validate') $repo (Join-Path $evidence 'source-twain-revalidate') -TimeoutMinutes 1 -NativeEnvironment -NumericOnly|Out-Null
+                }
+                Assert-NativeX64Qualification $receipt $instdir $sourceEvidence $evidence
             }
             $receipt.stage=if($CalcDispatchDiagnostic){'package-calc-dispatch-diagnostic'}else{'package-qualified-source-build'};Assert-NativeBuildTimeRemaining
             $zip=Join-Path $evidence $mode.archive
