@@ -658,7 +658,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
         self.assertEqual(before,{p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
     def test_gpg_input_drift_is_rejected_before_any_source_or_evidence_write(self):
-        target=self.gpg_input();target.write_bytes(target.read_bytes()+b'\n')
+        target=self.gpg_input();self.policy_input();target.write_bytes(target.read_bytes()+b'\n')
         before={p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()}
         with self.assertRaises(ValueError):self.install('x64')
         self.assertEqual([],list(self.evidence.iterdir()))
