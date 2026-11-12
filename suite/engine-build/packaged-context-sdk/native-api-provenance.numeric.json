@@ -1,0 +1,12 @@
+{
+  "actualWindowsExecuted": false,
+  "adaptation": "finite-sdk-environment-only; explicit RUNNER_TEMP handoff",
+  "candidateSha256": "1e2ae98c59e7fb552548f876c6a13566e082eced74f154ee15061715ae8ebb1c",
+  "kind": "typed-private-job-source-reuse",
+  "nativeApiClassBytesUnchanged": true,
+  "schemaVersion": 1,
+  "source": "suite/engine-build/dotnet_graph/runtime/sdk_win32.py",
+  "sourceLocatorIsHistorical": true,
+  "sourceModified": false,
+  "sourceSha256": "2710deeda6c7cd37d5e997350f0f82a5746f5d412ec9659e07ca2af5e1adab93"
+}

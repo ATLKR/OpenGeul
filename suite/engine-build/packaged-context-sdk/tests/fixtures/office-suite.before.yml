@@ -1,0 +1,1385 @@
+name: OpenGeul Office Suite 개발 검증
+'on':
+  push:
+    branches:
+    - work/opengeul-office-suite
+    - work/opengeul-office-arm64
+  workflow_dispatch:
+    inputs:
+      writer_server_observer:
+        description: 'Run only the owned Writer numeric diagnostic on its dedicated branch'
+        type: boolean
+        default: false
+        required: false
+      writer_observer_suite_head:
+        description: 'Exact reviewed Suite commit on the Writer branch; no default pin'
+        type: string
+        required: false
+      writer_observer_phase_seconds:
+        description: 'Explicit finite fresh-child total bound, canonical integer 6..1200; adequacy unverified'
+        type: string
+        required: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: office-suite-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  # Paired native menu verification and all original acceptance gates are required.
+  OPENGEUL_SUITE_RUN_MODE: acceptance
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+jobs:
+  windows-suite:
+    if: github.event.repository.private == false && (github.ref != 'refs/heads/work/opengeul-office-native-writer-observer')
+    name: windows-suite (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - architecture: x64
+          runner: windows-2025
+        - architecture: arm64
+          runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+    - name: Validate fixed Suite run mode
+      id: run-mode
+      shell: pwsh
+      run: |
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cnotin @('acceptance', 'navigation-diagnostic', 'ime-mode-diagnostic', 'focus-diagnostic', 'sal-offset-mapping', 'com-wait-diagnostic', 'mutex-function-mapping', 'matched-plugin-caller', 'reader-console-diagnostic', 'calc-dispatch-diagnostic')) {
+          throw 'Unknown Suite run mode.'
+        }
+    - name: 정확한 소스 바이트 보존
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: ${{ matrix.architecture }}
+    - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73
+      with:
+        dotnet-version: '10.0.404'
+        skip-lts-prepass: true
+        architecture: ${{ matrix.architecture }}
+    - name: 독립 PDF 검증 도구의 고정 해시 확인·설치
+      shell: pwsh
+      run: |
+        python -m pip install --require-hashes --only-binary=:all: -r suite/config/pdf-e2e-requirements.txt
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF verification tooling installation failed.' }
+        python -m pip install Pillow==13.0.0
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned image verification tooling installation failed.' }
+        python -m pip install PyYAML==6.0.3
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned YAML workflow tooling installation failed.' }
+    - name: Suite 단위 검사와 Windows shell 빌드 검사
+      id: suite-unit-shell
+      env:
+        OPENGEUL_SUITE_UNIT_NOTICE: '1'
+      shell: pwsh
+      run: |
+        $beforeCapabilityExit = 1
+        try {
+          python -B suite/scripts/unit-capability-receipt.py --phase before --output .work/suite-unit-capabilities
+          $beforeCapabilityExit = $LASTEXITCODE
+        } catch { Write-Host 'Before unit capability receipt failed.' }
+        $unitExit = 1
+        $unitFailure = $null
+        $afterCapabilityExit = 1
+        try {
+          python -m suite.scripts.run_unit_checks -s suite/tests -v
+          $unitExit = $LASTEXITCODE
+        } catch { $unitFailure = $_ }
+        finally {
+          try {
+            python -B suite/scripts/unit-capability-receipt.py --phase after --output .work/suite-unit-capabilities
+            $afterCapabilityExit = $LASTEXITCODE
+          } catch { Write-Host 'After unit capability receipt failed.' }
+        }
+        $shellExit = 1
+        $shellFailure = $null
+        try {
+          dotnet run --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release
+          $shellExit = $LASTEXITCODE
+        } catch { $shellFailure = $_ }
+        if ($null -ne $unitFailure) { throw $unitFailure }
+        if ($unitExit -ne 0) { throw 'Suite unit tests failed.' }
+        if ($null -ne $shellFailure) { throw $shellFailure }
+        if ($shellExit -ne 0) { throw 'Suite shell tests failed.' }
+        if ($beforeCapabilityExit -ne 0 -or $afterCapabilityExit -ne 0) { throw 'Suite unit capability receipts failed.' }
+    - name: 고정 버전의 패키지 경로 선택
+      id: runtime-input
+      shell: pwsh
+      run: |
+        $architecture = '${{ matrix.architecture }}'
+        $lockPath = if ($architecture -ceq 'arm64') { 'suite/config/runtime.arm64.lock.json' } else { 'suite/config/runtime.lock.json' }
+        $lock = Get-Content $lockPath -Raw | ConvertFrom-Json
+        if ($lock.architecture -cne $architecture -or $lock.version -cnotmatch '\A[0-9]+\.[0-9]+\.[0-9]+-dev\z') { throw 'Unexpected Suite lock identity.' }
+        if ($lock.runtime -isnot [pscustomobject]) { throw 'Suite runtime identity is missing.' }
+        $runtimeFormat = if ($lock.runtime.PSObject.Properties.Name -ccontains 'format') { $lock.runtime.format } else { 'msi' }
+        if ($runtimeFormat -isnot [string] -or $runtimeFormat -cnotin @('msi', 'source-built-zip')) { throw 'Unsupported Suite runtime format.' }
+        if ($runtimeFormat -ceq 'source-built-zip') {
+          python -c "import pathlib,sys; from suite.payload import _json_bytes; from suite.prepare import validate_source_build_lock; value=_json_bytes(pathlib.Path(sys.argv[1]).read_bytes(),'runtime lock'); validate_source_build_lock(value['runtime'],architecture=sys.argv[2])" $lockPath $architecture
+          if ($LASTEXITCODE -ne 0) { throw 'Source runtime lock admission failed.' }
+        }
+        "SUITE_RUNTIME_FORMAT=$runtimeFormat" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "SUITE_RUNTIME_LOCK=$lockPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "SUITE_PACKAGE=dist/OpenGeul-Office-$($lock.version)-windows-$architecture" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - name: Admit isolated diagnostics against exact owner-push source
+      id: sal-offset-admission
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' || env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic' || env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic'"
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        . ./suite/scripts/prepare-native31.ps1
+        Assert-Native31Context '${{ matrix.architecture }}'
+        $proof = @'
+        import hashlib, os, pathlib, stat, subprocess, tempfile, time
+        deadline = time.monotonic() + 30
+        def remaining():
+            value = deadline - time.monotonic()
+            if value <= 0:
+                raise TimeoutError('Original static source-admission deadline expired')
+            return value
+        def git(*args):
+            remaining()
+            with tempfile.TemporaryFile() as output:
+                subprocess.run(['git', *args], stdout=output, stderr=subprocess.DEVNULL, check=True, timeout=remaining())
+                remaining()
+                assert output.tell() <= 1048576, 'Static source Git output exceeds bound'
+                output.seek(0)
+                result = output.read(1048577)
+                remaining()
+                return result
+        def regular_ancestors(path):
+            for part in (path, *path.parents):
+                remaining()
+                info = part.lstat()
+                assert not stat.S_ISLNK(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & 1024, 'Static source path is aliased'
+                remaining()
+            return path.stat()
+        assert git('rev-parse', 'HEAD').decode().strip() == os.environ['GITHUB_SHA'], 'Static analysis HEAD differs from event'
+        git('diff', '--cached', '--quiet', 'HEAD', '--')
+        regular_ancestors(pathlib.Path.cwd())
+        total = 0
+        for item in git('ls-tree', '-rz', '--full-tree', 'HEAD').split(b'\0'):
+            remaining()
+            if not item:
+                continue
+            metadata, name = item.split(b'\t', 1)
+            mode, kind, expected = metadata.split()
+            path = pathlib.Path(os.fsdecode(name))
+            if mode == b'160000':
+                assert kind == b'commit' and not path.is_symlink(), 'Invalid tracked gitlink'
+                if path.exists():
+                    regular_ancestors(path)
+                    assert path.is_dir() and next(path.iterdir(), None) is None, 'Static analysis requires uninitialized gitlinks'
+                remaining()
+                continue
+            info = regular_ancestors(path)
+            assert mode in (b'100644', b'100755') and kind == b'blob' and stat.S_ISREG(info.st_mode), 'Static analysis requires regular tracked files'
+            assert info.st_size <= 8388608, 'Static source file exceeds bound'
+            total += info.st_size
+            assert total <= 67108864, 'Static source bytes exceed bound'
+            digest = hashlib.sha1(b'blob ' + str(info.st_size).encode() + b'\0')
+            with path.open('rb') as source:
+                opened = os.fstat(source.fileno())
+                assert (opened.st_dev, opened.st_ino, opened.st_size) == (info.st_dev, info.st_ino, info.st_size), 'Static source changed before read'
+                seen = 0
+                while True:
+                    remaining()
+                    chunk = source.read(min(1048576, info.st_size - seen + 1))
+                    remaining()
+                    if not chunk:
+                        break
+                    seen += len(chunk)
+                    assert seen <= info.st_size, 'Static source grew during read'
+                    digest.update(chunk)
+                assert seen == info.st_size, 'Static source shrank during read'
+            after = regular_ancestors(path)
+            assert (after.st_dev, after.st_ino, after.st_size) == (info.st_dev, info.st_ino, info.st_size), 'Static source changed during read'
+            assert digest.hexdigest().encode() == expected, 'Static analysis tracked bytes differ from event'
+        remaining()
+        '@
+        $proof | python -
+        if ($LASTEXITCODE -ne 0) { throw 'Static SAL source admission failed.' }
+
+    - name: 고정한 네이티브 소스 빌드 입력 확보
+      id: source-engine
+      if: "env.SUITE_RUNTIME_FORMAT == 'source-built-zip' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && (matrix.architecture == 'arm64' || (env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic')) && ((env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic') || steps.sal-offset-admission.outcome == 'success') && (env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' || (steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success'))"
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath $env:SUITE_RUNTIME_LOCK -Output .work/source-engine-input
+
+    - name: Map observed SAL offset from locked ARM64 bytes (not acceptance)
+      id: sal-offset-mapping
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/map-sal-offset.py --archive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip --lock suite/config/runtime.arm64.lock.json --output .work/suite-sal-offset-mapping/receipt.json
+        if ($LASTEXITCODE -ne 0) { throw 'Static SAL mapping rejected its input.' }
+    - name: Retain only static SAL mapping receipt
+      id: sal-offset-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping' && matrix.architecture == 'arm64' && steps.sal-offset-mapping.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-sal-offset-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-sal-offset-mapping/receipt.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Static SAL mapping cannot qualify a Suite package
+      id: sal-offset-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'sal-offset-mapping'"
+      shell: pwsh
+      run: |
+        throw 'Static SAL mapping only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Isolated synthetic STA COM wait diagnostic (not acceptance)
+      id: com-wait-diagnostic
+      env:
+        OPENGEUL_COM_WAIT_ADMITTED_SHA: ${{ github.sha }}
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success'"
+      shell: pwsh
+      run: |
+        dotnet run --no-build --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release -- --com-wait-diagnostic --architecture '${{ matrix.architecture }}' --output .work/suite-com-wait-diagnostic/receipt.json
+        if ($LASTEXITCODE -ne 0) { throw 'Synthetic COM wait fixture failed; no product conclusion is valid.' }
+    - name: Retain only synthetic COM wait receipt
+      id: com-wait-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic' && steps.com-wait-diagnostic.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-com-wait-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-com-wait-diagnostic/receipt.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Synthetic COM wait cannot qualify a Suite package
+      id: com-wait-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'com-wait-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Synthetic COM wait only: physical Office input and full Suite acceptance were not run; package delivery is prohibited.'
+    - name: Compile only native mutex layout fixture (never execute)
+      id: mutex-layout-fixture
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/prepare-mutex-fixture.py --architecture arm64 --output (Join-Path (Get-Location) '.work/suite-mutex-layout-fixture')
+        if ($LASTEXITCODE -ne 0) { throw 'Static mutex fixture preparation failed.' }
+    - name: Attribute private mutex function using authenticated static metadata
+      id: mutex-function-mapping
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.mutex-layout-fixture.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/map-mutex-function.py --archive .work/source-engine-input/OpenGeul-Office-engine-arm64.zip --lock suite/config/runtime.arm64.lock.json --fixture .work/suite-mutex-layout-fixture/mutex-layout-fixture.dll --output .work/suite-mutex-function-mapping/receipt.json --inspect-calls
+        if ($LASTEXITCODE -ne 0) { throw 'Static mutex attribution rejected its inputs.' }
+    - name: Retain only mutex attribution and compiler lifecycle receipts
+      id: mutex-function-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping' && matrix.architecture == 'arm64' && steps.mutex-layout-fixture.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-mutex-function-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-mutex-layout-fixture/receipt.json
+          .work/suite-mutex-function-mapping/receipt.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Static mutex attribution cannot qualify a Suite package
+      id: mutex-function-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'mutex-function-mapping'"
+      shell: pwsh
+      run: |
+        throw 'Static mutex attribution only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Fetch exact matched ARM64 plugin symbols
+      id: matched-symbol-inputs
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic') && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'"
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-plugin-symbols.ps1 -SymbolLockPath suite/config/plugin-symbols.arm64.lock.json -Output .work/plugin-symbol-input
+
+    - name: Qualify file-only system DbgHelp before GUI preparation
+      id: matched-symbol-qualification
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' || env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic') && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success' && steps.matched-symbol-inputs.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/matched_plugin_diagnostic.py --mode qualify --pair .work/plugin-symbol-input/pair --output .work/suite-matched-plugin/qualification.json
+        if ($LASTEXITCODE -ne 0) { throw 'Native local symbols unavailable; no GUI experiment is admitted.' }
+
+    - name: 고정 입력으로 별도 Suite 개발 패키지 빌드
+      if: "env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || (matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic' || (steps.sal-offset-admission.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'focus-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success')) && (env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' || (matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success'))"
+      shell: pwsh
+      run: |
+        $architecture = '${{ matrix.architecture }}'
+        if ($architecture -cnotin @('x64', 'arm64')) { throw 'Unsupported Suite build architecture.' }
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          if ('${{ steps.source-engine.outcome }}' -cne 'success') { throw 'Authenticated source engine acquisition failed; no alternate input is admitted.' }
+          ./suite/scripts/build-suite.ps1 -Architecture $architecture -EngineArchive ".work/source-engine-input/OpenGeul-Office-engine-$architecture.zip" -EngineReceipt .work/source-engine-input/source-build-receipt.json
+        } elseif ($env:SUITE_RUNTIME_FORMAT -ceq 'msi') {
+          ./suite/scripts/build-suite.ps1 -Architecture $architecture
+        } else {
+          throw 'Validated runtime format is required before building the Suite.'
+        }
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance' -or ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'ime-mode-diagnostic' -and '${{ matrix.architecture }}' -ceq 'arm64')) {
+          $ErrorActionPreference = 'Stop'
+          $suiteArchive = [System.IO.Path]::GetFullPath("$($env:SUITE_PACKAGE).zip")
+          $portableParent = Join-Path (Get-Location).Path '.work/suite-portable'
+          if (-not (Test-Path -LiteralPath $portableParent)) {
+            New-Item -ItemType Directory -Path $portableParent | Out-Null
+          }
+          $portableName = "$($env:GITHUB_RUN_ID)-${{ matrix.architecture }}-$($env:GITHUB_RUN_ATTEMPT) 휴대용 검증"
+          $portableRoot = Join-Path $portableParent $portableName
+          $portableReceipt = Join-Path $portableParent "$portableName.receipt.json"
+          python suite/scripts/portable-package-check.py --baseline $env:SUITE_PACKAGE --archive $suiteArchive --output $portableRoot --receipt $portableReceipt
+          if ($LASTEXITCODE -ne 0) { throw 'Portable final ZIP file check failed.' }
+          $receipt = Get-Content -LiteralPath $portableReceipt -Raw | ConvertFrom-Json
+          if ($receipt.schemaVersion -isnot [long] -or $receipt.schemaVersion -ne 1 -or
+              $receipt.kind -isnot [string] -or $receipt.kind -cne 'portable-package-file-check' -or
+              $receipt.sourceCommit -isnot [string] -or $receipt.sourceCommit -cne $env:GITHUB_SHA -or
+              $receipt.architecture -isnot [string] -or $receipt.architecture -cne '${{ matrix.architecture }}') {
+            throw 'Portable final ZIP receipt identity differs from this workflow.'
+          }
+          foreach ($flag in @('passed', 'archiveInventoryMatched', 'relocationVerified', 'sameVersionCoexistenceVerified', 'corruptionDetected', 'repairVerified')) {
+            if ($receipt.$flag -isnot [bool] -or $receipt.$flag -cne $true) { throw "Portable final ZIP receipt lacks $flag." }
+          }
+          foreach ($flag in @('updateVerified', 'guiVerified')) {
+            if ($receipt.$flag -isnot [bool] -or $receipt.$flag -cne $false) { throw "Portable file check cannot claim $flag." }
+          }
+          if ($receipt.existingHwpPreserved.passed -isnot [bool] -or $receipt.existingHwpPreserved.passed -cne $true) {
+            throw 'Portable final ZIP did not preserve existing HWP bytes.'
+          }
+          $expectedExtracted = Join-Path $portableRoot 'OpenGeul Office 설치 검증'
+          $expectedRepaired = Join-Path $portableRoot 'OpenGeul Office 복구 검증'
+          if ($receipt.extractedRoot -isnot [string] -or $receipt.extractedRoot -cne $expectedExtracted -or
+              $receipt.repairedRoot -isnot [string] -or $receipt.repairedRoot -cne $expectedRepaired) {
+            throw 'Portable final ZIP receipt roots differ from the owned extractions.'
+          }
+          $foreignCwd = Join-Path $portableRoot '외부 작업 폴더'
+          New-Item -ItemType Directory -Path $foreignCwd | Out-Null
+          "SUITE_ARCHIVE=$suiteArchive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SUITE_PACKAGE=$expectedRepaired" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SUITE_FOREIGN_CWD=$foreignCwd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        }
+      id: build
+
+    - name: Verify native packaged worker bootstrap without a console
+      id: worker-runtime
+      if: "!cancelled() && steps.suite-unit-shell.outcome == 'success' && steps.build.outcome == 'success'"
+      shell: pwsh
+      run: |
+        $suiteRoot = [System.IO.Path]::GetFullPath($env:SUITE_PACKAGE)
+        dotnet run --no-build --project suite/shell-tests/OpenGeul.Office.Tests.csproj -c Release -- --worker-runtime-probe --suite $suiteRoot --architecture '${{ matrix.architecture }}'
+        if ($LASTEXITCODE -ne 0) { throw 'Packaged worker bootstrap, console absence or original generation exit unverified.' }
+
+    - name: 실제 한국어 IME와 네이티브 UI 검사 준비
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9
+        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
+        ./suite/scripts/ensure-korean-ime.ps1 -Architecture '${{ matrix.architecture }}' -Output .work/suite-korean-readiness
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
+      id: readiness
+      if: "!cancelled() && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
+    - name: 한국어 입력 환경의 준비·실패 기록 즉시 보존
+      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-korean-readiness-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
+        retention-days: 1
+        if-no-files-found: error
+    - name: Suite native ARM64 privacy preparation
+      id: native31-privacy-prepare
+      if: "!cancelled() && github.ref == 'refs/heads/work/opengeul-office-arm64' && steps.build.outcome == 'success' && (steps.readiness.outcome == 'success' || (env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.sal-offset-admission.outcome == 'success'))"
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '12'
+      shell: pwsh
+      timeout-minutes: 3
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic') {
+          python -m pip install pywinauto==0.6.9
+          if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
+        }
+        ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
+    - name: Suite native31 setup and control originals
+      if: "(env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic' || matrix.architecture == 'arm64') && always() && github.ref == 'refs/heads/work/opengeul-office-arm64' && env.OPENGEUL_SUITE_RUN_MODE != 'sal-offset-mapping' && env.OPENGEUL_SUITE_RUN_MODE != 'com-wait-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'mutex-function-mapping' && (env.OPENGEUL_SUITE_RUN_MODE != 'matched-plugin-caller' || steps.native31-privacy-prepare.outcome != 'skipped') && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          ${{ runner.temp }}/suite-native31-setup-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}/
+          ${{ runner.temp }}/suite-native31-privacy-preparation-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: 실제 Office 엔진의 생성·편집·저장·재열기
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
+      id: fixtures
+      if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
+    - name: 여섯 모듈 native 메뉴·키보드·포커스 실제 검증
+      id: native-menu-ui
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && steps.suite-unit-shell.outcome == 'success' && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-native-menu/worker-diagnostics
+      shell: pwsh
+      timeout-minutes: 15
+      run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        python suite/e2e/native_menu_smoke.py --suite "$env:SUITE_PACKAGE" --fixtures .work/suite-engine/fixtures --output .work/suite-native-menu @sourceMenuArgs
+        $menuExit = $LASTEXITCODE
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Native menu scenario changed the packaged payload.' }
+        if ($menuExit -ne 0) { throw 'Actual native menu, focus or owned shutdown verification failed.' }
+    - name: 별도 native 메뉴 원본 여섯 세대·종료 기록 검증
+      id: native-menu-archive-integrity
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance'"
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ('${{ steps.native-menu-ui.outcome }}' -ceq 'skipped') {
+          $architecture = '${{ matrix.architecture }}'
+          $runId = 0L
+          $runAttempt = 0
+          if ($env:GITHUB_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or
+              -not [long]::TryParse($env:GITHUB_RUN_ID, [ref]$runId) -or $runId -le 0 -or
+              -not [int]::TryParse($env:GITHUB_RUN_ATTEMPT, [ref]$runAttempt) -or $runAttempt -le 0 -or
+              $architecture -cnotin @('x64', 'arm64')) { throw 'Invalid native menu non-execution identity.' }
+          if (-not (Test-Path -LiteralPath '.work')) {
+            New-Item -ItemType Directory -Path '.work' | Out-Null
+          }
+          $work = Get-Item -LiteralPath '.work' -Force
+          if (-not $work.PSIsContainer -or ($work.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Native menu non-execution receipt requires an ordinary work directory.'
+          }
+          $receipt = [ordered]@{schemaVersion=1; kind='native-menu-not-executed'; success=$false;
+            acceptanceEligible=$false; nativeMenuExecuted=$false; prerequisiteCode=1;
+            sourceCommit=$env:GITHUB_SHA; runId=$runId; runAttempt=$runAttempt; architecture=$architecture}
+          $receipt | ConvertTo-Json -Compress | Out-File -LiteralPath '.work/suite-native-menu-archive-integrity.json' -NoClobber -Encoding utf8
+          throw 'Native menu UI not executed: prerequisites unavailable.'
+        }
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        python suite/e2e/native_menu_archive_completeness.py --workspace . --suite "$env:SUITE_PACKAGE" --output .work/suite-native-menu-archive-integrity.json @sourceMenuArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Native menu original generation or graceful shutdown archive is incomplete.' }
+        if ('${{ steps.native-menu-ui.outcome }}' -cne 'success') { throw 'Native menu UI verification did not pass.' }
+    - name: native 메뉴 숫자 기록·빈 문서 상단 화면 별도 보존
+      id: native-menu-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (steps.native-menu-ui.outcome != 'skipped' || steps.native-menu-archive-integrity.outcome != 'skipped')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-native-menu-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-native-menu/results.json
+          .work/suite-native-menu/*-chrome.png
+          .work/suite-native-menu/worker-diagnostics/*/manifest.json
+          .work/suite-native-menu/worker-diagnostics/*/events.jsonl
+          .work/suite-native-menu/worker-diagnostics/*/shutdown.json
+          .work/suite-native-menu/worker-diagnostics/worker-save-*.jsonl
+          .work/suite-native-menu-archive-integrity.json
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
+    - name: Preserve bounded diagnostic prerequisite failure summary
+      id: diagnostic-fixture-failure-evidence
+      if: "always() && steps.run-mode.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'acceptance' && steps.fixtures.outcome == 'failure' && env.OPENGEUL_SUITE_RUN_MODE != 'calc-dispatch-diagnostic' && env.OPENGEUL_SUITE_RUN_MODE != 'ime-mode-diagnostic'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-diagnostic-fixture-failure-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-engine/engine-failure-summary.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Fetch and stage the locked ARM64 Calc dispatch diagnostic input
+      id: calc-dispatch-inputs
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $lockPath = 'suite/config/calc-dispatch.arm64.lock.json'
+        $inputRoot = Join-Path (Get-Location).Path '.work/suite-calc-dispatch-input'
+        ./suite/scripts/fetch-calc-dispatch.ps1 -DiagnosticLockPath $lockPath -Output $inputRoot
+        $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
+        $download = Get-Content -LiteralPath (Join-Path $inputRoot 'calc-dispatch-download.json') -Raw | ConvertFrom-Json
+        if ($download.schemaVersion -isnot [long] -or $download.schemaVersion -ne 1 -or
+            $download.kind -isnot [string] -or $download.kind -cne 'authenticated-calc-dispatch-download' -or
+            $download.passed -isnot [bool] -or $download.passed -cne $true) {
+          throw 'Calc dispatch input download did not authenticate.'
+        }
+        foreach ($key in @('sourceCommit','sourceLockSha256','coreCommit','artifactSha256')) {
+          if ($download.$key -isnot [string] -or $download.$key -cne $lock.$key) { throw 'Calc dispatch authenticated source differs from its lock.' }
+        }
+        foreach ($key in @('runId','runAttempt','artifactId','artifactSize')) {
+          if ($download.$key -isnot [long] -or $download.$key -ne $lock.$key) { throw 'Calc dispatch authenticated artifact differs from its lock.' }
+        }
+        foreach ($key in @('engineSha256','receiptSha256')) {
+          if ($download.$key -isnot [string] -or $download.$key -cnotmatch '^[0-9a-f]{64}$') { throw 'Calc dispatch authenticated inner digest is missing.' }
+        }
+        $diagnosticPackage = Join-Path (Get-Location).Path '.work/suite-calc-dispatch-package'
+        python suite/scripts/stage-calc-dispatch.py --baseline $env:SUITE_PACKAGE --archive (Join-Path $inputRoot 'OpenGeul-Office-engine-arm64-calc-dispatch.zip') --receipt (Join-Path $inputRoot 'calc-dispatch-source-build-receipt.json') --output $diagnosticPackage --expected-engine-source-commit $lock.sourceCommit --expected-suite-source-commit $env:GITHUB_SHA --expected-receipt-sha256 $download.receiptSha256 --expected-archive-sha256 $download.engineSha256
+        if ($LASTEXITCODE -ne 0) { throw 'Calc dispatch diagnostic overlay staging failed.' }
+        "SUITE_CALC_DISPATCH_PACKAGE=$diagnosticPackage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    - name: Observe one original ARM64 Calc save dispatch (not acceptance)
+      id: calc-dispatch-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && steps.calc-dispatch-inputs.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '9'
+        OPENGEUL_SUITE_CALC_TRACE_NOTICE: '1'
+        OPENGEUL_SUITE_FOREGROUND_NOTICE: '1'
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-calc-dispatch-worker-diagnostics
+      shell: pwsh
+      run: |
+        $lock = Get-Content -LiteralPath 'suite/config/calc-dispatch.arm64.lock.json' -Raw | ConvertFrom-Json
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_CALC_DISPATCH_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-calc-dispatch --diagnose-calc-dispatch --expected-engine-source-commit $lock.sourceCommit
+        if ($LASTEXITCODE -ne 0) { throw 'One original Calc dispatch observation incomplete; no unchanged retry.' }
+    - name: Preserve only numeric Calc dispatch results and authenticated input bindings
+      id: calc-dispatch-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic' && matrix.architecture == 'arm64' && steps.calc-dispatch-inputs.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-calc-dispatch-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-calc-dispatch/results.json
+          .work/suite-calc-dispatch/calc-dispatch-diagnostic.json
+          .work/suite-calc-dispatch-input/artifact-server-metadata.json
+          .work/suite-calc-dispatch-input/calc-dispatch-download.json
+          .work/suite-calc-dispatch-package/calc-dispatch-diagnostic.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Calc dispatch experiment deliberately cannot qualify acceptance
+      id: calc-dispatch-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'calc-dispatch-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Calc dispatch diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Observe one owned packaged reader console (not acceptance)
+      id: reader-console-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.suite-unit-shell.outcome == 'success' && steps.sal-offset-admission.outcome == 'success' && steps.source-engine.outcome == 'success' && steps.build.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/e2e/reader_console_diagnostic.py --suite $env:SUITE_PACKAGE --output .work/suite-reader-console
+        if ($LASTEXITCODE -ne 0) { throw 'One owned reader console observation incomplete; no unchanged retry.' }
+    - name: Preserve only bounded numeric reader console receipt
+      id: reader-console-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic' && matrix.architecture == 'arm64' && steps.reader-console-diagnostic.outcome != 'skipped'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-reader-console-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-reader-console/receipt.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Reader console experiment deliberately cannot qualify acceptance
+      id: reader-console-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'reader-console-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Reader console diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Targeted Writer navigation diagnostic (not acceptance)
+      id: navigation-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-navigation-diagnostic/worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-navigation-diagnostic --diagnose-navigation writer
+        if ($LASTEXITCODE -ne 0) { throw 'Targeted navigation diagnostic failed.' }
+    - name: Preserve targeted navigation evidence only
+      id: navigation-diagnostic-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-navigation-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-navigation-diagnostic/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: Diagnostic run deliberately cannot qualify Suite acceptance
+      id: diagnostic-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'navigation-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Navigation diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Targeted owned Writer repost ordering diagnostic (not acceptance)
+      id: focus-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic' && matrix.architecture == 'arm64' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-focus-diagnostic/worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-focus-diagnostic --diagnose-focus writer
+        if ($LASTEXITCODE -ne 0) { throw 'Targeted focus diagnostic failed.' }
+    - name: Preserve targeted capture ordering evidence only
+      id: focus-diagnostic-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic' && matrix.architecture == 'arm64'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-focus-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-focus-diagnostic/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: Focus experiment deliberately cannot qualify Suite acceptance
+      id: focus-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'focus-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'Focus diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: Observe one matched-plugin ARM64 capture cohort
+      id: matched-plugin-focus
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-focus-diagnostic/worker-diagnostics
+      shell: pwsh
+      run: |
+        $proof = (Resolve-Path .work/plugin-symbol-input/pair/receipt.json).Path
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-focus-diagnostic --diagnose-focus calc --matched-plugin-proof $proof
+        if ($LASTEXITCODE -ne 0) { throw 'Matched capture cohort failed; inspect bounded retained evidence.' }
+    - name: Resolve only the first eligible failed capture
+      id: matched-plugin-resolution
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64' && steps.matched-plugin-focus.outcome != 'skipped' && steps.matched-symbol-qualification.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/scripts/matched_plugin_diagnostic.py --mode resolve --pair .work/plugin-symbol-input/pair --focus .work/suite-focus-diagnostic/results.json --output .work/suite-matched-plugin/resolution.json
+        if ($LASTEXITCODE -ne 0) { throw 'Original capture caller remains inconclusive; no behavior fix is justified.' }
+    - name: Preserve bounded matched caller evidence
+      id: matched-plugin-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller' && matrix.architecture == 'arm64'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-matched-plugin-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-matched-plugin/
+          .work/suite-focus-diagnostic/
+          .work/plugin-symbol-input/plugin-symbol-download.json
+          .work/plugin-symbol-input/artifact-server-metadata.json
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: Matched caller experiment cannot qualify Office delivery
+      id: matched-plugin-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'matched-plugin-caller'"
+      shell: pwsh
+      run: |
+        throw 'Matched caller diagnostic only: paired native Office acceptance and package delivery remain unverified.'
+    - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기
+      id: calc-save
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '13'
+      shell: pwsh
+      run: |
+        $sourceReaderArgs = @()
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {
+          if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+            if ('${{ matrix.architecture }}' -cnotin @('x64', 'arm64')) { throw 'Unsupported source reader architecture.' }
+            $sourceReaderArgs = @('--source-qualified-reader', '${{ matrix.architecture }}')
+          } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+            throw 'Unsupported Suite runtime format for the model reader.'
+          }
+        }
+        python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save @sourceReaderArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+S verification failed.' }
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: Calc Ctrl+S 성공·실패 뒤 패키지 불변 확인
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+S verification.' }
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: Calc Ctrl+S 입력·저장·로컬 네이티브 진단 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-calc-save-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-calc-save/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: Enter 없이 실제 Calc Ctrl+W 저장·버림·취소 관측
+      id: calc-close
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '1'
+      shell: pwsh
+      run: |
+        $sourceReaderArgs = @()
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {
+          if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+            if ('${{ matrix.architecture }}' -cnotin @('x64', 'arm64')) { throw 'Unsupported source reader architecture.' }
+            $sourceReaderArgs = @('--source-qualified-reader', '${{ matrix.architecture }}')
+          } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+            throw 'Unsupported Suite runtime format for the model reader.'
+          }
+        }
+        python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close @sourceReaderArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+W choice probe failed.' }
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: Calc Ctrl+W 성공·실패 뒤 패키지 불변 확인
+      shell: pwsh
+      run: |
+        python suite/scripts/verify-suite.py $env:SUITE_PACKAGE
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during physical Calc Ctrl+W choice probe.' }
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: Calc Ctrl+W 세 선택과 로컬 네이티브 진단 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-calc-close-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-calc-close/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: 문서 형식 15개와 모듈 심화 기능 6개 의미 검증
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/office_feature_smoke.py --suite $package --output .work/suite-office-features
+        if ($LASTEXITCODE -ne 0) { throw 'Office format and feature semantic E2E failed.' }
+      id: office-features
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.build.outcome == 'success')"
+    - name: 패키지 HWP 변환기로 출처가 고정된 Home 입력 생성
+      id: home-fixtures
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/home_fixture_inputs.py --suite $package --output .work/e2e-fixtures
+        if ($LASTEXITCODE -ne 0) { throw 'Owned HWP fixture generation or provenance failed.' }
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.build.outcome == 'success')"
+    - name: Home 타일·파일 열기·공통 문서 메뉴 25개 실제 입력
+      id: home-routes
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '2'
+      shell: pwsh
+      run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {
+            $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+          }
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/home_routing_smoke.py --suite $package --features .work/suite-office-features --hwp-fixtures .work/e2e-fixtures --output .work/suite-home-routing @sourceMenuArgs
+        $homeExit = $LASTEXITCODE
+        python suite/scripts/verify-suite.py $package
+        $integrityExit = $LASTEXITCODE
+        if ($homeExit -ne 0 -or $integrityExit -ne 0) { throw "Home routing failed: physical=$homeExit integrity=$integrityExit" }
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.office-features.outcome == 'success' && steps.home-fixtures.outcome == 'success')"
+    - name: Home 입력·화면·문서별 네이티브 종료 증거 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-home-routes-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/e2e-fixtures/
+          .work/suite-home-routing/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: 다섯 모듈 PDF의 실제 페이지·한국어 텍스트 검증
+      shell: pwsh
+      run: |
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        $output = Join-Path $env:GITHUB_WORKSPACE '.work/suite-pdf-export'
+        & "$package/Office/program/python.exe" suite/e2e/pdf_export_smoke.py --produce --suite $package --output $output
+        $producerExit = $LASTEXITCODE
+        python suite/e2e/pdf_export_smoke.py --verify --suite $package --output $output
+        $verifierExit = $LASTEXITCODE
+        if ($producerExit -ne 0 -or $verifierExit -ne 0) { throw "PDF E2E failed: producer=$producerExit verifier=$verifierExit" }
+      if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.build.outcome == 'success')"
+    - name: 형식·심화 기능·PDF 원본 검증 기록 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-office-features-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/suite-office-features/
+          .work/suite-pdf-export/
+        include-hidden-files: true
+        retention-days: 1
+        if-no-files-found: error
+    - name: One owned Writer compartment callback (not acceptance)
+      id: ime-mode-diagnostic
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && steps.build.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success' && matrix.architecture == 'arm64' && steps.matched-symbol-qualification.outcome == 'success'"
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-ime-mode-diagnostic/worker-diagnostics
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '3'
+        OPENGEUL_SUITE_IME_COMPARTMENT_NOTICE: '1'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $callerArgs = @('--capture-ime-compartment')
+        if ('${{ matrix.architecture }}' -ceq 'arm64') {
+          $callerArgs += @('--matched-plugin-proof', (Resolve-Path .work/plugin-symbol-input/pair/receipt.json).Path)
+        }
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-ime-mode-diagnostic --diagnose-ime-mode writer @callerArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Targeted IME mode diagnostic failed.' }
+
+    - name: Validate the one in-memory compartment resolution receipt
+      id: ime-notification-resolution
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64' && steps.ime-mode-diagnostic.outcome != 'skipped' && steps.matched-symbol-qualification.outcome == 'success'"
+      shell: pwsh
+      run: |
+        python suite/e2e/ime_compartment_report.py --verify .work/suite-ime-mode-diagnostic/callback-numeric.json --source-commit $env:GITHUB_SHA --run-id $env:GITHUB_RUN_ID --run-attempt 1 --architecture arm64
+        if ($LASTEXITCODE -ne 0) { throw 'The one compartment numeric receipt is incomplete or differs from this run.' }
+    - name: Preserve targeted IME mode evidence only
+      id: ime-mode-diagnostic-evidence
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-ime-mode-diagnostic-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-ime-mode-diagnostic/callback-numeric.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: IME mode experiment deliberately cannot qualify Suite acceptance
+      id: ime-mode-not-acceptance
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic'"
+      shell: pwsh
+      run: |
+        throw 'IME mode diagnostic only: full Suite acceptance was not run; package delivery is prohibited.'
+    - name: 실제 한국어 조합·백스페이스·저장·재열기
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '3'
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        $sourceReaderArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          if ('${{ matrix.architecture }}' -cnotin @('x64', 'arm64')) { throw 'Unsupported source reader architecture.' }
+          $sourceReaderArgs = @('--source-qualified-reader', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Unsupported Suite runtime format for the model reader.'
+        }
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime @sourceReaderArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and content verification failed.' }
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success')"
+    - name: IME 입력·엔진 크래시 원본 기록 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-korean-ime-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-korean-ime/
+          .work/suite-worker-diagnostics/
+        retention-days: 1
+        if-no-files-found: error
+    - name: 한국어 탭 메뉴의 실제 접근성·화면 확인
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '4'
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/korean_ui_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-korean-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Actual Korean native Tabbed UI verification failed.' }
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: korean-ui 원본 검증 기록 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-korean-ui-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-korean-ui/
+        retention-days: 1
+        if-no-files-found: error
+    - name: 실제 Writer 제목 1 단축키·저장·독립 재열기
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '5'
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        python suite/e2e/writer_style_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-writer-style @sourceMenuArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Physical Writer Heading 1 save and independent reopen failed.' }
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: Writer 스타일 원본 검증 기록 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-writer-style-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-writer-style/
+        retention-days: 1
+        if-no-files-found: error
+    - name: 저장·취소·실패·창 복원·HWP 실행 수명 검사
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '6'
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        python suite/e2e/lifecycle_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-lifecycle @sourceMenuArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Actual native document lifecycle verification failed.' }
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: lifecycle 원본 검증 기록 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-lifecycle-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-lifecycle/
+        retention-days: 1
+        if-no-files-found: error
+    - name: 독립 문서 초기화와 종료 40회 모두 통과
+      env:
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        python suite/e2e/startup_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --launch-cwd $env:SUITE_FOREIGN_CWD --output .work/suite-startup --attempts 40
+        if ($LASTEXITCODE -ne 0) { throw 'At least one independent startup failed.' }
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: startup 원본 검증 기록 즉시 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-startup-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-startup/
+          .work/suite-engine/
+          .work/suite-worker-diagnostics/
+        retention-days: 1
+        if-no-files-found: error
+    - name: 첫 번째 전체 Suite GUI·편집 후 의미 검증
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '7'
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine/fixtures --output .work/suite-native @sourceMenuArgs
+        if ($LASTEXITCODE -ne 0) { throw 'First complete native UI verification failed.' }
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine --verify-ui
+        if ($LASTEXITCODE -ne 0) { throw 'First post-GUI semantic verification failed.' }
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+    - name: 새 문서 집합으로 전체 UI·E2E를 두 번째 독립 실행
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '8'
+        OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
+      shell: pwsh
+      run: |
+        $sourceMenuArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          $sourceMenuArgs = @('--source-qualified-menu', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Validated runtime format is required before native menu verification.'
+        }
+        $package = (Resolve-Path $env:SUITE_PACKAGE).Path
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine-2
+        if ($LASTEXITCODE -ne 0) { throw 'Second fresh engine fixtures failed.' }
+        python suite/e2e/windows_smoke.py --suite $package --fixtures .work/suite-engine-2/fixtures --output .work/suite-native-2 @sourceMenuArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Second complete native UI verification failed.' }
+        & "$package/Office/program/python.exe" suite/e2e/engine_smoke.py --suite $package --output .work/suite-engine-2 --verify-ui
+        if ($LASTEXITCODE -ne 0) { throw 'Second post-GUI semantic verification failed.' }
+        python suite/scripts/verify-suite.py $package
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during the complete native validation.' }
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
+    - name: 모든 네이티브 진단 보존·해시와 크래시 부재 확인
+      env:
+        OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
+        OPENGEUL_SUITE_NOTICE_SCOPE: '10'
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
+      shell: python
+      run: |
+        from pathlib import Path, PurePosixPath
+        import hashlib, json, os, re, sys
+        sys.path.insert(0, str(Path.cwd()))
+        from suite.e2e.native_cleanup_receipt import MAX_RECEIPT_BYTES, load_cleanup_receipt, validate_cleanup_receipt
+        def native_integrity_failure(exc, stage):
+            record = dict(success=False, errorType=type(exc).__name__, error=str(exc), stage=stage)
+            try:
+                from suite.e2e.numeric_notice import capture_failure_code
+                record['numericFailure'] = capture_failure_code(exc)
+            except Exception:
+                pass
+            return record
+        def check_native_archives(root, expected_engine_image, progress):
+            progress['stage'] = progress['prefix'] + '-root-admission' if progress['prefix'] is not None else 'verify-native-archives'
+            assert root.is_dir() and not root.is_symlink(), 'Owned native diagnostics are missing'
+            progress['stage'] = progress['prefix'] + '-manifest-discovery' if progress['prefix'] is not None else 'verify-native-archives'
+            manifests = sorted(root.glob('*/manifest.json'))
+            assert manifests, 'No owned native diagnostic manifests were archived'
+            progress['stage'] = progress['prefix'] + '-path-crash-scan' if progress['prefix'] is not None else 'verify-native-archives'
+            for path in root.rglob('*'):
+                assert not path.is_symlink(), 'Linked native diagnostic paths are not accepted'
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        signature = stream.read(4)
+                    assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
+            files = shutdowns = 0
+            for manifest in manifests:
+                progress['stage'] = progress['prefix'] + '-archive-members' if progress['prefix'] is not None else 'verify-native-archives'
+                record = json.loads(manifest.read_text(encoding='utf-8'))
+                progress['stage'] = progress['prefix'] + '-archive-complete' if progress['prefix'] is not None else 'verify-native-archives'
+                assert record.get('schemaVersion') == 1 and record.get('archiveComplete') is True, 'Incomplete native archive: ' + str(manifest)
+                progress['stage'] = progress['prefix'] + '-archive-list' if progress['prefix'] is not None else 'verify-native-archives'
+                assert isinstance(record.get('files'), list), 'Native archive file list is missing'
+                seen = set()
+                for item in record['files']:
+                    progress['stage'] = progress['prefix'] + '-archive-path' if progress['prefix'] is not None else 'verify-native-archives'
+                    name = item['path']
+                    relative = PurePosixPath(name)
+                    assert name and '\\' not in name and ':' not in name and not relative.is_absolute() and '..' not in relative.parts and relative.as_posix() == name and name not in seen, 'Unsafe or duplicate native archive member'
+                    seen.add(name)
+                    path = manifest.parent.joinpath(*relative.parts)
+                    progress['stage'] = progress['prefix'] + '-archive-location' if progress['prefix'] is not None else 'verify-native-archives'
+                    assert path.is_file() and path.resolve().is_relative_to(manifest.parent.resolve()), 'Native archive member is missing or escaped its profile'
+                    progress['stage'] = progress['prefix'] + '-archive-bytes' if progress['prefix'] is not None else 'verify-native-archives'
+                    assert type(item['bytes']) is int and path.stat().st_size == item['bytes'], 'Native archive file size differs'
+                    progress['stage'] = progress['prefix'] + '-archive-hash' if progress['prefix'] is not None else 'verify-native-archives'
+                    assert re.fullmatch('[a-f0-9]{64}', item['sha256']) and hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256'], 'Native archive file hash differs'
+                    files += 1
+                # These five diagnostics roots are product UnoBackend archives.
+                # Observer evidence is outside them; a missing proof is never an exemption.
+                progress['stage'] = progress['prefix'] + '-shutdown-proof' if progress['prefix'] is not None else 'verify-native-archives'
+                assert 'shutdown.json' in seen, 'Manifest-hashed product shutdown receipt is missing'
+                shutdown = manifest.parent / 'shutdown.json'
+                assert 0 < shutdown.stat().st_size <= MAX_RECEIPT_BYTES, 'Product shutdown receipt exceeds its finite limit'
+                validate_cleanup_receipt(load_cleanup_receipt(shutdown.read_bytes()),
+                                         expected_engine_image=str(expected_engine_image), launcher_pid=record.get('launcherPid'))
+                shutdowns += 1
+            return dict(schemaVersion=1, kind='native-archive-integrity', success=True, completeArchives=len(manifests), verifiedFiles=files, qualifiedShutdowns=shutdowns, crashDumps=0)
+        def check_evidence_crash_dumps(root, progress):
+            progress['stage'] = progress['prefix'] + '-root-admission' if progress['prefix'] is not None else 'verify-native-archives'
+            assert root.is_dir() and not root.is_symlink(), 'Owned Calc evidence is missing'
+            progress['stage'] = progress['prefix'] + '-path-crash-scan' if progress['prefix'] is not None else 'verify-native-archives'
+            for path in root.rglob('*'):
+                assert not path.is_symlink(), 'Linked Calc evidence paths are not accepted'
+                if path.is_file():
+                    with path.open('rb') as stream:
+                        signature = stream.read(4)
+                    assert path.suffix.lower() not in ('.dmp', '.mdmp') and signature != b'MDMP', 'Native crash dump found: ' + str(path)
+            return dict(success=True, crashDumps=0)
+        def check_all_native_archives(roots, evidence_roots, expected_engine_image):
+            records = []
+            archive_prefixes = ('native-integrity-shared', 'native-integrity-calc-save',
+                                'native-integrity-calc-close-save', 'native-integrity-calc-close-discard',
+                                'native-integrity-calc-close-cancel')
+            for index, root in enumerate(roots):
+                prefix = archive_prefixes[index] if index < len(archive_prefixes) else None
+                progress = dict(prefix=prefix, stage=prefix + '-root-admission' if prefix is not None else 'verify-native-archives')
+                try:
+                    record = check_native_archives(Path(root), expected_engine_image, progress)
+                except Exception as exc:
+                    record = native_integrity_failure(exc, progress['stage'])
+                record['root'] = str(root)
+                records.append(record)
+            evidence = []
+            evidence_prefixes = ('native-integrity-evidence-calc-save', 'native-integrity-evidence-calc-close')
+            for index, root in enumerate(evidence_roots):
+                prefix = evidence_prefixes[index] if index < len(evidence_prefixes) else None
+                progress = dict(prefix=prefix, stage=prefix + '-root-admission' if prefix is not None else 'verify-native-archives')
+                try:
+                    record = check_evidence_crash_dumps(Path(root), progress)
+                except Exception as exc:
+                    record = native_integrity_failure(exc, progress['stage'])
+                record['root'] = str(root)
+                evidence.append(record)
+            success = bool(records) and bool(evidence) and all(record['success'] for record in records + evidence)
+            result = dict(schemaVersion=1, kind='native-archive-integrity', success=success, roots=records, evidenceRoots=evidence,
+                          completeArchives=sum(record.get('completeArchives', 0) for record in records),
+                          verifiedFiles=sum(record.get('verifiedFiles', 0) for record in records),
+                          qualifiedShutdowns=sum(record.get('qualifiedShutdowns', 0) for record in records))
+            if success:
+                result['crashDumps'] = 0
+            return result
+        roots = ('.work/suite-worker-diagnostics', '.work/suite-calc-save/diagnostics',
+                 '.work/suite-calc-close/calc-close-save/diagnostics',
+                 '.work/suite-calc-close/calc-close-discard/diagnostics',
+                 '.work/suite-calc-close/calc-close-cancel/diagnostics')
+        evidence_roots = ('.work/suite-calc-save', '.work/suite-calc-close')
+        result = check_all_native_archives(roots, evidence_roots, Path(os.environ['SUITE_PACKAGE']).resolve() / 'Office/program/soffice.bin')
+        try:
+            from suite.e2e.native_archive_completeness import verify_native_archive_completeness
+            completeness = verify_native_archive_completeness(Path.cwd(), Path(os.environ['SUITE_PACKAGE']).resolve())
+        except Exception as exc:
+            completeness = native_integrity_failure(exc, 'native-integrity-generation-completeness')
+        result['generationCompleteness'] = completeness
+        result['success'] = result['success'] and completeness['success']
+        for record in (*result['roots'], *result['evidenceRoots'], completeness):
+            if record.get('numericFailure') is not None:
+                result['numericFailure'] = record['numericFailure']
+                result['stage'] = record.get('stage', 'verify-native-archives')
+                break
+        result.update(sourceCommit=os.environ['GITHUB_SHA'], runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'])
+        Path('.work/suite-native-integrity.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+        print(json.dumps(result))
+        if not result['success']:
+            try:
+                from suite.e2e.numeric_notice import emit_case_notice
+                emit_case_notice('native-integrity', dict(success=False, stage=result.get('stage', 'verify-native-archives'),
+                    **({'numericFailure': result['numericFailure']} if 'numericFailure' in result else {})))
+            except Exception:
+                pass
+        assert result['success'], 'At least one owned native diagnostics root failed integrity, original generation coverage or graceful shutdown qualification'
+    - name: 원본 GUI·엔진·IME·반복 검증 기록 보존
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (always())"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-evidence-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        include-hidden-files: true
+        path: |
+          .work/suite-engine/
+          .work/suite-engine-2/
+          .work/suite-native/
+          .work/suite-native-2/
+          .work/suite-calc-save/
+          .work/suite-calc-close/
+          .work/suite-korean-readiness/
+          !.work/suite-korean-readiness/fod-source/**/*.cab
+          .work/suite-korean-ime/
+          .work/suite-korean-ui/
+          .work/suite-writer-style/
+          .work/suite-lifecycle/
+          .work/suite-startup/
+          .work/suite-worker-diagnostics/
+          .work/suite-native-integrity.json
+          .work/suite-native31-privacy-preparation/
+          .work/suite-unit-capabilities/
+          .work/suite-portable/
+          .work/office-suite/msi.msi.log
+          .work/suite-office-features/
+          .work/e2e-fixtures/
+          .work/suite-home-routing/
+          .work/suite-pdf-export/
+          .work/source-engine-input/*.json
+        retention-days: 1
+        if-no-files-found: warn
+        compression-level: 6
+    - name: Verify final product ZIP identity after normal acceptance
+      id: final-zip-proof
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (success() && steps.home-routes.outcome == 'success')"
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $architecture = '${{ matrix.architecture }}'
+        if ($env:OPENGEUL_SUITE_RUN_MODE -cne 'acceptance' -or $architecture -cnotin @('x64', 'arm64') -or
+            $env:GITHUB_SHA -cnotmatch '\A[a-f0-9]{40}\z' -or $env:GITHUB_RUN_ID -cnotmatch '\A[1-9][0-9]{0,18}\z' -or
+            $env:GITHUB_RUN_ATTEMPT -cne '1') { throw 'Final portable proof requires its current normal source/run.' }
+        $runId = 0L
+        if (-not [long]::TryParse($env:GITHUB_RUN_ID, [ref]$runId) -or $runId -le 0) { throw 'Invalid source run.' }
+        $receiptPath = Join-Path '.work/suite-portable' "$runId-$architecture-1 휴대용 검증.receipt.json"
+        $receiptFile = Get-Item -LiteralPath $receiptPath
+        if ($receiptFile -isnot [System.IO.FileInfo] -or $receiptFile.Length -le 0 -or $receiptFile.Length -gt 16MB -or
+            ($receiptFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw 'Invalid portable receipt file.' }
+        $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+        if ($receipt.schemaVersion -isnot [long] -or $receipt.schemaVersion -ne 1 -or
+            $receipt.kind -isnot [string] -or $receipt.kind -cne 'portable-package-file-check' -or
+            $receipt.sourceCommit -isnot [string] -or $receipt.sourceCommit -cne $env:GITHUB_SHA -or
+            $receipt.architecture -isnot [string] -or $receipt.architecture -cne $architecture -or $receipt.archivePath -isnot [string] -or
+            $receipt.archiveSha256 -isnot [string] -or $receipt.archiveSha256 -cnotmatch '\A[a-f0-9]{64}\z') {
+            throw 'Portable receipt does not match this source.'
+        }
+        foreach ($flag in @('passed', 'archiveInventoryMatched', 'relocationVerified', 'sameVersionCoexistenceVerified', 'corruptionDetected', 'repairVerified')) {
+            if ($receipt.$flag -isnot [bool] -or $receipt.$flag -cne $true) { throw 'Portable file check is incomplete.' }
+        }
+        foreach ($flag in @('updateVerified', 'guiVerified')) {
+            if ($receipt.$flag -isnot [bool] -or $receipt.$flag -cne $false) { throw 'File check cannot qualify update or GUI.' }
+        }
+        if ($receipt.existingHwpPreserved.passed -isnot [bool] -or $receipt.existingHwpPreserved.passed -cne $true) {
+            throw 'Original HWP preservation is incomplete.'
+        }
+        $archivePath = [System.IO.Path]::GetFullPath($env:SUITE_ARCHIVE)
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($archivePath, [System.IO.Path]::GetFullPath($receipt.archivePath))) {
+            throw 'Final upload ZIP differs from the portable receipt.'
+        }
+        $archive = Get-Item -LiteralPath $archivePath
+        if ($archive -isnot [System.IO.FileInfo] -or ($archive.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw 'Final upload ZIP must be an ordinary file.'
+        }
+        $stream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $bytes = $stream.Length
+            if ($bytes -le 0 -or $bytes -gt 16GB) { throw 'Final ZIP exceeds its producer bound.' }
+            $sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant()
+            if ($stream.Length -ne $bytes -or $sha256 -cne $receipt.archiveSha256) { throw 'Final ZIP bytes changed.' }
+        } finally { $stream.Dispose() }
+        $proof = [ordered]@{schemaVersion=1; sourceCommit=$env:GITHUB_SHA; runId=$runId; runAttempt=1;
+            architecture=$architecture; sha256=$sha256; bytes=$bytes}
+        Write-Output ('::notice title=OpenGeul portable ZIP proof::' + ($proof | ConvertTo-Json -Compress))
+    - name: 모든 검증을 통과한 Suite 개발 패키지 전달
+      if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (success() && steps.home-routes.outcome == 'success')"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-office-suite-${{ matrix.architecture }}-${{ github.run_id }}
+        path: ${{ env.SUITE_ARCHIVE }}
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 0
+
+  writer-server-observer:
+    if: >-
+      github.event.repository.private == false && (
+      github.event_name == 'workflow_dispatch' &&
+      inputs.writer_server_observer == true &&
+      github.ref == 'refs/heads/work/opengeul-office-native-writer-observer' &&
+      github.repository == 'ATLKR/OpenGeul' && github.repository_owner == 'ATLKR' &&
+      github.actor == 'ATLKR' && github.actor_id == '65988341' &&
+      github.triggering_actor == 'ATLKR' && github.run_attempt == 1)
+    name: Writer owned numeric diagnostic (arm64; never acceptance)
+    runs-on: windows-11-arm
+    timeout-minutes: 150
+    env:
+      WRITER_OBSERVER_ENABLED: ${{ inputs.writer_server_observer }}
+      WRITER_OBSERVER_SUITE_HEAD: ${{ inputs.writer_observer_suite_head }}
+      WRITER_OBSERVER_PHASE_SECONDS: ${{ inputs.writer_observer_phase_seconds }}
+    steps:
+    - name: Preserve exact checkout bytes
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+        ref: ${{ github.sha }}
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: '3.12'
+        architecture: arm64
+    - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73
+      with:
+        dotnet-version: '10.0.404'
+        skip-lts-prepass: true
+        architecture: arm64
+    - name: Bind exact public owner manual context and current source bytes
+      id: writer-context
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path .work/writer-observer-public -ErrorAction Stop | Out-Null
+        python -B suite/scripts/writer-server-observer-workflow.py admit --output .work/writer-observer-public/context.numeric.json
+        if ($LASTEXITCODE -ne 0) { throw 'Writer manual context/source admission failed.' }
+        if (-not (Test-Path -LiteralPath suite/config/writer-server-observer.arm64.lock.json -PathType Leaf)) {
+          throw 'Root must supply the reviewed authenticated Writer external lock; no placeholder is admitted.'
+        }
+    - name: Acquire existing qualified normal ARM64 engine baseline
+      id: normal-engine
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-source-engine.ps1 -SourceLockPath suite/config/runtime.arm64.lock.json -Output .work/writer-normal-engine
+    - name: Build unchanged normal Suite baseline first
+      id: normal-build
+      shell: pwsh
+      run: |
+        ./suite/scripts/build-suite.ps1 -Architecture arm64 -OutputDirectory .work/writer-normal-baseline -EngineArchive .work/writer-normal-engine/OpenGeul-Office-engine-arm64.zip -EngineReceipt .work/writer-normal-engine/source-build-receipt.json
+    - name: Verify normal baseline through its original entry point
+      id: normal-verify
+      shell: pwsh
+      run: |
+        python -B suite/scripts/verify-suite.py .work/writer-normal-baseline
+        if ($LASTEXITCODE -ne 0) { throw 'Normal Suite baseline is not verified.' }
+    - name: Authenticate the separately pinned Writer outer artifact
+      id: writer-fetch
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: pwsh
+      run: |
+        ./suite/scripts/fetch-writer-server-observer.ps1 -DiagnosticLockPath suite/config/writer-server-observer.arm64.lock.json -Output .work/writer-engine-input
+    - name: Stage a new diagnostic copy without changing the normal baseline
+      id: writer-stage
+      timeout-minutes: 20
+      shell: pwsh
+      run: |
+        python -B suite/scripts/stage-writer-server-observer.py --baseline .work/writer-normal-baseline --artifact .work/writer-engine-input/github-artifact.zip --archive .work/writer-engine-input/OpenGeul-Office-engine-arm64-writer-server-observer.zip --receipt .work/writer-engine-input/writer-server-observer-source-build-receipt.json --source-lock suite/engine-build/writer-server-observer-diagnostic/source-lock.json --diagnostic-lock suite/config/writer-server-observer.arm64.lock.json --output .work/writer-diagnostic --expected-suite-source-commit $env:GITHUB_SHA
+        if ($LASTEXITCODE -ne 0) { throw 'Writer diagnostic staging rejected its authenticated inputs.' }
+    - name: Prepare the atomic library inside a fresh bounded Python child
+      id: atomic-prepare
+      timeout-minutes: 2
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Path .work/writer-observer-private/temp -ErrorAction Stop | Out-Null
+        $hostPython = (Get-Command python -ErrorAction Stop).Source
+        $private = [IO.Path]::GetFullPath('.work/writer-observer-private')
+        $program = [IO.Path]::GetFullPath('.work/writer-diagnostic/Office/program')
+        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds 45 --receipt .work/writer-observer-public/compiler-phase.numeric.json -- atomic --work "$private/atomic" --descriptor "$private/atomic-descriptor.json"
+        if ($LASTEXITCODE -ne 0) { throw 'Fresh compiler preparation is incomplete; original logs stay private.' }
+    - name: Observe one generated blank Writer in a fresh owned child
+      id: writer-observe
+      timeout-minutes: 22
+      shell: pwsh
+      run: |
+        $hostPython = (Get-Command python -ErrorAction Stop).Source
+        $private = [IO.Path]::GetFullPath('.work/writer-observer-private')
+        $program = [IO.Path]::GetFullPath('.work/writer-diagnostic/Office/program')
+        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds $env:WRITER_OBSERVER_PHASE_SECONDS --receipt .work/writer-observer-public/observe-phase.numeric.json -- observe --output ([IO.Path]::GetFullPath('.work/writer-diagnostic')) --baseline ([IO.Path]::GetFullPath('.work/writer-normal-baseline')) --artifact ([IO.Path]::GetFullPath('.work/writer-engine-input/github-artifact.zip')) --diagnostic-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer.arm64.lock.json')) --source-lock ([IO.Path]::GetFullPath('suite/engine-build/writer-server-observer-diagnostic/source-lock.json')) --expected-suite-source-commit $env:GITHUB_SHA --prepared-library "$private/atomic-descriptor.json" --host-python $hostPython --helper-script ([IO.Path]::GetFullPath('suite/e2e/writer_server_observer_msaa_helper.py')) --windows $env:SystemRoot --work-root "$private/owned-blank-writer" --report ([IO.Path]::GetFullPath('.work/writer-observer-public/report.numeric.json'))
+        $result = $LASTEXITCODE
+        exit $result
+    - name: Validate the exact numeric report before upload
+      id: writer-report
+      if: always() && steps.writer-observe.outcome != 'skipped'
+      shell: pwsh
+      run: |
+        python -B suite/scripts/writer-server-observer-workflow.py validate-report --input .work/writer-observer-public/report.numeric.json
+        if ($LASTEXITCODE -ne 0) { throw 'Writer report is absent or outside the numeric allowlist.' }
+    - name: Retain only explicit closed numeric observations
+      id: writer-upload
+      if: always() && steps.writer-context.outcome == 'success' && steps.writer-report.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-writer-server-observer-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/writer-observer-public/context.numeric.json
+          .work/writer-observer-public/report.numeric.json
+          .work/writer-observer-public/compiler-phase.numeric.json
+          .work/writer-observer-public/observe-phase.numeric.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Writer observation cannot qualify or deliver the Suite
+      id: writer-terminal
+      if: always()
+      shell: pwsh
+      run: |
+        throw 'Writer observation is diagnostic only: full acceptance and product delivery are prohibited.'

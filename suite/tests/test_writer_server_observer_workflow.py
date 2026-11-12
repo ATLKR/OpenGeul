@@ -57,7 +57,9 @@ class Workflow(unittest.TestCase):
         self.assertEqual(hashlib.sha256(actual.encode()).hexdigest(),fixture['normalJobTextSha256'])
         self.assertIn("permissions:\n  contents: read\n  actions: read\n",candidate)
         self.assertIn('OPENGEUL_SUITE_RUN_MODE: acceptance',candidate)
-        self.assertEqual(hashlib.sha256(candidate.split('  workflow_dispatch:',1)[0].encode()).hexdigest(),fixture['pushPrefixSha256'])
+        from suite.tests.reviewed_normal_workflow import original_push_oracle_text
+        prefix=original_push_oracle_text(candidate.split('  workflow_dispatch:',1)[0])
+        self.assertEqual(hashlib.sha256(prefix.encode()).hexdigest(),fixture['pushPrefixSha256'])
 
     def test_manual_job_is_exact_owner_branch_attempt_and_runner(self):
         job=self.candidate().split('\n  writer-server-observer:',1)[1]

@@ -5,7 +5,7 @@ Any other edit remains visible to the independent original-job SHA256 check.
 """
 
 CURRENT_NORMAL_IF = ("    if: github.event.repository.private == false && "
-    "(github.ref != 'refs/heads/work/opengeul-office-native-writer-observer')\n")
+    "(github.ref != 'refs/heads/work/opengeul-office-native-writer-observer' && github.ref != 'refs/heads/work/opengeul-office-package-context-sdk')\n")
 EXACT_SDK_SETUP = ("    - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73\n"
     "      with:\n"
     "        dotnet-version: '10.0.404'\n"
@@ -63,3 +63,10 @@ def original_normal_oracle_text(normal):
             raise ValueError('Reviewed normal-job source-reader delta differs')
         normal = normal.replace(before, command + '\n', 1)
     return normal
+
+
+def original_push_oracle_text(prefix):
+    delta = "    - work/opengeul-office-package-context-sdk\n"
+    if type(prefix) is not str or prefix.count(delta) != 1:
+        raise ValueError("Reviewed SDK diagnostic trigger delta differs")
+    return prefix.replace(delta, "", 1)

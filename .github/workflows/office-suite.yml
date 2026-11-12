@@ -4,6 +4,7 @@ name: OpenGeul Office Suite 개발 검증
     branches:
     - work/opengeul-office-suite
     - work/opengeul-office-arm64
+    - work/opengeul-office-package-context-sdk
   workflow_dispatch:
     inputs:
       writer_server_observer:
@@ -34,7 +35,7 @@ env:
   DOTNET_NOLOGO: '1'
 jobs:
   windows-suite:
-    if: github.event.repository.private == false && (github.ref != 'refs/heads/work/opengeul-office-native-writer-observer')
+    if: github.event.repository.private == false && (github.ref != 'refs/heads/work/opengeul-office-native-writer-observer' && github.ref != 'refs/heads/work/opengeul-office-package-context-sdk')
     name: windows-suite (${{ matrix.architecture }})
     strategy:
       fail-fast: false
@@ -1383,3 +1384,118 @@ jobs:
       shell: pwsh
       run: |
         throw 'Writer observation is diagnostic only: full acceptance and product delivery are prohibited.'
+
+
+  packaged-context-sdk:
+    if: >-
+      github.event.repository.private == false && (
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/work/opengeul-office-package-context-sdk' &&
+      github.repository == 'ATLKR/OpenGeul' && github.repository_id == '1405493151' &&
+      github.repository_owner == 'ATLKR' && github.actor == 'ATLKR' &&
+      github.actor_id == '65988341' && github.triggering_actor == 'ATLKR' &&
+      github.run_attempt == 1 && github.event.repository.fork == false)
+    name: Packaged context SDK compile-only (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 6
+    env:
+      SDK_MATRIX_RUNNER: ${{ matrix.os }}
+      SDK_REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+      SDK_REPOSITORY_FORK: ${{ github.event.repository.fork }}
+    steps:
+    - name: Preserve exact source bytes
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+        ref: ${{ github.sha }}
+    - name: Verify external pins and run only the bounded SDK negative gate
+      id: sdk-compile
+      timeout-minutes: 4
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $eligible = $false
+        $code = 1
+        $publicExisted = $true
+        try {
+          $architecture = switch ('${{ matrix.os }}') {
+            'windows-2025' { 'x64' }
+            'windows-11-arm' { 'arm64' }
+            default { throw 'Unsupported fixed SDK runner.' }
+          }
+          $machine = if ($architecture -ceq 'x64') { 0x8664 } else { 0xaa64 }
+          $base = Join-Path (Get-Location).Path 'suite/engine-build/packaged-context-sdk'
+          $entryPin = '952b4b4895590d657cad9126d9b2328ea193ceeeeebf730c48e9d06b871d9a12'
+          $bootstrapPin = '828cef4233ac7e2186c3ca5f112c10ca682a905ca3587fa6867a609046796c2d'
+          $manifestPin = '30fcbac5681a9614f19296b01d16d8148fa55eb7fa45c967f63c501cef9fa3c6'
+          foreach ($item in @(@('ci_entry.py',$entryPin),@('approved_launch.py',$bootstrapPin),@('approved-sdk-code.json',$manifestPin))) {
+            $file = Join-Path $base $item[0]
+            $info = Get-Item -LiteralPath $file -Force
+            if ($info.PSIsContainer -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $info.Length -lt 1 -or $info.Length -gt 1048576) { throw 'SDK source pin path rejected.' }
+            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $item[1]) { throw 'SDK external source pin mismatch.' }
+          }
+          # Existing toolcache only. No setup/download/installer/launcher fallback.
+          $cache = Join-Path $env:RUNNER_TOOL_CACHE 'Python'
+          $versions = @(Get-ChildItem -LiteralPath $cache -Directory | Where-Object { $_.Name -cmatch '\A3\.12\.[0-9]+\z' } | Sort-Object { [Version]$_.Name } -Descending)
+          $python = $null
+          foreach ($version in $versions) {
+            $candidate = Join-Path $version.FullName "$architecture/python.exe"
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $python = $candidate; break }
+          }
+          if ($null -eq $python) { throw 'Preinstalled native Python3.12 is required.' }
+          $info = Get-Item -LiteralPath $python -Force
+          if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $info.Length -lt 152 -or $info.Length -gt 134217728) { throw 'Native interpreter path rejected.' }
+          $stream = [IO.File]::Open($python,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+          try {
+            $reader = [IO.BinaryReader]::new($stream)
+            if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Native interpreter DOS signature rejected.' }
+            $stream.Position = 60
+            $offset = $reader.ReadUInt32()
+            if ($offset -lt 64 -or $offset -gt $stream.Length - 26) { throw 'Native interpreter header rejected.' }
+            $stream.Position = $offset
+            if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne $machine) { throw 'Native interpreter machine rejected.' }
+            $stream.Position = $offset + 22
+            $characteristics = $reader.ReadUInt16()
+            if (($characteristics -band 2) -eq 0 -or ($characteristics -band 0x2000) -ne 0 -or $reader.ReadUInt16() -ne 0x20b) { throw 'Native interpreter PE32+ rejected.' }
+          } finally { $stream.Dispose() }
+          $public = Join-Path (Get-Location).Path '.work/packaged-context-sdk-public/${{ matrix.os }}'
+          $publicExisted = Test-Path -LiteralPath $public
+          if ($publicExisted) { throw 'Preserve existing SDK diagnostic output.' }
+          & $python -I -B (Join-Path $base 'ci_entry.py') --architecture $architecture --expected-entry-sha256 $entryPin --expected-bootstrap-sha256 $bootstrapPin --expected-approved-manifest-sha256 $manifestPin 1>$null 2>$null
+          $code = $LASTEXITCODE
+        } catch { $code = 1 }
+        finally {
+          try {
+            if (-not $publicExisted) {
+              $file = Join-Path $public 'report.numeric.json'
+              $info = Get-Item -LiteralPath $file -Force
+              if ($info.PSIsContainer -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $info.Length -lt 1 -or $info.Length -gt 8192) { throw 'Numeric SDK report path rejected.' }
+              $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+              $keys = @('schemaVersion','kind','binding','failureCode','sdkReportKnown','sdkStage','sdkGatePassed','nativeSdkCompiled','nativeLinked','negativeSmokePassed','qualification','canService','actualPackageObservation','osImplicitEffectsKnown','watchdogVerified','externalMonitorCandidateImplemented','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup','envelopeExitCode','approvedCodeManifestSha256','compiledEvidence')
+              if (@($report.PSObject.Properties.Name).Count -ne $keys.Count -or @($report.PSObject.Properties.Name | Where-Object { $_ -cnotin $keys }).Count -ne 0) { throw 'SDK numeric report schema rejected.' }
+              if ($report.schemaVersion -ne 1 -or $report.kind -cne 'packaged-context-sdk-ci' -or $report.qualification -isnot [bool] -or $report.qualification -or $report.canService -isnot [bool] -or $report.canService -or $report.actualPackageObservation -or $report.osImplicitEffectsKnown -or $report.watchdogVerified) { throw 'SDK diagnostic cannot grant product qualification.' }
+              if ($report.binding.sourceCommit -cne $env:GITHUB_SHA -or $report.binding.runId -ne [long]$env:GITHUB_RUN_ID -or $report.binding.runAttempt -ne 1 -or $report.binding.architectureCode -ne $machine -or $report.binding.repositoryId -ne 1405493151) { throw 'SDK numeric source binding rejected.' }
+              $eligible = $true
+              if ($code -eq 0 -and ($report.sdkGatePassed -isnot [bool] -or -not $report.sdkGatePassed)) { $code = 1 }
+            }
+          } catch { $eligible = $false; $code = 1 }
+          "report_eligible=$($eligible.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        }
+        if ($code -ne 0) { Write-Host '{"sdkDiagnosticFailed":true}'; exit 1 }
+    - name: Preserve only the closed numeric SDK diagnostic
+      if: always() && !cancelled() && steps.sdk-compile.outputs.report_eligible == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-package-context-sdk-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/packaged-context-sdk-public/${{ matrix.os }}/report.numeric.json
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6

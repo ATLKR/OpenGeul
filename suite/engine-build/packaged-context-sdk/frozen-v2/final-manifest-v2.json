@@ -1,0 +1,131 @@
+{
+  "actualWindowsExecuted": false,
+  "apartmentP2Fixed": true,
+  "canService": false,
+  "controllerOwnershipKnown": false,
+  "delta": [
+    {
+      "beforeSha256": "0ee8e4d0ab965d17a5316c8759a1383ec7c7c2645df261acebeea44a730061b3",
+      "path": "context_observer_windows.cpp",
+      "sha256": "818756b814dacfe85bf0d32021148ef7438b3da754b258698bbc420c0e457ef9"
+    },
+    {
+      "beforeSha256": "953016885a74fdce3ae21cb137c9f7d5170809c78a44c0a1b17a2bf58326ef8f",
+      "path": "tests/core_tests.cpp",
+      "sha256": "237ea4561da241cffe1981669f93f68f550d288ed526801cbb86a2ce6ee26096"
+    },
+    {
+      "beforeSha256": "e7b34c1eee66eb8d062ed06aa9e232408e98e2ee4e59df3552866a137535b58c",
+      "path": "tests/test_portable_core.py",
+      "sha256": "48202f9eee45323cc2a1ebf9eee09ef9e5dcbb39c685640451fd0760f86fb0fe"
+    }
+  ],
+  "deltaPatchSha256": "605deddbfd5449044ec629f6f2c1a684ea617c64e64fe4d30be173a33af0e101",
+  "errors": 0,
+  "failures": 0,
+  "files": [
+    {
+      "bytes": 11172,
+      "path": "context_observer.hpp",
+      "sha256": "ad5d714116fd5791ffb831f8d9d3a300b3c2d5a10730f1e72d5d2b91aba22487"
+    },
+    {
+      "bytes": 8873,
+      "path": "context_observer_windows.cpp",
+      "sha256": "818756b814dacfe85bf0d32021148ef7438b3da754b258698bbc420c0e457ef9"
+    },
+    {
+      "bytes": 17053,
+      "path": "observation_contract.py",
+      "sha256": "2963a1dfc0722a7e6693499c33573c8a327d92c81b8483046f2cebd85e0ae4fc"
+    },
+    {
+      "bytes": 2706,
+      "path": "run_checks.py",
+      "sha256": "f36a07382f88159b1a598b3e8127d6e29a7979f92c12d3f60f52ac2af0574a1f"
+    },
+    {
+      "bytes": 4202,
+      "path": "tests/core_tests.cpp",
+      "sha256": "237ea4561da241cffe1981669f93f68f550d288ed526801cbb86a2ce6ee26096"
+    },
+    {
+      "bytes": 7518,
+      "path": "tests/test_portable_core.py",
+      "sha256": "48202f9eee45323cc2a1ebf9eee09ef9e5dcbb39c685640451fd0760f86fb0fe"
+    },
+    {
+      "bytes": 20428,
+      "path": "tests/test_observation_contract.py",
+      "sha256": "fc380f23506a29973c73bcac8dda253c0b9dc8414bf6136037a9dda732b53f32"
+    },
+    {
+      "bytes": 3549,
+      "path": "tests/test_native_json_interop.py",
+      "sha256": "dbee9ca479c27a4cda74fa503e58c54017c4baa0a35ac9bf9afe7abfa5ea6af2"
+    },
+    {
+      "bytes": 5072,
+      "path": "README.md",
+      "sha256": "20004534b145f3ac73aafc5d0151a4241b30c48da08866a3037c3fb2876ef3b7"
+    },
+    {
+      "bytes": 5208,
+      "path": "DESIGN.md",
+      "sha256": "c49b677f39f9186f30e7e0ce0ae9191f0cd46deb048786a88f30485a02cb6ebf"
+    },
+    {
+      "bytes": 3183,
+      "path": "PLAN.md",
+      "sha256": "7dab4299bc4932eccd189e7edf5860f4c7c158a1ca898bc28630128ee6871fd7"
+    },
+    {
+      "bytes": 4639,
+      "path": "SCHEMA.md",
+      "sha256": "b4c34556c8f6af46d39e7ee5738fdb902b4a870c0a77692734f8f46127b95c6d"
+    },
+    {
+      "bytes": 445,
+      "path": "bundle-manifest-v2.json",
+      "sha256": "0f38f3c60c36f73ab71c4af6a9b0eb77433c8f289659994c8b86070c25e866c6"
+    }
+  ],
+  "kind": "source-only-packaged-context-observer-candidate",
+  "liveCheckoutWrites": false,
+  "nativeSdkCompiled": false,
+  "oldPure40AllBytesPreserved": true,
+  "oldPure40FrozenFiles": 8,
+  "oldPure40TestsRerun": false,
+  "oldSingleRootLeasePreservationReceiptSha256": "fb8ff3ff95fd3d0c94a76f415c777367db3dc33f668989730536a2d545ac4c6b",
+  "originalHelperHandleKnown": false,
+  "osImplicitEffectsKnown": false,
+  "p2IndependentRereview": {
+    "actionableP1": 0,
+    "actionableP2": 0,
+    "actualTestsExecutedByReviewer": false,
+    "reviewer": "/root/dependency_upgrade_20261112/status_focus_schema_review"
+  },
+  "portableTests": 59,
+  "previous56SourceAndReceiptPreserved": true,
+  "previousManifestSha256": "204f368ecc1a169ebbfb6fcf06224c8a9ce57152bb5e4a8c2d4524289176d4cf",
+  "privacyHeuristicIsNotCertification": true,
+  "privacyHeuristicMatches": {
+    "environmentCopy": 0,
+    "environmentDump": 0,
+    "privateKeyHeader": 0,
+    "tokenLiteral": 0
+  },
+  "qualification": false,
+  "runtimeBundleSha256": "0f38f3c60c36f73ab71c4af6a9b0eb77433c8f289659994c8b86070c25e866c6",
+  "runtimeBundleVerified": true,
+  "runtimeFiles": [
+    "context_observer.hpp",
+    "context_observer_windows.cpp",
+    "observation_contract.py"
+  ],
+  "schemaVersion": 2,
+  "skipped": 0,
+  "validationReceiptSha256": "c20b5a51d413439c1db9a01f2db9d6613fed61b22dd96c1b607837a3ead34261",
+  "watchdogVerified": false,
+  "wholeIndependentReviewPending": true
+}
