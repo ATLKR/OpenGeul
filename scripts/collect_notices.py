@@ -151,6 +151,18 @@ WEBVIEW2_SDK_NOTICE = {'version': '1.0.3800.47',
                                              'sha256': '0513f7e61304321f2d91e1851475be07e091042aa3640597e660608f72521e6c'}}}
 
 
+class ReviewedNoticeAliasError(ValueError):
+    """Reject an alias while retaining its observed, path-free boundary role."""
+    def __init__(self, role: str, kind: str, context: dict | None = None, *, reparse_tag=None):
+        self.role = role
+        self.kind = kind
+        self.reparse_tag = reparse_tag if type(reparse_tag) is int and 0 <= reparse_tag <= 0xffffffff else None
+        message = 'Reviewed notice input must not use aliases'
+        if context is not None:
+            message += '; noticeContext=' + json.dumps(context, sort_keys=True, separators=(',', ':'))
+        super().__init__(message)
+
+
 def reviewed_path(location: Path, name: str) -> Path:
     relative=Path(name)
     if relative.is_absolute() or '..' in relative.parts or '\\' in name or ':' in name:
@@ -159,7 +171,9 @@ def reviewed_path(location: Path, name: str) -> Path:
     for component in (path,*path.parents):
         info=component.lstat()
         if stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0) & 0x400:
-            raise ValueError('Reviewed notice input must not use aliases')
+            role='root' if component==location else 'leaf' if component==path else 'intermediate'
+            kind='symlink' if stat.S_ISLNK(info.st_mode) else 'reparse'
+            raise ReviewedNoticeAliasError(role,kind,reparse_tag=getattr(info,'st_reparse_tag',None))
         if component==location:break
     if not stat.S_ISREG(path.stat().st_mode) or not path.resolve().is_relative_to(location.resolve()):
         raise ValueError('Reviewed notice input must be a regular package file')
@@ -246,8 +260,18 @@ def collect_reviewed_notices(ecosystem: str, item: dict, location: Path, output:
     if pin is None or item.get('license')!=pin['license']:
         raise ValueError('Reviewed notice package version/license requires review')
     manifest='Cargo.toml' if ecosystem=='cargo' else 'package.json'
-    reviewed_file(location,manifest,pin['manifestSha256'])
-    data=reviewed_file(location,pin['sourcePath'],pin['sourceSha256'])
+    def input_bytes(label, name, expected):
+        try:
+            return reviewed_file(location,name,expected)
+        except ReviewedNoticeAliasError as error:
+            # Name/version/license already matched the finite reviewed table.
+            # Never include a filesystem path, environment, or package content.
+            context={'ecosystem':ecosystem,'package':item['name'],'version':item['version'],
+                     'input':label,'role':error.role,'kind':error.kind}
+            if error.reparse_tag is not None:context['reparseTag']=error.reparse_tag
+            raise ReviewedNoticeAliasError(error.role,error.kind,context,reparse_tag=error.reparse_tag) from None
+    input_bytes('manifest',manifest,pin['manifestSha256'])
+    data=input_bytes('notice',pin['sourcePath'],pin['sourceSha256'])
     line_range=pin.get('lineRange')
     if line_range is not None:
         lines=data.splitlines(keepends=True)
