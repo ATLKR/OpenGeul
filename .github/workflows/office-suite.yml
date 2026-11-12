@@ -1518,3 +1518,146 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 6
+
+
+  ime-finalization-compile-observation:
+    if: >-
+      github.event.repository.private == false && (
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/work/opengeul-office-package-context-sdk' &&
+      github.repository == 'ATLKR/OpenGeul' && github.repository_id == '1405493151' &&
+      github.repository_owner == 'ATLKR' && github.actor == 'ATLKR' &&
+      github.actor_id == '65988341' && github.triggering_actor == 'ATLKR' &&
+      github.run_attempt == 1 && github.event.repository.fork == false)
+    name: Original Suite IME finalization compile observation (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    steps:
+    - name: Preserve exact source bytes
+      shell: pwsh
+      run: |
+        git config --global core.autocrlf false
+        git config --global core.longpaths true
+    - name: Checkout the collector source
+      id: ime-compile-root
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+        ref: ${{ github.sha }}
+        fetch-depth: 1
+    - name: Preserve preexisting compiler diagnostic source and output
+      id: ime-compile-paths
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Get-ExistingDiagnosticPathItem([string]$Path) {
+          try {
+            $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            if ($null -eq $item) { throw 'Preserve existing compiler observation source or output.' }
+            return $item
+          }
+          catch [System.Management.Automation.ItemNotFoundException] {
+            if ($_.Exception.GetType() -ne [System.Management.Automation.ItemNotFoundException]) { throw }
+            return $null
+          }
+        }
+        $work = Get-ExistingDiagnosticPathItem '.work'
+        if ($null -ne $work -and (-not $work.PSIsContainer -or ($work.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'Preserve aliased or non-directory diagnostic parent.' }
+        foreach ($path in @('.work/ime-finalization-source', '.work/ime-finalization-compile')) {
+          if ($null -ne (Get-ExistingDiagnosticPathItem $path)) { throw 'Preserve existing compiler observation source or output.' }
+        }
+    - name: Checkout the exact original Suite fixture source
+      id: ime-compile-source
+      if: success() && steps.ime-compile-paths.outcome == 'success'
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ATLKR/OpenGeul
+        ref: 3a5b101ba9b66b6c17544f89c9f39cdd6e63d933
+        path: .work/ime-finalization-source
+        persist-credentials: false
+        fetch-depth: 1
+    - name: Observe the original compiler boundary without SDK qualification
+      id: ime-compile-observe
+      if: always() && !cancelled() && steps.ime-compile-source.outcome == 'success'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Get-ExistingDiagnosticPathItem([string]$Path) {
+          try {
+            $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            if ($null -eq $item) { throw 'Preserve existing compiler observation source or output.' }
+            return $item
+          }
+          catch [System.Management.Automation.ItemNotFoundException] {
+            if ($_.Exception.GetType() -ne [System.Management.Automation.ItemNotFoundException]) { throw }
+            return $null
+          }
+        }
+        $eligible = $false
+        $code = 1
+        $outputWasFresh = $false
+        $invoked = $false
+        try {
+          if ($null -ne (Get-ExistingDiagnosticPathItem '.work/ime-finalization-compile')) { throw 'Preserve existing compiler observation output.' }
+          $outputWasFresh = $true
+          $architecture = switch ('${{ matrix.os }}') {
+            'windows-2025' { 'x64' }
+            'windows-11-arm' { 'arm64' }
+            default { throw 'Unsupported fixed SDK runner.' }
+          }
+          $machine = if ($architecture -ceq 'x64') { 0x8664 } else { 0xaa64 }
+          # Existing toolcache only. No setup/download/installer/launcher fallback.
+          $cache = Join-Path $env:RUNNER_TOOL_CACHE 'Python'
+          $versions = @(Get-ChildItem -LiteralPath $cache -Directory | Where-Object { $_.Name -cmatch '\A3\.12\.[0-9]+\z' } | Sort-Object { [Version]$_.Name } -Descending)
+          $python = $null
+          foreach ($version in $versions) {
+            $candidate = Join-Path $version.FullName "$architecture/python.exe"
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $python = $candidate; break }
+          }
+          if ($null -eq $python) { throw 'Preinstalled native Python3.12 is required.' }
+          $info = Get-Item -LiteralPath $python -Force
+          if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $info.Length -lt 152 -or $info.Length -gt 134217728) { throw 'Native interpreter path rejected.' }
+          $stream = [IO.File]::Open($python,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+          try {
+            $reader = [IO.BinaryReader]::new($stream)
+            if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Native interpreter DOS signature rejected.' }
+            $stream.Position = 60
+            $offset = $reader.ReadUInt32()
+            if ($offset -lt 64 -or $offset -gt $stream.Length - 26) { throw 'Native interpreter header rejected.' }
+            $stream.Position = $offset
+            if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne $machine) { throw 'Native interpreter machine rejected.' }
+            $stream.Position = $offset + 22
+            $characteristics = $reader.ReadUInt16()
+            if (($characteristics -band 2) -eq 0 -or ($characteristics -band 0x2000) -ne 0 -or $reader.ReadUInt16() -ne 0x20b) { throw 'Native interpreter PE32+ rejected.' }
+          } finally { $stream.Dispose() }
+          $invoked = $true
+          & $python suite/scripts/ime-finalization-compiler-observation/observe-ime-finalization-compile.py --source-root .work/ime-finalization-source --architecture $architecture --output .work/ime-finalization-compile 1>$null 2>$null
+          $code = $LASTEXITCODE
+        } catch { $code = 1 }
+        finally {
+          try {
+            if ($outputWasFresh -and $invoked) {
+              $directory = Get-Item -LiteralPath '.work/ime-finalization-compile' -Force
+              $file = Get-Item -LiteralPath '.work/ime-finalization-compile/report.numeric.json' -Force
+              if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $file.Length -lt 1 -or $file.Length -gt 32768) { throw 'Numeric compiler report path rejected.' }
+              $eligible = $true
+            }
+          } catch { $eligible = $false; $code = 1 }
+          try { "report_eligible=$($eligible.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8 }
+          catch { $eligible = $false; $code = 1 }
+        }
+        if (-not $eligible) { $code = 1 }
+        if ($code -ne 0) { Write-Host '{"imeCompileObservationFailed":true}'; exit 1 }
+    - name: Preserve only the fixed numeric compiler observation report
+      if: always() && !cancelled() && steps.ime-compile-observe.outputs.report_eligible == 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-ime-finalization-compile-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/ime-finalization-compile/report.numeric.json
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 6
