@@ -543,9 +543,13 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
     protected override void WndProc(ref Message m)
     {
         var appActivated = m.Msg == 0x001C && m.WParam != 0;
+        // WinForms can retain Active=true while the live foreground form was elsewhere.
+        // A later native activation need not raise another managed Activated event.
+        var windowActivated = m.Msg == 0x0006 && (m.WParam.ToInt64() & 0xffff) is 1 or 2;
         if (m.Msg == 0x001C) CountInitialFocusIngress(appActivated ? 1 : 2);
         var activationHwnd = m.HWnd;
         var initialFocusOwner = editorFocus;
+        var initialFocusGeneration = initialFocusOwnerGeneration;
         var pendingBefore = editorFocusDiagnostics.Enabled && initialFocusOwner?.InitialFocusPending == true;
         var observedForm = pendingBefore ? editorFocusFormHwnd : 0;
         var observedPanel = pendingBefore ? editorFocusPanelHwnd : 0;
@@ -556,8 +560,9 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         base.WndProc(ref m);
         if (activationSource != 0)
             TraceInitialActivation(activationSource, activationHwnd, initialFocusOwner, pendingBefore, observedForm, observedPanel);
-        if (appActivated && initialFocusOwner is not null && initialFocusOwner.InitialFocusPending &&
-            ReferenceEquals(editorFocus, initialFocusOwner) && !IsDisposed && !Disposing && IsHandleCreated &&
+        if ((appActivated || windowActivated) && initialFocusOwner is not null && initialFocusOwner.InitialFocusPending &&
+            ReferenceEquals(editorFocus, initialFocusOwner) && initialFocusOwnerGeneration == initialFocusGeneration &&
+            !closing && !closeApproved && !IsDisposed && !Disposing && IsHandleCreated &&
             activationHwnd == editorFocusFormHwnd && activationHwnd == Handle)
             QueueInitialEditorFocus();
     }

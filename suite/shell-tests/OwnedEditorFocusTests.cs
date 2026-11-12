@@ -312,7 +312,7 @@ internal static class OwnedEditorFocusTests
             Check(!Queue(route, callbacks.Add, () => true, reports.Add) && native.Sets == 1,
                 "A completed app activation retried native focus");
         });
-        yield return Test("The actual app activation entry fences the original owner and HWND after base processing", () =>
+        yield return Test("The actual app and window activation entries fence the original owner and HWND after base processing", () =>
         {
             var source = FocusFormSource();
             var body = FocusHostMethod(source, "protected override void WndProc(ref Message m)");
@@ -322,12 +322,17 @@ internal static class OwnedEditorFocusTests
             foreach (var capture in new[] { "var activationHwnd = m.HWnd;", "var initialFocusOwner = editorFocus;" })
                 Check(body.IndexOf(capture, StringComparison.Ordinal) is var at && at >= 0 && at < processed,
                     "The original app activation owner or HWND is not retained");
-            var wake = body.IndexOf("if (appActivated", StringComparison.Ordinal);
+            var wake = body.IndexOf("if ((appActivated || windowActivated)", StringComparison.Ordinal);
             var queue = body.IndexOf("QueueInitialEditorFocus();", StringComparison.Ordinal);
+            Check(body.IndexOf("var windowActivated = m.Msg == 0x0006 && (m.WParam.ToInt64() & 0xffff) is 1 or 2;", StringComparison.Ordinal)
+                is var window && window >= 0 && window < processed, "Native window activation did not retain exact active LOWORD states");
+            Check(body.IndexOf("var initialFocusGeneration = initialFocusOwnerGeneration;", StringComparison.Ordinal)
+                is var generation && generation >= 0 && generation < processed, "Native window activation did not retain its generation");
             Check(wake > processed && queue > wake, "App activation queued focus before base processing");
             var guard = body[wake..queue];
             foreach (var condition in new[] { "initialFocusOwner is not null", "initialFocusOwner.InitialFocusPending",
-                "ReferenceEquals(editorFocus, initialFocusOwner)", "!IsDisposed", "!Disposing", "IsHandleCreated",
+                "ReferenceEquals(editorFocus, initialFocusOwner)", "initialFocusOwnerGeneration == initialFocusGeneration",
+                "!closing", "!closeApproved", "!IsDisposed", "!Disposing", "IsHandleCreated",
                 "activationHwnd == editorFocusFormHwnd", "activationHwnd == Handle" })
                 Check(guard.Contains(condition, StringComparison.Ordinal), "App activation lost an original owner/lifetime guard");
             Check(guard.IndexOf("IsHandleCreated", StringComparison.Ordinal) < guard.IndexOf("activationHwnd == Handle", StringComparison.Ordinal),
