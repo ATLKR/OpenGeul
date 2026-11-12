@@ -675,7 +675,7 @@ class StorePackageTests(unittest.TestCase):
             self.assertFalse((root / '.work/store-payload').exists()); self.assertFalse(output.exists())
 
     def test_pair_build_asset_bounds_and_duplicates_fail_before_download(self):
-        for assets in ([{'name': 'provenance.json', 'size': 192 * 1024 * 1024 + 1}],
+        for assets in ([{'name': 'provenance.json', 'size': 256 * 1024 * 1024 + 1}],
                        [{'name': 'provenance.json', 'size': -1}], [{'name': 'provenance.json', 'size': True}],
                        [{'name': 'provenance.json', 'size': 1}] * 2,
                        [{'name': '../provenance.json', 'size': 1}]):

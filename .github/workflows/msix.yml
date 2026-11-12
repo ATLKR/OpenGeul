@@ -431,7 +431,11 @@ jobs:
       run: ./scripts/build-msix.ps1 -Phase Package -EditorComponent editor-input -CliComponent cli-input
     - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
-      run: python ci/evidence.py size --limit-mib 96 dist
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python scripts/release_pair.py sizes --package-directory dist --architecture x64
+        python ci/evidence.py size --limit-mib 128 dist
     - name: 검증한 빌드 결과 업로드
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -475,7 +479,11 @@ jobs:
       run: ./scripts/build-msix.ps1 -Phase Package -Architecture arm64 -EditorComponent editor-input -CliComponent cli-input
     - name: 업로드 전 전송 파일 크기 제한 검사
       shell: pwsh
-      run: python ci/evidence.py size --limit-mib 96 dist
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        python scripts/release_pair.py sizes --package-directory dist --architecture arm64
+        python ci/evidence.py size --limit-mib 128 dist
     - name: 검증한 빌드 결과 업로드
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:

@@ -74,7 +74,9 @@ class WindowsComponentsTests(unittest.TestCase):
         helpers = self.helper().configured()['helpers']
         self.assertTrue(name in helpers, 'Native advanced input stager must be included in component helpers')
         self.assertEqual(helpers[name], digest(ROOT/name))
-        self.assertEqual(len(helpers), 102)
+        self.assertEqual(len(helpers), 103)
+        budget_helper = 'scripts/normal_distribution_budget.py'
+        self.assertEqual(helpers[budget_helper], digest(ROOT/budget_helper))
 
     def test_equation_dialog_focus_actual_frontend_source_is_explicit(self):
         name = 'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts'

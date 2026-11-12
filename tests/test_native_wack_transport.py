@@ -101,7 +101,7 @@ class NativeJoinTests(unittest.TestCase):
         self.unsigned=next(self.directory.glob('*.msix'))
         self.binding={'repository':'ATLKR/OpenGeul','commit':'a'*40,'runId':'1234','runAttempt':'2'}
         install=json.loads((self.fixture.wacks['arm64']/'install.json').read_bytes())
-        self.files=transport._files(self.directory)
+        self.files=transport._files(self.directory,scope='source')
         self.split,self.installation,self.join,self.raw=native_split_fixture.make_split(self.unsigned,install,self.binding,'source',self.files)
         self.native=self.split['native'];self.origin=self.split['origin']
         with zipfile.ZipFile(self.unsigned) as package:
@@ -173,7 +173,9 @@ class NativeJoinTests(unittest.TestCase):
                 if path.endswith('/jobs?per_page=100'):return {'total_count':3,'jobs':raw['jobs']}
                 if path.endswith('/artifacts?per_page=100'):return {'total_count':2,'artifacts':[origin['unsigned']['artifact'],origin['native']['artifact']]}
                 return origin['unsigned']['artifact'] if path=='actions/artifacts/100' else origin['native']['artifact']
-            def zip(_,artifact_id):return raw['unsigned'] if artifact_id==100 else raw['native']
+            def zip(_,artifact_id,*,unsigned_scope=None):
+                if unsigned_scope!=('source' if artifact_id==100 else None):raise ValueError('Unexpected unsigned scope')
+                return raw['unsigned'] if artifact_id==100 else raw['native']
         with patch.object(transport,'_unsigned',return_value=self.unsigned_context):
             result=transport.download('source',self.directory,self.root/'download',backend=Backend(),env=self.env)
         self.assertEqual(result,self.origin)
@@ -181,7 +183,9 @@ class NativeJoinTests(unittest.TestCase):
         for key in ('native','unsigned'):
             swapped=dict(raw);swapped[key]=raw[key]+b'byte swap'
             class Swapped(Backend):
-                def zip(_,artifact_id):return swapped['unsigned'] if artifact_id==100 else swapped['native']
+                def zip(_,artifact_id,*,unsigned_scope=None):
+                    if unsigned_scope!=('source' if artifact_id==100 else None):raise ValueError('Unexpected unsigned scope')
+                    return swapped['unsigned'] if artifact_id==100 else swapped['native']
             destination=self.root/('bad-'+key)
             with patch.object(transport,'_unsigned',return_value=self.unsigned_context),self.assertRaises(ValueError):
                 transport.download('source',self.directory,destination,backend=Swapped(),env=self.env)
