@@ -97,7 +97,7 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
                 self.assertIs(probe._observed_call, context)
 
     def test_zero_com_unknown_wrappers_other_dll_and_callbacks_keep_setup(self):
-        for kind in ('lambda', 'tree', 'collection', 'wrapper', 'dwm', 'other-dll', 'new-object', 'late-export', 'callback'):
+        for kind in ('lambda', 'tree', 'collection', 'wrapper', 'other-dwm-export', 'foreign-dwm-library', 'other-dll', 'new-object', 'late-export', 'callback'):
             with self.subTest(kind=kind), sdk_probe() as probe:
                 class Com:
                     def parent(self): return 1
@@ -107,7 +107,8 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
                     'tree': Com().parent,
                     'collection': Com().element,
                     'wrapper': lambda: probe.user.IsWindow(7),
-                    'dwm': probe.dwm.DwmGetWindowAttribute,
+                    'other-dwm-export': probe.dwm.DwmFlush,
+                    'foreign-dwm-library': Library('dwmapi', use_last_error=True)['DwmGetWindowAttribute'],
                     'other-dll': Library('ole32', use_last_error=True)['IsWindow'],
                     'new-object': probe.user['IsWindow'],
                     'late-export': probe.user.GetWindowLongW,
@@ -116,6 +117,49 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
                 probe._call(candidates[kind])
                 self.assertEqual(len(probe.provider_client.operations), 4)
                 self.assertIn('providerBudget', probe.interop['lastCall'])
+
+    def test_inherited_dwm_snapshot_reaches_native_export_without_provider_setup(self):
+        class EInvalidArg(Exception):
+            hresult = -2147024809
+            def __str__(self): raise AssertionError('Exception text must not be read')
+        class RejectTimeout(Provider):
+            def __setattr__(self, name, value):
+                if name in ('ConnectionTimeout', 'TransactionTimeout'): raise EInvalidArg()
+                super().__setattr__(name, value)
+        with sdk_probe() as probe:
+            probe.provider_client = RejectTimeout(probe.clock)
+            function = probe.dwm.DwmGetWindowAttribute
+            function.result = 0
+            lookups = list(probe.dwm.lookups)
+            value = probe.window_snapshot(7)
+            self.assertEqual(value['cloaked'], 0)
+            self.assertEqual(len(function.calls), 1)
+            self.assertEqual(probe.provider_client.operations, [])
+            self.assertEqual(probe.dwm.lookups, lookups)
+            self.assert_native_record(probe)
+
+    def test_zero_uia_process_id_lambda_still_requires_provider_setup(self):
+        class EInvalidArg(Exception):
+            hresult = -2147024809
+            def __str__(self): raise AssertionError('Exception text must not be read')
+        class RejectTimeout(Provider):
+            def __setattr__(self, name, value):
+                if name in ('ConnectionTimeout', 'TransactionTimeout'): raise EInvalidArg()
+                super().__setattr__(name, value)
+        with sdk_probe() as probe:
+            probe.provider_client = RejectTimeout(probe.clock)
+            entered = []
+            class Element:
+                @property
+                def CurrentProcessId(self):
+                    entered.append(1)
+                    return 123
+            element = Element()
+            with self.assertRaises(EInvalidArg): probe._call(lambda: element.CurrentProcessId)
+            self.assertEqual(entered, [])
+            call = probe.interop['lastCall']
+            self.assertEqual((call['apiCode'], call['phaseCode'], call['calleeEntered']), (0, 1, False))
+            self.assertIn('providerBudget', call)
 
     def test_actual_uia_code_four_and_five_paths_keep_setup_for_same_native_object(self):
         for code in (4, 5):
@@ -140,9 +184,10 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
 
     def test_injected_or_replaced_creators_do_not_create_native_trust(self):
         for libraries in ({'user': Library('user32', use_last_error=True)},
-                          {'kernel': Library('kernel32', use_last_error=True)}):
+                          {'kernel': Library('kernel32', use_last_error=True)},
+                          {'dwm': Library('dwmapi', use_last_error=True)}):
             with sdk_probe(**libraries) as probe:
-                function = probe.user.IsWindow if 'user' in libraries else probe.kernel.GetProcessId
+                function = probe.user.IsWindow if 'user' in libraries else probe.kernel.GetProcessId if 'kernel' in libraries else probe.dwm.DwmGetWindowAttribute
                 probe._call(function, 7)
                 self.assertEqual(len(probe.provider_client.operations), 4)
         with sdk_probe(factory=lambda *a, **k: Library(*a, **k)) as probe:
@@ -154,6 +199,25 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
         with patch.object(menu.NativeActivationProbe, '__init__', wrapper), sdk_probe() as probe:
             probe._call(probe.user.IsWindow, 7)
             self.assertEqual(len(probe.provider_client.operations), 4)
+
+    def test_dwm_export_uses_the_same_retained_identity_signature_and_loader_guards(self):
+        for kind in ('library', 'name', 'cached-export', 'deleted-export', 'pointer-type',
+                     'owner', 'argtypes', 'restype', 'flags', 'errcheck', 'call-wrapper'):
+            with self.subTest(kind=kind), sdk_probe() as probe:
+                library, function = probe.dwm, probe.dwm.DwmGetWindowAttribute
+                if kind == 'library': probe.dwm = Library('dwmapi', use_last_error=True)
+                elif kind == 'name': library._name = 'user32'
+                elif kind == 'cached-export': library.DwmGetWindowAttribute = library['DwmGetWindowAttribute']
+                elif kind == 'deleted-export': del library.DwmGetWindowAttribute
+                elif kind == 'pointer-type': library._FuncPtr = type('Other', (Export,), {'_flags_': 16})
+                elif kind == 'owner': function._objects['0'] = object()
+                elif kind == 'argtypes': function.argtypes = list(function.argtypes)
+                elif kind == 'restype': function.restype = C.c_uint64
+                elif kind == 'flags': type(function)._flags_ = 0
+                elif kind == 'errcheck': function.errcheck = lambda value, *args: value
+                elif kind == 'call-wrapper': type(function).__call__ = lambda self, *args: 1
+                probe._call(function, 7)
+                self.assertEqual(len(probe.provider_client.operations), 4)
 
     def test_changed_library_export_owner_signature_flags_or_errcheck_falls_back(self):
         class Name(str):
@@ -300,7 +364,8 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
 class ActualWinDllAdmissionTests(unittest.TestCase):
     def test_cached_sdk_export_ownership_is_admitted_without_invoking_it(self):
         probe = menu.NativeMenuProbe(5, Clock())
-        for library, name in ((probe.user, 'IsWindow'), (probe.kernel, 'GetProcessId')):
+        for library, name in ((probe.user, 'IsWindow'), (probe.kernel, 'GetProcessId'),
+                              (probe.dwm, 'DwmGetWindowAttribute')):
             function = vars(library)[name]
             self.assertIs(type(function), vars(library)['_FuncPtr'])
             self.assertIs(function._objects['0'], library)

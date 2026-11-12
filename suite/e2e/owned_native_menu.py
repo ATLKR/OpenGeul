@@ -1080,7 +1080,8 @@ class NativeMenuProbe(NativeControlProbe):
                 and getattr(C,'WinDLL',None) is loader):
             entries=[]
             for role,dll,names in (('user','user32',_NATIVE_USER_EXPORTS+tuple(row[0] for row in signatures)),
-                                   ('kernel','kernel32',_NATIVE_KERNEL_EXPORTS)):
+                                   ('kernel','kernel32',_NATIVE_KERNEL_EXPORTS),
+                                   ('dwm','dwmapi',('DwmGetWindowAttribute',))):
                 library=vars(self).get(role)
                 if libraries.get(role) is not None or type(library) is not _OWNED_WINDLL_TYPE:continue
                 cached=vars(library);pointer=cached.get('_FuncPtr')
