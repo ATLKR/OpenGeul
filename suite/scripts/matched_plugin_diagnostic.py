@@ -150,7 +150,14 @@ def select_notification(report):
     return result
 
 
-def select_compartment(report):
+def select_compartment(report,*,expected_policy=4,expected_source=None):
+    """Explicit legacy/current prefix diagnosis; never full IME acceptance."""
+    assert type(expected_policy) is int and expected_policy in (4,5), 'External diagnostic policy required'
+    if expected_policy==4:
+        assert expected_source is None, 'Historical diagnostics cannot adopt a current source pin'
+    else:
+        from korean_ime_smoke import profile_policy_source_sha256
+        assert type(expected_source) is str and expected_source==profile_policy_source_sha256(), 'Independent current diagnostic source pin required'
     from ime_notification_caller import clean
     assert report.get('kind')=='native-ime-mode-diagnostic' and report.get('architecture')=='arm64'
     assert report.get('acceptanceEligible') is False and report.get('compartmentCallbackEnabled') is True
@@ -159,6 +166,14 @@ def select_compartment(report):
     assert proof.get('verified') is True and proof.get('released') is True and not report.get('pluginFileOriginCleanupErrorType')
     case=report['tests'][0]
     assert case.get('case')=='ime-writer' and case.get('kind')=='native-ime-mode-diagnostic'
+    for scope in (report,case):
+        if expected_policy==4:
+            assert 'imePolicySourceSha256' not in scope, 'Current source evidence is not a policy4 diagnostic'
+            if 'imePolicyVersion' in scope:
+                assert type(scope['imePolicyVersion']) is int and scope['imePolicyVersion']==4, 'Original diagnostic policy4 required'
+        else:
+            assert type(scope.get('imePolicyVersion')) is int and scope['imePolicyVersion']==5, 'Current diagnostic policy5 required'
+            assert scope.get('imePolicySourceSha256')==expected_source, 'Diagnostic metadata differs from independent source expectation'
     result=dict(status='inconclusive-case',evidenceKind='ime-compartment-callback',inputSignatureVerified=None,rvas=[],runtimeCallerProved=False,acceptanceEligible=False)
     if case.get('success') is True:
         result['status']='not-reproduced';return result
@@ -185,7 +200,7 @@ def select_compartment(report):
     command=next(r for r in case['imeCommands'] if r['command']==3);baseline=command['threadMode']
     assert command['success'] is True and command['nativeAck']==3 and command['status']==0 and clean(baseline)
     from korean_ime_smoke import require_mode_context
-    assert require_mode_context(command)[2:]==(native['officePid'],caller['tid'],caller['hwnd'],native['suiteHwnd'])
+    assert require_mode_context(command,expected_policy=expected_policy)[2:]==(native['officePid'],caller['tid'],caller['hwnd'],native['suiteHwnd'])
     assert command['requestedBudget']=={'counter':command['modeDeadlineCounter'],'frequency':command['modeCounterFrequency']}
     assert command['modeCounterFrequency']==caller['counterFrequency']
     assert caller['baselineCounter']<command['modeDeadlineCounter']<=caller['deadlineCounter']
@@ -230,13 +245,13 @@ def join_resolution(selection,worker):
     return all(f['tag']!='unresolved' for f in frames)
 
 
-def resolve_compartment_in_memory(report,pair,context,*,worker_run=None,progress=None):
+def resolve_compartment_in_memory(report,pair,context,*,worker_run=None,progress=None,expected_policy=4,expected_source=None):
     """Keep the original selector and file-only worker without a raw trace file."""
     if progress is not None:
         assert type(progress) is dict, 'Closed resolution progress required'
         progress.clear();progress['stage']='ime-compartment-select'
     assert type(context) is dict and report['runBinding']==context, 'Trace belongs to another run'
-    selection=select_compartment(report)
+    selection=select_compartment(report,expected_policy=expected_policy,expected_source=expected_source)
     if progress is not None:progress['selection']=selection
     if selection['status']!='selected':return selection,None
     if progress is not None:progress['stage']='ime-compartment-worker'

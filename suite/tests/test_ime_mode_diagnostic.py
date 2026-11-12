@@ -118,9 +118,9 @@ int main(){
 '''
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);cpp=root/'mode.cpp';exe=root/('mode.exe' if os.name=='nt' else 'mode')
-            cpp.write_text('#include "ime_compartment_protocol.h"\n'+prefix+'\n#include \"ime_notification_caller.h\"\n'+declarations+main)
+            cpp.write_text('#include "ime_compartment_protocol.h"\n#include "ime_profile_language.h"\n'+prefix+'\n#include \"ime_notification_caller.h\"\n'+declarations+main)
             build=subprocess.run([compiler,'-std=c++17','-I',str(Path(ime.__file__).parent),str(cpp),'-o',str(exe)],capture_output=True,text=True,timeout=30)
-            self.assertEqual(build.returncode,0,build.stdout+build.stderr)
+            self.assertEqual(build.returncode,0,'Synthetic mode-diagnostic compile failed')
             run=subprocess.run([str(exe)],capture_output=True,text=True,timeout=5)
             try:self.assertEqual(run.returncode,0,run.stdout+run.stderr)
             finally:remove_completed_image(root,exe,run)
@@ -146,10 +146,35 @@ int main(){
             root=Path(temporary);suite=root/'suite';suite.mkdir();fixtures=root/'fixtures';fixtures.mkdir()
             output=root/'diagnostic';event=root/'event.json';event.write_text('{}')
             (suite/'suite-inventory.json').write_text(json.dumps({'schemaVersion':1,'architecture':'x64'}))
-            with patch.object(ime,'os',SimpleNamespace(name='nt',environ={})),patch.dict(os.environ,{'GITHUB_EVENT_PATH':str(event)}), \
+            with patch.object(ime,'os',SimpleNamespace(name='nt',environ={})),patch.object(os,'environ',{'GITHUB_EVENT_PATH':str(event)}), \
                  patch.object(ime.native_arch,'observe_native_architecture'),patch.object(ime.native_arch,'validate_native_architecture'), \
                  patch.object(ime.ascii_input,'prepare_observer') as prepare:
                 with self.assertRaisesRegex(ValueError,'owner-push context'):
                     ime.main(['--suite',str(suite),'--fixtures',str(fixtures),'--readiness',str(root/'readiness.json'),
                         '--output',str(output),'--diagnose-ime-mode','calc'])
                 prepare.assert_not_called();self.assertFalse(output.exists())
+
+    def test_mode_gate_never_reads_the_original_environment_mapping(self):
+        import os,tempfile
+        from unittest.mock import patch
+        from test_ime_engine_retirement import PoisonEnvironment
+        known={'MODE_GATE_OUTSIDE':'synthetic-only'}
+        with patch.object(os,'environ',known),tempfile.TemporaryDirectory() as folder, \
+             patch.object(tempfile,'tempdir',folder):
+            poison=PoisonEnvironment();result=unittest.TestResult();seen=[]
+            original_main=ime.main
+            def main(*args,**kwargs):
+                self.assertTrue(type(os.environ) is dict and set(os.environ)=={'GITHUB_EVENT_PATH'},
+                    'Only the exact event fixture mapping may be active')
+                seen.append(True)
+                return original_main(*args,**kwargs)
+            case=ModeDiagnosticTests('test_mode_gate_rejects_before_output_or_preparation')
+            with patch.object(ime,'main',main),patch.object(os,'environ',poison):
+                case.run(result)
+                self.assertTrue(os.environ is poison,'Original mapping reference must be restored')
+            self.assertTrue(os.environ is known,'Outer synthetic mapping reference must be restored')
+            # Never print nested failure strings or environment/mock representations.
+            self.assertEqual(poison.read_attempts,0)
+            self.assertTrue(result.wasSuccessful(),'Actual mode gate failed environment isolation')
+            self.assertEqual(result.testsRun,1)
+            self.assertEqual(len(seen),1)

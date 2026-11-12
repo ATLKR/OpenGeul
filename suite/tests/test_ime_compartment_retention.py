@@ -65,7 +65,7 @@ class CompartmentRetentionTests(unittest.TestCase):
     def test_original_success_has_one_same_record_sink_after_cleanup_without_raw_sidecars(self):
         self.assertIn('compartment_sink',inspect.signature(ime.case).parameters)
         calls,record,result,error,captured,observed=self.original_case()
-        self.assertIsNone(error,repr(error));self.assertIs(result,record)
+        self.assertTrue(error is None,'Original synthetic case returned an error');self.assertIs(result,record)
         self.assertTrue(record['success']);self.assertEqual(self.sink_states,[True])
         self.assertEqual(len(captured),1);self.assertIs(captured[0],record)
         self.assertFalse(observed[0].retain_evidence)
@@ -104,23 +104,25 @@ class CompartmentRetentionTests(unittest.TestCase):
         report=fixture.compartment_report()
         from ime_policy5_fixtures import current_diagnostic_context_fixture
         current_diagnostic_context_fixture(report['tests'][0],ime)
+        source=ime.profile_policy_source_sha256();report.update(imePolicyVersion=5,imePolicySourceSha256=source)
         before=copy.deepcopy(report);calls=[]
         def worker(pair,*,mode,rvas):
             calls.append((pair,mode,rvas))
             return dict(success=True,resolution=dict(dllSha256=report['pluginFileOrigin']['dllSha256'],
                 identity=report['pluginFileOrigin']['matchedIdentity'],frames=[dict(returnRva=100,tag='frame-input-context')]))
-        selected,resolved=function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker)
+        selected,resolved=function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker,expected_policy=5,expected_source=source)
         self.assertEqual(selected['status'],'selected');self.assertTrue(resolved['success'])
         self.assertEqual(calls,[(Path('/synthetic/pair'),'resolve',[100])]);self.assertEqual(report,before)
         report['tests'][0]['keyTokens']=['g','k']
-        selected,resolved=function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker)
+        selected,resolved=function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker,expected_policy=5,expected_source=source)
         self.assertEqual(selected['status'],'inconclusive-case');self.assertIsNone(resolved)
         self.assertEqual(len(calls),1)
         report=fixture.compartment_report()
         from ime_policy5_fixtures import current_diagnostic_context_fixture
         current_diagnostic_context_fixture(report['tests'][0],ime)
+        report.update(imePolicyVersion=5,imePolicySourceSha256=source)
         report['tests'][0]['imeFailureCleanup']['engineExitConfirmed']=False
-        with self.assertRaises(AssertionError):function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker)
+        with self.assertRaises(AssertionError):function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker,expected_policy=5,expected_source=source)
         self.assertEqual(len(calls),1)
 
     def test_single_controller_keeps_raw_case_in_memory_and_only_persists_closed_numeric_receipt(self):
@@ -148,7 +150,11 @@ class CompartmentRetentionTests(unittest.TestCase):
                     k['compartment_sink'](record)
                     if failure=='case':raise primary
                     return record
-                def resolve(report,pair,actual,*,progress=None):
+                def resolve(report,pair,actual,*,worker_run=None,progress=None,expected_policy=4,expected_source=None):
+                    self.assertTrue(type(expected_policy)is int and expected_policy==5,'Current controller must explicitly select policy5')
+                    self.assertTrue(expected_source==ime.profile_policy_source_sha256(),'Current controller must supply its trusted source')
+                    self.assertTrue(report.get('imePolicyVersion')==5 and report.get('imePolicySourceSha256')==expected_source,'Current report must share the independent expectation')
+                    self.assertTrue(worker_run is None,'Controller cannot replace the file-only worker')
                     events.append('resolve');self.assertEqual(actual,binding)
                     if failure!='prepare':self.assertIs(report['tests'][0],record)
                     self.assertEqual(events.count('case'),int(failure!='prepare'))
@@ -198,6 +204,7 @@ class CompartmentRetentionTests(unittest.TestCase):
         fixture=CompartmentSelectionTests();fixture.setUp();raw=fixture.compartment_report()
         from ime_policy5_fixtures import current_diagnostic_context_fixture
         current_diagnostic_context_fixture(raw['tests'][0],ime)
+        source=ime.profile_policy_source_sha256();raw.update(imePolicyVersion=5,imePolicySourceSha256=source)
         projection=CompartmentReportTests();projection.setUp();_,_,worker=projection.fixture()
         raw['runBinding'].update(ref='refs/heads/work/opengeul-office-arm64',event='push',
             workflowRef='ATLKR/OpenGeul/.github/workflows/office-suite.yml@refs/heads/work/opengeul-office-arm64')
@@ -218,7 +225,11 @@ class CompartmentRetentionTests(unittest.TestCase):
             env.update(OPENGEUL_SUITE_NUMERIC_NOTICE='1',OPENGEUL_SUITE_NOTICE_SCOPE=notice_scope)
         emitter=ime.numeric_notice.NoticeEmitter(environ=env)
         original=resolver.resolve_compartment_in_memory;calls=[]
-        def resolved(report,pair,context,*,progress=None):
+        def resolved(report,pair,context,*,worker_run=None,progress=None,expected_policy=4,expected_source=None):
+            self.assertTrue(type(expected_policy)is int and expected_policy==5,'Current controller must explicitly select policy5')
+            self.assertTrue(expected_source==source,'Current controller must supply the trusted source independently')
+            self.assertTrue(report.get('imePolicyVersion')==5 and report.get('imePolicySourceSha256')==source,'Report must bind the same trusted source')
+            self.assertTrue(worker_run is None,'Controller cannot replace the file-only worker')
             self.assertIs(report['tests'][0],record)
             if resolver_failure:raise RuntimeError('SYNTHETIC PRIVATE worker failure')
             def file_worker(actual,*,mode,rvas):
@@ -227,12 +238,12 @@ class CompartmentRetentionTests(unittest.TestCase):
                 if resolution_phase=='join':
                     worker['resolution']['frames'][0]=dict(returnRva=100,callRva=96,tag='unresolved')
                 return worker
-            return original(report,pair,context,worker_run=file_worker,progress=progress)
+            return original(report,pair,context,worker_run=file_worker,progress=progress,expected_policy=expected_policy,expected_source=expected_source)
         primary=AssertionError('Native UI condition did not become true: False')
         def case(*args,**kw):kw['compartment_sink'](record);raise primary
         proof=dict(identity,released=False)
         lease=NS(binding=lambda:dict(verified=True),receipt=proof,close=lambda:proof.update(released=True))
-        with tempfile.TemporaryDirectory() as directory,patch.dict(ime.os.environ,env), \
+        with tempfile.TemporaryDirectory() as directory,patch.object(ime.os,'environ',dict(env)), \
              patch.object(ime.numeric_notice,'_EMITTER',emitter), \
              patch.object(publisher,'_attempted',False), \
              patch.object(ime,'_open_plugin_proof',return_value=lease), \
@@ -315,6 +326,61 @@ class CompartmentRetentionTests(unittest.TestCase):
 
     def test_resolution_notice_cannot_cross_original_ime_scope(self):
         self.controller_roundtrip(resolution_phase='worker',notice_scope='4')
+
+
+    def test_current_controller_expectation_never_comes_from_case_metadata(self):
+        from test_compartment_selection import CompartmentSelectionTests
+        from suite.scripts import matched_plugin_diagnostic as resolver
+        fixture=CompartmentSelectionTests();fixture.setUp();raw,source=fixture.current_compartment_report()
+        record=raw['tests'][0];record['imePolicySourceSha256']='0'*64
+        observed=[];worker_calls=[];original=resolver.resolve_compartment_in_memory
+        def worker(pair,*,mode,rvas):
+            worker_calls.append(True)
+            raise AssertionError('Untrusted source must not reach a worker')
+        def resolved(report,pair,context,*,worker_run=None,progress=None,expected_policy=4,expected_source=None):
+            observed.append((expected_policy,expected_source,report.get('imePolicyVersion'),report.get('imePolicySourceSha256')))
+            assert type(expected_policy)is int and expected_policy==5, 'Current controller must select policy5 independently'
+            assert expected_source==source, 'Current controller must supply its trusted source independently'
+            return original(report,pair,context,worker_run=worker,progress=progress,
+                expected_policy=expected_policy,expected_source=expected_source)
+        identity=dict(raw['pluginFileOrigin'],released=False)
+        lease=NS(binding=lambda:dict(verified=True),receipt=identity,close=lambda:identity.update(released=True))
+        def case(*args,**kw):kw['compartment_sink'](record);return record
+        publisher=NS(project=lambda *a,**k:dict(kind=4,status=0),encode_notice=json.dumps,emit_value=lambda value:True)
+        context=dict(sourceCommit='a'*40,runId=7,runAttempt=1,architecture=0xaa64)
+        with tempfile.TemporaryDirectory() as folder,patch.dict(sys.modules,{'ime_compartment_report':publisher}), \
+             patch.object(ime,'_open_plugin_proof',return_value=lease), \
+             patch.object(ime.ascii_input,'prepare_observer',return_value=object()), \
+             patch.object(ime,'case',side_effect=case), \
+             patch.object(resolver,'resolve_compartment_in_memory',resolved), \
+             patch.object(ime.numeric_notice,'emit_reader_guard_case',return_value=False), \
+             patch.object(ime.numeric_notice,'public_context',return_value=context):
+            root=Path(folder)
+            with self.assertRaises(AssertionError):
+                ime.run_compartment_diagnostic(root,root,root,{},'arm64',raw['runBinding'],root/'pair/receipt.json')
+        self.assertEqual(observed,[(5,source,5,source)])
+        self.assertEqual(worker_calls,[])
+
+
+    def test_controller_fixture_never_reads_or_copies_the_original_environment_mapping(self):
+        # Import fixture dependencies before installing a deliberately unreadable map.
+        import test_compartment_selection,test_ime_compartment_report,test_ime_mode_receipts
+        import ime_compartment_report
+        class PoisonEnvironment:
+            attempts=0
+            def deny(inner,*args,**kwargs):
+                inner.attempts+=1
+                raise AssertionError('Synthetic original environment must not be read')
+            copy=__iter__=keys=items=values=get=__getitem__=__contains__=__len__=deny
+            def __repr__(inner):return '<synthetic unreadable environment>'
+        known={'ISOLATION_TEST_ONLY':'synthetic'}
+        with patch.object(ime.os,'environ',known),tempfile.TemporaryDirectory() as folder,patch.object(tempfile,'tempdir',folder):
+            poison=PoisonEnvironment()
+            with patch.object(ime.os,'environ',poison):
+                self.controller_roundtrip()
+                self.assertTrue(ime.os.environ is poison,'Original mapping reference must return unchanged')
+            self.assertTrue(ime.os.environ is known,'Outer synthetic mapping reference must be restored')
+            self.assertEqual(poison.attempts,0)
 
 
 if __name__=='__main__':unittest.main()

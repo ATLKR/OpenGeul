@@ -221,6 +221,7 @@ class NotificationProducerTests(unittest.TestCase):
 #include "ime_notification_caller.h"
 #include "ime_compartment_protocol.h"
 #include "ime_command_admission.h"
+#include "ime_profile_language.h"
 using WCHAR=uint16_t;using LONG=int32_t;using HMODULE=void*;
 constexpr unsigned GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS=4,GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT=2;
 void MemoryBarrier(){} LONG InterlockedExchange(volatile LONG*p,LONG v){auto old=*p;*p=v;return old;}
@@ -261,7 +262,7 @@ int main(){reset();capture_notification(0,true);assert(shared->notification.sequ
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);cpp=root/'producer.cpp';exe=root/('producer.exe' if os.name=='nt' else 'producer');cpp.write_text(prefix)
             built=subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I',str(Path(ime.__file__).parent),str(cpp),'-o',str(exe)],capture_output=True,text=True,timeout=30)
-            self.assertEqual(built.returncode,0,built.stdout+built.stderr)
+            self.assertEqual(built.returncode,0,'Synthetic notification-producer compile failed')
             result=subprocess.run([str(exe)],capture_output=True,text=True,timeout=5)
             try:self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             finally:remove_completed_image(root,exe,result)

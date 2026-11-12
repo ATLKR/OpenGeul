@@ -17,6 +17,9 @@ class SetupDeadlineTests(unittest.TestCase):
         value.magic=0x4f47494d;value.version=4;value.pid=88;value.tid=44;value.targetHwnd=33;value.rootHwnd=11
         value.snapshotEvidence=dict(copyReturn=1,ackBefore=1,ackAfter=1,stable=True)
         value.tsfCaptured=1;value.profileChangeAttempted=1
+        value.previousLanguage=0x409
+        value.profileLanguage=ime.NativeProfileLanguageRecord(schemaVersion=1,command=1,complete=1,
+            originalLanguage=0x409,observedBefore=0x409,interfaceAttempts=1,getterAttempts=1,observedMask=3)
         value.threadMode=ime.native_mode.NativeModeReceipt(**mode_fixtures.ThreadModeReceiptTests().receipt(1))
         counter=patch.object(ime.native_mode,"counter_budget",return_value=(100000,1000))
         counter.start();self.addCleanup(counter.stop)
@@ -43,6 +46,18 @@ class SetupDeadlineTests(unittest.TestCase):
         with patch.object(ime.time,'monotonic',side_effect=lambda:now[0]),patch.object(ime,'wait_for',side_effect=wait):
             observer.command(1,setup_deadline=3.)
         self.assertTrue(observer.activation_attempted)
+    def test_current_capture_language_evidence_is_mandatory_before_original_memento(self):
+        for field,value in (('complete',0),('observedBefore',0x412),('getBeforeHresult',-1)):
+            now=[1.];observer=self.observer(now);setattr(observer.state().profileLanguage,field,value)
+            with self.subTest(field=field),patch.object(ime.time,'monotonic',side_effect=lambda:now[0]), \
+                 patch.object(ime,'wait_for',side_effect=lambda fn,seconds:fn()):
+                with self.assertRaises(AssertionError):observer.command(1,setup_deadline=3.)
+                self.assertIsNone(observer.original_tsf);self.assertIsNone(observer.original_context)
+                self.assertEqual(observer.commands[0]['nativeCallAttempts'],1)
+                self.assertFalse(observer.commands[0]['success'])
+                with self.assertRaises(AssertionError):observer.command(1,setup_deadline=3.)
+                self.assertEqual(len(observer.commands),1)
+
     def test_setup_command_keeps_native_minus_three_failure_and_does_not_retry(self):
         now=[1.];observer=self.observer(now,status=-3)
         with patch.object(ime.time,'monotonic',side_effect=lambda:now[0]),patch.object(ime,'wait_for',side_effect=lambda fn,seconds:fn()):

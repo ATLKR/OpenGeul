@@ -122,3 +122,91 @@ class CompartmentSelectionTests(unittest.TestCase):
         ):
             report=self.compartment_report();change(report['tests'][0])
             with self.assertRaises(AssertionError):self.m.select_compartment(report)
+
+    def test_historical_compartment_selection_uses_an_external_policy_four_expectation(self):
+        import korean_ime_smoke as ime
+        report=self.compartment_report();report['imePolicyVersion']=4
+        report['tests'][0]['imePolicyVersion']=4
+        observed=[];original=ime.require_mode_context
+        def context(row,*,expected_policy=5):
+            observed.append(expected_policy)
+            return original(row,expected_policy=expected_policy)
+        with patch.object(ime,'require_mode_context',context):selected=self.m.select_compartment(report)
+        self.assertEqual(observed,[4])
+        self.assertEqual(selected['status'],'selected')
+        self.assertFalse(selected['acceptanceEligible']);self.assertFalse(selected['runtimeCallerProved'])
+
+    def test_current_or_unmarked_policy_cannot_be_replayed_as_historical_compartment(self):
+        import ctypes
+        import korean_ime_smoke as ime
+        def current(report,case,command):
+            case.update(imePolicyVersion=5,imePolicySourceSha256=ime.profile_policy_source_sha256())
+            command.update(policyVersion=5,nativeSnapshotBytes=ctypes.sizeof(ime.NativeState),
+                profileLanguage={name:0 for name,_ in ime.NativeProfileLanguageRecord._fields_})
+        changes=(current,
+            lambda r,c,n:n.pop('policyVersion'),
+            lambda r,c,n:n.update(policyVersion=True),
+            lambda r,c,n:n.update(policyVersion=4.),
+            lambda r,c,n:n.update(nativeSnapshotBytes=596896),
+            lambda r,c,n:n.update(profileLanguage={}),
+            lambda r,c,n:c.update(imePolicyVersion=5),
+            lambda r,c,n:c.update(imePolicyVersion=4.),
+            lambda r,c,n:c.update(imePolicySourceSha256='a'*64),
+            lambda r,c,n:r.update(imePolicyVersion=5),
+            lambda r,c,n:r.update(imePolicyVersion=True),
+            lambda r,c,n:r.update(imePolicySourceSha256='b'*64),
+            lambda r,c,n:r.update(acceptanceEligible=True),
+            lambda r,c,n:r['pluginFileOrigin'].update(verified=False))
+        for index,change in enumerate(changes):
+            report=self.compartment_report();case=report['tests'][0]
+            command=next(row for row in case['imeCommands'] if row['command']==3)
+            change(report,case,command)
+            with self.subTest(case=index),self.assertRaises(AssertionError):self.m.select_compartment(report)
+
+    def current_compartment_report(self):
+        import korean_ime_smoke as ime
+        from ime_policy5_fixtures import current_diagnostic_context_fixture
+        source=ime.profile_policy_source_sha256();report=self.compartment_report()
+        current_diagnostic_context_fixture(report['tests'][0],ime)
+        report.update(imePolicyVersion=5,imePolicySourceSha256=source)
+        return report,source
+
+    def test_explicit_trusted_current_prefix_is_diagnostic_only_and_cannot_qualify_full_ime(self):
+        import korean_ime_smoke as ime
+        report,source=self.current_compartment_report()
+        selected=self.m.select_compartment(report,expected_policy=5,expected_source=source)
+        self.assertEqual(selected['status'],'selected');self.assertEqual(selected['rvas'],[100])
+        self.assertFalse(selected['acceptanceEligible']);self.assertFalse(selected['runtimeCallerProved'])
+        self.assertEqual([row['command'] for row in report['tests'][0]['imeCommands']],[3,1])
+        with self.assertRaisesRegex(AssertionError,'pipeline is incomplete'):
+            ime.require_tsf_pipeline(report['tests'][0],expected_source=source)
+        with self.assertRaises((AssertionError,KeyError)):
+            ime.validate_ime_evidence(report['tests'][0],expected_source=source)
+
+    def test_current_and_historical_sources_require_independent_explicit_policy_boundaries(self):
+        for index,(policy,source) in enumerate(((5,None),(5,'0'*64),(4,None),(4,'0'*64),(True,None),(5.,None))):
+            report,_=self.current_compartment_report()
+            with self.subTest(case=index),self.assertRaises(AssertionError):
+                self.m.select_compartment(report,expected_policy=policy,expected_source=source)
+        legacy=self.compartment_report();_,source=self.current_compartment_report()
+        for policy,pin in ((5,source),(4,source)):
+            with self.subTest(policy=policy),self.assertRaises(AssertionError):
+                self.m.select_compartment(legacy,expected_policy=policy,expected_source=pin)
+        report,_=self.current_compartment_report()
+        report['imePolicySourceSha256']=report['tests'][0]['imePolicySourceSha256']='0'*64
+        with self.assertRaises(AssertionError):
+            self.m.select_compartment(report,expected_policy=5,expected_source='0'*64)
+
+    def test_current_prefix_must_match_report_case_command_and_original_wire_context(self):
+        changes=(lambda r,c,n:r.pop('imePolicyVersion'),lambda r,c,n:r.pop('imePolicySourceSha256'),
+            lambda r,c,n:r.update(imePolicyVersion=4),lambda r,c,n:r.update(imePolicySourceSha256='0'*64),
+            lambda r,c,n:c.pop('imePolicyVersion'),lambda r,c,n:c.pop('imePolicySourceSha256'),
+            lambda r,c,n:c.update(imePolicyVersion=True),lambda r,c,n:c.update(imePolicySourceSha256='0'*64),
+            lambda r,c,n:n.update(policyVersion=4),lambda r,c,n:n.pop('nativeSnapshotBytes'),
+            lambda r,c,n:n.update(nativeSnapshotBytes=True),lambda r,c,n:n.update(nativeSnapshotBytes=596824),
+            lambda r,c,n:n['nativeContext'].update(version=5),lambda r,c,n:n['nativeContext'].update(pid=999))
+        for index,change in enumerate(changes):
+            report,source=self.current_compartment_report();case=report['tests'][0]
+            command=next(row for row in case['imeCommands'] if row['command']==3);change(report,case,command)
+            with self.subTest(case=index),self.assertRaises(AssertionError):
+                self.m.select_compartment(report,expected_policy=5,expected_source=source)

@@ -2295,6 +2295,7 @@ def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,bind
     import ime_compartment_report as publisher
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
     from suite.scripts.matched_plugin_diagnostic import resolve_compartment_in_memory
+    expected_source=profile_policy_source_sha256()
     lease=None;primary=None;cleanup_error=None;results=[];selection=resolution=None
     resolution_progress={}
     def retain(record):
@@ -2314,7 +2315,7 @@ def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,bind
             try:lease.close()
             except BaseException as exc:cleanup_error=type(exc).__name__
     success=len(results)==1 and results[0].get('success') is True and cleanup_error is None and primary is None
-    report=dict(schemaVersion=1,kind='native-ime-mode-diagnostic',success=success,acceptanceEligible=False,
+    report=dict(schemaVersion=1,kind='native-ime-mode-diagnostic',imePolicyVersion=5,imePolicySourceSha256=expected_source,success=success,acceptanceEligible=False,
         imeVerified=False,tests=results,runBinding=binding,architecture=architecture,expectedCaseCount=1,
         notificationCallerEnabled=False,compartmentCallbackEnabled=True)
     if lease is not None:report['pluginFileOrigin']=dict(lease.receipt)
@@ -2322,7 +2323,7 @@ def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,bind
     if primary is not None:report['preparationOrCaseErrorType']=type(primary).__name__
     try:
         selection,resolution=resolve_compartment_in_memory(report,proof_path.parent,binding,
-            progress=resolution_progress)
+            progress=resolution_progress,expected_policy=5,expected_source=expected_source)
     except BaseException as exc:
         selection=resolution_progress.get('selection')
         resolution=resolution_progress.get('resolution')

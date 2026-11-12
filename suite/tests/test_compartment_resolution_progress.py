@@ -86,3 +86,56 @@ class CompartmentResolutionProgressTests(unittest.TestCase):
         self.assertEqual(selected['status'],'inconclusive-case');self.assertIsNone(resolved)
         self.assertEqual(progress,dict(stage='ime-compartment-select',selection=selected))
         self.assertEqual(calls,[])
+
+    def test_current_or_unmarked_policy_is_rejected_before_any_symbol_worker(self):
+        for current in (False,True):
+            module,report,function=self.fixture();case=report['tests'][0]
+            command=next(row for row in case['imeCommands'] if row['command']==3)
+            if current:
+                import ctypes
+                import korean_ime_smoke as ime
+                case.update(imePolicyVersion=5,imePolicySourceSha256=ime.profile_policy_source_sha256())
+                command.update(policyVersion=5,nativeSnapshotBytes=ctypes.sizeof(ime.NativeState),
+                    profileLanguage={name:0 for name,_ in ime.NativeProfileLanguageRecord._fields_})
+            else:command.pop('policyVersion')
+            calls=[];progress={'stage':'old-worker','selection':{'stale':True},'resolution':{'stale':True}}
+            def worker(pair,*,mode,rvas):
+                calls.append(True)
+                identity=report['pluginFileOrigin']
+                return dict(success=True,resolution=dict(dllSha256=identity['dllSha256'],
+                    identity=copy.deepcopy(identity['matchedIdentity']),
+                    frames=[dict(returnRva=rva,tag='frame-input-context') for rva in rvas]))
+            with self.subTest(current=current):
+                with self.assertRaises(AssertionError):
+                    function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker,progress=progress)
+                self.assertEqual(progress,dict(stage='ime-compartment-select'))
+                self.assertEqual(calls,[])
+
+    def test_explicit_current_source_reaches_original_selector_and_fixed_worker_once(self):
+        fixture=selection_fixture.CompartmentSelectionTests();fixture.setUp();module=fixture.m
+        report,source=fixture.current_compartment_report();observed=[];calls=[];progress={}
+        original=module.select_compartment
+        def selector(value,*,expected_policy=4,expected_source=None):
+            observed.append((expected_policy,expected_source))
+            return original(value,expected_policy=expected_policy,expected_source=expected_source)
+        def worker(pair,*,mode,rvas):
+            calls.append((mode,list(rvas)))
+            identity=report['pluginFileOrigin']
+            return dict(success=True,resolution=dict(dllSha256=identity['dllSha256'],identity=copy.deepcopy(identity['matchedIdentity']),
+                frames=[dict(returnRva=rva,tag='frame-input-context')for rva in rvas]))
+        with patch.object(module,'select_compartment',selector):
+            selected,resolved=module.resolve_compartment_in_memory(report,Path('/synthetic/pair'),report['runBinding'],
+                worker_run=worker,progress=progress,expected_policy=5,expected_source=source)
+        self.assertEqual(observed,[(5,source)]);self.assertEqual(calls,[('resolve',[100])])
+        self.assertFalse(selected['acceptanceEligible']);self.assertFalse(selected['runtimeCallerProved'])
+        self.assertTrue(resolved['success']);self.assertEqual(progress['stage'],'ime-compartment-join')
+
+    def test_untrusted_current_source_keeps_progress_before_selection_and_never_calls_worker(self):
+        fixture=selection_fixture.CompartmentSelectionTests();fixture.setUp();module=fixture.m
+        for policy,source in ((5,None),(5,'0'*64),(4,None)):
+            report,_=fixture.current_compartment_report();calls=[]
+            progress={'stage':'old','selection':{'stale':True},'resolution':{'stale':True}}
+            with self.subTest(policy=policy,missing=source is None),self.assertRaises(AssertionError):
+                module.resolve_compartment_in_memory(report,Path('/synthetic/pair'),report['runBinding'],
+                    worker_run=lambda *a,**k:calls.append(True),progress=progress,expected_policy=policy,expected_source=source)
+            self.assertEqual(progress,dict(stage='ime-compartment-select'));self.assertEqual(calls,[])
