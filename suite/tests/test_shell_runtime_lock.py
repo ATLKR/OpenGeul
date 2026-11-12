@@ -15,6 +15,32 @@ class ShellRuntimeLockTests(unittest.TestCase):
     def project(self, relative):
         return ET.fromstring((ROOT / relative).read_text())
 
+    def test_bootstrap_installs_the_policy_yaml_pin_before_suite_discovery(self):
+        import ast
+        import shlex
+        from suite.tests.workflow_scope import suite_workflow_sections
+        pins = [line.strip() for line in (ROOT / 'ci/requirements.txt').read_text().splitlines()
+                if line.strip().startswith('PyYAML==')]
+        self.assertEqual(len(pins), 1)
+        self.assertRegex(pins[0], r'\APyYAML==[0-9]+\.[0-9]+\.[0-9]+\Z')
+        policy = ast.parse((ROOT / 'ci/policy.py').read_text())
+        loader = next(node for node in policy.body
+                      if isinstance(node, ast.FunctionDef) and node.name == 'load_workflow')
+        self.assertTrue(any(isinstance(node, ast.Import) and any(alias.name == 'yaml' for alias in node.names)
+                            for node in ast.walk(loader)), 'The tested loader requires the declared YAML tool')
+        normal = suite_workflow_sections((ROOT / '.github/workflows/office-suite.yml').read_text())[1]
+        lines = [line.strip() for line in normal.splitlines()]
+        installs = [index for index, line in enumerate(lines)
+                    if line.startswith('python -m pip install ')
+                    and shlex.split(line) == ['python', '-m', 'pip', 'install', pins[0]]]
+        self.assertEqual(len(installs), 1, 'Install the existing CI YAML pin before Suite discovery')
+        units = [index for index, line in enumerate(lines)
+                 if line == 'python -m suite.scripts.run_unit_checks -s suite/tests -v']
+        self.assertEqual(len(units), 1)
+        self.assertLess(installs[0], units[0])
+        self.assertEqual(lines[installs[0] + 1],
+            "if ($LASTEXITCODE -ne 0) { throw 'Pinned YAML workflow tooling installation failed.' }")
+
     def test_shell_targets_supported_windows_runtime_without_patch_drift(self):
         project = self.project('suite/shell/OpenGeul.Office.csproj')
         self.assertEqual('net10.0-windows', project.findtext('.//TargetFramework'))

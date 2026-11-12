@@ -101,14 +101,16 @@ class WorkflowScopeTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(m.suite_workflow_sections(source)[1].encode()).hexdigest(),raw_hash)
 
     def test_historical_oracle_rejects_changed_or_duplicate_reviewed_dependencies(self):
-        from suite.tests.reviewed_normal_workflow import original_normal_oracle_text, EXACT_SDK_SETUP
+        from suite.tests.reviewed_normal_workflow import original_normal_oracle_text, EXACT_SDK_SETUP, EXACT_YAML_SETUP
         root=Path(__file__).resolve().parents[2]
         normal=self.scope().suite_workflow_sections((root/'.github/workflows/office-suite.yml').read_text())[1]
         for changed in (normal.replace("dotnet-version: '10.0.404'", "dotnet-version: '10.0.405'"),
                         normal.replace('architecture: ${{ matrix.architecture }}', 'architecture: x64'),
                         normal.replace('Pillow==13.0.0', 'Pillow==14.0.0'),
+                        normal.replace('PyYAML==6.0.3', 'PyYAML==6.0.4'),
                         normal.replace("github.ref != 'refs/heads/work/opengeul-office-native-writer-observer'",'true'),
-                        normal+EXACT_SDK_SETUP):
+                        normal+EXACT_SDK_SETUP, normal+EXACT_YAML_SETUP,
+                        normal.replace("throw 'Pinned YAML workflow tooling installation failed.'", 'exit 0')):
             with self.subTest(),self.assertRaises(ValueError):original_normal_oracle_text(changed)
 
     def test_unknown_normal_workflow_edits_still_fail_the_immutable_oracle(self):

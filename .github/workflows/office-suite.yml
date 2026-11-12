@@ -78,6 +78,8 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF verification tooling installation failed.' }
         python -m pip install Pillow==13.0.0
         if ($LASTEXITCODE -ne 0) { throw 'Pinned image verification tooling installation failed.' }
+        python -m pip install PyYAML==6.0.3
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned YAML workflow tooling installation failed.' }
     - name: Suite 단위 검사와 Windows shell 빌드 검사
       id: suite-unit-shell
       env:

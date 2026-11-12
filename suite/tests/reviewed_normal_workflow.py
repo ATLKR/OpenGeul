@@ -12,6 +12,8 @@ EXACT_SDK_SETUP = ("    - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd
     "        skip-lts-prepass: true\n"
     "        architecture: ${{ matrix.architecture }}\n")
 CURRENT_PILLOW_INSTALL = "        python -m pip install Pillow==13.0.0\n"
+EXACT_YAML_SETUP = ("        python -m pip install PyYAML==6.0.3\n"
+    "        if ($LASTEXITCODE -ne 0) { throw 'Pinned YAML workflow tooling installation failed.' }\n")
 
 
 def original_normal_oracle_text(normal):
@@ -19,7 +21,8 @@ def original_normal_oracle_text(normal):
         raise ValueError('Historical normal-job oracle requires text')
     changes = ((CURRENT_NORMAL_IF, '    if: github.event.repository.private == false\n'),
         (EXACT_SDK_SETUP, ''),
-        (CURRENT_PILLOW_INSTALL, '        python -m pip install Pillow==12.3.0\n'))
+        (CURRENT_PILLOW_INSTALL, '        python -m pip install Pillow==12.3.0\n'),
+        (EXACT_YAML_SETUP, ''))
     for before, after in changes:
         if normal.count(before) != 1:
             raise ValueError('Reviewed normal-job dependency delta differs')
