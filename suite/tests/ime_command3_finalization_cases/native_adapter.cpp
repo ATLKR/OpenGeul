@@ -17,7 +17,7 @@ bool GetProcessTimes(void*,FILETIME*m,FILETIME*,FILETIME*,FILETIME*){m->dwLowDat
 bool original_target(HWND,bool){return owned;}
 bool budget(const opengeul_ime::CommandBudget&){return timely;}
 bool QueryPerformanceCounter(LARGE_INTEGER*q){q->QuadPart=++ticks;return true;}
-HWND GetFocus(){return reinterpret_cast<HWND>(owned?30:31);}void* GetKeyboardLayout(int){return reinterpret_cast<void*>(68289554);}
+HWND GetFocus(){return reinterpret_cast<HWND>(UINT_PTR(owned?30:31));}void* GetKeyboardLayout(int){return reinterpret_cast<void*>(68289554);}
 LONG InterlockedCompareExchange(volatile LONG*p,LONG after,LONG before){auto old=*p;if(old==before)*p=after;return old;}
 LONG InterlockedOr(volatile LONG*p,LONG bit){auto old=*p;*p|=bit;return old;}void MemoryBarrier(){}
 HIMC ImmGetContext(HWND){++gets;return scenario==1?nullptr:reinterpret_cast<HIMC>(80);}

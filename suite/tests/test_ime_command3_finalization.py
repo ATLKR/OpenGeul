@@ -143,7 +143,7 @@ class NativeTests(unittest.TestCase):
                 compiler=next((value for name in('c++','g++','clang++')if(value:=shutil.which(name))),None)
                 self.assertIsNotNone(compiler,'Existing C++ compiler required; no qualification skip')
                 exe=owned/'policy';environment={'PATH':os.defpath}
-                result=subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Werror','-I',str(owned),str(source),'-o',str(exe)],env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+                result=subprocess.run([compiler,'-std=c++17','-Wall','-Wextra','-Wshadow','-Werror','-I',str(owned),str(source),'-o',str(exe)],env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
                 self.assertEqual(result.returncode,0,'Synthetic native fixture compile exit')
             result=subprocess.run([str(exe)],env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
             try:self.assertEqual(result.returncode,0,'Synthetic native fixture exit')
