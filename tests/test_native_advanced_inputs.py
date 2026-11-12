@@ -27,7 +27,7 @@ class NativeAdvancedInputTests(unittest.TestCase):
         self.receipt=self.root/'evidence/native-advanced-inputs.json'
         self.wasm=self.root/'wasm-input';self.wasm.mkdir()
         self.wasm_files={n:(b'\0asm\1\0\0\0' if n=='rhwp_bg.wasm' else json.dumps({'version':wasm_artifacts.expected()['upstream']['rhwp']['version']}).encode() if n=='package.json' else ('owned '+n).encode())for n in wasm_artifacts.FILES}
-        self.wasm_proof={**wasm_artifacts.expected(),'artifacts':{n:hashlib.sha256(v).hexdigest()for n,v in self.wasm_files.items()},'generator':'wasm-pack 0.14.0 --target web --release --no-opt'}
+        self.wasm_proof={**wasm_artifacts.expected(),'artifacts':{n:hashlib.sha256(v).hexdigest()for n,v in self.wasm_files.items()},'generator':'wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api'}
         self.wasm_files['OPEN_GEUL_WASM.json']=(json.dumps(self.wasm_proof,indent=2)+'\n').encode()
         for n,v in self.wasm_files.items():(self.wasm/n).write_bytes(v)
         p=self.package/'provenance.json';prov=json.loads(p.read_bytes());prov['sourceParity'].update(wasmRebuild=self.wasm_proof,equationDialogFocus=test_ui_contract.frontend_binding()['equationDialogFocus']);p.write_text(json.dumps(prov)+'\n');test_store_package.StorePackageTests().checksum_directory(self.package)

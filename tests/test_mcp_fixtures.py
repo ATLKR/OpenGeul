@@ -20,7 +20,7 @@ class McpFixtureTests(unittest.TestCase):
         self.root=Path(self.temp.name);self.basic=self.root/'inputs';self.password=self.root/'password'
         self.basic.mkdir();self.password.mkdir();self.output=self.root/'output'
         self.binding={'repository':'ATLKR/OpenGeul','sourceCommit':'a'*40,'sourceRun':'12','runAttempt':'2'}
-        self.wasm={**expected(),'artifacts':{name:hashlib.sha256(name.encode()).hexdigest() for name in FILES},'generator':'wasm-pack 0.14.0 --target web --release --no-opt'}
+        self.wasm={**expected(),'artifacts':{name:hashlib.sha256(name.encode()).hexdigest() for name in FILES},'generator':'wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api'}
         self.wasm_file=self.root/'wasm.json';self.write(self.wasm_file,self.wasm)
         basic=package('OpenGeul fixture 한글 가나다 &amp; &lt;xml&gt; Ω 123')
         (self.basic/'basic.hwpx').write_bytes(basic);(self.password/'prior.hwpx').write_bytes(basic)

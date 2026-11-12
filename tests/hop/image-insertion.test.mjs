@@ -13,6 +13,7 @@ const {insertCommands}=await upstream('command/commands/insert.ts');
 const {WasmBridge}=await upstream('core/wasm-bridge.ts');
 const {EventBus}=await upstream('core/event-bus.ts');
 const {InputHandler}=await upstream('engine/input-handler.ts');
+const {ImeNavigationGuard}=await upstream('engine/ime-navigation-guard.ts');
 const {CursorState}=await upstream('engine/cursor.ts');
 const {CommandHistory}=await upstream('engine/history.ts');
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
@@ -26,7 +27,7 @@ const noop=()=>{};
 // Commands, lifecycle, mouse handlers, hitTest, document generations/handles,
 // insertPicture, snapshots/history and saved/reopened image bytes are real.
 function browser(t,{bytes,decode}={}) {
-  const keys=['document','Image','requestAnimationFrame','setTimeout'];
+  const keys=['document','window','Image','requestAnimationFrame','setTimeout'];
   const originals=new Map(keys.map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
   const create=URL.createObjectURL,revoke=URL.revokeObjectURL,timer=globalThis.setTimeout;
   let input,created=0,revoked=0,reads=0,images=0;
@@ -34,7 +35,8 @@ function browser(t,{bytes,decode}={}) {
   const listeners=new Map();
   const element=()=>({style:{},setAttribute:noop,appendChild:noop,addEventListener:noop,
     removeEventListener:noop,remove(){this.removed=true;},click:noop});
-  globalThis.document={body:element(),getElementById:()=>null,
+  globalThis.window=new EventTarget();
+  globalThis.document={querySelector:()=>null,body:element(),getElementById:()=>null,
     addEventListener(type,callback,options){if(!listeners.has(type))listeners.set(type,new Map());listeners.get(type).set(callback,options);},
     removeEventListener(type,callback){listeners.get(type)?.delete(callback);},
     dispatchEvent(event){for(const [callback,options] of [...(listeners.get(event.type) ?? [])]){if(options?.once)listeners.get(event.type).delete(callback);callback(event);}},
@@ -67,7 +69,7 @@ function harness(t) {
     imageInsertionLifecycle:0,imagePlacementContext:null,
     viewportManager:{getZoom:()=>1},selectionRenderer:renderer,caret:renderer,fieldMarker:renderer,
     caretLayoutReveal:{requestFor:noop,clear:noop},deferredPaginationRunner:{cancel:noop},
-    _cellBlockLetterImeGuard:{reset:noop},_compositionFragment:null,
+    _cellBlockLetterImeGuard:{reset:noop},_imeNavigationGuard:new ImeNavigationGuard(),_compositionFragment:null,
     textarea:{value:'',removeEventListener:noop,remove:noop,focus:noop},
     container:{clientWidth:800,clientHeight:1200,style:{},querySelector:()=>content,
       getBoundingClientRect:()=>({left:0,top:0}),removeEventListener:noop},

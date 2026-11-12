@@ -21,13 +21,14 @@ def validate(folder):
 def capture(folder):
     validate(folder)
     value=expected();value['artifacts']={name:sha(folder/name) for name in FILES}
-    value['generator']='wasm-pack 0.14.0 --target web --release --no-opt'
+    value['generator']='wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api'
     (folder/'OPEN_GEUL_WASM.json').write_text(json.dumps(value,indent=2)+'\n')
 def install(folder,source):
     validate(folder)
     value=json.loads((folder/'OPEN_GEUL_WASM.json').read_text())
     for key,expected_value in expected().items():
         if value.get(key)!=expected_value:raise ValueError(f'WASM source mismatch: {key}')
+    if value.get('generator') != 'wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api':raise ValueError('WASM source mismatch: generator')
     target=source/'apps/studio-host/vendor/rhwp-core'
     original=json.loads((target/'PROVENANCE.json').read_text())
     for name in FILES:

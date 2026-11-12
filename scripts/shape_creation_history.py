@@ -15,8 +15,8 @@ HELPER = 'scripts/shape_creation_history.py'
 HANDLER = 'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts'
 CONNECTOR = 'third_party/rhwp/rhwp-studio/src/engine/input-handler-connector.ts'
 SOURCE_FILES = (HANDLER, CONNECTOR)
-INPUT_SHA256 = 'ee144804d21ea5585fc03e5057317310990197c3b096c9aa34caa8006299d3c8'
-OUTPUT_SHA256 = 'bd3e440d6c71f268d58018d5ed84a6f1622d5f15264b267fcd40f5933c51aaac'
+INPUT_SHA256 = 'd72b4d188e55049df4deeee32853a3dacf991b40f90f9dd9e8c8166a21ff260a'
+OUTPUT_SHA256 = '6bfa1e62d98a4e5caf536b3a53392fe079d6f72295195b7c49aec75b5ca4b685'
 CONNECTOR_INPUT_SHA256 = 'ec265208f6fa7bd4bb82368c8a611c4915a0be89d9acb99108fad911f12a4dec'
 CONNECTOR_OUTPUT_SHA256 = '61bdad87ff678d8279ec8103aa54a2c6aa7d238006bff7e30a92bef5f101e2e0'
 OLD = '''      const result = this.wasm.createShapeControl({

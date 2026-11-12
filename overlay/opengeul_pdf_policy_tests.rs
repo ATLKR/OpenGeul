@@ -330,7 +330,8 @@ mod direct {
     use rhwp::paint::*;
     use rhwp::renderer::layer_renderer::LayerRasterRenderer;
     use rhwp::renderer::pdf::{
-        layer_trees_to_pdf, layer_trees_to_pdf_with_links, layer_trees_to_pdf_with_options,
+        layer_trees_to_pdf, layer_trees_to_pdf_with_annotations, layer_trees_to_pdf_with_links,
+        layer_trees_to_pdf_with_options,
         DirectPdfExportOptions,
     };
     use rhwp::renderer::render_tree::{BoundingBox, FieldMarkerType, TextRunNode};
@@ -525,6 +526,10 @@ mod direct {
         assert_policy_denied(
             layer_trees_to_pdf_with_links(pages, &[Vec::new()], options),
             "links",
+        );
+        assert_policy_denied(
+            layer_trees_to_pdf_with_annotations(pages, &[Vec::new()], &[Vec::new()], options),
+            "annotations",
         );
     }
 

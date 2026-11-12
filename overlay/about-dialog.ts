@@ -1,7 +1,7 @@
 import { AboutDialog as UpstreamAboutDialog } from '@/upstream/ui';
 
 // Reviewed with config/upstream.lock.json; __HOP_VERSION__ is the product version.
-const HOP_BASE_VERSION = '0.4.5';
+const HOP_BASE_VERSION = '0.5.3';
 
 export class AboutDialog extends UpstreamAboutDialog {
   protected override createBody(): HTMLElement {

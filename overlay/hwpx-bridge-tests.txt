@@ -262,7 +262,7 @@
     expect(native.docId).toBe('old-doc');
     expect(native.sourcePath).toBe('/tmp/old.hwp');
     expect(native.revision).toBe(1);
-    expect(document.title).toBe('• old.hwp - HOP');
+    expect(document.title).toBe('• old.hwp - OpenGeul');
     expect(invokeMock).not.toHaveBeenCalledWith('close_document', { docId: 'old-doc' });
     expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'incoming-doc' });
     expect(getWasmMock(setup.bridge, 'loadDocumentMock')).toHaveBeenCalledTimes(encryptedAttempt ? 1 : 0);
@@ -293,7 +293,7 @@
     expect((await opening)?.message).toBe('new.hwp — 1페이지');
     expect(setup.content()).toBe('NEW');
     expect(setup.bridge.hasUnsavedChanges()).toBe(false);
-    expect(document.title).toBe('new.hwp - HOP');
+    expect(document.title).toBe('new.hwp - OpenGeul');
     expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'old-doc' });
     expect(invokeMock).not.toHaveBeenCalledWith('close_document', { docId: 'incoming-doc' });
   });
@@ -344,7 +344,7 @@
     expect((await creating)?.message).toBe('새 문서.hwp — 1페이지');
     expect(setup.content()).toBe('BLANK');
     expect(setup.bridge.hasUnsavedChanges()).toBe(false);
-    expect(document.title).toBe('새 문서.hwp - HOP');
+    expect(document.title).toBe('새 문서.hwp - OpenGeul');
     expect(invokeMock).toHaveBeenCalledWith('close_document', { docId: 'old-doc' });
     expect(invokeMock).not.toHaveBeenCalledWith('close_document', { docId: 'incoming-doc' });
   });

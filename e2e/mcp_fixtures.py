@@ -73,7 +73,7 @@ def identity(binding):
 def wasm_proof(value):
     exact(value,('upstream','namespaceHelper','namespacePatcher','artifacts','generator'))
     require(all(value[k]==v for k,v in wasm_expected().items())
-            and value['generator']=='wasm-pack 0.14.0 --target web --release --no-opt','QA WASM 출처가 현재 소스와 다릅니다')
+            and value['generator']=='wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api','QA WASM 출처가 현재 소스와 다릅니다')
     exact(value['artifacts'],WASM_FILES)
     require(all(isinstance(v,str) and re.fullmatch('[0-9a-f]{64}',v) for v in value['artifacts'].values()),'QA WASM 파일 SHA가 올바르지 않습니다')
 

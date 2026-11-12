@@ -23,35 +23,47 @@ from shape_creation_history import apply as apply_shape_creation_history
 from nested_line_navigation import apply as apply_nested_line_navigation
 
 
-TAURI_VERSION = "2.11.1"
+TAURI_VERSION = "2.12.5"
 DESKTOP_LOCK = ROOT / "overlay/desktop-cargo.lock.toml"
-UPDATE_DEPENDENCIES = '''reqwest = { version = "=0.13.2", default-features = false, features = ["rustls-no-provider"] }
-tokio = { version = "=1.52.1", features = ["time", "sync"] }
-rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+UPDATE_DEPENDENCIES = '''reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider"] }
+tokio = { version = "=1.54.1", features = ["time", "sync"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 '''
 ASYNC_CLIPBOARD_SOURCE_SHA256 = {
-    'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
-    'input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+    'input-handler-keyboard.ts': '40e871f95d00415c289a1730c86222660ad32027229813531d6c1f2ae90beb87',
+    'input-handler.ts': '224be1c8a887ae3d054b5bbf7530d930ec78298424bef732904b5d49a668aef2',
 }
 IMAGE_INSERTION_SOURCE_SHA256 = {
-    'command/commands/insert.ts': '29e9c3d98e26a8c7b44cd59af8a31872abf4e618ae37d15e3049178cc5226364',
+    'command/commands/insert.ts': '0b1a9719438faa78a20958aef48809ee965f6d7d10ba784221a29601f86614be',
     'engine/input-handler.ts': ASYNC_CLIPBOARD_SOURCE_SHA256['input-handler.ts'],
 }
 # This second transformation must start with the reviewed Task 1 lifecycle bytes.
-IMAGE_INSERTION_CLIPBOARD_HANDLER_SHA256 = 'eacebec707126015bfa92e09e7c1a1cb9df9a33d18218368bd7996266e5dbd3a'
+IMAGE_INSERTION_CLIPBOARD_HANDLER_SHA256 = '58437fabe0348c23a8e85f5c34b6944a522f4fae8b57f064c41380b33a8b6975'
 ASYNC_FONT_SOURCE_SHA256 = {
-    'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
-    'apps/studio-host/src/ui/toolbar.ts': '203dc4cff5d4ce851466f4efb5107d2b138e0b95d4478ee1a2a93a5049bf62fe',
+    'apps/studio-host/src/main.ts': '2c5c4ffc4e42ad6234e798cf8a95a877c61b41a4c771e54713d34ea65d263208',
+    'apps/studio-host/src/ui/toolbar.ts': '8fc3134d76935de08acd987335d5ef879d5e40558e8f55a3e861fefcb753559c',
     **{'third_party/rhwp/rhwp-studio/src/engine/'+name: digest
        for name, digest in ASYNC_CLIPBOARD_SOURCE_SHA256.items()},
 }
 ASYNC_FONT_INPUT_SHA256 = {
     **ASYNC_FONT_SOURCE_SHA256,
-    'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts': '99a842d88873ef9baf6286ef0d9925a3992f204fae07b5d8f7aed0984f96c0ba',
-    'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts': '8bfd546419fa0fa433f64ea724277f99ae38f95ef4e90ffcf7ad35d7d85f0876',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts': '883f5fa430389980a947ef934efcc9e1bd057c806a195a055e1ae4d468e90879',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts': '13892dc7588d9d049a65ce7be391056a3bfc15e572ae901734f7ae65150e6407',
 }
 FONT_TOOLBAR_TEST_SHA256 = 'e48357f3a39095b06800aa8b75fb9727a3367015f2857243ea6de0b57c2e5f5c'
 FONT_MAIN = 'apps/studio-host/src/main.ts'
+# rhwp 0.9.0 excludes this vendored crate from the workspace and never enables
+# its signatures feature, even through the root's --all-features graph. Its
+# standalone dependency unit tests refer to a certificate not shipped in Git.
+# This exact reviewed source/manifest pair is not a product or workspace test
+# target. Never fabricate the certificate or exempt another missing include.
+NON_TARGET_VENDOR_TEST_INPUTS = ({
+    'manifestSha256': 'f9b27a36d6feb82f66e456489398b6406b48e6ebbe1c8d2dc4c7f960edb5c505',
+    'source': 'vendor/rhwp-pdf-import-backend/src/signatures/pades/ess.rs',
+    'sourceSha256': 'f53c1a9c85ea4f8d215ac4df293c97b9bd71f1305c6f66148de66443046dff4d',
+    'input': 'vendor/rhwp-pdf-import-backend/tests/fixtures/test_signing_cert.pem',
+    'reason': 'Excluded dependency cfg(test) module behind an unselected signatures feature; not a workspace test target.',
+},)
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -162,6 +174,8 @@ def cargo_source_directories(source: Path, revision: str) -> list[str]:
 
 def restore_compile_inputs(source: Path) -> None:
     """희소 경로의 literal include 입력도 원래 Git blob으로 복원한다."""
+    manifest_sha = hashlib.sha256((source/'Cargo.toml').read_bytes()).hexdigest()
+    non_targets = []
     names = run('git', 'ls-files', '-z', '*.rs', cwd=source).split('\0')
     for name in names:
         rust = source / name
@@ -178,6 +192,13 @@ def restore_compile_inputs(source: Path) -> None:
                 raise ValueError('Rust include input escapes the upstream checkout') from None
             if target.is_file():
                 continue
+            reviewed = next((entry for entry in NON_TARGET_VENDOR_TEST_INPUTS
+                             if entry['source'] == name and entry['input'] == path
+                             and entry['manifestSha256'] == manifest_sha
+                             and entry['sourceSha256'] == hashlib.sha256(rust.read_bytes()).hexdigest()), None)
+            if reviewed is not None:
+                non_targets.append(reviewed)
+                continue
             # A missing fixture is a preparation failure, never a skipped test.
             try:
                 size = int(run('git', 'cat-file', '-s', 'HEAD:' + path, cwd=source))
@@ -191,6 +212,9 @@ def restore_compile_inputs(source: Path) -> None:
                 raise ValueError('Rust include blob size changed')
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
+    (source/'.opengeul-compile-inputs.json').write_text(json.dumps({
+        'formatVersion': 1, 'nonTargetVendorTestInputs': non_targets,
+    }, indent=2)+'\n', encoding='utf-8')
 
 
 def install_store_updates(source: Path) -> None:
@@ -633,6 +657,8 @@ def patch(source: Path, version: str) -> None:
     win.write_text(json.dumps(w,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     for rel in ('package.json','apps/desktop/package.json'):
         path=source/rel; value=json.loads(path.read_text(encoding='utf-8')); value['version']=version
+        if rel == 'package.json':
+            value['packageManager'] = 'pnpm@' + json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8'))['pnpm']
         path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     hop_version=json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8'))['hop']['version']
     # Tauri rewrites this manifest with LF in the editor build. Prepare identical
@@ -690,6 +716,13 @@ def patch(source: Path, version: str) -> None:
     replace_file(ui/'about-dialog.ts', 'version.textContent = `Version ${__APP_VERSION__}`;',
         'version.textContent = `버전 ${__APP_VERSION__}`;')
     install_product_information(source)
+    # HOP 0.5.3 mirrors document.title into the actual native window title.
+    # Preserve dirty/document state while presenting the distribution identity.
+    replace_file(host/'src/core/tauri-bridge.ts',
+                 "`${this.dirty ? '• ' : ''}${this.fileName || '문서'} - HOP`",
+                 "`${this.dirty ? '• ' : ''}${this.fileName || '문서'} - OpenGeul`")
+    replace_file(host/'src/core/tauri-bridge.ts', ": 'HOP';", ": 'OpenGeul';")
+    replace_file(host/'src/core/tauri-bridge.test.ts', " - HOP'", " - OpenGeul'", expected=5)
     async_clipboard_proof = install_async_clipboard_guard(source)
     image_insertion_proof = install_image_insertion_guard(source, async_clipboard_proof)
     async_font_proof = install_async_font_selection_guard(source, async_clipboard_proof, image_insertion_proof)
@@ -750,9 +783,10 @@ def patch(source: Path, version: str) -> None:
     value=replace_once(value,' — 이 페이지만 건너뛰고 PDF 를 계속합니다.',
         ' — PDF 내보내기를 중단합니다.',expected=2)
     value=replace_once(value,'    crate::renderer::font_paths::load_into_fontdb(&mut fontdb, &options.font_paths);','    for dir in &options.font_paths { fontdb.load_fonts_dir(dir); }')
-    direct='''pub fn layer_trees_to_pdf_with_links(
+    direct='''pub fn layer_trees_to_pdf_with_annotations(
     layer_trees: &[crate::paint::PageLayerTree],
     links: &[Vec<super::hyperlinks::PdfLink>],
+    destinations: &[Vec<super::hyperlinks::PdfNamedDestination>],
     options: &DirectPdfExportOptions,
 ) -> Result<Vec<u8>, String> {'''
     value=replace_once(value,direct,direct+'\n    opengeul_pdf_guard::reject_direct_export()?;')

@@ -19,20 +19,20 @@ MAX_LEDGER = 64 * 1024
 MAX_SOURCE = 4 * 1024 * 1024
 REFERENCE = {
     'originalFiles': {
-        'src/main.rs': 'a5dbc5951e0e3e95ed56a5c0f28980a912f9a38ddc8c3dd86213e03877a79e85',
-        'src/mcp_serve.rs': '1b2ff2113d6c6dcfd0514fcc22bb14aad960bd62ef8d6fcedcbb13f8ab69b281',
-        'Cargo.toml': '17d3f9d347d3d5c1011e3299ac85f640d9f31e854e442c4696f55da85809700b',
+        'src/main.rs': '9df55a4840ea40d2f0f3764a3c3f783f9e7470e936d62bd6598fed44cae10be9',
+        'src/mcp_serve.rs': '2d62d3d328b941444688ba8284736f1bc458eb510bbd8c49e5770f3991f8781c',
+        'Cargo.toml': 'f9b27a36d6feb82f66e456489398b6406b48e6ebbe1c8d2dc4c7f960edb5c505',
     },
     'patchedFiles': {
-        'src/main.rs': 'd55823e3ea2325e5e78e4d46bd55b99ff17f28dcc6a53d67736a964f93231fef',
-        'src/mcp_serve.rs': '205b4dab4f32f3996340c8e237b1b5fec3a39b74e8789bf34297da23902bd471',
-        'Cargo.toml': '769745d72376286c03413925eff943af5014db3467e21798d9fc886044d02405',
+        'src/main.rs': 'a7562754434ef56be16d91bdc7e61860035debdd1364431ece14ecbd04cbc3d6',
+        'src/mcp_serve.rs': 'ef54ab0fb50ad8d4bab71eb9a84d58097f3bbf23734702f2f92e3790c52301f1',
+        'Cargo.toml': '85c77e9e642870b1c12d8d5c20866d5b35eb6d11fdf95fd4beaf3f9399942291',
     },
     # prepare_native_tests writes host newlines after appending the exact four
     # integration targets to the pinned COM-patched manifest.
     'preparedManifestSha256': (
-        '3e5a95c7b4b81b208d56844b252f3d1f50077a4ab28f38ec3746b0b51b8541b0',
-        '54781eabb14ad85dbc06d4929b7b6ed00219e4030840e9cfbc8d76aa5ae0e4ca',
+        '5edcc9bd774878379521fefd9a1e7b509aa7571a478858550ef61b5d5afc186d',
+        '80350e8f958a063ddd13731bb3defd059e3144a252a016bbb699ead22190a12a',
     ),
 }
 

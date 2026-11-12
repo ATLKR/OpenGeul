@@ -19,12 +19,12 @@ SVG = CORE + 'src/renderer/svg.rs'
 TEXT = CORE + 'vendor/svg2pdf/src/render/text.rs'
 # PDF is pinned after the existing OpenGeul embedding/completeness guards.
 SOURCE_SHA256 = {
-    LIB: '15cc41eef2f9d65773a0f0dd2ddd8144331a8304e42425f90adc06ba137c4406',
-    RENDER: '040df1fbe7fedd93b65dff234a6091243a61d59b02f92be3eeaf373bbef7cf35',
-    PDF: '0d460d7e4944588f79f4ea9a9857598e21a4c10d76cd907067ff2077e5455a04',
-    PATCHES: '87293452a2e13bbf6403a0fe07f679d2405e5a248df57a31bdbcde5f325b776c',
-    SVG: 'a5f10616101d31582185eaba2283aa5d44a8529d23a681096d512a1341244829',
-    TEXT: '2c1d3b4890157916bd39c63f6d54ec5ad48422d704c48b5a7ec58e85d052991d',
+    LIB: '520999ca4b7de311bdbcf814f6c545310f76856589645aa2c4c981d9972cca86',
+    RENDER: 'ed70f3b6e6f8203d974bb92b3a4512145c26368f3a808ea6436ccbaf4cfd5f0e',
+    PDF: '0a137cf21d4ccda1c19dbc7e05a127601c49c3632b488582e2ce581188d7d281',
+    PATCHES: 'dbb13ee392a0ec79275ebaea056019931ee0222f400f99e8202128a2b1e60acc',
+    SVG: '2a8e42b67a57bb0c204e54ca257c0fc38b2675753c24f01d364302fb3ad48b13',
+    TEXT: '2a9dcf21e803d327d0ff771a1597b4892e952a54b78aa8f894ab8f263a947d94',
 }
 PRESERVED_SHA256 = {
     CORE + 'vendor/svg2pdf/LICENSE-APACHE': '62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a',
@@ -34,12 +34,12 @@ PRESERVED_SHA256 = {
 }
 # Explicit reviewed output bytes, including the existing font-policy guards.
 PATCHED_SHA256 = {
-    LIB: 'dc33760dff462546dec8e47c896a6c278d9533758e21847eda0ddfd8386a5e02',
-    RENDER: 'fadb08aa5901d5fb09642c95c37bf0de7b94fa87e23a34ab5c0c41820cd110ae',
-    PDF: '84bb9980b3a42e42998872bc9112a1714ef82984a5981b59c51d148f90b9e804',
-    PATCHES: 'bc7f84bb9ecf563dbbcbd766624f54946e9c3020b887b7b239847419ee94de97',
-    SVG: '8f885604bcf4c4e569d3c8ea88835c64c2295df71b72275a76b9b10fa649c661',
-    TEXT: 'f1c567987c73859910adfaca4daa37869924c1b26ac6089a4ff821d90b6b91bf',
+    LIB: '8ed60d863787acd6a5f9fe060b17bcb31d17213aef2ec3de5f1d56bb7bdc2eec',
+    RENDER: '9a6584c062b7986937e054c061bb74488a4b8cfd8be7e8d44fdc786ce8be94de',
+    PDF: '3f52aa477fa4218f9206f850663a239ff3fd41b9192a2181b76acb782933c53a',
+    PATCHES: '4a9765c5a806dd3e6e5e573266d7bf4bf4cc703c7072fc1071fcb3cd21b783ef',
+    SVG: '5be22c2f77e0781fcd169417e5a4d9279ea49a76f76b11eca567d5757f29b872',
+    TEXT: '975437bc272d678997591d39741764080875c9560aad40949ea167f7b9e6b7bf',
 }
 SOURCE_FILES = tuple((*SOURCE_SHA256, *PRESERVED_SHA256))
 
@@ -198,8 +198,14 @@ def patched_texts(texts: dict[str, str]) -> dict[str, str]:
         '''        // Root Forms retain SVG coordinates; apply only the 96 DPI -> 72 pt scale.
         content.transform([0.75, 0.0, 0.0, 0.75, 0.0, 0.0]);''')
     svg = _replace(texts[SVG],
-        '                let common_attrs = attrs_for_cluster(cluster_str, &color);',
-        '''                let mut common_attrs = attrs_for_cluster(cluster_str, &color);
+        '''                let common_attrs = match &outline_attrs {
+                    Some(stroke) => attrs_for_cluster(cluster_str, "none") + stroke,
+                    None => attrs_for_cluster(cluster_str, &color),
+                };''',
+        '''                let mut common_attrs = match &outline_attrs {
+                    Some(stroke) => attrs_for_cluster(cluster_str, "none") + stroke,
+                    None => attrs_for_cluster(cluster_str, &color),
+                };
                 let advance = cluster_advance(*char_idx, cluster_str);
                 if advance.is_finite() && advance > 0.0 {
                     common_attrs.push_str(&format!(

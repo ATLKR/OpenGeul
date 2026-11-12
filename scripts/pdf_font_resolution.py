@@ -15,13 +15,13 @@ GUARD = 'third_party/rhwp/src/renderer/pdf/opengeul_pdf_guard.rs'
 POLICY = 'third_party/rhwp/src/renderer/pdf/opengeul_font_policy.rs'
 SOURCE_FILES = (PDF, GUARD, POLICY)
 INPUT_SOURCE_SHA256 = {
-    PDF: '84bb9980b3a42e42998872bc9112a1714ef82984a5981b59c51d148f90b9e804',
+    PDF: '3f52aa477fa4218f9206f850663a239ff3fd41b9192a2181b76acb782933c53a',
     GUARD: '844e00c23f76bb6bab2554cda58173ef07ed929e7f58971b89366a31db017a68',
     POLICY: 'a27b64bfc47e986cf92bb66237fdaa20fc8522fc88757dfd606d9c17ea70578f',
 }
 OUTPUT_SOURCE_SHA256 = {
     **INPUT_SOURCE_SHA256,
-    PDF: '8bb23f71c9eccd728fb06b66f61247e90289a3c3114edaa5886cd278b4b72ac3',
+    PDF: '87cccfd4f15773c78ba5e63762f2b4015c1445dbfa434d0f0980955deb290b75',
 }
 REPLACEMENTS = ((
     b'    options.fontdb = std::sync::Arc::new(fontdb);\n',

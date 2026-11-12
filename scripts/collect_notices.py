@@ -4,14 +4,73 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import stat
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST_SKIA_NAMES = {'skia-safe', 'skia-bindings'}
-RUST_SKIA_VERSION = '0.153.3'
-RUST_SKIA_COMMIT = 'b7f043e0b1e2a850e702245de811f01df1f6b0ff'
+RUST_SKIA_VERSION = '0.156.0'
+RUST_SKIA_COMMIT = 'ce6727ef251518df37bcfdde4865b71f7e3a4352'
 RUST_SKIA_SHA256 = '4b33ed5b329a3a79eb1243fd91373c68b0ae0b9df7503bfc50d0c5253adf1b9a'
-RUST_SKIA_NOTICE = ROOT / 'notices/rust-skia-0.153.3-LICENSE.txt'
+RUST_SKIA_NOTICE = ROOT / 'notices/rust-skia-0.156.0-LICENSE.txt'
+RHWP_SOURCE_COMMIT = 'c9095c5f67632e6721e800ccc7fb43ea49d26682'
+# These source-package notices are not all at Cargo's package root. Keep their
+# exact origins in the review inventory without claiming that every asset ships.
+SUPPLEMENTAL_NOTICES = {
+    'rhwp-pdf-import-backend': {
+        'version':'0.3.78-rhwp.1', 'license':'MIT OR Apache-2.0',
+        'directory':'vendor/rhwp-pdf-import-backend',
+        'files':{
+            'src/fonts/assets/LICENSE-DejaVu':'5fe93f9ee914fc7c4f0cfc73b7b0e972167f1b8f89ba57f9ad55d6013eb8a8ac',
+            'src/fonts/assets/LICENSE-NotoEmoji':'8d64bebb6ad6958b0f38a25e2ca948ffc5df8bca30bfb55d92a67244e1c8fec0',
+            'src/fonts/assets/LICENSE-fallback-fonts':'7fee68f76f08309b3a599bd93c66e0c5f263e6ccfe98dbe74ecfabbe1eb77429',
+            'TRADEMARKS.md':'09fbcb46691825dc4f3a981e841b6f0521543419860ca1aec64cd576ec067277',
+        },
+    },
+    'rhwp-zune-jpeg': {
+        'version':'0.5.15-rhwp.1', 'license':'(MIT OR Apache-2.0 OR Zlib) AND IJG',
+        'directory':'vendor/rhwp-zune-jpeg',
+        'files':{'README.ijg':'75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6'},
+    },
+    'rhwp-hayro-jpeg2000': {
+        'version':'0.4.0-rhwp.1', 'license':'Apache-2.0 OR MIT',
+        'directory':'vendor/rhwp-hayro-jpeg2000',
+        'files':{'assets/LICENSE.txt':'469d87b5fa48f8aaf69e25f4fcac3a309c97dbb7d561b917638abdb640e004d9'},
+    },
+}
+
+
+def collect_supplements(item: dict, location: Path, output: Path) -> list[dict]:
+    pin=SUPPLEMENTAL_NOTICES.get(item['name'])
+    if pin is None:return []
+    if item['version'] != pin['version'] or item.get('license') != pin['license']:
+        raise ValueError('Supplemental notice package version/license requires review')
+    inputs=[]
+    for name,expected in pin['files'].items():
+        relative=Path(name)
+        if relative.is_absolute() or '..' in relative.parts or '\\' in name:
+            raise ValueError('Supplemental notice path must remain in the package')
+        path=location/relative
+        for component in (path,*path.parents):
+            info=component.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0) & 0x400:
+                raise ValueError('Supplemental notice source must not use aliases')
+            if component==location:break
+        if not path.is_file() or not path.resolve().is_relative_to(location.resolve()):
+            raise ValueError('Supplemental notice source must remain a regular package file')
+        with path.open('rb') as stream:data=stream.read(2_000_001)
+        if len(data)>2_000_000 or hashlib.sha256(data).hexdigest()!=expected:
+            raise ValueError('Supplemental notice text differs from the reviewed source')
+        data.decode('utf-8')
+        inputs.append((name,expected,data))
+    records=[]
+    for name,expected,data in inputs:
+        filename='supplemental/'+name+'.txt'
+        destination=output/filename;destination.parent.mkdir(parents=True,exist_ok=True)
+        destination.write_bytes(data)
+        records.append({'sourcePath':name,'sha256':expected,'file':filename,
+            'sourceUrl':f'https://raw.githubusercontent.com/edwardkim/rhwp/{RHWP_SOURCE_COMMIT}/{pin["directory"]}/{name}'})
+    return records
 
 
 def collect(directory: Path, output: Path) -> list[str]:
@@ -41,6 +100,10 @@ def collect_cargo(packages: list[dict], out: Path) -> list[dict]:
                 try: (out/ident/'declared-license.txt').write_text(path.read_text(encoding='utf-8'),encoding='utf-8'); texts.append('declared-license.txt')
                 except UnicodeError: pass
         record={'ecosystem':'cargo','name':item['name'],'version':item['version'],'declaredLicense':item.get('license'),'texts':texts}
+        supplements=collect_supplements(item,location,out/ident)
+        if supplements:
+            record['supplementalNotices']=supplements
+            texts.extend(entry['file'] for entry in supplements)
         if item['name'] in RUST_SKIA_NAMES:
             if item['version'] != RUST_SKIA_VERSION or item.get('license') != 'MIT':
                 raise ValueError('Shipped rust-skia version/license changed; review its exact notice before packaging')

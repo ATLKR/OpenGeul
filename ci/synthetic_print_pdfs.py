@@ -49,7 +49,7 @@ def context(workspace,env,os_name):
 def fixed_wasm(workspace):
  folder=workspace/'wasm-input';value,metadata_hash=read_json(folder/'OPEN_GEUL_WASM.json')
  require(set(value)=={'upstream','namespaceHelper','namespacePatcher','artifacts','generator'} and all(value.get(k)==v for k,v in wasm_expected().items()),'현재 pin·namespace 소스의 WASM provenance 필요')
- require(value['generator']=='wasm-pack 0.14.0 --target web --release --no-opt' and type(value['artifacts']) is dict and set(value['artifacts'])==set(WASM_FILES),'기존 WASM 생성 명령·파일6개 필요')
+ require(value['generator']=='wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api' and type(value['artifacts']) is dict and set(value['artifacts'])==set(WASM_FILES),'기존 WASM 생성 명령·파일6개 필요')
  used=0
  for name in WASM_FILES:
   path=folder/name;regular(path);size=path.stat().st_size;used+=size
