@@ -13,6 +13,7 @@ import tempfile
 import time
 import urllib.request
 from playwright.sync_api import sync_playwright, expect
+from lifecycle_observer import LifecycleObserver
 from native_controls import filename_control, explorer_window_binding, explorer_item_binding, physical_explorer_selection, require_explorer_selection, acknowledge_information_dialog
 from ui_contract import canonical_local_path
 from webview_debug import MachineRegistry, ScopedDebugOverride, debug_arguments
@@ -54,6 +55,8 @@ class Session:
         self.mode=mode; self.folder=folder; folder.mkdir(parents=True,exist_ok=True)
         self.executable=executable; self.proc=None; self.browser=None; self.context=None; self.page=None
         self.messages=[]; self.requests=[]; self.dialogs=[]; self.errors=[]
+        self.lifecycle=LifecycleObserver(enabled=mode!='native',browser_code={'chromium':1,'firefox':2,'webkit':3}.get(browser,0))
+        self.lifecycle.phase(1)
         self.profile=None; self.log=None; self.debug_override=None; self.pw=sync_playwright().start()
         try:
             if mode=='native':
@@ -90,15 +93,21 @@ class Session:
                 if self.page is None:
                     self.page=self.context.wait_for_event('page',timeout=30000)
             else:
+                self.lifecycle.phase(2)
                 self.browser=getattr(self.pw,browser).launch(headless=True)
+                self.lifecycle.bind_browser(self.browser);self.lifecycle.phase(3)
                 self.context=self.browser.new_context(accept_downloads=True, viewport={'width':1280,'height':900})
+                self.lifecycle.bind_context(self.context)
                 # Browser jobs cover the public HTML picker/download fallback,
                 # not File System Access OS dialogs. Scope it before any page.
                 self.context.add_init_script(
                     "Object.defineProperty(window, 'showOpenFilePicker', {value: undefined, configurable: true});"
                     "Object.defineProperty(window, 'showSaveFilePicker', {value: undefined, configurable: true});")
+                self.lifecycle.phase(4)
                 self.page=self.context.new_page()
+                self.lifecycle.bind_page(self.page)
             # Disable resource capture so traces cannot redistribute installed fonts.
+            self.lifecycle.phase(5)
             self.context.tracing.start(screenshots=True,snapshots=False,sources=False)
             self.page.set_default_timeout(15000)
             self.page.on('console',lambda message:self.messages.append({'type':message.type,'text':message.text}))
@@ -109,13 +118,19 @@ class Session:
             self.dialog_handler=dialog_handler
             self.page.on('dialog',dialog_handler)
             if mode!='native':
+                self.lifecycle.phase(6)
                 self.page.goto(url,wait_until='domcontentloaded')
+                self.lifecycle.phase(7)
                 expect(self.page.locator('#sb-message')).to_contain_text('HWP 파일을 선택',timeout=60000)
-                if fixture: self.page.locator('#file-input').set_input_files(str(fixture))
+                if fixture:
+                    self.lifecycle.phase(8)
+                    self.page.locator('#file-input').set_input_files(str(fixture))
             if fixture is None:
                 expect(self.page.locator('#sb-message')).to_contain_text('HWP 파일을 선택',timeout=60000)
                 menu(self.page,'file:new-doc')
+            self.lifecycle.phase(9)
             self.wait_loaded(fixture.name if fixture else '새 문서.hwp')
+            self.lifecycle.phase(10)
             runtime={'mode':mode,'browser':self.browser.version,
                 'executableSha256':digest(executable) if executable else None,'fixtureSha256':digest(fixture) if fixture else None,
                 'navigator':self.page.evaluate('({platform:navigator.platform,userAgent:navigator.userAgent})')}
@@ -123,7 +138,9 @@ class Session:
                 runtime['nativeArchitecture']=self.native_architecture
                 runtime['webview2Native']=verify_webview2(self.proc.pid,architecture)
             (folder/'runtime.json').write_text(json.dumps(runtime,indent=2),encoding='utf-8')
-        except BaseException:
+            self.lifecycle.phase(11)
+        except BaseException as error:
+            self.lifecycle.failed(error)
             self.close()
             raise
 
@@ -670,33 +687,43 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
         return output
 
     def close(self):
-        # Cleanup must also run when startup, evidence capture or process teardown fails.
-        try:
-            if self.page:
-                try:self.page.screenshot(path=str(self.folder/'last-screen.png'),timeout=3000)
-                except Exception:pass
-            if self.context:
-                try:self.context.tracing.stop(path=str(self.folder/'trace.zip'))
-                except Exception:pass
-            (self.folder/'events.json').write_text(json.dumps({'console':self.messages[-200:],'requests':self.requests[-300:],
-                'dialogs':self.dialogs,'errors':self.errors},ensure_ascii=False,indent=2),encoding='utf-8')
-        finally:
+        with self.lifecycle.cleanup_scope():
+            # Cleanup must also run when startup, evidence capture or process teardown fails.
+            self.lifecycle.cleanup()
             try:
-                if self.browser:
-                    try:self.browser.close()
+                if self.page:
+                    self.lifecycle.phase(14)
+                    try:self.page.screenshot(path=str(self.folder/'last-screen.png'),timeout=3000)
                     except Exception:pass
-                if self.proc and self.proc.poll() is None:
-                    try:subprocess.run(['taskkill','/PID',str(self.proc.pid),'/T','/F'],capture_output=True,timeout=20)
-                    finally:
-                        if self.proc.poll() is None:self.proc.kill()
-                        self.proc.wait(timeout=10)
+                if self.context:
+                    self.lifecycle.phase(15)
+                    try:self.context.tracing.stop(path=str(self.folder/'trace.zip'))
+                    except Exception:pass
+                self.lifecycle.phase(16)
+                (self.folder/'events.json').write_text(json.dumps({'console':self.messages[-200:],'requests':self.requests[-300:],
+                    'dialogs':self.dialogs,'errors':self.errors},ensure_ascii=False,indent=2),encoding='utf-8')
             finally:
                 try:
-                    if self.log:self.log.close()
-                    try:self.pw.stop()
-                    except Exception:pass
+                    if self.browser:
+                        self.lifecycle.phase(17)
+                        try:self.browser.close()
+                        except Exception:pass
+                    self.lifecycle.phase(18)
+                    if self.proc and self.proc.poll() is None:
+                        try:subprocess.run(['taskkill','/PID',str(self.proc.pid),'/T','/F'],capture_output=True,timeout=20)
+                        finally:
+                            if self.proc.poll() is None:self.proc.kill()
+                            self.proc.wait(timeout=10)
                 finally:
                     try:
-                        if self.debug_override:self.debug_override.close()
+                        if self.log:self.log.close()
+                        self.lifecycle.phase(19)
+                        try:self.pw.stop()
+                        except Exception:pass
                     finally:
-                        if self.profile:shutil.rmtree(self.profile,ignore_errors=True)
+                        try:
+                            if self.debug_override:self.debug_override.close()
+                        finally:
+                            try:
+                                if self.profile:shutil.rmtree(self.profile,ignore_errors=True)
+                            finally:self.lifecycle.finish(self.folder/'lifecycle.json')
