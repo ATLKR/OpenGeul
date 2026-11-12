@@ -1,0 +1,236 @@
+{
+  "files": [
+    {
+      "bytes": 3296,
+      "path": "fixtures/contract.json",
+      "sha256": "fa75b4eb4ee68498eeda159751de37d2f628472db000a7a2b0d5a452fd056baf"
+    },
+    {
+      "bytes": 117,
+      "path": "fixtures/generated/net_ure/net_oootypes/Synthetic.cs",
+      "sha256": "8c9fc31965dbabd1600fed6fe7fb6b9a47bf3bc88320bc289a384faf57c29253"
+    },
+    {
+      "bytes": 115,
+      "path": "fixtures/generated/net_ure/net_uretypes/Synthetic.cs",
+      "sha256": "dedb4fc7e39d55add7b36ff5484e4b5af574b5c071bb1cbbd06b87c1462c107c"
+    },
+    {
+      "bytes": 97,
+      "path": "fixtures/source/net_ure/source/basetypes/Any.cs",
+      "sha256": "55ab2120a78b0b4036c4adb4a898268420481880ae5e488bdad9793204bda361"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/basetypes/BoundAttribute.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/basetypes/IQueryInterface.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/basetypes/RaisesAttribute.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/basetypes/UnoException.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/basetypes/UnoGeneratedAttribute.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 117,
+      "path": "fixtures/source/net_ure/source/bridge/helper/DisposeGuard.cs",
+      "sha256": "7bdcd35109e0da1714cc5b82a605872fd1bcaafdd6fdec6fb6b7c8bd05ee32a5"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/helper/StructHelper.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/helper/TypeHelper.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/helper/WeakBase.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/helper/WeakComponentBase.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/native/InteropMethods.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/native/InteropTypes.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/native/Marshaller.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/native/NativeBootstrap.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/native/NativeUnoProxy.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/native/NetEnvironment.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/native/WeakIndexTable.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 64,
+      "path": "fixtures/source/net_ure/source/bridge/native/WeakOidTypeTable.cs",
+      "sha256": "b2f048eee72e46082766f26208f785d90b942c0414d0535dafb7438f260554b3"
+    },
+    {
+      "bytes": 0,
+      "path": "runtime/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 8924,
+      "path": "runtime/bounded.py",
+      "sha256": "61b059e0485c285026b86f28ab082b31deac7f565cf479625ec97642a707d172"
+    },
+    {
+      "bytes": 20420,
+      "path": "runtime/controller.py",
+      "sha256": "99012fbfda81733e49419c039dc54cbf17414014e50572532923e17a15b92746"
+    },
+    {
+      "bytes": 556,
+      "path": "runtime/native-port-provenance.json",
+      "sha256": "a0e91375b636f80bd6e60b4f45bf1ea140ee5b93641e1dbc09866c29dc5ace6a"
+    },
+    {
+      "bytes": 19344,
+      "path": "runtime/native_snapshot.py",
+      "sha256": "c351985b794e020d4e72575d765ad700076feff62771a12f3ade7b42a8f89cf3"
+    },
+    {
+      "bytes": 9514,
+      "path": "runtime/sdk-observer/ApiVerifier.cs",
+      "sha256": "d9983cd33ea519f07deaa376b6802e4926d61742356694f2188ccfc3a6405268"
+    },
+    {
+      "bytes": 11722,
+      "path": "runtime/sdk-observer/NumericLogger.cs",
+      "sha256": "d5242693974ce613f64d273214506f0396b8692f2ee72f79947902a83f0acb32"
+    },
+    {
+      "bytes": 20104,
+      "path": "runtime/sdk_win32.py",
+      "sha256": "2710deeda6c7cd37d5e997350f0f82a5746f5d412ec9659e07ca2af5e1adab93"
+    },
+    {
+      "bytes": 2452,
+      "path": "source-snapshot/net_ure/CustomTarget_net_nuget_pkg.mk",
+      "sha256": "1015ccb28dba46cafc30842e8ccfd9b35e508c40bc893c87a44d8bc8ad3ab451"
+    },
+    {
+      "bytes": 955,
+      "path": "source-snapshot/net_ure/DotnetLibrary_net_basetypes.mk",
+      "sha256": "bdfdc49a9a2fbce2d552615e62e75b347ddf264025b463ae377ff3c36ed2f6af"
+    },
+    {
+      "bytes": 1754,
+      "path": "source-snapshot/net_ure/DotnetLibrary_net_bridge.mk",
+      "sha256": "4b75434ca42850650b2cc2334816d06a9fb72c66fdd143efa1fc0fd953f8af49"
+    },
+    {
+      "bytes": 801,
+      "path": "source-snapshot/net_ure/DotnetLibrary_net_oootypes.mk",
+      "sha256": "4f1ac8905639f44b31bc72b4ceaa5b5a159e826908cace6772800332ffba4437"
+    },
+    {
+      "bytes": 802,
+      "path": "source-snapshot/net_ure/DotnetLibrary_net_uretypes.mk",
+      "sha256": "6b5702367b60e766ff9ca571a051c79d1e84a6e32514ad385229bfbcb90ef71d"
+    },
+    {
+      "bytes": 984,
+      "path": "source-snapshot/net_ure/Module_net_ure.mk",
+      "sha256": "da85da18dbc52afddc5381d6d1c6230c6e17483959d52adf10c135f870c99ba2"
+    },
+    {
+      "bytes": 5315,
+      "path": "source-snapshot/solenv/gbuild/DotnetLibrary.mk",
+      "sha256": "f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b"
+    },
+    {
+      "bytes": 5154,
+      "path": "source-snapshot/solenv/gbuild/DotnetTest.mk",
+      "sha256": "5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272"
+    },
+    {
+      "bytes": 843,
+      "path": "templates/baseline/net_basetypes.csproj",
+      "sha256": "498a86963ea1ac891154ed05d2f3969ba03bd8a94b73ac7d8b6596ec29cfe525"
+    },
+    {
+      "bytes": 1782,
+      "path": "templates/baseline/net_bridge.csproj",
+      "sha256": "6505c7e4019232e90788e979ed43b97bc6e2392538e0ae52116a04c7ea533b69"
+    },
+    {
+      "bytes": 507,
+      "path": "templates/baseline/net_oootypes.csproj",
+      "sha256": "6993f943e6c9cba4fad2017fa22fb7126659ee4839f961940a7c9f604efb4a4f"
+    },
+    {
+      "bytes": 509,
+      "path": "templates/baseline/net_uretypes.csproj",
+      "sha256": "d019c1b61ba3fcf1d83d0353f9c15cc45605dc6792ec5094ca11d4e791140298"
+    },
+    {
+      "bytes": 1047,
+      "path": "templates/candidate/net_basetypes.csproj",
+      "sha256": "950f415df6a9a9cf6c464e230393cf29f8c825fab91708064582e8b93db6181f"
+    },
+    {
+      "bytes": 2036,
+      "path": "templates/candidate/net_bridge.csproj",
+      "sha256": "68ace44ef7faf038430240f548e6c843155ebc2af1d28185525b56333f0d257e"
+    },
+    {
+      "bytes": 751,
+      "path": "templates/candidate/net_oootypes.csproj",
+      "sha256": "9968ddd9c192144fc740ed517ba6856d8d7dd2406b4b80bc67a9a6e11467111c"
+    },
+    {
+      "bytes": 753,
+      "path": "templates/candidate/net_uretypes.csproj",
+      "sha256": "1b13673bf4897c2bc5c8dbf16307951cc47db94e3e6ef86d05812ac997e4bde4"
+    }
+  ],
+  "kind": "synthetic-dotnet-probe-assets",
+  "schemaVersion": 1
+}

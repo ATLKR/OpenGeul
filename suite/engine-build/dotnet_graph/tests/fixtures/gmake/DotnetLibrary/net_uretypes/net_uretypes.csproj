@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+<PropertyGroup>
+<TargetFramework>netstandard2.0</TargetFramework>  <AssemblyName>net_uretypes</AssemblyName> <Version>0.1.0</Version> <Company>LibreOffice</Company> <Description>UNO runtime datatypes for the .NET language UNO binding.</Description> 
+</PropertyGroup>
+<ItemGroup>
+<Compile Include="/workspace/scratch/opengeul-source-e789-lock-20261112/dotnet-probe-proposal/gmake-generation/CustomTarget/net_ure/net_uretypes/**/*.cs"/> <ProjectReference Include="/workspace/scratch/opengeul-source-e789-lock-20261112/dotnet-probe-proposal/gmake-generation/DotnetLibrary/net_basetypes/net_basetypes.csproj"/>
+</ItemGroup>
+</Project>

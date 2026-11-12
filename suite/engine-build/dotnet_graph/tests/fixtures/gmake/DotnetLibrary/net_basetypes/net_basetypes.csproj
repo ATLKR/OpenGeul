@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+<PropertyGroup>
+<TargetFramework>netstandard2.0</TargetFramework>  <AssemblyName>net_basetypes</AssemblyName> <Version>0.1.0</Version> <Company>LibreOffice</Company> <Description>Base datatypes for the .NET language UNO binding.</Description> 
+</PropertyGroup>
+<ItemGroup>
+<Compile Include="/workspace/scratch/opengeul-source-e789-lock-20261112/dotnet-probe-proposal/fixtures/source/net_ure/source/basetypes/Any.cs"/> <Compile Include="/workspace/scratch/opengeul-source-e789-lock-20261112/dotnet-probe-proposal/fixtures/source/net_ure/source/basetypes/BoundAttribute.cs"/> <Compile Include="/workspace/scratch/opengeul-source-e789-lock-20261112/dotnet-probe-proposal/fixtures/source/net_ure/source/basetypes/IQueryInterface.cs"/> <Compile Include="/workspace/scratch/opengeul-source-e789-lock-20261112/dotnet-probe-proposal/fixtures/source/net_ure/source/basetypes/RaisesAttribute.cs"/> <Compile Include="/workspace/scratch/opengeul-source-e789-lock-20261112/dotnet-probe-proposal/fixtures/source/net_ure/source/basetypes/UnoException.cs"/> <Compile Include="/workspace/scratch/opengeul-source-e789-lock-20261112/dotnet-probe-proposal/fixtures/source/net_ure/source/basetypes/UnoGeneratedAttribute.cs"/>
+</ItemGroup>
+</Project>

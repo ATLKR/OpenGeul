@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+<PropertyGroup>
+<TargetFramework>netstandard2.0</TargetFramework>  <AssemblyName>net_basetypes</AssemblyName> <Version>0.1.0</Version> <Company>LibreOffice</Company> <Description>Base datatypes for the .NET language UNO binding.</Description> 
+<OutputPath>@VARIANT_ROOT@/DotnetLibrary/net_basetypes/</OutputPath><AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath><BuildProjectReferences>false</BuildProjectReferences></PropertyGroup>
+<ItemGroup>
+<Compile Include="@VARIANT_ROOT@/Source/net_ure/source/basetypes/Any.cs" /> <Compile Include="@VARIANT_ROOT@/Source/net_ure/source/basetypes/BoundAttribute.cs" /> <Compile Include="@VARIANT_ROOT@/Source/net_ure/source/basetypes/IQueryInterface.cs" /> <Compile Include="@VARIANT_ROOT@/Source/net_ure/source/basetypes/RaisesAttribute.cs" /> <Compile Include="@VARIANT_ROOT@/Source/net_ure/source/basetypes/UnoException.cs" /> <Compile Include="@VARIANT_ROOT@/Source/net_ure/source/basetypes/UnoGeneratedAttribute.cs" />
+</ItemGroup>
+</Project>

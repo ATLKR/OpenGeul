@@ -1,7 +1,7 @@
 name: OpenGeul native ARM64 Office engine source build
 'on':
   push:
-    branches: [work/opengeul-office-native-engine]
+    branches: [work/opengeul-office-native-engine, work/opengeul-office-dotnet-graph-diagnostic]
     paths:
       - .github/workflows/office-native-engine.yml
       - suite/scripts/build-native-engine.ps1
@@ -30,6 +30,7 @@ permissions:
   contents: read
 jobs:
   native-firebird-and-office:
+    if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/work/opengeul-office-dotnet-graph-diagnostic' }}
     runs-on: windows-11-arm
     timeout-minutes: 360
     env:
@@ -140,3 +141,51 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
+
+  dotnet-graph-diagnostic:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/work/opengeul-office-dotnet-graph-diagnostic' && github.repository == 'ATLKR/OpenGeul' && github.repository_id == '1405493151' && github.repository_owner == 'ATLKR' && github.actor == 'ATLKR' && github.run_attempt == '1' && github.event.repository.private == false && github.event.repository.fork == false }}
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OPENGEUL_DOTNET_GRAPH_DIAGNOSTIC_ONLY: '1'
+    steps:
+      - name: Admit only the explicit isolated owner diagnostic
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'ATLKR/OpenGeul' -or
+              $env:GITHUB_EVENT_NAME -cne 'push' -or
+              $env:GITHUB_REF -cne 'refs/heads/work/opengeul-office-dotnet-graph-diagnostic' -or
+              $env:GITHUB_ACTOR -cne 'ATLKR' -or
+              $env:GITHUB_REPOSITORY_OWNER -cne 'ATLKR' -or
+              $env:GITHUB_REPOSITORY_ID -cne '1405493151' -or
+              $env:GITHUB_RUN_ATTEMPT -cne '1') {
+            throw 'Dotnet graph diagnostic admission failed.'
+          }
+      - name: Preserve exact diagnostic source bytes
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Observe only the bounded synthetic MSBuild graph
+        shell: pwsh
+        run: |
+          # Diagnostic only: no engine build, qualification or delivery occurs.
+          python suite/engine-build/dotnet-graph-diagnostic.py --diagnostic-only --output .work/dotnet-graph-diagnostic
+          if ($LASTEXITCODE -ne 0) { throw 'Bounded dotnet graph diagnostic failed.' }
+      - name: Retain only the closed numeric diagnostic receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-dotnet-graph-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .work/dotnet-graph-diagnostic/dotnet-graph-diagnostic.json
+          if-no-files-found: error
+          retention-days: 7

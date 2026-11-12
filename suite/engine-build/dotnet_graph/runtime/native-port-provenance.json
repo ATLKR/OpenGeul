@@ -1,0 +1,9 @@
+{
+  "adaptedSha256": "2710deeda6c7cd37d5e997350f0f82a5746f5d412ec9659e07ca2af5e1adab93",
+  "onlyAdaptation": "Diagnostic finite DOTNET/NUGET environment keys and required false certificate/global-tool side-effect guards; original Writer file and allowlist unchanged",
+  "schemaVersion": 1,
+  "snapshotSha256": "c351985b794e020d4e72575d765ad700076feff62771a12f3ade7b42a8f89cf3",
+  "source": "suite/e2e/writer_server_observer_win32.py",
+  "sourceSha256": "c351985b794e020d4e72575d765ad700076feff62771a12f3ade7b42a8f89cf3",
+  "windowsActualVerified": false
+}
