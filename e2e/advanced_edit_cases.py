@@ -151,10 +151,10 @@ class AdvancedEditCases:
             expected={(r,c):((1,1),f'INNER-{r}{c}',(f'INNER-{r}{c}',)) for r in range(2) for c in range(2)}
             expected[(0,0)]=((1,1),'INNER-00'+suffix,('INNER-00'+suffix,)); assert_grid(result,'s0/body/t0/r0c0/t0',expected)
         self.advanced_check('nested',lambda r:verify(r,''))
-        # Owned fixture's first nested row covers approximately 56.5–72mm.
-        # This authored interior point is verified against the real native layout.
-        # Saved direct ancestry is the decisive check; a missed click fails it.
-        self.advanced_click_mm(42,63); self.page.keyboard.press('End'); self.page.keyboard.insert_text('-EDIT')
+        # rhwp 0.9 paints this owned first inner cell at x31.0–62.8mm,
+        # y36.0–50.1mm (the authored 4000-HU row). Use its interior point;
+        # saved direct ancestry remains decisive when a physical click misses.
+        self.advanced_click_mm(42,43); self.page.keyboard.press('End'); self.page.keyboard.insert_text('-EDIT')
         self.advanced_check('edited',lambda r:verify(r,'-EDIT'))
         self.undo(); self.advanced_check('undo',lambda r:verify(r,''))
         self.redo(); self.advanced_check('redo',lambda r:verify(r,'-EDIT'))
@@ -164,7 +164,7 @@ class AdvancedEditCases:
         self.undo(); self.advanced_check('delete-undo',lambda r:verify(r,'-EDIT'))
         self.redo(); saved=self.advanced_check('delete-redo',lambda r:verify(r,''))
         self.open(saved); self.advanced_check('reopen',lambda r:verify(r,''))
-        self.advanced_click_mm(42,63); self.page.keyboard.press('End'); self.page.keyboard.insert_text('-NEXT')
+        self.advanced_click_mm(42,43); self.page.keyboard.press('End'); self.page.keyboard.insert_text('-NEXT')
         self.advanced_check('next-edit',lambda r:verify(r,'-NEXT')); self.advanced_immutable()
 
     def test_advanced_field_insert_fill_history_reopen(self):
