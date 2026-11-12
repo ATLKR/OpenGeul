@@ -24,14 +24,18 @@ def _read(path):
     if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or not 0<info.st_size<=MAX_INPUT:
         raise ValueError('Reviewed npm input type or size differs')
     def identity(value):
-        return value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns,value.st_nlink
+        # Windows Python3.12 path ctime is creation time; fstat ctime is change time.
+        stamp=getattr(value,'st_birthtime_ns',None) if os.name=='nt' else value.st_ctime_ns
+        if type(stamp) is not int:raise ValueError('Reviewed npm input timestamp unavailable')
+        return value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,stamp,value.st_nlink
     with path.open('rb') as stream:
         opened=os.fstat(stream.fileno())
         if identity(opened)!=identity(info):raise ValueError('Reviewed npm input identity differs')
         raw=stream.read(MAX_INPUT+1)
         after=os.fstat(stream.fileno())
     final=path.lstat()
-    if (len(raw)!=info.st_size or len(raw)>MAX_INPUT or identity(after)!=identity(info)
+    if (len(raw)!=info.st_size or len(raw)>MAX_INPUT or identity(after)!=identity(opened)
+            or after.st_ctime_ns!=opened.st_ctime_ns or final.st_ctime_ns!=info.st_ctime_ns
             or identity(final)!=identity(info) or stat.S_ISLNK(final.st_mode)
             or getattr(final,'st_file_attributes',0)&0x400):
         raise ValueError('Reviewed npm input changed during read')
