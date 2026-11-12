@@ -75,6 +75,16 @@ class NativeAdvancedInputTests(unittest.TestCase):
         self.assertEqual(discovery.returncode,0,discovery.stderr);self.assertEqual(discovery.stdout.strip(),'42')
         self.assertEqual(len(ui_contract.manifest('native')),42)
 
+    def test_scheduled_source_stages_same_run_advanced_inputs_without_qualification(self):
+        self.run['event']='schedule';self.refresh()
+        receipt=self.stage()
+        self.assertEqual(ui_contract.frontend_source_binding(self.fixtures,ROOT),test_ui_contract.frontend_binding())
+        after=self.inventory(self.fixture_root)
+        self.assertEqual({k:after[k]for k in self.baseline},self.baseline)
+        self.assertEqual(len(after),29)
+        self.assertEqual(receipt['sourceCommit'],'a'*40)
+        self.assertFalse(receipt['productExecuted']);self.assertFalse(receipt['sourceQualified'])
+
     def test_wrong_head_run_attempt_and_successful_wasm_producer_are_rejected(self):
         mutations=[lambda:self.run.update(head_sha='b'*40),lambda:self.run.update(id=124),lambda:self.run.update(run_attempt=2),lambda:self.producer.update(conclusion='failure'),lambda:self.producer.update(run_attempt=2),lambda:self.producer.update(head_sha='b'*40),lambda:self.producer.update(name='browser-e2e (chromium)')]
         for change in mutations:
