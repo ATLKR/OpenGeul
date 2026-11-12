@@ -480,7 +480,8 @@
       "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
       "hooks": [
         "arm64Full",
-        "winAccFocusOrder"
+        "winAccFocusOrder",
+        "flexFatalCompatibility"
       ]
     },
     "windows-x64-common-v2": {
@@ -495,7 +496,8 @@
         "atlNativePaths",
         "harfbuzzNativeMesonPaths",
         "cliPublisherPolicyPlatform",
-        "winAccFocusOrder"
+        "winAccFocusOrder",
+        "flexFatalCompatibility"
       ]
     }
   },
@@ -585,5 +587,13 @@
     "path": "cli_ure/CliNativeLibrary_cli_cppuhelper.mk",
     "sha256": "7c776454bb55e541da3a937c8edf44166cb3d3837789b95c0359ec52c8df9bba",
     "size": 1009
+  },
+  "flexFatalCompatibility": {
+    "path": "connectivity/source/parse/sqlflex.l",
+    "size": 37027,
+    "sha256": "87e66cc9306322ca97c2e4ccbb41b0960fb8857aee4e536bf051c043ebf6c11a",
+    "afterSize": 37161,
+    "afterSha256": "f0890c54e65b52ac31a37a99b20a17fb9e9282985f25fa99ba4718490975200c",
+    "condition": "WNT"
   }
 }

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "LibreOffice/core",
+    "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+    "path": "connectivity/source/parse/sqlflex.l",
+    "url": "https://github.com/LibreOffice/core/blob/9dea406ab7695df6325b11b0e19fdca8db4b7276/connectivity/source/parse/sqlflex.l",
+    "bytes": 37027,
+    "sha256": "87e66cc9306322ca97c2e4ccbb41b0960fb8857aee4e536bf051c043ebf6c11a",
+    "fixture": "sqlflex.l"
+  },
+  "candidateAfter": {
+    "bytes": 37161,
+    "sha256": "f0890c54e65b52ac31a37a99b20a17fb9e9282985f25fa99ba4718490975200c",
+    "patchSha256": "52e5102c3c6950379c342eb7e36a0f55d96f4c2aad871b0445e2f55c73710f9c"
+  },
+  "scope": "Exact public source fixture and bounded candidate after-pin; no native build or full-engine qualification."
+}

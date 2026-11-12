@@ -32,7 +32,8 @@ class NativeEngineBuildTests(unittest.TestCase):
                               ('external/zstd/UnpackedTarball_zstd.mk', 'native-zstd-unpack/UnpackedTarball_zstd.mk'),
                               ('solenv/gbuild/platform/com_MSC_defs.mk', 'native-gpg-build-compiler/com_MSC_defs.mk'),
                               ('external/harfbuzz/ExternalProject_harfbuzz.mk', 'native-meson-path/ExternalProject_harfbuzz.mk'),
-                              ('cli_ure/CliNativeLibrary_cli_cppuhelper.mk', 'native-cli-policy/cli_ure/CliNativeLibrary_cli_cppuhelper.mk')]:
+                              ('cli_ure/CliNativeLibrary_cli_cppuhelper.mk', 'native-cli-policy/cli_ure/CliNativeLibrary_cli_cppuhelper.mk'),
+                              ('connectivity/source/parse/sqlflex.l', 'native-flex-fatal/sqlflex.l')]:
             target = source / name; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((SOURCE.parents[1] / 'tests/fixtures' / fixture).read_bytes())
         loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
@@ -47,8 +48,10 @@ class NativeEngineBuildTests(unittest.TestCase):
         atl = module._install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths'])
         harfbuzz = module._install_harfbuzz_native_meson_paths(source, evidence, lock['windowsHarfbuzzNativeMesonPaths'])
         cli_policy = module._install_cli_policy_platform(source, evidence, lock['windowsCliPublisherPolicyPlatform'])
+        flex = module._install_flex_fatal_compat(source, evidence, lock['flexFatalCompatibility'], 'x64')
         good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
                     nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
+                    flexFatalCompatibilitySourcePatch=flex,
                     sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
                                      firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg, atlNativePaths=atl,
                                      harfbuzzNativeMesonPaths=harfbuzz, cliPublisherPolicyPlatform=cli_policy),
@@ -66,7 +69,7 @@ class NativeEngineBuildTests(unittest.TestCase):
         import copy
         _, _, _, _, good = self._x64_source_hook_fixture()
         path = self.root / 'receipt.json'; path.write_text(json.dumps(good))
-        call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64"
+        call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64 {quote(self.root/'evidence')}"
         self.ps(call)
         selected=good['sourceHooks'][hook]
         for field, value in [('schemaVersion', True), ('kind', 'other'), ('path', '../escape'), ('condition', 'WNT_AARCH64'),
@@ -104,7 +107,7 @@ class NativeEngineBuildTests(unittest.TestCase):
         import copy
         _, _, _, evidence, good = self._x64_source_hook_fixture()
         packet=self.root/'harfbuzz-receipt.json'
-        call=f'Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64'
+        call=f"Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64 {quote(self.root/'evidence')}"
         packet.write_text(json.dumps(good));self.ps(call)
         selected=good['sourceHooks']['harfbuzzNativeMesonPaths']
         variants=[]
@@ -131,7 +134,7 @@ class NativeEngineBuildTests(unittest.TestCase):
         _, _, _, _, good = self._x64_source_hook_fixture()
         packet=self.root/'harfbuzz-receipt.json';packet.write_text(json.dumps(good))
         engine=SOURCE.parents[1]/'engine-build'
-        self.ps(f'Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64')
+        self.ps(f"Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64 {quote(self.root/'evidence')}")
         for mutation in ("$pin|Add-Member -NotePropertyName unexpected -NotePropertyValue 0", "$pin.size=[string]$pin.size", "$pin.afterSize=[string]$pin.afterSize",
                          "$pin.sha256=@($pin.sha256)", "$pin.path=@($pin.path)", "$pin.condition='WNT_X86_64'"):
             body=f"""
@@ -140,7 +143,7 @@ $manifest=Get-Content {quote(engine/'source-build.json')} -Raw|ConvertFrom-Json
 $pin=$manifest.windowsHarfbuzzNativeMesonPaths;{mutation}
 $encoded=$manifest|ConvertTo-Json -Depth 40 -Compress
 function Get-Content {{param($LiteralPath,[switch]$Raw) $encoded}}
-Assert-NativeSourceRecipeBinding $receipt x64
+Assert-NativeSourceRecipeBinding $receipt x64 {quote(self.root/'evidence')}
 """
             with self.subTest(mutation=mutation):self.rejected(body)
 
@@ -148,7 +151,7 @@ Assert-NativeSourceRecipeBinding $receipt x64
         import copy
         _, _, _, _, good = self._x64_source_hook_fixture()
         packet = self.root/'atl-receipt.json'
-        call = f'Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64'
+        call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) x64 {quote(self.root/'evidence')}"
         packet.write_text(json.dumps(good)); self.ps(call)
         cases = []
         for field, value in [('schemaVersion', True), ('kind', 'other'), ('condition', 'WNT_AARCH64'),
@@ -343,7 +346,7 @@ Invoke-Expression $calls[0].Extent.Text|Out-Null
         _, _, _, _, good = self._x64_source_hook_fixture()
         self.assertEqual(4, len(good['sourceRecipeProof']['armGuardedSources']))
         path = self.root / 'receipt.json'; path.write_text(json.dumps(good))
-        call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64"
+        call = f"Assert-NativeSourceRecipeBinding (Get-Content {quote(path)} -Raw|ConvertFrom-Json) x64 {quote(self.root/'evidence')}"
         self.ps(call)
         bad = []
         for field, value in [('schemaVersion', True), ('kind', 'other'), ('path', '../escape'), ('condition', 'WNT_AARCH64'),
@@ -356,9 +359,61 @@ Invoke-Expression $calls[0].Extent.Text|Out-Null
         changed = copy.deepcopy(good); changed['sourceRecipeProof']['armGuardedSources'][0]['unchanged'] = False; bad.append(changed)
         # The previous core's valid canonical plan must not certify this source.
         changed = copy.deepcopy(good); changed['sourceRecipeProof']['recipeSha256'] = 'e2ee50135f765384f994193419b3aa60b41812b09d9eeec491e4fa1201a0b036'; bad.append(changed)
+        changed = copy.deepcopy(good); changed['sourceRecipeProof']['recipeSha256'] = 'f1443e964597347e0e6967dca1fb248da579ac751545b47ffe0c0fba2b2ba442'; bad.append(changed)
         for index, packet in enumerate(bad):
             with self.subTest(case=index):
                 path.write_text(json.dumps(packet)); self.rejected(call)
+
+    def test_flex_source_binding_requires_exact_core_typed_false_flags_and_retained_bytes(self):
+        import copy
+        from suite.tests.test_native_source_recipe import load
+        module=load('apply_native_source');engine=SOURCE.parents[1]/'engine-build'
+        pin=json.loads((engine/'source-build.json').read_text())['flexFatalCompatibility']
+        original=(SOURCE.parents[1]/'tests/fixtures/native-flex-fatal/sqlflex.l').read_bytes()
+        for architecture in ('arm64','x64'):
+            source=self.root/architecture/'source';evidence=self.root/architecture/'evidence'
+            target=source/module.FLEX_PATH;target.parent.mkdir(parents=True);target.write_bytes(original);evidence.mkdir()
+            proof=module._install_flex_fatal_compat(source,evidence,pin,architecture)
+            packet=self.root/(architecture+'-flex.json');packet.write_text(json.dumps(proof))
+            setup=f"$pin=(Get-Content {quote(engine/'source-build.json')} -Raw|ConvertFrom-Json).flexFatalCompatibility\n"
+            call=f"Assert-NativeFlexFatalSourceBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) $pin {architecture} {quote(evidence)}"
+            self.ps(setup+call)
+            self.rejected(setup+f"Assert-NativeFlexFatalSourceBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) $pin {architecture}")
+            self.rejected(setup+f"Assert-NativeFlexFatalSourceBinding (Get-Content {quote(packet)} -Raw|ConvertFrom-Json) $pin {architecture} 'relative'")
+            variants=[]
+            for field,value in [('schemaVersion',True),('kind','other'),('coreCommit','0'*40),
+                                ('architecture','x64' if architecture=='arm64' else 'arm64'),('path','../escape'),
+                                ('beforeBytes',True),('afterBytes',37161.0),('beforeSha256',['0'*64]),
+                                ('afterSha256','0'*64),('extra',False)]:
+                changed=copy.deepcopy(proof);changed[field]=value;variants.append(changed)
+            for flag in ('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified'):
+                for value in (True,0):
+                    changed=copy.deepcopy(proof);changed[flag]=value;variants.append(changed)
+            for phase in ('original','effective'):
+                changed=copy.deepcopy(proof);changed['evidence'].pop(phase);variants.append(changed)
+                changed=copy.deepcopy(proof);changed['evidence'][phase]=str(evidence/'..'/evidence.name/Path(proof['evidence'][phase]).name);variants.append(changed)
+            foreign=self.root/architecture/'previous-run-evidence';foreign.mkdir()
+            changed=copy.deepcopy(proof)
+            for phase in ('original','effective'):
+                retained=Path(proof['evidence'][phase]);other=foreign/retained.name
+                other.write_bytes(retained.read_bytes());changed['evidence'][phase]=str(other)
+            variants.append(changed)
+            variants_file=self.root/(architecture+'-flex-invalid.json');variants_file.write_text(json.dumps(variants))
+            self.ps(setup+f"""
+$variants=Get-Content {quote(variants_file)} -Raw|ConvertFrom-Json
+foreach($variant in $variants){{
+    $rejected=$false
+    try{{Assert-NativeFlexFatalSourceBinding $variant $pin {architecture} {quote(evidence)}}}catch{{$rejected=$true}}
+    if(-not $rejected){{throw 'Malformed Flex source proof was accepted'}}
+}}
+""")
+            for field,value in [('size','$true'),('afterSize','37161.0'),('sha256',"@('"+pin['sha256']+"')"),('condition',"'WNT_AARCH64'")]:
+                self.rejected(setup+f'$pin.{field}={value};'+call)
+            for phase in ('original','effective'):
+                retained=Path(proof['evidence'][phase]);raw=retained.read_bytes()
+                retained.write_bytes(raw+b'changed');self.rejected(setup+call)
+                retained.unlink();self.rejected(setup+call)
+                retained.write_bytes(raw)
 
     def test_crt_terms_snapshot_hash_and_url_match_selected_visual_studio(self):
         import hashlib

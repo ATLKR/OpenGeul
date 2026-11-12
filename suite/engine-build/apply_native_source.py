@@ -17,8 +17,11 @@ import stat
 HERE = Path(__file__).resolve().parent
 CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
-RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder'])}
+RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder', 'flexFatalCompatibility']),
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility'])}
+FLEX_PATH = 'connectivity/source/parse/sqlflex.l'
+FLEX_BEFORE = (37027, '87e66cc9306322ca97c2e4ccbb41b0960fb8857aee4e536bf051c043ebf6c11a')
+FLEX_AFTER = (37161, 'f0890c54e65b52ac31a37a99b20a17fb9e9282985f25fa99ba4718490975200c')
 LOADER_PATH = 'external/firebird/ExternalProject_firebird.mk'
 ZSTD_PATH = 'external/zstd/UnpackedTarball_zstd.mk'
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
@@ -139,6 +142,7 @@ def _select_plan(lock, policy_raw, architecture):
                 or common[1]['beforeBytes'] != winacc['beforeBytes']):
             raise ValueError('source-recipe-input')
         common[1]['afterBytes'] = winacc['afterBytes']
+        common.append(_flex_pin(lock['flexFatalCompatibility']))
         arm_pins = [lock[key] for key in ['configureSource', 'sourceHook', 'icuBuildPath', 'zstdSourceLinks']]
         arm_pins += [lock[key]['recipe'] for key in ['mddsEquality', 'pythonNativeHost', 'atlNativePaths']]
         consumers = lock['atlConsumerNativePaths']['recipes']
@@ -200,6 +204,57 @@ def _select_plan(lock, policy_raw, architecture):
                 'sourceDependencies': dependencies, 'payloads': selected_payloads}
     except (KeyError, TypeError, IndexError, AttributeError):
         raise ValueError('source-recipe-input') from None
+
+
+def _flex_pin(pin):
+    if (type(pin) is not dict or set(pin) != {'path', 'size', 'sha256', 'afterSize', 'afterSha256', 'condition'}
+            or any(type(pin[key]) is not str for key in ('path', 'sha256', 'afterSha256', 'condition'))
+            or type(pin['size']) is not int or type(pin['afterSize']) is not int
+            or pin['path'] != FLEX_PATH or pin['condition'] != 'WNT'
+            or (pin['size'], pin['sha256']) != FLEX_BEFORE
+            or (pin['afterSize'], pin['afterSha256']) != FLEX_AFTER):
+        raise ValueError('source-recipe-input')
+    return _pin(pin, FLEX_PATH)
+
+
+def _flex_fatal_bytes(original, pin):
+    _flex_pin(pin)
+    if type(original) is not bytes or (len(original), _sha(original)) != FLEX_BEFORE:
+        raise ValueError('source-recipe-input')
+    before = b'    /*hack to silence -Wunused-function*/\n    if ((0)) yy_fatal_error(msg);'
+    after = (b'    /*hack to silence -Wunused-function*/\n'
+             b'#if YY_FLEX_MAJOR_VERSION == 2 && YY_FLEX_MINOR_VERSION == 6 && YY_FLEX_SUBMINOR_VERSION == 5\n'
+             b'    if ((0)) yypanic(msg);\n'
+             b'#else\n'
+             b'    if ((0)) yy_fatal_error(msg);\n'
+             b'#endif')
+    if original.count(before) != 1: raise ValueError('source-recipe-input')
+    changed = original.replace(before, after, 1)
+    if (len(changed), _sha(changed)) != FLEX_AFTER: raise ValueError('source-recipe-output')
+    return changed
+
+
+def _install_flex_fatal_compat(source, evidence, pin, architecture):
+    if architecture not in RECIPES: raise ValueError('source-recipe-input')
+    _directory(source); _directory(evidence)
+    target = source / FLEX_PATH; original = _regular(target)
+    changed = _flex_fatal_bytes(original, pin)
+    retained = {phase: evidence / (phase + '-' + architecture + '-sqlflex.l')
+                for phase in ('original', 'effective')}
+    if any(path.exists() or path.is_symlink() for path in retained.values()):
+        raise ValueError('source-recipe-input')
+    for phase, raw in [('original', original), ('effective', changed)]:
+        with retained[phase].open('xb') as stream: stream.write(raw)
+        if _regular(retained[phase]) != raw: raise ValueError('source-recipe-output')
+    target.write_bytes(changed)
+    if _regular(target) != changed: raise ValueError('source-recipe-output')
+    return {'schemaVersion': 1, 'kind': 'windows-flex-fatal-compatibility-source-hook',
+            'coreCommit': CORE, 'architecture': architecture, 'path': FLEX_PATH,
+            'beforeBytes': len(original), 'afterBytes': len(changed),
+            'beforeSha256': _sha(original), 'afterSha256': _sha(changed),
+            'evidence': {phase: str(path) for phase, path in retained.items()},
+            'nativeBuildVerified': False, 'fullEngineQualified': False,
+            'acceptanceEligible': False, 'guiVerified': False}
 
 
 def _cli_policy_bytes(original, pin):
@@ -485,6 +540,7 @@ def _install_atl_native_paths(source, evidence, descriptor):
 
 
 def _validate_common(inputs, lock, payloads, architecture):
+    _flex_fatal_bytes(inputs[FLEX_PATH], lock['flexFatalCompatibility'])
     bootstrap = lock['moduleBootstrap']
     original = inputs[COMMON_PATHS[0]]
     if original.count(b'-type d -path ') != 1 or _sha(original.replace(b'-type d -path ', b'-type d ! -path ')) != bootstrap['afterSha256']:
@@ -552,6 +608,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
                  'cliPublisherPolicyPlatform': _install_cli_policy_platform(source, evidence, lock['windowsCliPublisherPolicyPlatform']),
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
+    flex = _install_flex_fatal_compat(source, evidence, lock['flexFatalCompatibility'], architecture)
     if architecture == 'arm64':
         for path, name in ARM_OUTPUTS.items():
             if _regular(source / path) != payloads[name]: raise ValueError('source-recipe-output')
@@ -572,7 +629,8 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
              'hookOrder': plan['recipe']['hooks'], 'armGuardedSources': guarded,
              'nativeBuildVerified': False, 'fullEngineQualified': False,
              'acceptanceEligible': False, 'guiVerified': False}
-    return {'sourceHooks': hooks, 'winAccFocusOrderSourcePatch': winacc, 'sourceRecipeProof': proof}
+    return {'sourceHooks': hooks, 'winAccFocusOrderSourcePatch': winacc,
+            'flexFatalCompatibilitySourcePatch': flex, 'sourceRecipeProof': proof}
 
 
 def main():

@@ -2185,9 +2185,53 @@ function Assert-NativeX64CliPolicySourceBinding($Proof,$Pin,[string]$EvidenceDir
     }
 }
 
-function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+function Assert-NativeFlexFatalSourceBinding($Proof,$Pin,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture,[string]$EvidenceDirectory) {
+    Assert-NativeAtlKeys $Pin @('path','size','sha256','afterSize','afterSha256','condition')
+    foreach($field in @('path','sha256','afterSha256','condition')) {
+        if($Pin.$field -isnot [string]) {throw 'Source Flex descriptor requires exact scalar strings.'}
+    }
+    if(($Pin.size -isnot [int] -and $Pin.size -isnot [long]) -or
+       ($Pin.afterSize -isnot [int] -and $Pin.afterSize -isnot [long]) -or
+       $Pin.path -cne 'connectivity/source/parse/sqlflex.l' -or $Pin.condition -cne 'WNT' -or
+       $Pin.size -ne 37027 -or $Pin.afterSize -ne 37161 -or
+       $Pin.sha256 -cne '87e66cc9306322ca97c2e4ccbb41b0960fb8857aee4e536bf051c043ebf6c11a' -or
+       $Pin.afterSha256 -cne 'f0890c54e65b52ac31a37a99b20a17fb9e9282985f25fa99ba4718490975200c') {throw 'Source Flex pinned descriptor differs.'}
+    Assert-NativeAtlKeys $Proof @('schemaVersion','kind','coreCommit','architecture','path','beforeBytes','afterBytes',
+        'beforeSha256','afterSha256','evidence','nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')
+    foreach($field in @('kind','coreCommit','architecture','path','beforeSha256','afterSha256')) {
+        if($Proof.$field -isnot [string]) {throw 'Source Flex proof requires exact scalar strings.'}
+    }
+    if(($Proof.schemaVersion -isnot [int] -and $Proof.schemaVersion -isnot [long]) -or $Proof.schemaVersion -ne 1 -or
+       $Proof.kind -cne 'windows-flex-fatal-compatibility-source-hook' -or
+       $Proof.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
+       $Proof.architecture -cne $Architecture -or $Proof.path -cne $Pin.path -or
+       ($Proof.beforeBytes -isnot [int] -and $Proof.beforeBytes -isnot [long]) -or
+       ($Proof.afterBytes -isnot [int] -and $Proof.afterBytes -isnot [long]) -or
+       $Proof.beforeBytes -ne $Pin.size -or $Proof.afterBytes -ne $Pin.afterSize -or
+       $Proof.beforeSha256 -cne $Pin.sha256 -or $Proof.afterSha256 -cne $Pin.afterSha256) {throw 'Source Flex compatibility proof differs.'}
+    foreach($field in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+        if($Proof.$field -isnot [bool] -or $Proof.$field) {throw 'Source Flex hook cannot qualify a native engine.'}
+    }
+    Assert-NativeAtlKeys $Proof.evidence @('original','effective')
+    if([string]::IsNullOrWhiteSpace($EvidenceDirectory) -or -not [IO.Path]::IsPathFullyQualified($EvidenceDirectory) -or
+       $EvidenceDirectory -cne [IO.Path]::GetFullPath($EvidenceDirectory)) {throw 'Source Flex expected evidence directory is not canonical.'}
+    Assert-UnlinkedPath $EvidenceDirectory
+    foreach($phase in @('original','effective')) {
+        $path=$Proof.evidence.$phase
+        if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or
+           $path -cne [IO.Path]::GetFullPath($path) -or
+           [IO.Path]::GetFileName($path) -cne ($phase+'-'+$Architecture+'-sqlflex.l')) {throw 'Source Flex evidence path differs.'}
+        $parent=[IO.Path]::GetDirectoryName($path)
+        if($parent -cne $EvidenceDirectory) {throw 'Source Flex evidence belongs to another source run.'}
+        Assert-UnlinkedPath $parent
+        if($phase -ceq 'original') {Confirm-FileIdentity $path $Pin.size SHA256 $Pin.sha256|Out-Null}
+        else {Confirm-FileIdentity $path $Pin.afterSize SHA256 $Pin.afterSha256|Out-Null}
+    }
+}
+
+function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[string]$SourceEvidenceDirectory) {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','winAccFocusOrder')}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder','flexFatalCompatibility')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','winAccFocusOrder','flexFatalCompatibility')}
     $guardCount=if($Architecture -ceq 'arm64'){13}else{4}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
@@ -2195,12 +2239,12 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
        $proof.nativeBuildVerified -ne $false -or $proof.fullEngineQualified -ne $false -or $proof.acceptanceEligible -ne $false -or $proof.guiVerified -ne $false) {throw 'Source recipe is not bound to this actual source/policy run.'}
     if($Architecture -ceq 'x64' -and (@($proof.armGuardedSources|Where-Object {$_.unchanged -ne $true -or $_.sha256 -cne $_.beforeSha256}).Count -or
        $Receipt.sourceHooks.kind -cne 'native-windows-common-source-hooks' -or $Receipt.sourceHooks.architecture -cne 'x64')) {throw 'x64 source receipt applied ARM-only hooks.'}
+    $manifestPath=Join-Path $PSScriptRoot '../engine-build/source-build.json';Assert-UnlinkedPath $manifestPath
+    if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
+    $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
     if($Architecture -ceq 'x64') {
-        $manifestPath=Join-Path $PSScriptRoot '../engine-build/source-build.json';Assert-UnlinkedPath $manifestPath
-        if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
-        $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
         $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe)
-        if($proof.recipeSha256 -cne 'f1443e964597347e0e6967dca1fb248da579ac751545b47ffe0c0fba2b2ba442') {throw 'x64 canonical source recipe differs.'}
+        if($proof.recipeSha256 -cne '95c0bff970c3cc13f679f2dbaa226c4c4a45e236195efcdcd25e6ade6f94b2dc') {throw 'x64 canonical source recipe differs.'}
         for($i=0;$i -lt 4;$i++) {
             $row=$proof.armGuardedSources[$i]
             if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
@@ -2319,6 +2363,7 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
         }
         Assert-NativeX64CliPolicySourceBinding $Receipt.sourceHooks.cliPublisherPolicyPlatform $manifest.windowsCliPublisherPolicyPlatform $directory
     }
+    Assert-NativeFlexFatalSourceBinding $Receipt.flexFatalCompatibilitySourcePatch $manifest.flexFatalCompatibility $Architecture $SourceEvidenceDirectory
 }
 
 function Assert-WinAccBinaryProof($Proof,[string]$RuntimeRoot,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
@@ -2342,7 +2387,7 @@ function Get-WinAccBinaryProof([string]$Python,[string]$Repo,[string]$RuntimeRoo
     return $pe
 }
 
-function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot) {
+function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot,[string]$SourceEvidenceDirectory) {
     $target=Get-NativeEngineTarget x64
     if($Receipt.schemaVersion -ne 2 -or $Receipt.architecture -cne 'x64' -or $Receipt.phase -ine 'Full' -or $Receipt.kind -cne 'native-office-engine-source-build' -or
        $Receipt.passed -ne $false -or $Receipt.fullEngineQualified -ne $false -or $Receipt.acceptanceEligible -ne $false -or $Receipt.guiVerified -ne $false -or
@@ -2355,7 +2400,7 @@ function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot) {
     Assert-NativeX64AtlPlanCurrent $Receipt.atlBuildInputs $Receipt.nativePreflight.compiler.compilerRoot $Receipt.configuration
     Assert-NativeToolsetMetadata $Receipt.nativePreflight.compiler|Out-Null
     Assert-NativeBuildHost $Receipt.host x64
-    Assert-NativeSourceRecipeBinding $Receipt x64
+    Assert-NativeSourceRecipeBinding $Receipt x64 $SourceEvidenceDirectory
     Assert-WinAccBinaryProof $Receipt.winAccBinary $RuntimeRoot x64
     $binding=$Receipt.workflowBinding
     if($binding.workflow -cne $target.workflow -or $binding.workflowRef -cne ('ATLKR/OpenGeul/'+$target.workflow+'@'+$target.ref) -or $binding.ref -cne $target.ref -or $binding.job -cne $target.job -or
@@ -2484,14 +2529,15 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         }
         $python=(Get-Command python -ErrorAction Stop).Source
         $receipt.stage='real-source-recipe-tests';Assert-NativeBuildTimeRemaining
-        Invoke-LoggedCommand $python @('-m','unittest','discover','-s','suite/tests','-p','test_native_source_recipe.py','-v') $repo (Join-Path $evidence 'source-recipe-tests') -EnvironmentOverrides @{OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE=$source;OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE='1'} -NativeEnvironment:($Architecture -ceq 'x64')|Out-Null
+        Invoke-LoggedCommand $python @('-m','unittest','suite.tests.test_native_source_recipe','suite.tests.test_native_flex_fatal','-v') $repo (Join-Path $evidence 'source-recipe-tests') -EnvironmentOverrides @{OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE=$source;OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE='1'} -NativeEnvironment:($Architecture -ceq 'x64')|Out-Null
         $receipt.sourceRecipeChecksExecuted=$true
         $receipt.stage='install-authenticated-source-hooks';Assert-NativeBuildTimeRemaining
         $sourceEvidence=Join-Path $evidence 'source-recipe';New-Item -ItemType Directory $sourceEvidence|Out-Null
         $hookResult=Invoke-LoggedCommand $python @((Join-Path $repo 'suite/engine-build/apply_native_source.py'),'--libreoffice-source',$source,'--evidence-directory',$sourceEvidence,'--architecture',$Architecture) $repo (Join-Path $evidence 'source-hooks') -NativeEnvironment:($Architecture -ceq 'x64')
         $hooks=Get-Content -LiteralPath $hookResult.stdout -Raw|ConvertFrom-Json
         $receipt.sourceHooks=$hooks.sourceHooks;$receipt.winAccFocusOrderSourcePatch=$hooks.winAccFocusOrderSourcePatch;$receipt.sourceRecipeProof=$hooks.sourceRecipeProof
-        Assert-NativeSourceRecipeBinding $receipt $Architecture
+        $receipt.flexFatalCompatibilitySourcePatch=$hooks.flexFatalCompatibilitySourcePatch
+        Assert-NativeSourceRecipeBinding $receipt $Architecture $sourceEvidence
         Assert-WinAccFocusSourcePatchReceipt $receipt.winAccFocusOrderSourcePatch $manifest.winAccFocusOrder $pin.coreCommit $sourceEvidence
         if($CalcDispatchDiagnostic) {
             $receipt.stage='install-authenticated-calc-dispatch-diagnostic';Assert-NativeBuildTimeRemaining
@@ -2676,7 +2722,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 if((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configurationSha256 -or
                    (Get-FileHash -LiteralPath (Join-Path $source 'autogen.input') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configureArgumentsSha256) {throw 'Native configuration changed during compilation.'}
                 Assert-CygwinNasmConfiguration $receipt.configuration $receipt.nasmBuildTool
-                Assert-NativeX64Qualification $receipt $instdir
+                Assert-NativeX64Qualification $receipt $instdir $sourceEvidence
             }
             $receipt.stage=if($CalcDispatchDiagnostic){'package-calc-dispatch-diagnostic'}else{'package-qualified-source-build'};Assert-NativeBuildTimeRemaining
             $zip=Join-Path $evidence $mode.archive

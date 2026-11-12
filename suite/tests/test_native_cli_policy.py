@@ -136,12 +136,12 @@ class CliPublisherPolicyTests(unittest.TestCase):
         module = recipe(); lock = json.loads((ENGINE / 'source-build.json').read_bytes())
         policy = (ENGINE / 'native-targets.json').read_bytes()
         arm = module._select_plan(lock, policy, 'arm64'); x64 = module._select_plan(lock, policy, 'x64')
-        self.assertEqual('453fa33f4f5e32c9772a386c890f27c8ffe083d9fa45a1a35b07049ad32c6456',
+        self.assertEqual('a8080687422c3160b568be282b14812247bb34008b345665fc60153440ea36bf',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
         self.assertNotIn(POLICY_PATH, [row['path'] for row in arm['sources']])
         self.assertEqual(1, sum(row['path'] == POLICY_PATH for row in x64['sources']))
         self.assertNotIn(POLICY_PATH, [row['path'] for row in x64['armGuardedSources']])
-        self.assertEqual(['cliPublisherPolicyPlatform', 'winAccFocusOrder'], x64['recipe']['hooks'][-2:])
+        self.assertEqual(['cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility'], x64['recipe']['hooks'][-3:])
         for field, value in [('path', '../escape'), ('condition', 'WNT_AARCH64'), ('size', True),
                              ('afterSize', 1.5), ('sha256', 'invalid'), ('afterSha256', 'invalid'), ('extra', False)]:
             changed = copy.deepcopy(lock); changed['windowsCliPublisherPolicyPlatform'][field] = value
