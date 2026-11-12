@@ -32,6 +32,8 @@ class IMECasePhaseTests(unittest.TestCase):
         if empty_retirement_failure:
             from ime_typed_policy_fixtures import complete_record
             complete_record(record_template,empty=True)
+        from ime_policy5_fixtures import current_command_fixture
+        for command in record_template['imeCommands']:current_command_fixture(command,ime)
         observed=dict(text='Engine-OpenGeul-'+module+' 한글 '+ime.marker(module),formula='=SUM(B1:C1)',value=42,pageCount=1)
         user=NS(GetKeyboardLayout=lambda tid:layout[0],GetAsyncKeyState=lambda key:0,GetKeyState=lambda key:0,
             GetWindowThreadProcessId=lambda hwnd,pointer:41,GetForegroundWindow=lambda:11,GetAncestor=lambda hwnd,kind:11,

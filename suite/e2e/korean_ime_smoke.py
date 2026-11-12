@@ -139,34 +139,80 @@ def validate_restoration(receipt):
     return receipt
 
 
+def validate_profile_language(record, command, original_language):
+    """New-producer evidence; the existing complete profile/HKL validator remains separate."""
+    assert type(record) is dict and set(record)=={name for name,_ in NativeProfileLanguageRecord._fields_}, 'Missing measured TSF language record'
+    assert all(type(value) is int for value in record.values()), 'TSF language record must contain only integers'
+    assert type(command) is int and command in (1,4) and record['schemaVersion']==1 and record['command']==command and record['status']==0 and record['complete']==1, 'TSF language policy did not finish'
+    assert type(original_language) is int and 0<original_language<=65535 and record['originalLanguage']==original_language, 'TSF original language differs from captured profile'
+    assert record['interfaceAttempts']==1 and record['interfaceHresult']==record['getBeforeHresult']==0, 'TSF language interface/getter failed'
+    assert 0<record['observedBefore']<=65535, 'TSF original/current language was not measured'
+    if command==1:
+        assert record['observedBefore']==original_language and record['getterAttempts']==1 and record['changeAttempts']==0 and record['observedMask']==3, 'TSF original language capture differs from actual state'
+        assert all(record[key]==0 for key in ('observedAfterChange','observedAfterHkl','changeHresult','getAfterChangeHresult','getAfterHklHresult')), 'Capture invented a restoration observation'
+    else:
+        changed=record['changeAttempts']
+        assert changed in (0,1) and record['getterAttempts']==2+changed and record['observedMask']==(31 if changed else 19), 'TSF language operation count/mask changed'
+        assert record['observedAfterHkl']==original_language and record['getAfterHklHresult']==0, 'TSF current language differs after exact HKL restoration'
+        if changed:
+            assert record['observedBefore']!=original_language and record['observedAfterChange']==original_language and record['changeHresult']==record['getAfterChangeHresult']==0, 'TSF language transition/readback failed'
+        else:
+            assert record['observedBefore']==original_language and record['observedAfterChange']==record['changeHresult']==record['getAfterChangeHresult']==0, 'Unneeded TSF language change or invented readback'
+    return record
+
+
 def original_empty_us_profile(row):
     return (all(type(row.get(key)) is int and row[key] == value for key, value in
         (('previousLayout', 0x04090409), ('previousProfileType', 2), ('previousLanguage', 0x0409), ('previousProfileLayout', 0x04090409)))
         and all(type(row.get(key)) is str and row[key].lower() == '{00000000-0000-0000-0000-000000000000}' for key in ('previousClsid', 'previousProfile')))
 
 
-def require_mode_context(row):
+def require_mode_context(row, *, expected_policy=5):
     context = row['nativeContext']
-    assert type(row.get('policyVersion')) is int and row['policyVersion'] == 4
+    assert type(expected_policy) is int and expected_policy in (4,5), 'An external expected policy is required'
+    assert type(row.get('policyVersion')) is int and row['policyVersion'] == expected_policy
+    if expected_policy==5:
+        assert type(row.get('nativeSnapshotBytes')) is int and row['nativeSnapshotBytes']==ctypes.sizeof(NativeState), 'Current policy requires its complete native snapshot'
+    else:
+        assert 'nativeSnapshotBytes' not in row and 'profileLanguage' not in row, 'Current wire evidence cannot be relabeled historical'
     assert type(context) is dict and set(context) == {'magic', 'version', 'pid', 'tid', 'targetHwnd', 'rootHwnd'}
     assert all(type(value) is int and 0 < value < 2**64 for value in context.values())
     assert context['magic'] == 0x4f47494d and context['version'] == 4 and context['pid'] < 2**32 and context['tid'] < 2**32, 'Native typed policy context/version changed'
     return tuple(context[key] for key in ('magic', 'version', 'pid', 'tid', 'targetHwnd', 'rootHwnd'))
 
 
-def require_tsf_pipeline(record):
-    """Replay wire4 values and every command; no EMPTY scalar or restoration alias."""
-    assert type(record.get('imePolicyVersion')) is int and record['imePolicyVersion'] == 4
+def profile_policy_source_sha256():
+    """Trusted checkout identity; never derive an expectation from a receipt."""
+    code=Path(__file__).read_bytes();header=Path(__file__).with_name('ime_profile_language.h').read_bytes()
+    assert 0<len(code)<=2*1024*1024 and 0<len(header)<=2*1024*1024
+    return hashlib.sha256(b'OpenGeul-IME-policy5\0'+len(code).to_bytes(8,'little')+code+header).hexdigest()
+
+
+def require_tsf_pipeline(record, *, expected_policy=5, expected_source=None):
+    """Current policy5; historical policy4 requires an external explicit selection.
+
+    The wire/context4 prefix stays intact. Do not select policy/source from data.
+    """
+    assert type(expected_policy) is int and expected_policy in (4,5)
+    assert type(record.get('imePolicyVersion')) is int and record['imePolicyVersion']==expected_policy
+    if expected_policy==5:
+        current_source=profile_policy_source_sha256()
+        expected_source=current_source if expected_source is None else expected_source
+        assert expected_source==current_source, 'Independent source pin differs from the current trusted helper/header'
+        assert type(expected_source) is str and re.fullmatch('[0-9a-f]{64}',expected_source)
+        assert record.get('imePolicySourceSha256')==expected_source, 'Current source identity differs from its independent expectation'
+    else:
+        assert expected_source is None and 'imePolicySourceSha256' not in record, 'Historical validation cannot adopt current source evidence'
     commands = record['imeCommands']
     assert type(commands) is list and len(commands) == 4 and [row['command'] for row in commands] == [1, 2, 3, 4], 'Original one-shot TSF command pipeline is incomplete'
     assert record['activeProfile'] == commands[0] and record['restoration'] == commands[3]
-    context = require_mode_context(commands[0])
+    context = require_mode_context(commands[0],expected_policy=expected_policy)
     assert context[2:] == (record['officePid'], record['editorTid'], record['keyboardFocusHwnd'], record['windowHwnd']), 'Native TSF context differs from the original editor'
     original = native_mode.require_typed_mode_receipt(commands[0]['threadMode'], 1, allow_empty=original_empty_us_profile(commands[0]))
     origin = 'empty' if original[0][1] == 0 else 'i4'
     profile = require_readiness(record['readiness'], architecture=record.get('architecture', 'x64'))['profile']
     for sequence, row in enumerate(commands, 1):
-        assert require_mode_context(row) == context
+        assert require_mode_context(row,expected_policy=expected_policy) == context
         assert type(row['startedAt']) in (int, float) and math.isfinite(row['startedAt']) and row['startedAt'] >= 0
         if sequence > 1: assert commands[sequence-2]['startedAt'] <= row['startedAt'], 'TSF command observation times moved backwards'
         for key in ('command', 'nativeAck', 'publishedCommand', 'nativeAttemptedMask', 'nativeCallAttempts', 'nativePublicationReturn', 'status', 'tsfModeCaptured', 'profileChangeAttempted'):
@@ -201,6 +247,15 @@ def require_tsf_pipeline(record):
         if sequence in (1, 2, 3):
             assert row['activeLanguage'] == 0x0412 and row['activeClsid'].lower() == profile['providerClsid'].lower() and row['activeProfile'].lower() == profile['profileGuid'].lower() and row['layout'] & 0xffff == 0x0412
         if sequence in (2, 3): assert imm['open'] and bool(imm['conversion'] & 1) == (sequence == 3), 'IMM mode did not acknowledge the exact TSF request'
+    if expected_policy==5:
+        original_language=commands[0]['previousLanguage']
+        validate_profile_language(commands[0]['profileLanguage'],1,original_language)
+        assert commands[3]['previousLanguage']==original_language, 'Restoration differs from captured original language'
+        validate_profile_language(commands[3]['profileLanguage'],4,original_language)
+        for row in commands[1:3]:
+            language=row['profileLanguage']
+            assert type(language) is dict and set(language)=={name for name,_ in NativeProfileLanguageRecord._fields_}
+            assert all(type(value) is int and value==0 for value in language.values()), 'Non-language commands invented a language transition'
     restored = commands[3]
     assert commands[0]['previousImmState'] == {key: commands[0]['immState'][key] for key in ('open', 'conversion', 'sentence')}, 'Original IMM capture metadata differs from its raw getters'
     validate_restoration(restored)
@@ -250,9 +305,9 @@ def original_ime_profile(record):
     return canonical_profile_projection(raw['profileDirectory']['witness'], raw['profileUrl'])
 
 
-def require_ime_save_disposition(record, restoration):
+def require_ime_save_disposition(record, restoration, *, expected_policy=5, expected_source=None):
     assert record['restoration'] == restoration
-    origin, facts = require_tsf_pipeline(record)
+    origin, facts = require_tsf_pipeline(record,expected_policy=expected_policy,expected_source=expected_source)
     if origin == 'empty':
         from ime_engine_retirement import require_ime_retirement_admission
         require_ime_retirement_admission(record['imeEngineRetirement'], expected_native=record['imeKeyboardSession']['expectedNative'],
@@ -262,7 +317,7 @@ def require_ime_save_disposition(record, restoration):
     return facts
 
 
-def validate_ime_evidence(record):
+def validate_ime_evidence(record, *, expected_policy=5, expected_source=None):
     architecture = native_arch.require_architecture(record.get('architecture', 'x64'))
     for field in ('nativeArchitecture', 'targetArchitecture'):
         if architecture == 'arm64' or field in record:
@@ -296,7 +351,7 @@ def validate_ime_evidence(record):
     assert expected in observed.get('text', ''), 'Actual UNO reopen lost the Korean marker'
     assert record.get('layoutRestored') is True, 'Original owned profile/HKL was not restored'
     validate_restoration(record.get('restoration'))
-    origin, facts = require_tsf_pipeline(record)
+    origin, facts = require_tsf_pipeline(record,expected_policy=expected_policy,expected_source=expected_source)
     if origin == 'empty':
         from ime_engine_retirement import require_ime_engine_retirement
         _require_precommand_retirement_join(record)
@@ -336,6 +391,26 @@ class NativeModeDiagnosticEvent(ctypes.Structure):
                 ('mode',native_mode.NativeModeReceipt)]
 
 
+class NativeProfileLanguageRecord(ctypes.Structure):
+    _fields_ = [('schemaVersion', ctypes.c_uint32),
+                ('command', ctypes.c_uint32),
+                ('status', ctypes.c_uint32),
+                ('complete', ctypes.c_uint32),
+                ('originalLanguage', ctypes.c_uint32),
+                ('observedBefore', ctypes.c_uint32),
+                ('observedAfterChange', ctypes.c_uint32),
+                ('observedAfterHkl', ctypes.c_uint32),
+                ('interfaceAttempts', ctypes.c_uint32),
+                ('getterAttempts', ctypes.c_uint32),
+                ('changeAttempts', ctypes.c_uint32),
+                ('observedMask', ctypes.c_uint32),
+                ('interfaceHresult', ctypes.c_int32),
+                ('getBeforeHresult', ctypes.c_int32),
+                ('changeHresult', ctypes.c_int32),
+                ('getAfterChangeHresult', ctypes.c_int32),
+                ('getAfterHklHresult', ctypes.c_int32)]
+
+
 class NativeState(ctypes.Structure):
     _fields_ = [('magic', ctypes.c_uint32), ('version', ctypes.c_uint32),
                 ('pid', ctypes.c_uint32), ('tid', ctypes.c_uint32),
@@ -367,7 +442,8 @@ class NativeState(ctypes.Structure):
                 ('modeDiagnostics',NativeModeDiagnosticEvent * 128),
                 ('contextBoundaryExpired',ctypes.c_int32),('contextBoundaryRejected',ctypes.c_int32),
                 ('notificationConfig',notification.Config),('notification',notification.Record),
-                ('compartmentConfig',compartment.Config),('compartment',compartment.Record)]
+                ('compartmentConfig',compartment.Config),('compartment',compartment.Record),
+                ('profileLanguage', NativeProfileLanguageRecord)]
 
 
 OBSERVER_SOURCE = r'''
@@ -378,6 +454,7 @@ OBSERVER_SOURCE = r'''
 #include <stdint.h>
 #include "ime_thread_mode_windows.h"
 #include "ime_typed_origin.h"
+#include "ime_profile_language.h"
 #include "ime_command_admission.h"
 #include "ime_notification_caller.h"
 #include "ime_compartment_windows.h"
@@ -407,11 +484,13 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     ModeDiagnosticEvent modeDiagnostics[128];
     volatile LONG contextBoundaryExpired,contextBoundaryRejected;
     opengeul_ime::NotificationConfig notificationConfig;opengeul_ime::NotificationRecord notification;
-    opengeul_ime::CompartmentConfig compartmentConfig;opengeul_ime::CompartmentRecord compartment; };
+    opengeul_ime::CompartmentConfig compartmentConfig;opengeul_ime::CompartmentRecord compartment;
+    opengeul_ime::ProfileLanguageRecord profileLanguage; };
 static State* shared = nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
 static bool haveOldProfile = false;
+static opengeul_ime::ProfileLanguageOriginal originalProfileLanguage{};
 static bool initialized = false;
 static opengeul_ime::TypedPair originalTsf = {};
 static opengeul_ime::CommandAdmission commandAdmission = {};
@@ -457,6 +536,32 @@ static bool original_target(HWND hwnd,bool input) {
         && pid==shared->pid && tid==shared->tid && tid==GetCurrentThreadId()
         && (!input || (GetFocus()==hwnd && uint64_t(UINT_PTR(GetAncestor(GetForegroundWindow(),GA_ROOT)))==shared->rootHwnd));
 }
+// No private vtable or new thread manager: QI and every call stay in this owned callback.
+class ProfileLanguageApi {
+    ITfInputProcessorProfileMgr* manager;
+    ITfInputProcessorProfiles* reader=nullptr;
+    HWND target;UINT sequence;opengeul_ime::CommandBudget limits;
+public:
+    ProfileLanguageApi(ITfInputProcessorProfileMgr* manager,HWND target,UINT sequence,
+        const opengeul_ime::CommandBudget& limits):manager(manager),target(target),sequence(sequence),limits(limits){}
+    ProfileLanguageApi(const ProfileLanguageApi&)=delete;
+    ProfileLanguageApi& operator=(const ProfileLanguageApi&)=delete;
+    ~ProfileLanguageApi(){if(reader)reader->Release();}
+    bool Boundary(){return original_target(target,sequence!=4)&&budget(limits);}
+    int32_t Interface(){
+        return manager&&!reader?manager->QueryInterface(__uuidof(ITfInputProcessorProfiles),
+            reinterpret_cast<void**>(&reader)):E_UNEXPECTED;
+    }
+    int32_t GetLanguage(uint32_t& output){
+        if(!reader)return E_UNEXPECTED;
+        LANGID value=0;const auto hr=reader->GetCurrentLanguage(&value);
+        if(hr==S_OK)output=value;
+        return hr;
+    }
+    int32_t ChangeLanguage(uint32_t language){
+        return reader?reader->ChangeCurrentLanguage(static_cast<LANGID>(language)):E_UNEXPECTED;
+    }
+};
 static bool same_profile(const TF_INPUTPROCESSORPROFILE& a,const TF_INPUTPROCESSORPROFILE& b) {
     return a.dwProfileType==b.dwProfileType && a.langid==b.langid && a.hkl==b.hkl
         && IsEqualGUID(a.clsid,b.clsid) && IsEqualGUID(a.guidProfile,b.guidProfile);
@@ -625,6 +730,7 @@ static void command(HWND hwnd, UINT sequence) {
     if (!lease.Entered()) return; // Never overwrite active status/receipt/ACK on rejection.
     const auto limits=lease.budget;
     shared->status=0; shared->threadMode=opengeul_ime::ModeReceipt{};
+    shared->profileLanguage=opengeul_ime::ProfileLanguageRecord{};
     ITfInputProcessorProfileMgr* mgr=profiles();
     GUID category; CLSIDFromString(L"{34745C63-B2F0-4784-8B67-5E12C8701A31}",&category);
     if (!original_target(hwnd,sequence!=4)) failure(-43);
@@ -638,6 +744,9 @@ static void command(HWND hwnd, UINT sequence) {
             shared->previousProfileLayout=uint64_t(UINT_PTR(oldProfile.hkl));
             StringFromGUID2(oldProfile.clsid,shared->previousClsid,40);
             StringFromGUID2(oldProfile.guidProfile,shared->previousProfile,40);
+            ProfileLanguageApi language(mgr,hwnd,sequence,limits);
+            if(!opengeul_ime::CaptureProfileLanguage(language,originalProfileLanguage,
+                    shared->profileLanguage,oldProfile.langid))failure(-49);
         } else failure(-8);
         if (!observe_imm(hwnd)) failure(-3);
         shared->previousOpen=shared->immOpen;shared->previousConversion=shared->immConversion;
@@ -688,9 +797,18 @@ static void command(HWND hwnd, UINT sequence) {
         if(compartmentSink && !compartment_disconnect(limits))failure(-48);
         if (!initialized || !haveOldProfile || !shared->tsfCaptured || !shared->profileChangeAttempted) failure(-42);
         if (!shared->status) {
-            SetLastError(0);
-            if (!ActivateKeyboardLayout(HKL(UINT_PTR(shared->previousLayout)),0)) {shared->activateLayoutError=GetLastError();failure(-7);}
+            ProfileLanguageApi language(mgr,hwnd,sequence,limits);
+            if(!opengeul_ime::PrepareProfileLanguageRestore(language,originalProfileLanguage,
+                    shared->profileLanguage,oldProfile.langid))failure(-49);
+            // A language transition can select its default HKL: restore the exact
+            // original HKL afterwards, with the unchanged one-shot flags-zero call.
+            if(!shared->status){
+                SetLastError(0);
+                if (!ActivateKeyboardLayout(HKL(UINT_PTR(shared->previousLayout)),0)) {shared->activateLayoutError=GetLastError();failure(-7);}
+            }
             if (!budget(limits)) failure(-20);
+            if(!shared->status&&!opengeul_ime::VerifyProfileLanguageAfterHkl(language,originalProfileLanguage,
+                    shared->profileLanguage))failure(-49);
             if (!shared->status) {
                 shared->activateProfileHresult=mgr ? mgr->ActivateProfile(oldProfile.dwProfileType,oldProfile.langid,
                     oldProfile.clsid,oldProfile.guidProfile,
@@ -1060,7 +1178,7 @@ def compile_observer(folder, mapping, profile, *, architecture='x64', setup_dead
     native_arch.require_architecture(architecture)
     remaining_setup(setup_deadline, 60, clock=clock)
     source, library = folder / 'ime-observer.cpp', folder / 'ime-observer.dll'
-    for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h', 'ime_typed_origin.h',
+    for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h', 'ime_typed_origin.h', 'ime_profile_language.h',
                  'ime_notification_caller.h','ime_compartment_protocol.h','ime_compartment_lease.h','ime_compartment_windows.h','ascii_message_protocol.h','bounded_stack_windows.h','bounded_plugin_origin_windows.h'):
         (folder / name).write_bytes(Path(__file__).with_name(name).read_bytes())
     source.write_text(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
@@ -1237,7 +1355,7 @@ class CompositionObserver:
     def _command_snapshot(self, state, command):
         limits = state.commandBudgets[command - 1]
         return {'command': command, 'status': int(state.status), 'nativeAck': int(state.ack),
-            'policyVersion': int(state.version),
+            'policyVersion': 5, 'nativeSnapshotBytes': ctypes.sizeof(NativeState),
             'nativeContext': {key: int(getattr(state, key)) for key in ('magic', 'version', 'pid', 'tid', 'targetHwnd', 'rootHwnd')},
             'snapshotEvidence': dict(state.snapshotEvidence),
             'publishedCommand': int(state.command), 'nativeAttemptedMask': int(state.nativeAttemptedMask),
@@ -1258,7 +1376,9 @@ class CompositionObserver:
             'modeDeadlineCounter': int(limits.counter), 'modeCounterFrequency': int(limits.frequency),
             'immState': dict(contextPresent=int(state.immContextPresent), conversionSucceeded=int(state.immConversionSucceeded),
                 open=int(state.immOpen), conversion=int(state.immConversion), sentence=int(state.immSentence)),
-            'previousImmState': dict(open=int(state.previousOpen), conversion=int(state.previousConversion), sentence=int(state.previousSentence))}
+            'previousImmState': dict(open=int(state.previousOpen), conversion=int(state.previousConversion), sentence=int(state.previousSentence)),
+            'profileLanguage': {name:int(getattr(state.profileLanguage,name))
+                for name,_ in NativeProfileLanguageRecord._fields_}}
 
     def command(self, command, *, setup_deadline=None):
         assert type(command) is int and command in (1, 2, 3, 4)
@@ -1318,10 +1438,12 @@ class CompositionObserver:
                     assert (state.immOpen, state.immConversion, state.immSentence) == (state.previousOpen, state.previousConversion, state.previousSentence), 'Exact original IMM state was not read back'
             remaining_setup(bounded_deadline, 5)
             if command == 1:
+                validate_profile_language(row['profileLanguage'],1,state.previousLanguage)
                 self.original_tsf, self.original_context = observed, context
             if command == 4:
                 assert int(self.api.user.GetKeyboardLayout(self.tid) or 0) == state.previousLayout, 'Original input layout was not restored'
                 validate_restoration(row)
+                validate_profile_language(row['profileLanguage'],4,state.previousLanguage)
                 row.update(profileHklRestored=True, immEqual=True,
                     typedStateEqual=observed == self.original_tsf,
                     restorationDisposition='empty-origin-retirement-required' if row['tsfOrigin'] == 'empty' else 'concrete-restored')
@@ -1768,7 +1890,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     launch_started = time.monotonic()
     launch_environment = {} if calc_dispatch_transport is None else dict(environment=calc_dispatch_transport.child_environment(os.environ))
     process = launch_suite([str(suite / 'OpenGeul.Office.exe'), '--module', module, '--file', str(source)], suite, output, name, **launch_environment)
-    record = {'module': module, 'case': name, 'imePolicyVersion': 4, 'kind': 'native-korean-ime', 'shellPid': process.pid,
+    record = {'module': module, 'case': name, 'imePolicyVersion': 5, 'imePolicySourceSha256': profile_policy_source_sha256(), 'kind': 'native-korean-ime', 'shellPid': process.pid,
               'file': str(source), 'success': False, 'imeVerified': False, 'stage': 'attach',
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
               'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}

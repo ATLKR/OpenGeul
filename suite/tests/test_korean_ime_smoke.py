@@ -112,7 +112,7 @@ class KoreanImePolicyTests(unittest.TestCase):
         return complete_record(record)
 
     def test_real_dubeolsik_commit_backspace_save_and_reopen_satisfy_policy(self):
-        result = ime.validate_ime_evidence(self.record())
+        result = ime.validate_ime_evidence(self.record(), expected_policy=4)
         self.assertTrue(result['imeVerified'])
         self.assertTrue(result['backspaceCompositionVerified'])
 
@@ -166,7 +166,7 @@ class KoreanImePolicyTests(unittest.TestCase):
             record = self.record()
             change(record)
             with self.subTest(change=change), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence(record)
+                ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_prefix_receipt_must_match_observed_editor_focus_thread_and_neutral_us_state(self):
         changes = [lambda r: r['asciiEditorInputs'][0]['actions'][0]['before'].update(focusHwnd=99),
@@ -180,7 +180,7 @@ class KoreanImePolicyTests(unittest.TestCase):
             record = self.record()
             change(record)
             with self.subTest(change=change), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence(record)
+                ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_preexisting_or_malformed_receipt_cannot_authorize_korean_activation(self):
         for preexisting in (True, False):
@@ -366,7 +366,7 @@ with patch.object(ctypes,'WinDLL',create=True,side_effect=AssertionError('native
     def test_missing_or_non_english_ascii_setup_receipt_cannot_pass(self):
         for patch in ({'asciiPrefix': ''}, {'prefixInputLayout': 0x04120412}, {'prefixInputLayout': 0}):
             with self.subTest(patch=patch), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence({**self.record(), **patch})
+                ime.validate_ime_evidence({**self.record(), **patch}, expected_policy=4)
 
     def test_restore_requires_successful_native_calls_and_exact_original_hkl_and_tsf_identity(self):
         for patch in ({'activateProfileHresult': -2147467259}, {'status': -6},
@@ -376,50 +376,50 @@ with patch.object(ctypes,'WinDLL',create=True,side_effect=AssertionError('native
             record = self.record()
             record['restoration'].update(patch)
             with self.subTest(patch=patch), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence(record)
+                ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_unicode_only_input_cannot_claim_ime(self):
         for patch in ({'inputMethod': 'Unicode-SendInput'}, {'unicodeInputUsed': True},
                       {'keyTokens': ['한글']}, {'events': []}):
             with self.subTest(patch=patch), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence({**self.record(), **patch})
+                ime.validate_ime_evidence({**self.record(), **patch}, expected_policy=4)
 
     def test_missing_or_different_tsf_profile_is_not_microsoft_ime_evidence(self):
         for patch in ({'activeProfile': {}}, {'readiness': {}},
                       {'activeProfile': {'activeLanguage': 0x0412, 'activeClsid': '{UNVERIFIED}',
                                          'activeProfile': '{B2B2B2B2-1111-2222-3333-444444444444}'}}):
             with self.subTest(patch=patch), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence({**self.record(), **patch})
+                ime.validate_ime_evidence({**self.record(), **patch}, expected_policy=4)
 
     def test_foreign_process_or_thread_composition_cannot_satisfy_policy(self):
         for key in ('pid', 'tid', 'hwnd', 'layout'):
             record = self.record()
             for event in record['events']: event[key] = 123
             with self.subTest(key=key), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence(record)
+                ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_saved_preexisting_korean_without_distinct_new_marker_is_rejected(self):
         for key in ('savedText', 'reopened'):
             record = self.record()
             record[key] = 'Engine-OpenGeul-writer 한글' if key == 'savedText' else {'text': 'Engine-OpenGeul-writer 한글'}
             with self.subTest(key=key), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence(record)
+                ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_missing_backspace_transition_and_missing_commit_are_rejected(self):
         for index in (6, 8):
             record = self.record()
             del record['events'][index]
             with self.subTest(index=index), self.assertRaises(AssertionError):
-                ime.validate_ime_evidence(record)
+                ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_calc_reopen_must_preserve_formula_and_original_marker(self):
         record = self.record()
         record.update(module='calc', asciiPrefix=' ime-opengeul-calc:', savedText=record['savedText'].replace('writer', 'calc'))
         record['asciiEditorInputs'] = [self.ascii_receipt('calc')]
         record['reopened'] = {'text': record['savedText'], 'formula': '=SUM(B1:C1)', 'value': 42}
-        self.assertTrue(ime.validate_ime_evidence(record)['imeVerified'])
+        self.assertTrue(ime.validate_ime_evidence(record, expected_policy=4)['imeVerified'])
         record['reopened']['value'] = 0
-        with self.assertRaises(AssertionError): ime.validate_ime_evidence(record)
+        with self.assertRaises(AssertionError): ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_incomplete_or_unsigned_readiness_cannot_enable_real_input(self):
         record = self.readiness()
@@ -483,10 +483,10 @@ class NativeArmImeTests(unittest.TestCase):
                 'processArchitecture': 'arm64', 'nativeArchitecture': 'arm64'},
             targetArchitecture={'processMachine': 0, 'nativeMachine': 0xaa64,
                 'processArchitecture': 'arm64', 'nativeArchitecture': 'arm64'})
-        self.assertTrue(ime.validate_ime_evidence(record)['imeVerified'])
+        self.assertTrue(ime.validate_ime_evidence(record, expected_policy=4)['imeVerified'])
         record['events'][0]['pid'] += 1
         with self.assertRaisesRegex(AssertionError, 'another process'):
-            ime.validate_ime_evidence(record)
+            ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_arm_composition_requires_native_controller_and_target_receipts(self):
         for field in ('nativeArchitecture', 'targetArchitecture'):
@@ -499,7 +499,7 @@ class NativeArmImeTests(unittest.TestCase):
                     nativeArchitecture=proof, targetArchitecture=proof)
                 record[field] = value
                 with self.subTest(field=field, value=value), self.assertRaisesRegex(AssertionError, 'architecture|native|Native'):
-                    ime.validate_ime_evidence(record)
+                    ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_compiler_targets_arm64_and_verifies_emitted_dll_before_returning(self):
         import struct

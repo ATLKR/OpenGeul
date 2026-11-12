@@ -127,7 +127,8 @@ class TypedReceiptPolicyTests(unittest.TestCase):
     def test_original_native_state_prefix_and_semantic_version4_survive_diagnostics(self):
         self.assertEqual(ime.NativeState.diagnosticCount.offset,553720)
         self.assertEqual(ime.NativeState.modeDiagnosticVersion.offset,567040)
-        self.assertEqual(ctypes.sizeof(ime.NativeState),596824)  # Only the final compartment array grows.
+        self.assertEqual(ctypes.sizeof(ime.NativeState),596896)  # New 68-byte language record plus final alignment.
+        self.assertEqual(ime.NativeState.profileLanguage.offset,596824)
         self.assertEqual(ime.NativeState.compartmentConfig.offset,596032)
         self.assertEqual(ime.NativeState.compartment.offset,596040)
         self.assertEqual(ime.NativeState.notificationConfig.offset,593696)
@@ -143,20 +144,20 @@ class TypedPublicPipelineTests(unittest.TestCase):
     def record(self,*,empty=False,returned=None):
         return complete_record(ime_fixtures.KoreanImePolicyTests().record(),empty=empty,returned=returned)
     def test_concrete_pipeline_keeps_real_composition_save_and_reopen_gates(self):
-        record=self.record();self.assertTrue(ime.validate_ime_evidence(record)['imeVerified'])
-        self.assertEqual(ime.require_tsf_pipeline(record)[1]['restorationDisposition'],'concrete-restored')
+        record=self.record();self.assertTrue(ime.validate_ime_evidence(record, expected_policy=4)['imeVerified'])
+        self.assertEqual(ime.require_tsf_pipeline(record, expected_policy=4)[1]['restorationDisposition'],'concrete-restored')
         record['savedText']='preexisting Korean 한글'
-        with self.assertRaises(AssertionError):ime.validate_ime_evidence(record)
+        with self.assertRaises(AssertionError):ime.validate_ime_evidence(record, expected_policy=4)
     def test_empty_final_mixed_tags_are_truthful_inequality_and_pending_retirement(self):
         record=self.record(empty=True,returned=((1,0,None),(0,3,33)))
-        origin,facts=ime.require_tsf_pipeline(record)
+        origin,facts=ime.require_tsf_pipeline(record, expected_policy=4)
         self.assertEqual(origin,'empty');self.assertFalse(facts['typedStateEqual'])
         self.assertEqual(facts['restorationDisposition'],'empty-origin-retirement-required')
         self.assertNotIn('value',record['restoration']['typedValues']['open'])
     def test_empty_equality_never_turns_into_concrete_restoration(self):
-        record=self.record(empty=True);self.assertTrue(ime.require_tsf_pipeline(record)[1]['typedStateEqual'])
+        record=self.record(empty=True);self.assertTrue(ime.require_tsf_pipeline(record, expected_policy=4)[1]['typedStateEqual'])
         record['restoration']['restorationDisposition']='concrete-restored'
-        with self.assertRaises(AssertionError):ime.require_tsf_pipeline(record)
+        with self.assertRaises(AssertionError):ime.require_tsf_pipeline(record, expected_policy=4)
     def test_mixed_original_unknown_error_bool_and_forged_scalar_are_fatal(self):
         mutations=(lambda r:r['imeCommands'][0]['threadMode'].update(beforeOpenHr=True),
             lambda r:r['imeCommands'][0]['threadMode'].update(beforeConversionHr=0,beforeConversionType=3),
@@ -166,7 +167,7 @@ class TypedPublicPipelineTests(unittest.TestCase):
             lambda r:r['imeCommands'][0].update(previousClsid='{11111111-1111-1111-1111-111111111111}'))
         for mutate in mutations:
             r=self.record(empty=True);mutate(r)
-            with self.subTest(mutate=mutate),self.assertRaises(AssertionError):ime.require_tsf_pipeline(r)
+            with self.subTest(mutate=mutate),self.assertRaises(AssertionError):ime.require_tsf_pipeline(r, expected_policy=4)
     def test_wire_context_ack_budget_and_command_memento_cannot_change(self):
         mutations=(lambda r:r.update(imePolicyVersion=3),lambda r:r['imeCommands'][1]['nativeContext'].update(version=3),
             lambda r:r['imeCommands'][1]['nativeContext'].update(tid=99),lambda r:r['imeCommands'][1]['snapshotEvidence'].update(ackAfter=1),
@@ -174,29 +175,29 @@ class TypedPublicPipelineTests(unittest.TestCase):
             lambda r:r['imeCommands'][0].update(nativePublicationReturn=True),lambda r:r['imeCommands'][0]['snapshotEvidence'].update(copyReturn=True))
         for mutate in mutations:
             r=self.record();mutate(r)
-            with self.subTest(mutate=mutate),self.assertRaises(AssertionError):ime.require_tsf_pipeline(r)
+            with self.subTest(mutate=mutate),self.assertRaises(AssertionError):ime.require_tsf_pipeline(r, expected_policy=4)
     def test_empty_return_cannot_claim_writes_or_skip_imm_equality(self):
         for mutate in (lambda r:r['restoration']['threadMode'].update(openSetCalls=1),
             lambda r:r['restoration']['immState'].update(conversion=0),
             lambda r:r['restoration']['threadMode'].update(beforeOpenHr=-1)):
             r=self.record(empty=True);mutate(r)
-            with self.subTest(mutate=mutate),self.assertRaises(AssertionError):ime.require_tsf_pipeline(r)
+            with self.subTest(mutate=mutate),self.assertRaises(AssertionError):ime.require_tsf_pipeline(r, expected_policy=4)
     def test_legacy_zero_placeholders_do_not_define_empty_original_state(self):
         r=self.record(empty=True)
         for row in r['imeCommands']:row.update(previousTsfOpen=17,previousTsfConversion=55)
-        self.assertEqual(ime.require_tsf_pipeline(r)[0],'empty')
+        self.assertEqual(ime.require_tsf_pipeline(r, expected_policy=4)[0],'empty')
     def test_every_empty_origin_requires_retirement_even_when_typed_equal(self):
         r=self.record(empty=True)
         self.assertTrue(r['restoration']['typedStateEqual'])
-        with self.assertRaises((AssertionError,KeyError)):ime.validate_ime_evidence(r)
+        with self.assertRaises((AssertionError,KeyError)):ime.validate_ime_evidence(r, expected_policy=4)
         r['imeEngineRetirement']={'success':True,'handleClosed':True}
-        with self.assertRaises((AssertionError,KeyError)):ime.validate_ime_evidence(r)
+        with self.assertRaises((AssertionError,KeyError)):ime.validate_ime_evidence(r, expected_policy=4)
     def test_real_retirement_admission_save_gate_and_final_raw_proof_are_distinct(self):
         import os
         from test_ime_engine_retirement import Fixture
         with tempfile.TemporaryDirectory() as directory:
             f=Fixture(directory)
-            with patch.dict(os.environ,f.environment,clear=True):
+            with patch.object(os,'environ',dict(f.environment)):
                 from ime_typed_policy_fixtures import full_post_semantic_context
                 post,metadata=full_post_semantic_context(self,f.binding,70.)
                 f.record['imeSemanticContext']=post;f.record['imeKeyboardSession'].update(metadata)
@@ -221,16 +222,16 @@ class TypedPublicPipelineTests(unittest.TestCase):
                     receipt.update(documentHwnd=record['windowHwnd'],childHwnd=record['childHwnd'])
                     for action in receipt['actions']:
                         for side in ('before','after'):action[side].update(focusHwnd=record['keyboardFocusHwnd'],editorThreadId=record['editorTid'])
-                self.assertEqual(ime.require_ime_save_disposition(record,record['restoration'])['restorationDisposition'],'empty-origin-retirement-required')
-                with self.assertRaises((AssertionError,ValueError,KeyError)):ime.validate_ime_evidence(record)
+                self.assertEqual(ime.require_ime_save_disposition(record,record['restoration'], expected_policy=4)['restorationDisposition'],'empty-origin-retirement-required')
+                with self.assertRaises((AssertionError,ValueError,KeyError)):ime.validate_ime_evidence(record, expected_policy=4)
                 record['imeEngineRetirement']=f.verify(lease)
-                self.assertTrue(ime.validate_ime_evidence(record)['imeVerified'])
-                with self.assertRaises((AssertionError,ValueError,KeyError)):ime.require_ime_save_disposition(record,record['restoration'])
+                self.assertTrue(ime.validate_ime_evidence(record, expected_policy=4)['imeVerified'])
+                with self.assertRaises((AssertionError,ValueError,KeyError)):ime.require_ime_save_disposition(record,record['restoration'], expected_policy=4)
                 early=copy.deepcopy(record)
                 early['imeEngineRetirement']['admission']['startedAt']=metadata['setupFinishedAt']-.01
-                with self.assertRaises(AssertionError):ime.validate_ime_evidence(early)
+                with self.assertRaises(AssertionError):ime.validate_ime_evidence(early, expected_policy=4)
                 record['imeEngineRetirement']['admission']['finishedAt']=record['imeCommands'][0]['startedAt']+.01
-                with self.assertRaises(AssertionError):ime.validate_ime_evidence(record)
+                with self.assertRaises(AssertionError):ime.validate_ime_evidence(record, expected_policy=4)
 
     def test_original_profile_is_derived_from_the_post_native_witness_not_retirement(self):
         from ime_typed_policy_fixtures import full_post_semantic_context

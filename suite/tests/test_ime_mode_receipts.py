@@ -90,6 +90,12 @@ class ObserverModeJoinTests(unittest.TestCase):
         state.magic=0x4f47494d;state.version=4;state.pid=88;state.tid=44;state.targetHwnd=33;state.rootHwnd=11
         state.snapshotEvidence=dict(copyReturn=1,ackBefore=command,ackAfter=command,stable=True)
         state.tsfCaptured=1;state.profileChangeAttempted=1
+        state.previousLanguage=0x0409
+        if command in (1,4):
+            language=state.profileLanguage;language.schemaVersion=1;language.command=command;language.complete=1
+            language.originalLanguage=language.observedBefore=0x0409;language.interfaceAttempts=1
+            language.getterAttempts=1 if command==1 else 2;language.observedMask=3 if command==1 else 19
+            if command==4:language.observedAfterHkl=0x0409
         state.previousTsfOpen=1;state.previousTsfConversion=0x20
         state.immContextPresent=state.immConversionSucceeded=state.immOpen=1
         state.immConversion=0x21

@@ -101,7 +101,10 @@ class CompartmentRetentionTests(unittest.TestCase):
         fixture=CompartmentSelectionTests();fixture.setUp();module=fixture.m
         function=getattr(module,'resolve_compartment_in_memory',None)
         self.assertTrue(callable(function),'In-memory compartment resolution is required')
-        report=fixture.compartment_report();before=copy.deepcopy(report);calls=[]
+        report=fixture.compartment_report()
+        from ime_policy5_fixtures import current_diagnostic_context_fixture
+        current_diagnostic_context_fixture(report['tests'][0],ime)
+        before=copy.deepcopy(report);calls=[]
         def worker(pair,*,mode,rvas):
             calls.append((pair,mode,rvas))
             return dict(success=True,resolution=dict(dllSha256=report['pluginFileOrigin']['dllSha256'],
@@ -113,7 +116,10 @@ class CompartmentRetentionTests(unittest.TestCase):
         selected,resolved=function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker)
         self.assertEqual(selected['status'],'inconclusive-case');self.assertIsNone(resolved)
         self.assertEqual(len(calls),1)
-        report=fixture.compartment_report();report['tests'][0]['imeFailureCleanup']['engineExitConfirmed']=False
+        report=fixture.compartment_report()
+        from ime_policy5_fixtures import current_diagnostic_context_fixture
+        current_diagnostic_context_fixture(report['tests'][0],ime)
+        report['tests'][0]['imeFailureCleanup']['engineExitConfirmed']=False
         with self.assertRaises(AssertionError):function(report,Path('/synthetic/pair'),report['runBinding'],worker_run=worker)
         self.assertEqual(len(calls),1)
 
@@ -190,6 +196,8 @@ class CompartmentRetentionTests(unittest.TestCase):
         from suite.scripts import matched_plugin_diagnostic as resolver
         import ime_compartment_report as publisher
         fixture=CompartmentSelectionTests();fixture.setUp();raw=fixture.compartment_report()
+        from ime_policy5_fixtures import current_diagnostic_context_fixture
+        current_diagnostic_context_fixture(raw['tests'][0],ime)
         projection=CompartmentReportTests();projection.setUp();_,_,worker=projection.fixture()
         raw['runBinding'].update(ref='refs/heads/work/opengeul-office-arm64',event='push',
             workflowRef='ATLKR/OpenGeul/.github/workflows/office-suite.yml@refs/heads/work/opengeul-office-arm64')

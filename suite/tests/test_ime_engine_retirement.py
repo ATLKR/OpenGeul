@@ -125,7 +125,7 @@ class RetirementTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(retirement,'The separate owned retirement mechanism is missing')
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.f=Fixture(self.tmp.name)
-        self.environment=patch.dict(os.environ,self.f.environment,clear=True);self.environment.start();self.addCleanup(self.environment.stop)
+        self.environment=patch.object(os,'environ',dict(self.f.environment));self.environment.start();self.addCleanup(self.environment.stop)
     def test_real_archive_zero_exit_and_release_form_a_complete_replayable_proof(self):
         self.f.archive();lease=self.f.admit();proof=self.f.verify(lease)
         self.assertIs(proof,self.f.record['imeEngineRetirement']);self.assertIs(self.f.require(proof),proof)
@@ -476,6 +476,48 @@ class RetirementTests(unittest.TestCase):
         proof=self.f.verify(self.f.admit());self.assertEqual(len(proof['archive']['members']),128)
         changed=copy.deepcopy(proof);changed['archive']['members'].append(dict(path='extra',bytes=0,sha256=hashlib.sha256(b'').hexdigest()))
         with self.assertRaises((AssertionError,ValueError)):self.f.require(changed)
+
+
+class PoisonEnvironment:
+    """Synthetic original mapping: every read/copy path is forbidden."""
+    def __init__(self):self.read_attempts=0
+    def _deny(self,*args,**kwargs):
+        self.read_attempts+=1
+        raise AssertionError('Synthetic original environment must not be read')
+    copy=__iter__=keys=items=values=__getitem__=get=__contains__=__len__=_deny
+    def __repr__(self):return '<synthetic unreadable environment>'
+
+
+class EnvironmentIsolationTests(unittest.TestCase):
+    def _run_actual_case_without_reading_original_mapping(self,case_factory):
+        known=dict(ENV,ISOLATION_TEST_OUTSIDE='synthetic-only')
+        # Patch the mapping object itself; never enumerate/copy the caller mapping.
+        with patch.object(os,'environ',known),tempfile.TemporaryDirectory() as folder, \
+             patch.object(tempfile,'tempdir',folder):
+            case=case_factory();poison=PoisonEnvironment();result=unittest.TestResult();seen=[]
+            original_admit=Fixture.admit
+            def admit(fixture):
+                self.assertTrue(type(os.environ) is dict and os.environ==fixture.environment,
+                    'Only the exact known fixture mapping may be active')
+                seen.append(True)
+                return original_admit(fixture)
+            with patch.object(Fixture,'admit',admit),patch.object(os,'environ',poison):
+                case.run(result)
+                self.assertTrue(os.environ is poison,'Original mapping reference must be restored')
+            self.assertTrue(os.environ is known,'Outer synthetic mapping reference must be restored')
+            # Never interpolate nested errors, mapping values or mock calls in failures.
+            self.assertTrue(result.wasSuccessful(),'Actual fixture entry failed isolation')
+            self.assertEqual(result.testsRun,1)
+            self.assertEqual(poison.read_attempts,0)
+            self.assertGreaterEqual(len(seen),1)
+    def test_retirement_setup_replaces_original_mapping_without_reading_it(self):
+        self._run_actual_case_without_reading_original_mapping(lambda:RetirementTests(
+            'test_real_archive_zero_exit_and_release_form_a_complete_replayable_proof'))
+    def test_typed_retirement_entry_replaces_original_mapping_without_reading_it(self):
+        def case():
+            from test_ime_typed_origin import TypedPublicPipelineTests
+            return TypedPublicPipelineTests('test_real_retirement_admission_save_gate_and_final_raw_proof_are_distinct')
+        self._run_actual_case_without_reading_original_mapping(case)
 
 
 if __name__=='__main__':unittest.main()

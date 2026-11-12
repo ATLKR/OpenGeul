@@ -132,6 +132,8 @@ class IMEKeyboardSessionTests(unittest.TestCase):
             windowHwnd=session.binding['suiteHwnd'],officePid=session.binding['officePid'],
             restoration=ime_fixtures.KoreanImePolicyTests().restoration())
         complete_record(record)
+        from ime_policy5_fixtures import current_record_fixture
+        current_record_fixture(record,ime_fixtures.ime)
         session.begin_save(record['restoration'], 31.); session.save(); session.close()
     def test_owned_capture_settles_read_only_under_original_setup_deadline(self):
         from unittest.mock import patch
