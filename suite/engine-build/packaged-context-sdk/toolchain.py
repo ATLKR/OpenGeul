@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes as C
 import hashlib
 import json
+import math
 import ntpath
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import re
 import stat
 import struct
 import sys
+import time
 from supervisor import GateFailure,win_path
 
 MANIFEST_SHA='746176ff820c8ca659fb09584f3d3dd6bf1fa33fe491ed73485e3e22e48390e5'
@@ -186,7 +188,135 @@ def sdk_registry_root(registry):
     if any(ntpath.normcase(root)!=ntpath.normcase(present[0]) for root in present[1:]):raise GateFailure(13)
     return present[0]
 
-def system_locations(arch):
+class _CommandLease:
+    """OS-selected WRP classification and change detection, not signature proof."""
+    def __init__(self,architecture,deadline,api,*,clock=time.monotonic):
+        self._api=api;self._clock=clock;self._deadline=deadline;self._handle=None
+        self._record=None;self._base=None;self._stable=False;self._wrp=False
+        self._closed=False;self._close_attempted=False;self._cleanup_ok=True;self._rechecks=0
+        self.path=None;self.system_root=None
+        try:
+            if architecture not in MACHINES:raise GateFailure(14)
+            self._machine=MACHINES[architecture];self._check(deadline)
+            self.path,self.system_root=self._os_path(deadline)
+            # Store a returned native handle before any post-call clock check.
+            self._handle=self._api.open(self.path);self._check(deadline)
+            self._valid_handle(self._handle)
+            stamp,record=self._measure(self._handle,deadline)
+            self._base=stamp;self._record=record
+            self.verify()
+        except BaseException as error:
+            self.close()
+            if isinstance(error,(KeyboardInterrupt,SystemExit,GateFailure)):raise
+            raise GateFailure(14) from None
+    @staticmethod
+    def _valid_handle(handle):
+        if type(handle) is not int or not 0<handle<(1<<(8*C.sizeof(C.c_void_p)))-1:raise GateFailure(14)
+    def _check(self,end):
+        now=self._clock()
+        if (type(end) not in (int,float) or type(self._deadline) not in (int,float)
+            or not math.isfinite(end) or not math.isfinite(self._deadline) or end>self._deadline
+            or type(now) not in (int,float) or not math.isfinite(now) or now>=end-1):raise GateFailure(10)
+    def _call(self,name,*args,end):
+        self._check(end);self._api.set_deadline(end)
+        value=getattr(self._api,name)(*args);self._check(end);return value
+    def _os_path(self,end):
+        directory=cmd_path(self._call('system_directory',end=end).rstrip('\\'))
+        windows=cmd_path(self._call('windows_directory',end=end).rstrip('\\'))
+        path=cmd_path(ntpath.join(directory,'cmd.exe'))
+        if ntpath.normcase(path)!=ntpath.normcase(ntpath.join(windows,'System32','cmd.exe')):raise GateFailure(14)
+        if self._call('no_reparse',path,end=end) is not True:raise GateFailure(14)
+        protected=self._call('is_protected',path,end=end);self._wrp=protected is True
+        if protected is not True:raise GateFailure(14)
+        return path,windows
+    def _stamp(self,value):
+        keys={'identity','finalPath','size','modified','links','regular','reparse','inheritable'}
+        if type(value) is not dict or set(value)!=keys:raise GateFailure(14)
+        identity=value['identity'];modified=value['modified'];size=value['size'];links=value['links']
+        if (type(identity) is not tuple or len(identity)!=2 or type(identity[0]) is not int or not 0<identity[0]<=0xffffffffffffffff
+            or type(identity[1]) is not bytes or len(identity[1])!=16 or not any(identity[1])
+            or type(modified) is not tuple or len(modified)!=2 or any(type(v) is not int or not 0<v<=0x7fffffffffffffff for v in modified)
+            or type(size) is not int or not 0<size<=128*1024*1024 or type(links) is not int or not 1<=links<=1048576
+            or value['regular'] is not True or value['reparse'] is not False or value['inheritable'] is not False):raise GateFailure(14)
+        final=value['finalPath']
+        if type(final) is not str or not final.startswith('\\\\?\\') or len(final)>32768:raise GateFailure(14)
+        final=cmd_path(final[4:])
+        if ntpath.normcase(final)!=ntpath.normcase(self.path):raise GateFailure(14)
+        return identity,ntpath.normcase(final),size,modified,links
+    def _measure(self,handle,end):
+        before=self._stamp(self._call('snapshot',handle,end=end))
+        b=self._call('read',handle,before[2],end=end)
+        after=self._stamp(self._call('snapshot',handle,end=end))
+        if type(b) is not bytes or len(b)!=before[2] or before!=after:raise GateFailure(14)
+        if len(b)<152 or b[:2]!=b'MZ':raise GateFailure(14)
+        offset=struct.unpack_from('<I',b,0x3c)[0]
+        if not 64<=offset<=len(b)-26 or b[offset:offset+4]!=b'PE\0\0':raise GateFailure(14)
+        machine=struct.unpack_from('<H',b,offset+4)[0];flags=struct.unpack_from('<H',b,offset+22)[0]
+        if machine!=self._machine or not flags&2 or flags&0x2000 or struct.unpack_from('<H',b,offset+24)[0]!=0x20b:raise GateFailure(14)
+        return after,{'machine':machine,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}
+    @property
+    def record(self):
+        return None if self._record is None else dict(self._record)
+    def verify(self,*,deadline=None):
+        self._stable=False;end=self._deadline if deadline is None else deadline;fresh=None
+        try:
+            self._check(end);self._valid_handle(self._handle)
+            path,windows=self._os_path(end)
+            if ntpath.normcase(path)!=ntpath.normcase(self.path) or ntpath.normcase(windows)!=ntpath.normcase(self.system_root):raise GateFailure(14)
+            stamp,record=self._measure(self._handle,end)
+            if stamp!=self._base or record!=self._record:raise GateFailure(14)
+            # Retain fresh handle before the deadline can reject this phase.
+            fresh=self._api.open(self.path);self._check(end);self._valid_handle(fresh)
+            stamp,record=self._measure(fresh,end)
+            if stamp!=self._base or record!=self._record:raise GateFailure(14)
+            self._rechecks+=1;self._stable=True
+        except (KeyboardInterrupt,SystemExit,GateFailure):raise
+        except BaseException:raise GateFailure(14) from None
+        finally:
+            if fresh is not None:
+                try:closed=self._api.close(fresh) is True
+                except BaseException:closed=False
+                if not closed:
+                    self._cleanup_ok=False;self._stable=False
+                    if sys.exc_info()[0] is None:raise GateFailure(14)
+        return self.record
+    def close(self):
+        if self._close_attempted:return self._closed and self._cleanup_ok
+        self._close_attempted=True;handle=self._handle;self._handle=None
+        if handle is None:self._closed=True
+        else:
+            try:self._closed=self._api.close(handle) is True
+            except BaseException:self._closed=False
+        return self._closed and self._cleanup_ok
+    def observation(self):
+        return {'systemDirectoryKnown':self._record is not None,'wrpProtected':self._wrp,
+          'protectionClassificationOnly':True,'signatureVerified':False,
+          'linkCount':None if self._base is None else self._base[4],
+          'handleIdentityStable':self._stable,'freshPathStable':self._stable,'bytesPeHashStable':self._stable,
+          'rechecks':self._rechecks,'closed':self._closed and self._cleanup_ok}
+
+def acquire_command(architecture,deadline):
+    try:
+        if type(deadline) not in (int,float) or not math.isfinite(deadline) or time.monotonic()>=deadline-1:raise GateFailure(10)
+        return _CommandLease(architecture,deadline,_Win32CommandApi(deadline))
+    except GateFailure as error:
+        error.file_role_code=2
+        raise
+
+def validate_command_observation(value,*,require_closed=False):
+    keys={'systemDirectoryKnown','wrpProtected','protectionClassificationOnly','signatureVerified',
+      'linkCount','handleIdentityStable','freshPathStable','bytesPeHashStable','rechecks','closed'}
+    if type(value) is not dict or set(value)!=keys or type(require_closed) is not bool:raise GateFailure(14)
+    for name in keys-{'linkCount','rechecks'}:
+        if type(value[name]) is not bool:raise GateFailure(14)
+    if value['protectionClassificationOnly'] is not True or value['signatureVerified'] is not False:raise GateFailure(14)
+    if value['linkCount'] is not None and (type(value['linkCount']) is not int or not 1<=value['linkCount']<=1048576):raise GateFailure(14)
+    if type(value['rechecks']) is not int or not 0<=value['rechecks']<=128:raise GateFailure(14)
+    if require_closed and (value['linkCount'] is None or value['rechecks']<1 or any(value[k] is not True for k in
+      ('systemDirectoryKnown','wrpProtected','handleIdentityStable','freshPathStable','bytesPeHashStable','closed'))):raise GateFailure(14)
+    return value
+
+def system_locations(arch,*,deadline):
     if sys.platform!='win32':raise GateFailure(1)
     import winreg
     k=C.WinDLL('kernel32',use_last_error=True)
@@ -215,6 +345,218 @@ def system_locations(arch):
     if not 64<=offset<=len(raw)-26 or raw[offset:offset+4]!=b'PE\0\0':raise GateFailure(12)
     vs_machine=struct.unpack_from('<H',raw,offset+4)[0]
     if vs_machine not in (0x14c,MACHINES[arch]):raise GateFailure(12)
-    cmd=Path(system)/'System32/cmd.exe';command=installed_pe(cmd,MACHINES[arch],2)
-    return {'system':system,'programFiles':pf,'programFilesX86':pf86,'sdk':sdk,'vswhere':str(vswhere),'command':str(cmd),
-      'controller':controller,'commandRecord':command,'vswhereSha256':hashlib.sha256(raw).hexdigest()}
+    lease=acquire_command(arch,deadline)
+    try:
+        if ntpath.normcase(system)!=ntpath.normcase(lease.system_root):raise GateFailure(14)
+        return {'system':system,'programFiles':pf,'programFilesX86':pf86,'sdk':sdk,'vswhere':str(vswhere),'command':lease.path,
+          'controller':controller,'commandRecord':lease.record,'commandLease':lease,'vswhereSha256':hashlib.sha256(raw).hexdigest()}
+    except BaseException:
+        lease.close()
+        raise
+
+
+"""Native-only fragment for the SDK toolchain's exact OS-command lease.
+
+Merge into toolchain.py, whose existing GateFailure and canonical are required.
+This adapter reports file observations; it does not grant a path, hardlink,
+publisher, signature, runtime or servicing qualification.
+"""
+import ctypes as C
+import os
+from os import fspath as _command_fspath
+from pathlib import Path
+import stat
+import sys
+import math
+import time
+
+
+class _CommandFileId128(C.Structure):
+    _fields_=[('Identifier',C.c_uint8*16)]
+
+
+class _CommandFileIdInfo(C.Structure):
+    _fields_=[('VolumeSerialNumber',C.c_uint64),('FileId',_CommandFileId128)]
+
+
+class _CommandStandardInfo(C.Structure):
+    _fields_=[('AllocationSize',C.c_int64),('EndOfFile',C.c_int64),
+        ('NumberOfLinks',C.c_uint32),('DeletePending',C.c_uint8),('Directory',C.c_uint8)]
+
+
+class _CommandAttributeTagInfo(C.Structure):
+    _fields_=[('FileAttributes',C.c_uint32),('ReparseTag',C.c_uint32)]
+
+
+class _CommandBasicInfo(C.Structure):
+    _fields_=[('CreationTime',C.c_int64),('LastAccessTime',C.c_int64),
+        ('LastWriteTime',C.c_int64),('ChangeTime',C.c_int64),('FileAttributes',C.c_uint32)]
+
+
+def _command_wide(path):
+    value=_command_fspath(path)
+    if type(value) is not str or not value or '\0' in value:
+        raise GateFailure(14) from None
+    raw=value.encode('utf-16-le')
+    if len(raw)//2>=32768:
+        raise GateFailure(14) from None
+    return (C.c_uint16*(len(raw)//2+1)).from_buffer_copy(raw+b'\0\0')
+
+
+def _command_handle(value):
+    if type(value) is not int or not 0<value<(1<<(C.sizeof(C.c_void_p)*8))-1:
+        raise GateFailure(14) from None
+    return value
+
+
+def _command_text(buffer,length):
+    if type(length) is not int or not 0<length<len(buffer) or buffer[length]!=0:
+        raise GateFailure(14) from None
+    value=C.string_at(C.addressof(buffer),length*2).decode('utf-16-le')
+    if not value or '\0' in value:
+        raise GateFailure(14) from None
+    return value
+
+
+class _Win32CommandApi:
+    """Typed read-only APIs; native calls are unavailable on non-Windows hosts."""
+    def __init__(self,deadline,*,clock=time.monotonic):
+        self._deadline=deadline;self._active_end=deadline;self._clock=clock
+        try:
+            self.set_deadline(deadline)
+            if os.name!='nt' or sys.platform!='win32' or C.sizeof(C.c_void_p)!=8:
+                raise GateFailure(14) from None
+            self._kernel=self._invoke(C.WinDLL,'kernel32.dll',use_last_error=True,winmode=0x800)
+            self._sfc=self._invoke(C.WinDLL,'sfc.dll',use_last_error=True,winmode=0x800)
+            u16=C.POINTER(C.c_uint16);u32=C.c_uint32;handle=C.c_void_p;i32=C.c_int32
+            def bind(dll,name,args,result):
+                function=getattr(dll,name);function.argtypes=args;function.restype=result
+                return function
+            self._system=self._invoke(bind,self._kernel,'GetSystemDirectoryW',[u16,u32],u32)
+            self._windows=self._invoke(bind,self._kernel,'GetWindowsDirectoryW',[u16,u32],u32)
+            self._protected=self._invoke(bind,self._sfc,'SfcIsFileProtected',[handle,u16],i32)
+            self._open=self._invoke(bind,self._kernel,'CreateFileW',[u16,u32,u32,handle,u32,u32,handle],handle)
+            self._information=self._invoke(bind,self._kernel,'GetFileInformationByHandleEx',[handle,i32,handle,u32],i32)
+            self._final=self._invoke(bind,self._kernel,'GetFinalPathNameByHandleW',[handle,u16,u32,u32],u32)
+            self._type=self._invoke(bind,self._kernel,'GetFileType',[handle],u32)
+            self._flags=self._invoke(bind,self._kernel,'GetHandleInformation',[handle,C.POINTER(u32)],i32)
+            self._seek=self._invoke(bind,self._kernel,'SetFilePointerEx',[handle,C.c_int64,C.POINTER(C.c_int64),u32],i32)
+            self._read=self._invoke(bind,self._kernel,'ReadFile',[handle,handle,u32,C.POINTER(u32),handle],i32)
+            self._close=self._invoke(bind,self._kernel,'CloseHandle',[handle],i32)
+        except GateFailure:raise
+        except Exception:
+            raise GateFailure(14) from None
+
+    def _check_end(self,end):
+        now=self._clock()
+        if (type(end) not in (int,float) or type(self._deadline) not in (int,float)
+                or not math.isfinite(end) or not math.isfinite(self._deadline)
+                or end>self._deadline or type(now) not in (int,float)
+                or not math.isfinite(now) or now>=end-1):
+            raise GateFailure(10) from None
+
+    def set_deadline(self,end):
+        """Use a caller phase inside the original window, never a new window."""
+        try:self._check_end(end);self._active_end=end
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None
+
+    def _check(self):
+        self._check_end(self._active_end)
+
+    def _invoke(self,function,*args,**kwargs):
+        self._check();value=function(*args,**kwargs);self._check();return value
+
+    def _directory(self,function):
+        buffer=(C.c_uint16*32768)()
+        return _command_text(buffer,self._invoke(function,buffer,len(buffer)))
+
+    def system_directory(self):
+        try:return self._directory(self._system)
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None
+
+    def windows_directory(self):
+        try:return self._directory(self._windows)
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None
+
+    def no_reparse(self,path):
+        try:
+            self._check();leaf=Path(path)
+            if not leaf.is_absolute() or '..' in leaf.parts:return False
+            for parent in leaf.parents:
+                info=self._invoke(parent.lstat)
+                if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or getattr(info,'st_file_attributes',0)&0x400):return False
+            info=self._invoke(leaf.lstat)
+            return bool(stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                and not getattr(info,'st_file_attributes',0)&0x400)
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None
+
+    def is_protected(self,path):
+        try:return bool(self._invoke(self._protected,None,_command_wide(path)))
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None
+
+    def open(self,path):
+        try:
+            # No other native API may run between acquiring and returning this
+            # handle: the caller must retain it before deadline/policy checks.
+            self._check()
+            return _command_handle(self._open(_command_wide(path),0x80000000,1,None,3,0x00200000,None))
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None
+
+    def snapshot(self,handle):
+        try:
+            handle=_command_handle(handle)
+            values=[]
+            for kind,structure in ((18,_CommandFileIdInfo),(1,_CommandStandardInfo),
+                    (9,_CommandAttributeTagInfo),(0,_CommandBasicInfo)):
+                value=structure()
+                if not self._invoke(self._information,handle,kind,C.byref(value),C.sizeof(value)):
+                    raise GateFailure(14) from None
+                values.append(value)
+            identity,standard,attributes,basic=values
+            buffer=(C.c_uint16*32768)()
+            final=_command_text(buffer,self._invoke(self._final,handle,buffer,len(buffer),0))
+            file_type=self._invoke(self._type,handle);flags=C.c_uint32()
+            if not self._invoke(self._flags,handle,C.byref(flags)):
+                raise GateFailure(14) from None
+            return dict(identity=(int(identity.VolumeSerialNumber),bytes(identity.FileId.Identifier)),
+                finalPath=final,size=int(standard.EndOfFile),
+                modified=(int(basic.LastWriteTime),int(basic.ChangeTime)),links=int(standard.NumberOfLinks),
+                regular=bool(file_type==1 and not standard.Directory and not standard.DeletePending
+                    and not (attributes.FileAttributes|basic.FileAttributes)&0x10),
+                reparse=bool((attributes.FileAttributes|basic.FileAttributes)&0x400 or attributes.ReparseTag),
+                inheritable=bool(flags.value&1))
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None
+
+    def read(self,handle,expected_size):
+        try:
+            handle=_command_handle(handle)
+            if type(expected_size) is not int or not 0<expected_size<=128*1024*1024:
+                raise GateFailure(14) from None
+            position=C.c_int64()
+            if not self._invoke(self._seek,handle,0,C.byref(position),0) or position.value!=0:
+                raise GateFailure(14) from None
+            data=bytearray()
+            while len(data)<expected_size:
+                size=min(65536,expected_size-len(data));buffer=(C.c_uint8*size)();received=C.c_uint32()
+                if not self._invoke(self._read,handle,buffer,size,C.byref(received),None) or not 0<received.value<=size:
+                    raise GateFailure(14) from None
+                data.extend(bytes(buffer[:received.value]))
+            extra=(C.c_uint8*1)();received=C.c_uint32()
+            if not self._invoke(self._read,handle,extra,1,C.byref(received),None) or received.value!=0:
+                raise GateFailure(14) from None
+            return bytes(data)
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None
+
+    def close(self,handle):
+        try:return bool(self._close(_command_handle(handle)))
+        except GateFailure:raise
+        except Exception:raise GateFailure(14) from None

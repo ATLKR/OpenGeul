@@ -123,6 +123,7 @@ def _number(value):return type(value) in (int,float) and math.isfinite(value)
 
 def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs=None):
     from run_sdk_gate import empty_receipt
+    from toolchain import validate_command_observation
     keys=set(empty_receipt())|{'architectureCode','controller','commandProcessor','vswhereSha256','compiler','linker',
       'compilerVersion','installationVersion','devcmdSha256','sdkVersion','sdkInputs','compileInputs','portObject',
       'smokeObject','executable','startedAt','deadline','finishedAt','approvedCodeManifestSha256','cancelled'}
@@ -162,6 +163,8 @@ def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs
         if any(not _number(row[k]) for k in ('startedAt','deadline','finishedAt')) or not row['startedAt']<row['deadline']<=deadline or row['deadline']-row['startedAt']>30.000001:raise CiFailure(4)
         if any(not _integer(row[k]) for k in ('exitCode','pid','creation','failureCode','handlesClosed')):raise CiFailure(4)
     if value['sdkGatePassed']:
+        try:validate_command_observation(value.get('commandProcessorBinding'),require_closed=True)
+        except BaseException:raise CiFailure(4) from None
         true=('actualWindowsExecuted','nativeSdkCompiled','nativeLinked','negativeSmokePassed','frozenV2Preserved','workRootCreated','codeApprovalVerified')
         if value['stage']!=7 or value['failureCode']!=0 or any(value[k] is not True for k in true) or len(rows)!=5 or value.get('architectureCode')!=expected:raise CiFailure(4)
         required={'controller','commandProcessor','compiler','linker','portObject','smokeObject','executable',
@@ -173,12 +176,22 @@ def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs
         for row in rows:
             if any(not row[k] for k in ('completed','cleanupProved','rootExitObserved','jobEmptyObserved','identityRechecked')) or row['forcedCleanup'] or row['cancelled'] or row['exitCode'] or row['failureCode'] or row['handlesClosed']!=4 or not row['pid'] or not row['creation'] or row['startedAt']<previous or not row['startedAt']<=row['finishedAt']<=row['deadline']:raise CiFailure(4)
             previous=row['finishedAt']
+    if value.get('commandProcessorBinding') is not None:
+        try:validate_command_observation(value['commandProcessorBinding'])
+        except BaseException:raise CiFailure(4) from None
     return value
 
-def public_report(binding,outer,raw,*,failure=0,observation=None):
-    return {'schemaVersion':2,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
+def public_report(binding,outer,raw,*,failure=0,observation=None,command_binding=None):
+    command_ok=False
+    if command_binding is not None:
+        from toolchain import validate_command_observation
+        validate_command_observation(command_binding)
+        try:validate_command_observation(command_binding,require_closed=True);command_ok=True
+        except BaseException:command_ok=False
+    return {'schemaVersion':3,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
+      'commandProcessorBinding':command_binding,
       'sdkReportKnown':raw is not None,'sdkStage':None if raw is None else raw['stage'],
-      'sdkGatePassed':bool(raw and outer and raw['sdkGatePassed'] and outer['completed'] and failure==0),
+      'sdkGatePassed':bool(raw and outer and raw['sdkGatePassed'] and outer['completed'] and failure==0 and command_ok),
       'nativeSdkCompiled':None if raw is None else raw['nativeSdkCompiled'],
       'nativeLinked':None if raw is None else raw['nativeLinked'],'negativeSmokePassed':None if raw is None else raw['negativeSmokePassed'],
       'qualification':False,'canService':False,'actualPackageObservation':False,'osImplicitEffectsKnown':False,
@@ -203,7 +216,7 @@ class Parser(argparse.ArgumentParser):
     def error(self,message):raise CiFailure(1)
 
 def main(argv=None):
-    start=time.monotonic();deadline=start+180.;outer=None;raw=None;binding=None;public=None;failure=0;stage=0;observation=None
+    start=time.monotonic();deadline=start+180.;outer=None;raw=None;binding=None;public=None;failure=0;stage=0;observation=None;command_lease=None
     try:
         stage=1
         if not sys.flags.isolated or not sys.dont_write_bytecode:raise CiFailure(1)
@@ -227,7 +240,7 @@ def main(argv=None):
         for index,name in enumerate(('context_observer.hpp','context_observer_windows.cpp','sdk_smoke.hpp','windows_sdk_smoke.cpp'),1):
             b=toolchain.read(root/'frozen-v2'/name,1024*1024) if index<=2 else context.read_approved(name)
             expected_inputs.append({'slot':index,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
-        stage=8;locations=toolchain.system_locations(args.architecture)
+        stage=8;locations=toolchain.system_locations(args.architecture,deadline=deadline);command_lease=locations['commandLease']
         stage=9;temp=_regular(os.environ.get('RUNNER_TEMP',''),True)
         work=temp/('opengeul-sdk-gate-'+uuid.uuid4().hex)
         envelope=temp/('opengeul-sdk-envelope-'+uuid.uuid4().hex);envelope.mkdir()
@@ -239,7 +252,9 @@ def main(argv=None):
           '--overall-start',repr(start),'--overall-deadline',repr(deadline)]
         remaining=deadline-time.monotonic()
         if remaining<=1:raise CiFailure(10)
-        stage=10;outer=EnvelopeRunner(NativeApi()).run(command,str(repo),child_env,deadline)
+        stage=10;command_lease.verify(deadline=deadline)
+        outer=EnvelopeRunner(NativeApi()).run(command,str(repo),child_env,deadline)
+        command_lease.verify(deadline=deadline)
         stage=11
         path=work/'sdk-gate.numeric.json'
         if path.exists():raw=validate_sdk_report(json.loads(_read(path,16384)),args.architecture,args.expected_approved_manifest_sha256,deadline,expected_inputs)
@@ -250,9 +265,11 @@ def main(argv=None):
         failure=error.code if isinstance(error,CiFailure) else 31
         observation=failure_observation(error,stage)
     finally:
+        if command_lease is not None and not command_lease.close():failure=31
         if time.monotonic()>deadline:failure=10
         if public is not None and public.is_dir():
-            report=public_report(binding,outer,raw,failure=failure,observation=observation)
+            report=public_report(binding,outer,raw,failure=failure,observation=observation,
+              command_binding=None if command_lease is None else command_lease.observation())
             encoded=json.dumps(report,sort_keys=True,separators=(',',':')).encode()+b'\n'
             if len(encoded)<=8192:
                 try:

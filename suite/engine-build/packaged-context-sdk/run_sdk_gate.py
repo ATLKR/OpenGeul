@@ -21,7 +21,8 @@ def empty_receipt():
       'negativeSmokePassed':False,'actualPackageObservation':False,'qualification':False,'canService':False,
       'originalHelperHandleKnown':False,'packagedHelperLauncherImplemented':False,'watchdogVerified':False,
       'synchronousOsCallPreemptionVerified':False,'osImplicitEffectsKnown':False,'frozenV2Preserved':False,
-      'pure40TestsRerun':False,'lease6TestsRerun':False,'workRootCreated':False,'codeApprovalVerified':False,'phaseResults':[]}
+      'pure40TestsRerun':False,'lease6TestsRerun':False,'workRootCreated':False,'codeApprovalVerified':False,
+      'commandProcessorBinding':None,'phaseResults':[]}
 
 def _fresh_text(root,name,text):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,40}\.cmd',name):raise GateFailure(2)
@@ -82,14 +83,15 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
         result['codeApprovalVerified']=True;result['approvedCodeManifestSha256']=code_admission.manifest_sha256
     except BaseException:result['failureCode']=3;return result
     if sys.platform!='win32':result['failureCode']=1;return result
-    source_bundle=Path(source_bundle);root=None;tools_before=None
+    source_bundle=Path(source_bundle);root=None;tools_before=None;command_lease=None
     def remaining():
         if time.monotonic()>=overall:raise GateFailure(10)
     try:
         if architecture not in tools.MACHINES:raise GateFailure(2)
         result['stage']=1;before=tools.verify_bundle(source_bundle);remaining()
         root=_owned_root(work_root);result['workRootCreated']=True
-        locations=tools.system_locations(architecture);machine=tools.MACHINES[architecture];remaining()
+        locations=tools.system_locations(architecture,deadline=overall);command_lease=locations['commandLease']
+        machine=tools.MACHINES[architecture];remaining()
         result['architectureCode']=machine;result['controller']=locations['controller']
         result['commandProcessor']=locations['commandRecord'];result['vswhereSha256']=locations['vswhereSha256']
         from owned_job_win32 import NativeApi
@@ -97,8 +99,10 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
         environment=child_environment(locations['system'],locations['programFiles'],locations['programFilesX86'],str(root))
         def phase(argv,seconds):
             end=phase_deadline(time.monotonic(),overall,seconds)
+            command_lease.verify(deadline=end)
             row=runner.run(argv,str(root),environment,end);result['phaseResults'].append(row)
             result['actualWindowsExecuted']=True
+            command_lease.verify(deadline=end)
             if not row['completed']:raise GateFailure(10 if row['failureCode']==10 else 13)
         require_fresh_outputs(root,('vswhere.json',))
         name=_fresh_text(root,'vs-discovery.cmd',discovery_batch(locations['vswhere']))
@@ -132,7 +136,7 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
         result['negativeSmokePassed']=True
         for index,(name,src) in enumerate(inputs.items()):
             if hashlib.sha256(tools.read(src,1024*1024)).hexdigest()!=hashes[index]['sha256'] or hashlib.sha256(tools.read(root/name,1024*1024)).hexdigest()!=hashes[index]['sha256']:raise GateFailure(3)
-        after=(dict(cl=tools.pe(vs['cl'],machine),link=tools.pe(vs['link'],machine)),hashlib.sha256(tools.read(vs['devcmd'],1024*1024)).hexdigest(),tools.pe(locations['command'],machine))
+        after=(dict(cl=tools.pe(vs['cl'],machine),link=tools.pe(vs['link'],machine)),hashlib.sha256(tools.read(vs['devcmd'],1024*1024)).hexdigest(),command_lease.verify())
         if after!=tools_before or tools.installed_sdk(locations['sdk'],architecture)!=sdk:raise GateFailure(3)
         code_admission.require_root(ROOT)
         if tools.verify_bundle(source_bundle)!=before:raise GateFailure(3)
@@ -141,6 +145,9 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
         result['failureCode']=error.code if isinstance(error,GateFailure) else 31
         result['cancelled']=isinstance(error,(KeyboardInterrupt,SystemExit))
     finally:
+        if command_lease is not None:
+            if not command_lease.close():result['sdkGatePassed']=False;result['failureCode']=14
+            result['commandProcessorBinding']=command_lease.observation()
         result['startedAt']=start;result['deadline']=overall;result['finishedAt']=time.monotonic()
         if result['finishedAt']>overall:result['sdkGatePassed']=False;result['failureCode']=10
     return result

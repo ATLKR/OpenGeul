@@ -1433,9 +1433,9 @@ jobs:
           }
           $machine = if ($architecture -ceq 'x64') { 0x8664 } else { 0xaa64 }
           $base = Join-Path (Get-Location).Path 'suite/engine-build/packaged-context-sdk'
-          $entryPin = 'd2d58f493793962ecb85951038fe5387b698bacaf119405cbdda6bacaf3dd2cf'
+          $entryPin = 'db25ada9aeac60dea9e0424879758139cc23f4227bfebe13228261b1b9315136'
           $bootstrapPin = '828cef4233ac7e2186c3ca5f112c10ca682a905ca3587fa6867a609046796c2d'
-          $manifestPin = '3a37916d78b92d3169934dc12b5876481ec9eb47abbf53e44755877182740c89'
+          $manifestPin = 'e4f0f6e07609f61d9ce474653641a4a8ddac1ced0534b010f97ee8e6fbd9ecf0'
           foreach ($item in @(@('ci_entry.py',$entryPin),@('approved_launch.py',$bootstrapPin),@('approved-sdk-code.json',$manifestPin))) {
             $file = Join-Path $base $item[0]
             $info = Get-Item -LiteralPath $file -Force
@@ -1479,10 +1479,29 @@ jobs:
               $info = Get-Item -LiteralPath $file -Force
               if ($info.PSIsContainer -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $info.Length -lt 1 -or $info.Length -gt 8192) { throw 'Numeric SDK report path rejected.' }
               $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
-              $keys = @('schemaVersion','kind','binding','failureCode','sdkReportKnown','sdkStage','sdkGatePassed','nativeSdkCompiled','nativeLinked','negativeSmokePassed','qualification','canService','actualPackageObservation','osImplicitEffectsKnown','watchdogVerified','externalMonitorCandidateImplemented','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup','envelopeExitCode','approvedCodeManifestSha256','compiledEvidence','failureObservation')
+              $keys = @('schemaVersion','kind','binding','failureCode','sdkReportKnown','sdkStage','sdkGatePassed','nativeSdkCompiled','nativeLinked','negativeSmokePassed','qualification','canService','actualPackageObservation','osImplicitEffectsKnown','watchdogVerified','externalMonitorCandidateImplemented','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup','envelopeExitCode','approvedCodeManifestSha256','compiledEvidence','failureObservation','commandProcessorBinding')
               if (@($report.PSObject.Properties.Name).Count -ne $keys.Count -or @($report.PSObject.Properties.Name | Where-Object { $_ -cnotin $keys }).Count -ne 0) { throw 'SDK numeric report schema rejected.' }
-              if ($report.schemaVersion -ne 2 -or $report.kind -cne 'packaged-context-sdk-ci' -or $report.qualification -isnot [bool] -or $report.qualification -or $report.canService -isnot [bool] -or $report.canService -or $report.actualPackageObservation -or $report.osImplicitEffectsKnown -or $report.watchdogVerified) { throw 'SDK diagnostic cannot grant product qualification.' }
+              if ($report.schemaVersion -ne 3 -or $report.kind -cne 'packaged-context-sdk-ci' -or $report.qualification -isnot [bool] -or $report.qualification -or $report.canService -isnot [bool] -or $report.canService -or $report.actualPackageObservation -or $report.osImplicitEffectsKnown -or $report.watchdogVerified) { throw 'SDK diagnostic cannot grant product qualification.' }
               if ($report.binding.sourceCommit -cne $env:GITHUB_SHA -or $report.binding.runId -ne [long]$env:GITHUB_RUN_ID -or $report.binding.runAttempt -ne 1 -or $report.binding.architectureCode -ne $machine -or $report.binding.repositoryId -ne 1405493151) { throw 'SDK numeric source binding rejected.' }
+              # Closed OS-command binding: classification/change detection, no signature claim.
+              if ($report.sdkGatePassed -isnot [bool]) { throw 'SDK pass state must be known.' }
+              $commandBinding = $report.commandProcessorBinding
+              if ($null -ne $commandBinding) {
+                $commandKeys = @('systemDirectoryKnown','wrpProtected','protectionClassificationOnly','signatureVerified','linkCount','handleIdentityStable','freshPathStable','bytesPeHashStable','rechecks','closed')
+                if (@($commandBinding.PSObject.Properties.Name).Count -ne $commandKeys.Count -or @($commandBinding.PSObject.Properties.Name | Where-Object { $_ -cnotin $commandKeys }).Count -ne 0) { throw 'Command binding schema rejected.' }
+                foreach ($name in @('systemDirectoryKnown','wrpProtected','protectionClassificationOnly','signatureVerified','handleIdentityStable','freshPathStable','bytesPeHashStable','closed')) {
+                  if ($commandBinding.$name -isnot [bool]) { throw 'Command binding Boolean unknown.' }
+                }
+                if (-not $commandBinding.protectionClassificationOnly -or $commandBinding.signatureVerified) { throw 'Command binding must not claim signature verification.' }
+                if ($null -ne $commandBinding.linkCount -and ($commandBinding.linkCount -isnot [long] -or $commandBinding.linkCount -lt 1 -or $commandBinding.linkCount -gt 1048576)) { throw 'Command link observation rejected.' }
+                if ($commandBinding.rechecks -isnot [long] -or $commandBinding.rechecks -lt 0 -or $commandBinding.rechecks -gt 128) { throw 'Command recheck observation rejected.' }
+                if ($report.sdkGatePassed) {
+                  foreach ($name in @('systemDirectoryKnown','wrpProtected','handleIdentityStable','freshPathStable','bytesPeHashStable','closed')) {
+                    if (-not $commandBinding.$name) { throw 'Command binding cannot qualify SDK success.' }
+                  }
+                  if ($null -eq $commandBinding.linkCount -or $commandBinding.rechecks -lt 1) { throw 'Command binding incomplete.' }
+                }
+              } elseif ($report.sdkGatePassed) { throw 'Command binding is required for SDK success.' }
               $eligible = $true
               if ($code -eq 0 -and ($report.sdkGatePassed -isnot [bool] -or -not $report.sdkGatePassed)) { $code = 1 }
             }

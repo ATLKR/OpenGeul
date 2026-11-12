@@ -39,7 +39,11 @@ def condition(text,**overrides):
     return bool(eval(compile(tree,'closed-job-selector','eval'),{'__builtins__':{}},values))
 
 def success_fixture():
+    command_binding={'systemDirectoryKnown':True,'wrpProtected':True,'protectionClassificationOnly':True,
+      'signatureVerified':False,'linkCount':2,'handleIdentityStable':True,'freshPathStable':True,
+      'bytesPeHashStable':True,'rechecks':2,'closed':True}
     value={'schemaVersion':1,'kind':'packaged-context-sdk-negative-gate','stage':7,'failureCode':0,
+      'commandProcessorBinding':command_binding,
       'architectureCode':0x8664,'approvedCodeManifestSha256':'1'*64,'phaseResults':[],
       'compilerVersion':'14.44.35207','installationVersion':'17.14.19','sdkVersion':'10.0.26100.0',
       'startedAt':0.,'deadline':180.,'finishedAt':8.,'vswhereSha256':'2'*64,'devcmdSha256':'3'*64}
@@ -120,7 +124,7 @@ class CiContracts(unittest.TestCase):
         m=self.api();raw=success_fixture();inputs=copy.deepcopy(raw['compileInputs'])
         self.assertIs(m.validate_sdk_report(raw,'x64','1'*64,180.,inputs),raw)
         outer={'completed':True,'cleanupProved':True,'forcedCleanup':False,'exitCode':0}
-        report=m.public_report(m.require_context(environment(),'x64'),outer,raw)
+        report=m.public_report(m.require_context(environment(),'x64'),outer,raw,command_binding=raw['commandProcessorBinding'])
         self.assertTrue(report['sdkGatePassed']);self.assertFalse(report['qualification']);self.assertFalse(report['canService'])
         self.assertEqual(set(report['compiledEvidence']),{'portObject','smokeObject','executable','compiler','linker'})
     def test_changed_source_input_architecture_identity_or_authority_cannot_pass(self):
