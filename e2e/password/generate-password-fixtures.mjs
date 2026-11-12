@@ -28,7 +28,7 @@ for (const name of artifactNames) {
   const info = lstatSync(join(wasmDir, name));
   assert(info.isFile() && !info.isSymbolicLink(), `regular artifact required: ${name}`);
 }
-assert.equal(JSON.parse(read('package.json').toString('utf8')).version, '0.8.7', 'package version');
+assert.equal(JSON.parse(read('package.json').toString('utf8')).version, '0.9.0', 'package version');
 
 // Final qualification requires the source-bound rebuild manifest and matching
 // bytes. A pristine upstream artifact can never silently acquire that label.
@@ -36,15 +36,16 @@ let provenance = null;
 if (existsSync(join(wasmDir, 'OPEN_GEUL_WASM.json'))) {
   provenance = JSON.parse(read('OPEN_GEUL_WASM.json').toString('utf8'));
   const lock = JSON.parse(readFileSync(resolve('config/upstream.lock.json'), 'utf8'));
-  assert.equal(lock.hop?.version, '0.4.5');
-  assert.equal(lock.hop?.commit, '34bd15c97e0851627cb7f055042c5340198aeb7f');
-  assert.equal(lock.rhwp?.version, '0.8.7');
-  assert.equal(lock.rhwp?.commit, '1a76570e833917d15817415a53c09ad61ab3203f');
+  assert.equal(lock.hop?.version, '0.5.3');
+  assert.equal(lock.hop?.commit, 'c298160120c9ffbfca7e72f13dc2e7060ddff7fe');
+  assert.equal(lock.rhwp?.version, '0.9.0');
+  assert.equal(lock.rhwp?.commit, 'c9095c5f67632e6721e800ccc7fb43ea49d26682');
   assert.deepEqual(provenance.upstream, lock, 'source-bound checkout upstream lock');
   assert.equal(provenance.namespaceHelper,
     sha256(readFileSync(resolve('overlay/hwpx_namespaces.rs'))), 'source-bound namespace helper');
   assert.equal(provenance.namespacePatcher,
     sha256(readFileSync(resolve('scripts/patch_namespaces.py'))), 'source-bound namespace patcher');
+  assert.equal(provenance.generator, 'wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api', 'source-bound WASM build command');
   for (const name of artifactNames) {
     assert.equal(sha256(read(name)), provenance.artifacts?.[name], `source-bound ${name}`);
   }
@@ -53,8 +54,8 @@ const qualification = provenance ? 'final-source-bound' : 'preliminary-pinned-ve
 if (!provenance) {
   assert(existsSync(join(wasmDir, 'PROVENANCE.json')), 'verified engine provenance required');
   const upstream = JSON.parse(read('PROVENANCE.json').toString('utf8'));
-  assert.equal(upstream.version, '0.8.7');
-  assert.equal(upstream.commit, '1a76570e833917d15817415a53c09ad61ab3203f');
+  assert.equal(upstream.version, '0.9.0');
+  assert.equal(upstream.commit, 'c9095c5f67632e6721e800ccc7fb43ea49d26682');
   for (const name of artifactNames) {
     assert.equal(sha256(read(name)), upstream.artifacts?.[name]?.sha256, `pinned vendor ${name}`);
   }
