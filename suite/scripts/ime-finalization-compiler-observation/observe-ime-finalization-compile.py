@@ -19,17 +19,17 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-SOURCE_HEAD='3a5b101ba9b66b6c17544f89c9f39cdd6e63d933'
+SOURCE_HEAD='b98b555b646f8fd412057afb880e8b4c35262f9a'
 SOURCE_PINS=(
- ('suite/tests/test_ime_command3_finalization.py',26192,'524599a937bf5700af3fb662575ea7bf31dd3c6586eb86eefabbc1e6709649dc'),
- ('suite/tests/test_native_crt_probe.py',69758,'3c8e659a4e28ff707d4c52f83f59f0d9f0626d477a9543d05e8e0d780e7a0569'),
- ('suite/tests/ime_command3_finalization_cases/native_policy.cpp',2427,'0be63f6c8c3475dc05c27128831f71e49cda0c9e2e4381920c3c44f54c6dd953'),
- ('suite/tests/ime_command3_finalization_cases/native_adapter.cpp',3464,'aa4daefefbd9b83cba4558caf62f05b3c2dc783d7193af193d5f929dd6388175'),
- ('suite/tests/ime_command3_finalization_cases/native_negotiation.cpp',4112,'10e07296a030cc04ac267e1b130d0e2d7031f3105c5db9d8e0c797a8ab7b7ce0'),
- ('suite/e2e/ime_command3_finalization.h',3119,'bfb4f0e24e4b3c85d1f89cf50f68059d95bcfbf98f435867982b16acec7de967'),
- ('suite/e2e/ime_command3_finalization_windows.h',3585,'8da200c94a6ab2172746d683cb0862d41a9148823f60e0ed859d4ec352b5a482'),
- ('suite/e2e/korean_ime_smoke.py',185108,'4896642204c0d8ef07c505a9e1791983c9cede350fcb60258f81b93604c04144'),
- ('suite/tests/native_executable_cleanup.py',2232,'98bbf36d12b986e72adf817aa5a224c64d0e33d2b6d3cb634a96410addb3455d'),
+ ('suite/tests/test_ime_command3_finalization.py', 26203, 'b4613fb30ca0714c834ddba315792d89bd0e7dbe47f497af2dbb870c4ebc4af1'),
+ ('suite/tests/test_native_crt_probe.py', 69758, '3c8e659a4e28ff707d4c52f83f59f0d9f0626d477a9543d05e8e0d780e7a0569'),
+ ('suite/tests/ime_command3_finalization_cases/native_policy.cpp', 2427, '0be63f6c8c3475dc05c27128831f71e49cda0c9e2e4381920c3c44f54c6dd953'),
+ ('suite/tests/ime_command3_finalization_cases/native_adapter.cpp', 3474, 'c2ba8257b7068189dcb0d47738e2e4abaef02d04238ee564154d7d5f3ed09a07'),
+ ('suite/tests/ime_command3_finalization_cases/native_negotiation.cpp', 4148, '940dbb11d0d73c39cf85f3604e615d294afc2a38ed72fdf67d4a39891684feff'),
+ ('suite/e2e/ime_command3_finalization.h', 3119, 'bfb4f0e24e4b3c85d1f89cf50f68059d95bcfbf98f435867982b16acec7de967'),
+ ('suite/e2e/ime_command3_finalization_windows.h', 3585, '8da200c94a6ab2172746d683cb0862d41a9148823f60e0ed859d4ec352b5a482'),
+ ('suite/e2e/korean_ime_smoke.py', 185108, '4896642204c0d8ef07c505a9e1791983c9cede350fcb60258f81b93604c04144'),
+ ('suite/tests/native_executable_cleanup.py', 2232, '98bbf36d12b986e72adf817aa5a224c64d0e33d2b6d3cb634a96410addb3455d'),
 )
 CASES=(('test_real_portable_policy','native_policy.cpp'),
        ('test_actual_windows_sampling_adapter_pairs_context','native_adapter.cpp'),

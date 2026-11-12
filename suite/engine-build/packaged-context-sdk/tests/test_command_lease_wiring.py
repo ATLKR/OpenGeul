@@ -58,7 +58,7 @@ class CommandLeaseWiringTests(unittest.TestCase):
         raw=fixtures.success_fixture();raw['commandProcessorBinding']=binding()
         outer={'completed':True,'cleanupProved':True,'forcedCleanup':False,'exitCode':0}
         report=ci_entry.public_report(ci_entry.require_context(fixtures.environment(),'x64'),outer,raw,command_binding=binding())
-        self.assertEqual(report['schemaVersion'],3);self.assertEqual(report['commandProcessorBinding'],binding())
+        self.assertEqual(report['schemaVersion'],4);self.assertEqual(report['commandProcessorBinding'],binding())
         self.assertTrue(report['sdkGatePassed']);self.assertFalse(report['qualification']);self.assertFalse(report['canService'])
         unknown=ci_entry.public_report(report['binding'],None,None)
         self.assertIsNone(unknown['commandProcessorBinding']);self.assertFalse(unknown['sdkGatePassed'])

@@ -1433,9 +1433,9 @@ jobs:
           }
           $machine = if ($architecture -ceq 'x64') { 0x8664 } else { 0xaa64 }
           $base = Join-Path (Get-Location).Path 'suite/engine-build/packaged-context-sdk'
-          $entryPin = 'db25ada9aeac60dea9e0424879758139cc23f4227bfebe13228261b1b9315136'
+          $entryPin = 'e2709a95602c71e565f3e8f8734e5d6774f1191aaab7b986cb80431774aa05c3'
           $bootstrapPin = '828cef4233ac7e2186c3ca5f112c10ca682a905ca3587fa6867a609046796c2d'
-          $manifestPin = 'e4f0f6e07609f61d9ce474653641a4a8ddac1ced0534b010f97ee8e6fbd9ecf0'
+          $manifestPin = 'd27b1bc5649c60d7e24cf43c8807668e161aaeb93de38f55943594c340bf67bf'
           foreach ($item in @(@('ci_entry.py',$entryPin),@('approved_launch.py',$bootstrapPin),@('approved-sdk-code.json',$manifestPin))) {
             $file = Join-Path $base $item[0]
             $info = Get-Item -LiteralPath $file -Force
@@ -1479,9 +1479,9 @@ jobs:
               $info = Get-Item -LiteralPath $file -Force
               if ($info.PSIsContainer -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $info.Length -lt 1 -or $info.Length -gt 8192) { throw 'Numeric SDK report path rejected.' }
               $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
-              $keys = @('schemaVersion','kind','binding','failureCode','sdkReportKnown','sdkStage','sdkGatePassed','nativeSdkCompiled','nativeLinked','negativeSmokePassed','qualification','canService','actualPackageObservation','osImplicitEffectsKnown','watchdogVerified','externalMonitorCandidateImplemented','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup','envelopeExitCode','approvedCodeManifestSha256','compiledEvidence','failureObservation','commandProcessorBinding')
+              $keys = @('schemaVersion','kind','binding','failureCode','sdkReportKnown','sdkStage','sdkGatePassed','nativeSdkCompiled','nativeLinked','negativeSmokePassed','qualification','canService','actualPackageObservation','osImplicitEffectsKnown','watchdogVerified','externalMonitorCandidateImplemented','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup','envelopeExitCode','approvedCodeManifestSha256','compiledEvidence','failureObservation','commandProcessorBinding','helperFailureCode','helperPhaseResults','helperFailureObservation')
               if (@($report.PSObject.Properties.Name).Count -ne $keys.Count -or @($report.PSObject.Properties.Name | Where-Object { $_ -cnotin $keys }).Count -ne 0) { throw 'SDK numeric report schema rejected.' }
-              if ($report.schemaVersion -ne 3 -or $report.kind -cne 'packaged-context-sdk-ci' -or $report.qualification -isnot [bool] -or $report.qualification -or $report.canService -isnot [bool] -or $report.canService -or $report.actualPackageObservation -or $report.osImplicitEffectsKnown -or $report.watchdogVerified) { throw 'SDK diagnostic cannot grant product qualification.' }
+              if ($report.schemaVersion -ne 4 -or $report.kind -cne 'packaged-context-sdk-ci' -or $report.qualification -isnot [bool] -or $report.qualification -or $report.canService -isnot [bool] -or $report.canService -or $report.actualPackageObservation -or $report.osImplicitEffectsKnown -or $report.watchdogVerified) { throw 'SDK diagnostic cannot grant product qualification.' }
               if ($report.binding.sourceCommit -cne $env:GITHUB_SHA -or $report.binding.runId -ne [long]$env:GITHUB_RUN_ID -or $report.binding.runAttempt -ne 1 -or $report.binding.architectureCode -ne $machine -or $report.binding.repositoryId -ne 1405493151) { throw 'SDK numeric source binding rejected.' }
               # Closed OS-command binding: classification/change detection, no signature claim.
               if ($report.sdkGatePassed -isnot [bool]) { throw 'SDK pass state must be known.' }
@@ -1502,6 +1502,83 @@ jobs:
                   if ($null -eq $commandBinding.linkCount -or $commandBinding.rechecks -lt 1) { throw 'Command binding incomplete.' }
                 }
               } elseif ($report.sdkGatePassed) { throw 'Command binding is required for SDK success.' }
+              # Pure schema-4 fragment. The caller supplies the already-parsed $report.
+              # Recorded phase rows are observations, not an attempt count or qualification.
+              & {
+                  param($value)
+                  function Reject-HelperObservation { throw 'sdk_helper_observation_rejected' }
+                  function Test-HelperLong($item,[long]$minimum,[long]$maximum) {
+                      return ($item -is [long] -and $item -ge $minimum -and $item -le $maximum)
+                  }
+                  function Test-HelperOptionalLong($item,[long]$minimum,[long]$maximum) {
+                      return ($null -eq $item -or (Test-HelperLong $item $minimum $maximum))
+                  }
+                  function Test-HelperNumber($item) {
+                      return (($item -is [long]) -or ($item -is [double] -and -not [double]::IsNaN($item) -and -not [double]::IsInfinity($item)))
+                  }
+                  function Test-HelperKeys($item,[string[]]$expected) {
+                      if ($null -eq $item -or $item.GetType() -ne [System.Management.Automation.PSCustomObject]) { return $false }
+                      $actual=@($item.PSObject.Properties.Name)
+                      if ($actual.Count -ne $expected.Count) { return $false }
+                      foreach ($name in $actual) { if ($name -cnotin $expected) { return $false } }
+                      return $true
+                  }
+
+                  if ($null -eq $value -or $value.GetType() -ne [System.Management.Automation.PSCustomObject]) { Reject-HelperObservation }
+                  $rootKeys=@($value.PSObject.Properties.Name)
+                  foreach ($name in @('sdkReportKnown','sdkStage','helperFailureCode','helperPhaseResults','helperFailureObservation')) {
+                      if ($name -cnotin $rootKeys) { Reject-HelperObservation }
+                  }
+                  if ($value.sdkReportKnown -isnot [bool]) { Reject-HelperObservation }
+                  if (-not $value.sdkReportKnown) {
+                      if ($null -ne $value.helperFailureCode -or $null -ne $value.helperPhaseResults -or $null -ne $value.helperFailureObservation) { Reject-HelperObservation }
+                      return
+                  }
+                  if (-not (Test-HelperLong $value.sdkStage 0 7) -or -not (Test-HelperLong $value.helperFailureCode 0 31)) { Reject-HelperObservation }
+
+                  $rows=$value.helperPhaseResults
+                  if ($null -eq $rows -or $rows.GetType() -ne [object[]] -or $rows.Count -gt 5) { Reject-HelperObservation }
+                  $rowKeys=@('startedAt','deadline','finishedAt','completed','cleanupProved','forcedCleanup','rootExitObserved','jobEmptyObserved','identityRechecked','cancelled','exitCode','pid','creation','failureCode','handlesClosed')
+                  $rowFlags=@('completed','cleanupProved','forcedCleanup','rootExitObserved','jobEmptyObserved','identityRechecked','cancelled')
+                  foreach ($row in $rows) {
+                      if (-not (Test-HelperKeys $row $rowKeys)) { Reject-HelperObservation }
+                      foreach ($name in @('startedAt','deadline','finishedAt')) {
+                          if (-not (Test-HelperNumber $row.$name)) { Reject-HelperObservation }
+                      }
+                      if ($row.startedAt -ge $row.deadline -or ($row.deadline - $row.startedAt) -gt 30.000001) { Reject-HelperObservation }
+                      foreach ($name in $rowFlags) { if ($row.$name -isnot [bool]) { Reject-HelperObservation } }
+                      if ($row.rootExitObserved) {
+                          if (-not (Test-HelperLong $row.exitCode 0 4294967295)) { Reject-HelperObservation }
+                      } elseif ($null -ne $row.exitCode) { Reject-HelperObservation }
+                      if (($null -eq $row.pid) -ne ($null -eq $row.creation)) { Reject-HelperObservation }
+                      if (-not (Test-HelperOptionalLong $row.pid 1 4294967295) -or -not (Test-HelperOptionalLong $row.creation 1 ([long]::MaxValue))) { Reject-HelperObservation }
+                      if (-not (Test-HelperLong $row.failureCode 0 31) -or -not (Test-HelperLong $row.handlesClosed 0 4)) { Reject-HelperObservation }
+                  }
+
+                  $observation=$value.helperFailureObservation
+                  if ($null -eq $observation) { return }
+                  $observationKeys=@('stageCode','exceptionKnown','exceptionTypeCode','nativeCode','errno','winerror','filesystemCode','fileRoleCode','observedLinkCount','sourceFrames','sourceLocationKnown','sourceFramesTruncated')
+                  if (-not (Test-HelperKeys $observation $observationKeys)) { Reject-HelperObservation }
+                  if (-not (Test-HelperLong $observation.stageCode 1 7) -or $observation.stageCode -ne $value.sdkStage) { Reject-HelperObservation }
+                  if ($observation.exceptionKnown -isnot [bool] -or -not (Test-HelperLong $observation.exceptionTypeCode 0 5)) { Reject-HelperObservation }
+                  if ($observation.exceptionKnown -ne ($observation.exceptionTypeCode -ne 0)) { Reject-HelperObservation }
+                  if (-not (Test-HelperOptionalLong $observation.nativeCode 0 65535)) { Reject-HelperObservation }
+                  foreach ($name in @('errno','winerror')) {
+                      if (-not (Test-HelperOptionalLong $observation.$name -2147483648 4294967295)) { Reject-HelperObservation }
+                  }
+                  if (-not (Test-HelperOptionalLong $observation.filesystemCode 1 5) -or -not (Test-HelperOptionalLong $observation.fileRoleCode 1 3) -or -not (Test-HelperOptionalLong $observation.observedLinkCount 0 1048576)) { Reject-HelperObservation }
+                  $kind=$observation.exceptionTypeCode
+                  if (($kind -lt 1 -or $kind -gt 4) -and $null -ne $observation.nativeCode) { Reject-HelperObservation }
+                  if ($kind -ne 5 -and ($null -ne $observation.errno -or $null -ne $observation.winerror)) { Reject-HelperObservation }
+                  if ($kind -ne 2 -and ($null -ne $observation.filesystemCode -or $null -ne $observation.fileRoleCode -or $null -ne $observation.observedLinkCount)) { Reject-HelperObservation }
+                  $frames=$observation.sourceFrames
+                  if ($null -eq $frames -or $frames.GetType() -ne [object[]] -or $frames.Count -gt 8) { Reject-HelperObservation }
+                  foreach ($frame in $frames) {
+                      if (-not (Test-HelperKeys $frame @('fileCode','line')) -or -not (Test-HelperLong $frame.fileCode 1 6) -or -not (Test-HelperLong $frame.line 1 100000)) { Reject-HelperObservation }
+                  }
+                  if ($observation.sourceLocationKnown -isnot [bool] -or $observation.sourceLocationKnown -ne ($frames.Count -gt 0) -or $observation.sourceFramesTruncated -isnot [bool]) { Reject-HelperObservation }
+                  if ($observation.sourceFramesTruncated -and $frames.Count -ne 8) { Reject-HelperObservation }
+              } $report
               $eligible = $true
               if ($code -eq 0 -and ($report.sdkGatePassed -isnot [bool] -or -not $report.sdkGatePassed)) { $code = 1 }
             }
@@ -1576,7 +1653,7 @@ jobs:
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: ATLKR/OpenGeul
-        ref: 3a5b101ba9b66b6c17544f89c9f39cdd6e63d933
+        ref: b98b555b646f8fd412057afb880e8b4c35262f9a
         path: .work/ime-finalization-source
         persist-credentials: false
         fetch-depth: 1

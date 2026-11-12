@@ -20,7 +20,7 @@ def load():
 class CollectorTests(unittest.TestCase):
     def setUp(self):self.c=load()
     def test_fixed_head_nine_file_roles_and_original_policy_positive(self):
-        self.assertEqual(self.c.SOURCE_HEAD,'3a5b101ba9b66b6c17544f89c9f39cdd6e63d933')
+        self.assertEqual(self.c.SOURCE_HEAD,'b98b555b646f8fd412057afb880e8b4c35262f9a')
         self.assertEqual(len(self.c.SOURCE_PINS),9)
         self.assertEqual(tuple(item[1] for item in self.c.CASES),('native_policy.cpp','native_adapter.cpp','native_negotiation.cpp'))
     def test_source_literal_is_read_by_ast_without_importing_ui(self):

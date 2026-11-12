@@ -121,6 +121,47 @@ def _integer(value,maximum=0x7fffffffffffffff):return type(value) is int and 0<=
 def _sha(value):return type(value) is str and re.fullmatch('[0-9a-f]{64}',value) is not None
 def _number(value):return type(value) in (int,float) and math.isfinite(value)
 
+def validate_helper_failure_observation(value,stage):
+    """Validate the existing pure observer packet; never interpret exception text."""
+    if value is None:return None
+    keys={'stageCode','exceptionKnown','exceptionTypeCode','nativeCode','errno','winerror','filesystemCode',
+      'fileRoleCode','observedLinkCount','sourceFrames','sourceLocationKnown','sourceFramesTruncated'}
+    if type(value) is not dict or set(value)!=keys or type(stage) is not int or not 1<=stage<=7:raise CiFailure(4)
+    if type(value['stageCode']) is not int or value['stageCode']!=stage:raise CiFailure(4)
+    if type(value['exceptionKnown']) is not bool or not _integer(value['exceptionTypeCode'],5) or value['exceptionKnown']!=(value['exceptionTypeCode']!=0):raise CiFailure(4)
+    for key,low,high in (('nativeCode',0,65535),('errno',-2147483648,4294967295),('winerror',-2147483648,4294967295),
+      ('filesystemCode',1,5),('fileRoleCode',1,3),('observedLinkCount',0,1048576)):
+        item=value[key]
+        if item is not None and (type(item) is not int or not low<=item<=high):raise CiFailure(4)
+    kind=value['exceptionTypeCode']
+    if kind not in (1,2,3,4) and value['nativeCode'] is not None:raise CiFailure(4)
+    if kind!=5 and any(value[key] is not None for key in ('errno','winerror')):raise CiFailure(4)
+    if kind!=2 and any(value[key] is not None for key in ('filesystemCode','fileRoleCode','observedLinkCount')):raise CiFailure(4)
+    frames=value['sourceFrames']
+    if type(frames) is not list or len(frames)>8:raise CiFailure(4)
+    for row in frames:
+        if type(row) is not dict or set(row)!={'fileCode','line'} or type(row['fileCode']) is not int or not 1<=row['fileCode']<=6 or type(row['line']) is not int or not 1<=row['line']<=100000:raise CiFailure(4)
+    if type(value['sourceLocationKnown']) is not bool or value['sourceLocationKnown']!=bool(frames) or type(value['sourceFramesTruncated']) is not bool:raise CiFailure(4)
+    if value['sourceFramesTruncated'] and len(frames)!=8:raise CiFailure(4)
+    return {**value,'sourceFrames':[dict(row) for row in frames]}
+
+def project_helper_phases(rows):
+    """Returned records only. Unknown exit/identity sentinels become explicit null."""
+    keys={'startedAt','deadline','finishedAt','completed','cleanupProved','forcedCleanup','rootExitObserved','jobEmptyObserved',
+      'identityRechecked','exitCode','pid','creation','failureCode','cancelled','handlesClosed'}
+    if type(rows) is not list or len(rows)>5:raise CiFailure(4)
+    result=[]
+    for row in rows:
+        if type(row) is not dict or set(row)!=keys:raise CiFailure(4)
+        for key in ('completed','cleanupProved','forcedCleanup','rootExitObserved','jobEmptyObserved','identityRechecked','cancelled'):
+            if type(row[key]) is not bool:raise CiFailure(4)
+        if any(not _number(row[key]) for key in ('startedAt','deadline','finishedAt')) or not row['startedAt']<row['deadline'] or row['deadline']-row['startedAt']>30.000001:raise CiFailure(4)
+        if not _integer(row['exitCode'],0xffffffff) or not _integer(row['pid'],0xffffffff) or not _integer(row['creation']) or not _integer(row['failureCode'],31) or not _integer(row['handlesClosed'],4):raise CiFailure(4)
+        if bool(row['pid'])!=bool(row['creation']):raise CiFailure(4)
+        result.append({**row,'exitCode':row['exitCode'] if row['rootExitObserved'] else None,
+          'pid':row['pid'] or None,'creation':row['creation'] or None})
+    return result
+
 def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs=None):
     from run_sdk_gate import empty_receipt
     from toolchain import validate_command_observation
@@ -129,6 +170,7 @@ def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs
       'smokeObject','executable','startedAt','deadline','finishedAt','approvedCodeManifestSha256','cancelled'}
     if type(value) is not dict or set(value)-keys or value.get('kind')!='packaged-context-sdk-negative-gate' or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=1:raise CiFailure(4)
     if not _integer(value.get('stage'),7) or not _integer(value.get('failureCode'),31):raise CiFailure(4)
+    validate_helper_failure_observation(value.get('failureObservation'),value['stage'])
     for key,item in empty_receipt().items():
         if type(item) is bool and type(value.get(key)) is not bool:raise CiFailure(4)
     false=('actualPackageObservation','qualification','canService','originalHelperHandleKnown','packagedHelperLauncherImplemented',
@@ -188,8 +230,15 @@ def public_report(binding,outer,raw,*,failure=0,observation=None,command_binding
         validate_command_observation(command_binding)
         try:validate_command_observation(command_binding,require_closed=True);command_ok=True
         except BaseException:command_ok=False
-    return {'schemaVersion':3,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
+    helper_code=None;helper_phases=None;helper_observation=None
+    if raw is not None:
+        helper_code=raw['failureCode']
+        if not _integer(helper_code,31):raise CiFailure(4)
+        helper_phases=project_helper_phases(raw['phaseResults'])
+        helper_observation=validate_helper_failure_observation(raw.get('failureObservation'),raw['stage'])
+    return {'schemaVersion':4,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
       'commandProcessorBinding':command_binding,
+      'helperFailureCode':helper_code,'helperPhaseResults':helper_phases,'helperFailureObservation':helper_observation,
       'sdkReportKnown':raw is not None,'sdkStage':None if raw is None else raw['stage'],
       'sdkGatePassed':bool(raw and outer and raw['sdkGatePassed'] and outer['completed'] and failure==0 and command_ok),
       'nativeSdkCompiled':None if raw is None else raw['nativeSdkCompiled'],

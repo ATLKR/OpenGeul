@@ -1,6 +1,6 @@
 # Fixed IME native-fixture compiler observation
 
-This diagnostic admits only Suite commit `3a5b101ba9b66b6c17544f89c9f39cdd6e63d933` and the nine source sizes/hashes embedded in the collector. It checks the actual checkout HEAD and bytes, copies only those verified bytes to an owned temporary tree, and runs the original three native fixture methods. `helper()` reads the original observer string through AST without importing the document UI.
+This diagnostic admits only Suite commit `b98b555b646f8fd412057afb880e8b4c35262f9a` and the nine source sizes/hashes embedded in the collector. It checks the actual checkout HEAD and bytes, copies only those verified bytes to an owned temporary tree, and runs the original three native fixture methods. `helper()` reads the original observer string through AST without importing the document UI.
 
 ```text
 python suite/scripts/ime-finalization-compiler-observation/observe-ime-finalization-compile.py --source-root .work/ime-finalization-source --architecture x64 --output .work/ime-finalization-compile

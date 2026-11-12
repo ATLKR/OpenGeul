@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 ROOT=Path(__file__).resolve().parents[1];REPO=ROOT.parents[2]
 spec=importlib.util.spec_from_file_location('ime_workflow_existing_sdk',Path(__file__).with_name('test_ci_wiring.py'));fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
-PIN='3a5b101ba9b66b6c17544f89c9f39cdd6e63d933'
+PIN='b98b555b646f8fd412057afb880e8b4c35262f9a'
 class CompileObservationWorkflowTests(unittest.TestCase):
  def setUp(self):
   self.w=yaml.safe_load((REPO/'.github/workflows/office-suite.yml').read_text());self.job=self.w['jobs'].get('ime-finalization-compile-observation');self.assertTrue(type(self.job)is dict,'Independent compile observation job must exist')

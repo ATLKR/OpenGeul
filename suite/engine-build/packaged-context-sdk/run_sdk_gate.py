@@ -22,7 +22,7 @@ def empty_receipt():
       'originalHelperHandleKnown':False,'packagedHelperLauncherImplemented':False,'watchdogVerified':False,
       'synchronousOsCallPreemptionVerified':False,'osImplicitEffectsKnown':False,'frozenV2Preserved':False,
       'pure40TestsRerun':False,'lease6TestsRerun':False,'workRootCreated':False,'codeApprovalVerified':False,
-      'commandProcessorBinding':None,'phaseResults':[]}
+      'commandProcessorBinding':None,'phaseResults':[],'failureObservation':None}
 
 def _fresh_text(root,name,text):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,40}\.cmd',name):raise GateFailure(2)
@@ -87,8 +87,9 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
     def remaining():
         if time.monotonic()>=overall:raise GateFailure(10)
     try:
+        result['stage']=1
         if architecture not in tools.MACHINES:raise GateFailure(2)
-        result['stage']=1;before=tools.verify_bundle(source_bundle);remaining()
+        before=tools.verify_bundle(source_bundle);remaining()
         root=_owned_root(work_root);result['workRootCreated']=True
         locations=tools.system_locations(architecture,deadline=overall);command_lease=locations['commandLease']
         machine=tools.MACHINES[architecture];remaining()
@@ -142,6 +143,8 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
         if tools.verify_bundle(source_bundle)!=before:raise GateFailure(3)
         remaining();result.update(stage=7,frozenV2Preserved=True,sdkGatePassed=True)
     except BaseException as error:
+        from ci_entry import failure_observation
+        result['failureObservation']=failure_observation(error,result['stage'])
         result['failureCode']=error.code if isinstance(error,GateFailure) else 31
         result['cancelled']=isinstance(error,(KeyboardInterrupt,SystemExit))
     finally:
