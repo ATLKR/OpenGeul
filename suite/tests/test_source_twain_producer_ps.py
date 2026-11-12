@@ -18,17 +18,20 @@ class TwainProducerTests(existing.ProducerTests):
     test_component_binder_requires_current_context_and_generic_native_gate_stays_closed=None
     test_full_capture_revalidation_and_separate_inventory_role_are_mandatory=None
     test_component_object_cannot_differ_from_current_owned_proof_file=None
+    test_companion_static_runtime_and_current_config_cannot_be_replayed=None
 
     def fixture(self,label):
         value=capture_fixture.TwainCaptureTests('test_twain_capture_requires_exact_source_effect_and_scanner_peer')
         value.setUp();self.addCleanup(value.doCleanups)
         paths=value.fixture(label);self.assertEqual(value.run_capture(paths),0)
+        self.static_runtime_source_hook=value.static_runtime_source_hook
         return paths
 
     def receipt(self,paths):
         proof=paths[-1]/'source-twain-proof.json'
-        return ("$p=Get-Content "+quote(proof)+" -Raw|ConvertFrom-Json\n"
+        body=("$p=Get-Content "+quote(proof)+" -Raw|ConvertFrom-Json\n"
             "$r=[pscustomobject]@{sourcePin=[pscustomobject]@{coreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276'};architecture='x64';sourceCommit=$p.buildBinding.sourceCommit;sourceTree=$p.buildBinding.sourceTree;sourceRun=$p.buildBinding.sourceRun;runAttempt=$p.buildBinding.runAttempt;sourceRecipeProof=[pscustomobject]@{recipeSha256=$p.buildBinding.recipeSha256};installedRuntimeStage=[pscustomobject]@{receipt=[pscustomobject]@{sha256=$p.installedArchive.stageReceiptSha256}};sourceTwainProof=$p}\n")
+        return body+self.bind_static_runtime_fixture(paths,self.static_runtime_source_hook)
 
     def call(self,paths):
         return 'Get-OwnedSourceTwainProduct $r '+quote(paths[1])+' '+quote(paths[-1])
@@ -99,12 +102,20 @@ class TwainProducerTests(existing.ProducerTests):
         revalidate=source[source.index("$receipt.stage='revalidate-source-twain'"):source.index('Assert-NativeX64Qualification $receipt')]
         self.assertIn('-TimeoutMinutes 1 -NativeEnvironment -NumericOnly',revalidate)
 
-    def test_original_spsupp_and_generic_pe_bodies_are_unchanged(self):
+    def test_schema2_spsupp_and_unchanged_generic_pe_bodies_are_pinned(self):
         source=DRIVER.read_text()
         generic=source[source.index('function Get-ProductPeIdentity('):source.index('function Save-ProductPeFailure(')]
         self.assertEqual(hashlib.sha256(generic.encode()).hexdigest(),'03a16d71f4cddf8cf24997d5e3f2c0655b449abdc4a2d0e82b2fd83f962c500d')
         spsupp=source[source.index('function Get-OwnedSourceCompanionProduct('):source.index('function Get-OwnedSourceTwainProduct(')]
-        self.assertEqual(hashlib.sha256(spsupp.encode()).hexdigest(),'776697e88f154dcdd3a027e8466113da640cb62d33f979be6882793453c38c1f')
+        # Schema2 intentionally replaces the logical LinkTarget PE alias with
+        # source-backed physical instdir/config identities and static CRT proof.
+        self.assertEqual(hashlib.sha256(spsupp.encode()).hexdigest(),'d381eb7aba5f590864fa2861bd2b5941be0a2ded0b24fdf3ea85e4352bdb02bc')
+        for required in ('Assert-NativeX64CompanionStaticRuntimeSourceBinding',
+                '$location.configurationSha256 -cne $Receipt.configurationSha256',
+                "$p.buildOutput.path -cne 'instdir/program/spsupp_x86.dll'",
+                "$p.nativeHelperBuildOutput.path -cne 'instdir/program/spsupp_helper.exe'"):
+            self.assertIn(required,spsupp)
+
 
     def test_final_inventory_binds_both_native_peers_without_inflating_native_count(self):
         source=DRIVER.read_text()
@@ -114,3 +125,13 @@ class TwainProducerTests(existing.ProducerTests):
                 '$matches[0].sha256 -cne $peer.sha256','$matches[0].size -ne $peer.size'):
             with self.subTest(boundary=required):self.assertTrue(required in final,'Missing native peer inventory join')
         self.assertTrue("$receipt.nativePeCount=@($inventory|Where-Object {$_.role -eq $nativeRole}).Count" in source)
+
+    def test_twain_static_runtime_and_current_config_cannot_be_replayed(self):
+        kinds=('missing-hook','qualified-hook','configuration-digest','configuration-bytes','original','effective','foreign-evidence')
+        for ordinal,kind in enumerate(kinds):
+            with self.subTest(case=ordinal):
+                paths=self.fixture('reject-'+str(ordinal))
+                mutation=self.binding_mutation(paths,self.static_runtime_source_hook,kind)
+                body=self.receipt(paths)+mutation
+                body+="$rejected=$false;try{"+self.call(paths)+"|Out-Null}catch{$rejected=$true};if(-not $rejected){exit 32}\n"
+                self.assertEqual(self.ps(body),0)

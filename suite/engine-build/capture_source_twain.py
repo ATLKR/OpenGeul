@@ -52,19 +52,23 @@ def _hash(path,size,deadline):
 def capture(source,runtime,stage_path,context_path,evidence,*,validate=False):
     source=Path(source).absolute();runtime=Path(runtime).absolute();evidence=Path(evidence).absolute()
     stage_path=Path(stage_path).absolute();context_path=Path(context_path).absolute();deadline=time.monotonic()+50
-    phase=1;observed=None
+    phase=1;observed=None;diagnostic=payload._source_companion_diagnostic()
     try:
         if stage_path!=evidence/'installed-runtime-stage.json':raise Failure(1)
         if not validate and ((evidence/'source-twain-proof.json').exists() or (evidence/'source-twain').exists()):raise Failure(1)
         context=json.loads(_read(context_path,16384,deadline))
-        if (type(context) is not dict or set(context)!={'schemaVersion','architecture','coreCommit','buildBinding','stageReceiptSha256','sourceEvidenceDirectory','cliPolicyEvidence'}
+        if (type(context) is not dict or set(context)!={'schemaVersion','architecture','coreCommit','buildBinding','stageReceiptSha256','sourceEvidenceDirectory','cliPolicyEvidence','x86StaticRuntimeEvidence'}
                 or type(context['schemaVersion']) is not int or context['schemaVersion']!=1
                 or context['architecture']!='x64' or context['coreCommit']!=payload._SOURCE_COMPANION_CORE
                 or type(context['stageReceiptSha256']) is not str or not payload.SHA.fullmatch(context['stageReceiptSha256'])):raise Failure(1)
         payload._source_companion_binding(context['buildBinding'])
-        phase=2;retained=[]
-        policy=context['cliPolicyEvidence'];source_evidence=Path(context['sourceEvidenceDirectory']).absolute()
+        phase=2;retained=[];location_retained=[]
+        policy=context['cliPolicyEvidence']
+        directory_value=context['sourceEvidenceDirectory']
+        if type(directory_value)is not str or not Path(directory_value).is_absolute() or str(Path(directory_value))!=directory_value or '..' in Path(directory_value).parts:raise Failure(2)
+        source_evidence=Path(directory_value)
         if source_evidence!=evidence/'source-recipe' or type(policy) is not dict or set(policy)!={'original','effective'}:raise Failure(2)
+        crt_sources=payload._source_companion_static_runtime_sources(source,source_evidence,context['x86StaticRuntimeEvidence'],_read,deadline)
         original_path=Path(policy['original']).absolute();effective_path=Path(policy['effective']).absolute()
         if (original_path.parent!=source_evidence or effective_path.parent!=source_evidence
                 or original_path.name!='original-x64-CliNativeLibrary_cli_cppuhelper.mk'
@@ -74,12 +78,21 @@ def capture(source,runtime,stage_path,context_path,evidence,*,validate=False):
             if pin['path']=='cli_ure/CliNativeLibrary_cli_cppuhelper.mk':
                 original=_read(original_path,512*1024,deadline)
                 if _read(effective_path,512*1024,deadline)!=effective:raise Failure(2)
+            elif pin['path'] in crt_sources:original=crt_sources[pin['path']]['original']
             else:original=effective
             if (len(original)!=pin['bytes'] or hashlib.sha256(original).hexdigest()!=pin['sha256']
                     or hashlib.sha1(b'blob '+str(len(original)).encode()+b'\0'+original).hexdigest()!=pin['gitBlob']
                     or len(effective)!=pin['effectiveBytes'] or hashlib.sha256(effective).hexdigest()!=pin['effectiveSha256']):raise Failure(2)
             retained.append((pin,original,effective))
-        config=_read(source/'config_host.mk',2*1024*1024,deadline).decode('utf-8','strict')
+        raw_config=_read(source/'config_host.mk',2*1024*1024,deadline)
+        config=raw_config.decode('utf-8','strict')
+        compilers=re.findall(r'^[ \t]*(?:export[ \t]+)?COM[ \t]*=[ \t]*(.*)$',config,re.M)
+        if len(compilers)!=1 or compilers[0].strip()!='MSC':raise Failure(2)
+        instroot,location_contract=payload._source_companion_locations(source,runtime,raw_config)
+        for pin in payload.SOURCE_COMPANION_LOCATION_PINS:
+            data=_read(source/pin['path'],512*1024,deadline)
+            if len(data)!=pin['bytes'] or hashlib.sha256(data).hexdigest()!=pin['sha256'] or hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()!=pin['gitBlob']:raise Failure(2)
+            location_retained.append((pin,data))
         configured=re.findall(r'^[ \t]*(?:export[ \t]+)?CXX_X86_BINARY[ \t]*[:?+]?=[ \t]*(.*)$',config,re.M)
         if len(configured)!=1 or not configured[0].strip():raise Failure(2)
         for name,expected in (('OS','WNT'),('CPUNAME','X86_64')):
@@ -120,17 +133,19 @@ def capture(source,runtime,stage_path,context_path,evidence,*,validate=False):
                         count+=len(chunk);digest.update(chunk)
                         if count>entry.file_size:raise Failure(3)
                 if count!=entry.file_size or digest.hexdigest()!=row.get('sha256'):raise Failure(3)
-        phase=4;observed=payload._source_companion_pe(runtime/'program/twain32shim.exe')
-        helper=payload._source_companion_pe(runtime/'program/scnlo.dll',read_exports=False)
-        target=payload._source_companion_pe(source/'workdir/LinkTarget/Executable/twain32shim.exe')
-        helper_target=payload._source_companion_pe(source/'workdir/LinkTarget/Library/scnlo.dll',read_exports=False)
-        for name,actual,built in [('program/twain32shim.exe',observed,target),('program/scnlo.dll',helper,helper_target)]:
-            if (actual['size']!=selected[name].get('bytes') or actual['sha256']!=selected[name].get('sha256')
-                    or any(actual[k]!=built[k] for k in ('size','sha256'))):raise Failure(4)
-        component=dict(schemaVersion=1,kind='source-built-x86-twain-companion',architecture='x64',coreCommit=payload._SOURCE_COMPANION_CORE,
+        phase=4;observed=payload._source_companion_observe_pe(1,runtime/'program/twain32shim.exe',diagnostic)
+        helper=payload._source_companion_observe_pe(2,runtime/'program/scnlo.dll',diagnostic,read_exports=False)
+        target=payload._source_companion_observe_pe(3,instroot/'program/twain32shim.exe',diagnostic)
+        helper_target=payload._source_companion_observe_pe(4,instroot/'program/scnlo.dll',diagnostic,read_exports=False)
+        for role,name,actual,built in [(1,'program/twain32shim.exe',observed,target),(2,'program/scnlo.dll',helper,helper_target)]:
+            if not payload._source_companion_observe_join(role,actual,selected[name].get('bytes'),selected[name].get('sha256'),diagnostic):raise Failure(4)
+            if not payload._source_companion_observe_join(role+2,built,actual['size'],actual['sha256'],diagnostic):raise Failure(4)
+        component=dict(schemaVersion=2,kind='source-built-x86-twain-companion',architecture='x64',coreCommit=payload._SOURCE_COMPANION_CORE,
             path='program/twain32shim.exe',role='x86CompatibilityHelper',machine=observed['machine'],size=observed['size'],sha256=observed['sha256'],
             buildBinding=context['buildBinding'],sourceIntent='twain-32bit-driver-process-bridge',sourceProofs=payload.SOURCE_TWAIN_SOURCE_PINS,
-            configuredX86=True,linkTarget=dict(path='workdir/LinkTarget/Executable/twain32shim.exe',size=target['size'],sha256=target['sha256']),
+            staticRuntimeSourceProofs=payload.SOURCE_X86_COMPANION_CRT_PINS,configuredX86=True,linkTarget=dict(kind='gbuild-bookkeeping-prefix',path='workdir/LinkTarget/Executable/twain32shim.exe'),
+            buildOutput=dict(path='instdir/program/twain32shim.exe',size=target['size'],sha256=target['sha256']),
+            nativePeerBuildOutput=dict(path='instdir/program/scnlo.dll',size=helper_target['size'],sha256=helper_target['sha256']),locationContract=location_contract,
             nativePeer=dict(path='program/scnlo.dll',machine=helper['machine'],role='nativeX64',size=helper['size'],sha256=helper['sha256']),
             installedArchive=dict(kind='main',size=archive['bytes'],sha256=archive['sha256'],stageReceiptSha256=context['stageReceiptSha256']),
             exports=observed['exports'],imports=observed['imports'],dependencyPolicy='x86-twain-os-only-no-private-shadow-v1',
@@ -145,6 +160,19 @@ def capture(source,runtime,stage_path,context_path,evidence,*,validate=False):
                     path.parent.mkdir(parents=True,exist_ok=True)
                     with path.open('xb') as stream:stream.write(data)
                 if _hash(path,len(data),deadline)!=expected_sha:raise Failure(6)
+        for pin in payload.SOURCE_X86_COMPANION_CRT_PINS:
+            for side in ('original','effective'):
+                raw=crt_sources[pin['path']][side];path=retained_root/'static-runtime'/side/pin['path']
+                if not validate:
+                    path.parent.mkdir(parents=True,exist_ok=True)
+                    with path.open('xb') as stream:stream.write(raw)
+                if _hash(path,len(raw),deadline)!=hashlib.sha256(raw).hexdigest():raise Failure(6)
+        for pin,data in location_retained:
+            path=retained_root/'location'/'source'/pin['path']
+            if not validate:
+                path.parent.mkdir(parents=True,exist_ok=True)
+                with path.open('xb') as stream:stream.write(data)
+            if _hash(path,len(data),deadline)!=pin['sha256']:raise Failure(6)
         encoded=json.dumps(component,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
         if len(encoded)>65536 or time.monotonic()>=deadline:raise Failure(8)
         if validate:
@@ -153,9 +181,10 @@ def capture(source,runtime,stage_path,context_path,evidence,*,validate=False):
         else:
             with (evidence/'source-twain-proof.json').open('xb') as stream:stream.write(encoded)
         return component
-    except BaseException:
+    except BaseException as error:
+        payload._source_companion_closed_exception(error,diagnostic,capture,Failure)
         failure=dict(schemaVersion=1,kind='source-twain-capture-failure',phase=phase,passed=False,
-            fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+            fullEngineQualified=False,acceptanceEligible=False,guiVerified=False,diagnostic=diagnostic)
         if observed:
             failure.update(machine=observed['machine'],optionalMagic=observed['optionalMagic'],size=observed['size'],sha256=observed['sha256'],
                 clrRva=observed['clrRva'],clrSize=observed['clrSize'],exportCount=len(observed['exports']))
@@ -163,6 +192,7 @@ def capture(source,runtime,stage_path,context_path,evidence,*,validate=False):
             failure['osImports']=sorted(set(n for n in imports if n in payload._SOURCE_TWAIN_OS_IMPORTS))
             failure['vcImports']=sorted(set(n for n in imports if re.fullmatch(r'(?:msvcp|vcruntime|concrt)[0-9][a-z0-9_.-]*\.dll',n)))
             failure['unknownImportCount']=sum(n not in failure['osImports'] and n not in failure['vcImports'] for n in imports)
+            failure['unknownImports']={key:[n for n in observed['imports'][key] if n not in failure['osImports'] and n not in failure['vcImports']] for key in ('normal','delay')}
         try:
             with (evidence/'source-twain-failure.json').open('xb') as stream:stream.write(json.dumps(failure,sort_keys=True).encode()+b'\n')
         except BaseException:pass

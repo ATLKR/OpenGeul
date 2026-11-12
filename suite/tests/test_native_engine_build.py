@@ -36,6 +36,9 @@ class NativeEngineBuildTests(unittest.TestCase):
                               ('connectivity/source/parse/sqlflex.l', 'native-flex-fatal/sqlflex.l')]:
             target = source / name; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((SOURCE.parents[1] / 'tests/fixtures' / fixture).read_bytes())
+        target=source/lock['moduleBootstrap']['path'];target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_bytes((SOURCE.parents[1]/'tests/fixtures/native-source-tar/unpack-sources').read_bytes())
+        bootstrap=module.ARM.install_module_bootstrap(source,evidence)
         loader = module._install_firebird_loader_path(source, evidence, lock['windowsFirebirdLoaderPath'])
         zstd = module._install_zstd_source_links(source, evidence, lock['windowsZstdSourceLinks'])
         gpg = module._install_gpg_build_compiler_path(source, evidence, lock['windowsGpgBuildCompilerPath'])
@@ -48,6 +51,10 @@ class NativeEngineBuildTests(unittest.TestCase):
         atl = module._install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths'])
         harfbuzz = module._install_harfbuzz_native_meson_paths(source, evidence, lock['windowsHarfbuzzNativeMesonPaths'])
         cli_policy = module._install_cli_policy_platform(source, evidence, lock['windowsCliPublisherPolicyPlatform'])
+        for pin in lock['windowsX86CompanionStaticRuntime']['sources']:
+            target=source/pin['path'];target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes((SOURCE.parents[1]/'tests/fixtures/twain-source-9dea'/pin['path']).read_bytes())
+        static_runtime=module._install_x86_companion_static_runtime(source,evidence,lock['windowsX86CompanionStaticRuntime'])
         flex = module._install_flex_fatal_compat(source, evidence, lock['flexFatalCompatibility'], 'x64')
         for pin in lock['windowsDotnetProjectGraph']['sources']:
             target=source/pin['path'];target.parent.mkdir(parents=True,exist_ok=True)
@@ -56,9 +63,10 @@ class NativeEngineBuildTests(unittest.TestCase):
         good = dict(sourcePortManifestSha256=hashlib.sha256((engine / 'source-build.json').read_bytes()).hexdigest(),
                     nativeTargetsSha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
                     flexFatalCompatibilitySourcePatch=flex,
-                    sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64',
+                    sourceHooks=dict(kind='native-windows-common-source-hooks', architecture='x64', moduleBootstrap=bootstrap,
+                                     nativeBuildVerified=False, basePersistenceVerified=False,
                                      firebirdLoaderPath=loader, zstdSourceLinks=zstd, gpgBuildCompilerPath=gpg, atlNativePaths=atl,
-                                     harfbuzzNativeMesonPaths=harfbuzz, cliPublisherPolicyPlatform=cli_policy, dotnetProjectGraph=dotnet),
+                                     harfbuzzNativeMesonPaths=harfbuzz, cliPublisherPolicyPlatform=cli_policy, x86CompanionStaticRuntime=static_runtime, dotnetProjectGraph=dotnet),
                     sourceRecipeProof=dict(schemaVersion=1, kind='native-engine-source-recipe-install', architecture='x64',
                         recipeId=plan['recipeId'], hookOrder=plan['recipe']['hooks'],
                         policySha256=hashlib.sha256((engine / 'native-targets.json').read_bytes()).hexdigest(),
@@ -255,6 +263,7 @@ if(-not $rejected){{throw 'Missing replay was qualified'}}
             'test_x64_harfbuzz_rejects_invalid_compilers_and_conversion_before_meson',
             'test_x64_harfbuzz_real_cygwin_uses_builtin_host_and_actual_path_conversion']
         expected=['suite.tests.test_native_source_recipe.ActualSourceRecipeTests.'+name for name in methods]
+        expected.append('suite.tests.source_x86_companion_crt_selection.GbuildSelectionTests.test_both_real_recipes_select_static_only_for_the_exact_x64_msc_profile')
         receiver=f"""
 import json,os
 from pathlib import Path
@@ -281,11 +290,11 @@ class TextTestRunner:
             'XDG_CACHE_HOME':'/workspace/toolcache/opengeul-validation/cache',
             'XDG_CONFIG_HOME':'/workspace/toolcache/opengeul-validation/config',
             'XDG_DATA_HOME':'/workspace/toolcache/opengeul-validation/data','PYTHONUTF8':'1'}
-        for count,skip,passed in ((4,0,True),(3,0,True),(4,1,True),(4,0,False)):
+        for count,skip,passed in ((5,0,True),(4,0,True),(6,0,True),(5,1,True),(5,0,False),(0,0,True)):
             (repo/'controlled-result.json').write_text(json.dumps(dict(testsRun=count,skipped=skip,success=passed)))
             result=subprocess.run(['/usr/bin/bash',str(script)],env=clean,capture_output=True,timeout=10)
             with self.subTest(testsRun=count,skipped=skip,success=passed):
-                self.assertEqual(count==4 and skip==0 and passed,result.returncode==0)
+                self.assertEqual(count==5 and skip==0 and passed,result.returncode==0)
 
     def test_x64_final_harfbuzz_source_mutation_is_rejected(self):
         _, _, source, _, _ = self._x64_source_hook_fixture()

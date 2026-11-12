@@ -84,7 +84,8 @@ class NativeFlexFatalTests(unittest.TestCase):
         calls=re.findall(r"(?m)^\s*Invoke-LoggedCommand \$python @\(([^)\r\n]+)\).*?\(Join-Path \$evidence 'source-recipe-tests'\)",driver)
         self.assertEqual(1,len(calls),'The common producer source unit caller is ambiguous')
         self.assertEqual(['-m','unittest','suite.tests.test_native_source_recipe',
-                          'suite.tests.test_native_flex_fatal','-v'],re.findall(r"'([^']*)'",calls[0]))
+                          'suite.tests.test_native_flex_fatal',
+                          'suite.tests.test_x86_companion_static_runtime.StaticRuntimeTests','-v'],re.findall(r"'([^']*)'",calls[0]))
 
     def test_fixture_has_exact_public_source_and_independent_candidate_pins(self):
         metadata=json.loads((FIXTURE/'source.json').read_bytes())

@@ -2194,6 +2194,59 @@ function Assert-NativeX64CliPolicySourceBinding($Proof,$Pin,[string]$EvidenceDir
     }
 }
 
+function Assert-NativeX64CompanionStaticRuntimeSourceBinding($Proof,$Pin,[string]$EvidenceDirectory) {
+    Assert-NativeAtlKeys $Pin @('condition','sources')
+    if($Pin.condition -isnot [string] -or $Pin.condition -cne 'WNT_X86_64_MSC' -or
+       $Pin.sources -isnot [array] -or $Pin.sources.Count -ne 2) {throw 'Source companion static runtime descriptor differs.'}
+    Assert-NativeAtlKeys $Proof @('schemaVersion','kind','coreCommit','architecture','condition','recipes',
+        'nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')
+    if(($Proof.schemaVersion -isnot [int] -and $Proof.schemaVersion -isnot [long]) -or $Proof.schemaVersion -ne 1 -or
+       $Proof.kind -isnot [string] -or $Proof.kind -cne 'windows-x64-x86-companion-static-runtime-source-hooks' -or
+       $Proof.coreCommit -isnot [string] -or $Proof.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
+       $Proof.architecture -isnot [string] -or $Proof.architecture -cne 'x64' -or $Proof.condition -isnot [string] -or
+       $Proof.condition -cne $Pin.condition -or $Proof.recipes -isnot [array] -or $Proof.recipes.Count -ne 2) {throw 'Source companion static runtime proof differs.'}
+    foreach($field in @('nativeBuildVerified','fullEngineQualified','acceptanceEligible','guiVerified')) {
+        if($Proof.$field -isnot [bool] -or $Proof.$field) {throw 'Source companion static runtime hook cannot qualify a native engine.'}
+    }
+    if([string]::IsNullOrWhiteSpace($EvidenceDirectory) -or -not [IO.Path]::IsPathFullyQualified($EvidenceDirectory) -or
+       $EvidenceDirectory -cne [IO.Path]::GetFullPath($EvidenceDirectory)) {throw 'Source companion static runtime evidence directory differs.'}
+    Assert-UnlinkedPath $EvidenceDirectory
+    $expected=@(
+        @('shell/Library_spsupp_x86.mk',1444,'68a515669d5730ef7ce4d23def0c288110b259ba01e89aa3bb3275d33b496c56',1630,'5b1c4729b8861e72422ba08cc6d8af5b5adc69c721f5f877991c7c915fe486a3'),
+        @('extensions/Executable_twain32shim.mk',1235,'9dfc8323e9d5af2611a9330fd67d7244a248825af1ce73aa7bd9ecdea1d674c4',1425,'f669bc99d15f302aed5a6dd9af94c700ff9a0add204166a1e029d8f9093b1c61'))
+    for($i=0;$i -lt 2;$i++) {
+        $pinRow=$Pin.sources[$i];$row=$Proof.recipes[$i];$fixed=$expected[$i]
+        Assert-NativeAtlKeys $pinRow @('path','size','sha256','afterSize','afterSha256')
+        Assert-NativeAtlKeys $row @('path','beforeBytes','afterBytes','beforeSha256','afterSha256','evidence')
+        foreach($field in @('path','sha256','afterSha256')) {
+            if($pinRow.$field -isnot [string]) {throw 'Source companion static runtime descriptor requires scalar strings.'}
+        }
+        foreach($field in @('path','beforeSha256','afterSha256')) {
+            if($row.$field -isnot [string]) {throw 'Source companion static runtime proof requires scalar strings.'}
+        }
+        foreach($field in @('size','afterSize')) {
+            if($pinRow.$field -isnot [int] -and $pinRow.$field -isnot [long]) {throw 'Source companion static runtime descriptor requires exact integer sizes.'}
+        }
+        foreach($field in @('beforeBytes','afterBytes')) {
+            if($row.$field -isnot [int] -and $row.$field -isnot [long]) {throw 'Source companion static runtime proof requires exact integer sizes.'}
+        }
+        if($pinRow.path -cne $fixed[0] -or $pinRow.size -ne $fixed[1] -or $pinRow.sha256 -cne $fixed[2] -or
+           $pinRow.afterSize -ne $fixed[3] -or $pinRow.afterSha256 -cne $fixed[4] -or
+           $row.path -cne $pinRow.path -or $row.beforeBytes -ne $pinRow.size -or $row.afterBytes -ne $pinRow.afterSize -or
+           $row.beforeSha256 -cne $pinRow.sha256 -or $row.afterSha256 -cne $pinRow.afterSha256) {throw 'Source companion static runtime source tuple differs.'}
+        Assert-NativeAtlKeys $row.evidence @('original','effective')
+        foreach($phase in @('original','effective')) {
+            $path=$row.evidence.$phase
+            if($path -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($path) -or $path -cne [IO.Path]::GetFullPath($path) -or
+               [IO.Path]::GetDirectoryName($path) -cne $EvidenceDirectory -or
+               [IO.Path]::GetFileName($path) -cne ($phase+'-x64-'+[IO.Path]::GetFileName($pinRow.path))) {throw 'Source companion static runtime evidence belongs to another source run.'}
+            Assert-UnlinkedPath $path
+            if($phase -ceq 'original') {Confirm-FileIdentity $path $pinRow.size SHA256 $pinRow.sha256|Out-Null}
+            else {Confirm-FileIdentity $path $pinRow.afterSize SHA256 $pinRow.afterSha256|Out-Null}
+        }
+    }
+}
+
 function Assert-NativeFlexFatalSourceBinding($Proof,$Pin,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture,[string]$EvidenceDirectory) {
     Assert-NativeAtlKeys $Pin @('path','size','sha256','afterSize','afterSha256','condition')
     foreach($field in @('path','sha256','afterSha256','condition')) {
@@ -2294,7 +2347,7 @@ function Assert-NativeDotnetProjectGraphSourceBinding($Proof,$Pin,[ValidateSet('
 
 function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[string]$SourceEvidenceDirectory) {
     $target=Get-NativeEngineTarget $Architecture;$proof=$Receipt.sourceRecipeProof
-    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')}
+    $order=if($Architecture -ceq 'arm64'){@('arm64Full','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')}else{@('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','x86CompanionStaticRuntime','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')}
     $guardCount=if($Architecture -ceq 'arm64'){13}else{4}
     if($proof.schemaVersion -ne 1 -or $proof.kind -cne 'native-engine-source-recipe-install' -or $proof.architecture -cne $Architecture -or
        $proof.recipeId -cne $target.sourceRecipe -or $proof.policySha256 -cne $Receipt.nativeTargetsSha256 -or $proof.manifestSha256 -cne $Receipt.sourcePortManifestSha256 -or
@@ -2306,8 +2359,14 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
     if((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Receipt.sourcePortManifestSha256) {throw 'Source manifest changed after source binding.'}
     $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
     if($Architecture -ceq 'x64') {
+        Assert-NativeAtlKeys $Receipt.sourceHooks @('kind','architecture','moduleBootstrap','firebirdLoaderPath','zstdSourceLinks',
+            'gpgBuildCompilerPath','atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','x86CompanionStaticRuntime',
+            'nativeBuildVerified','basePersistenceVerified','dotnetProjectGraph')
+        foreach($field in @('nativeBuildVerified','basePersistenceVerified')) {
+            if($Receipt.sourceHooks.$field -isnot [bool] -or $Receipt.sourceHooks.$field) {throw 'Source hooks cannot qualify a native engine.'}
+        }
         $pins=@($manifest.configureSource,$manifest.sourceHook,$manifest.mddsEquality.recipe,$manifest.pythonNativeHost.recipe)
-        if($proof.recipeSha256 -cne '66704ff304812a3181912c38723e4d0333670055dbb0c879e46fcc1ea961324d') {throw 'x64 canonical source recipe differs.'}
+        if($proof.recipeSha256 -cne '26a58083e03132ea83a6def9ef4b2c432660a7e8bbcf75063bb325797db8ef4b') {throw 'x64 canonical source recipe differs.'}
         for($i=0;$i -lt 4;$i++) {
             $row=$proof.armGuardedSources[$i]
             if($row.path -cne $pins[$i].path -or $row.beforeSha256 -cne $pins[$i].sha256 -or $row.sha256 -cne $pins[$i].sha256) {throw 'x64 protected ARM-only source identity differs.'}
@@ -2425,6 +2484,7 @@ function Assert-NativeSourceRecipeBinding($Receipt,[ValidateSet('arm64','x64',Ig
             else {Confirm-FileIdentity $path $pin.afterSize SHA256 $pin.afterSha256|Out-Null}
         }
         Assert-NativeX64CliPolicySourceBinding $Receipt.sourceHooks.cliPublisherPolicyPlatform $manifest.windowsCliPublisherPolicyPlatform $directory
+        Assert-NativeX64CompanionStaticRuntimeSourceBinding $Receipt.sourceHooks.x86CompanionStaticRuntime $manifest.windowsX86CompanionStaticRuntime $SourceEvidenceDirectory
     }
     Assert-NativeFlexFatalSourceBinding $Receipt.flexFatalCompatibilitySourcePatch $manifest.flexFatalCompatibility $Architecture $SourceEvidenceDirectory
     if($Architecture -ceq 'arm64' -and $proof.recipeSha256 -cne '9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe') {throw 'ARM64 canonical source recipe differs.'}
@@ -2467,12 +2527,17 @@ function Get-OwnedSourceCompanionProduct($Receipt,[string]$RuntimeRoot,[string]$
     }
     if($null -eq $p -or $Receipt.architecture -isnot [string] -or $Receipt.architecture -cne 'x64' -or $Receipt.sourcePin.coreCommit -isnot [string] -or $Receipt.sourcePin.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
        ($p.schemaVersion -isnot [long] -and $p.schemaVersion -isnot [int])) {throw 'Source companion profile is absent.'}
-    if($p.schemaVersion -ne 1 -or $p.kind -cne 'source-built-x86-sharepoint-companion' -or $p.architecture -cne 'x64' -or
+    Assert-NativeAtlKeys $p @('schemaVersion','kind','architecture','coreCommit','path','role','machine','size','sha256','buildBinding',
+        'sourceIntent','sourceProofs','configuredX86','linkTarget','nativeHelper','installedArchive','exports','imports','dependencyPolicy',
+        'fullEngineQualified','acceptanceEligible','guiVerified','locationContract','buildOutput','nativeHelperBuildOutput','staticRuntimeSourceProofs')
+    if($p.schemaVersion -ne 2 -or $p.kind -cne 'source-built-x86-sharepoint-companion' -or $p.architecture -cne 'x64' -or
        $p.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or $p.path -cne 'program/spsupp_x86.dll' -or $p.role -cne 'x86CompatibilityHelper' -or
        ($p.machine -isnot [long] -and $p.machine -isnot [int])) {throw 'Source companion role is not reviewed.'}
     if($p.machine -ne 332 -or $p.configuredX86 -isnot [bool] -or -not $p.configuredX86 -or
        $p.fullEngineQualified -isnot [bool] -or $p.fullEngineQualified -or $p.acceptanceEligible -isnot [bool] -or $p.acceptanceEligible -or
        $p.guiVerified -isnot [bool] -or $p.guiVerified -or @($p.sourceProofs).Count -ne 13) {throw 'Source companion metadata cannot qualify an engine.'}
+    $staticRuntimeDescriptor=[pscustomobject]@{condition='WNT_X86_64_MSC';sources=$p.staticRuntimeSourceProofs}
+    Assert-NativeX64CompanionStaticRuntimeSourceBinding $Receipt.sourceHooks.x86CompanionStaticRuntime $staticRuntimeDescriptor (Join-Path ([IO.Path]::GetFullPath($EvidenceDirectory)) 'source-recipe')
     foreach($name in @('sourceCommit','sourceTree')) {
         if($p.buildBinding.$name -isnot [string] -or $Receipt.$name -isnot [string] -or $p.buildBinding.$name -cnotmatch '^[0-9a-f]{40}$' -or
            $p.buildBinding.$name -cne $Receipt.$name) {throw 'Source companion belongs to a different source tree.'}
@@ -2486,8 +2551,33 @@ function Get-OwnedSourceCompanionProduct($Receipt,[string]$RuntimeRoot,[string]$
         if(($identity.size -isnot [long] -and $identity.size -isnot [int]) -or $identity.size -lt 64 -or $identity.size -gt 16777216 -or
            $identity.sha256 -isnot [string] -or $identity.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Source companion binary identity is invalid.'}
     }
+    # Schema 2 keeps the gbuild bookkeeping prefix separate from physical build products.
+    Assert-NativeAtlKeys $p.locationContract @('schemaVersion','kind','coreCommit','sourceProofs','sourceRelativeInstRoot','libraryFolder','binaryFolder','configurationSha256')
+    $location=$p.locationContract
+    if(($location.schemaVersion -isnot [long] -and $location.schemaVersion -isnot [int]) -or $location.schemaVersion -ne 1 -or
+       $location.kind -cne 'gbuild-instdir-location-v1' -or $location.coreCommit -cne $p.coreCommit -or
+       $location.sourceRelativeInstRoot -cne 'instdir' -or $location.libraryFolder -cne 'program' -or $location.binaryFolder -cne 'program' -or
+       $location.configurationSha256 -isnot [string] -or $location.configurationSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $Receipt.configurationSha256 -isnot [string] -or $Receipt.configurationSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $location.configurationSha256 -cne $Receipt.configurationSha256 -or @($location.sourceProofs).Count -ne 3) {throw 'Source companion location or configuration differs.'}
+    $locationSourcePaths=@('solenv/gbuild/TargetLocations.mk','solenv/gbuild/Helper.mk','solenv/gbuild/Executable.mk')
+    for($i=0;$i -lt $locationSourcePaths.Count;$i++) {
+        $sourceProof=$location.sourceProofs[$i];Assert-NativeAtlKeys $sourceProof @('path','bytes','gitBlob','sha256')
+        if($sourceProof.path -cne $locationSourcePaths[$i] -or ($sourceProof.bytes -isnot [long] -and $sourceProof.bytes -isnot [int]) -or
+           $sourceProof.bytes -le 0 -or $sourceProof.gitBlob -isnot [string] -or $sourceProof.gitBlob -cnotmatch '^[0-9a-f]{40}$' -or
+           $sourceProof.sha256 -isnot [string] -or $sourceProof.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Source companion location source identity is invalid.'}
+    }
+    Assert-NativeAtlKeys $p.linkTarget @('kind','path')
+    foreach($output in @($p.buildOutput,$p.nativeHelperBuildOutput)) {
+        Assert-NativeAtlKeys $output @('path','size','sha256')
+        if(($output.size -isnot [long] -and $output.size -isnot [int]) -or $output.size -lt 64 -or $output.size -gt 16777216 -or
+           $output.sha256 -isnot [string] -or $output.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Source companion physical build identity is invalid.'}
+    }
     if(($p.nativeHelper.machine -isnot [long] -and $p.nativeHelper.machine -isnot [int]) -or $p.nativeHelper.path -isnot [string] -or $p.nativeHelper.path -cne 'program/spsupp_helper.exe' -or $p.nativeHelper.machine -ne 34404 -or $p.nativeHelper.role -cne 'nativeX64' -or
-       $p.linkTarget.path -cne 'workdir/LinkTarget/Library/spsupp_x86.dll' -or $p.linkTarget.size -ne $p.size -or $p.linkTarget.sha256 -cne $p.sha256) {
+       $p.linkTarget.kind -cne 'gbuild-bookkeeping-prefix' -or $p.linkTarget.path -cne 'workdir/LinkTarget/Library/spsupp_x86.dll' -or
+       $p.buildOutput.path -cne 'instdir/program/spsupp_x86.dll' -or $p.buildOutput.size -ne $p.size -or $p.buildOutput.sha256 -cne $p.sha256 -or
+       $p.nativeHelperBuildOutput.path -cne 'instdir/program/spsupp_helper.exe' -or $p.nativeHelperBuildOutput.size -ne $p.nativeHelper.size -or
+       $p.nativeHelperBuildOutput.sha256 -cne $p.nativeHelper.sha256) {
         throw 'Source companion source target or native helper differs.'
     }
     $root=[IO.Path]::GetFullPath($RuntimeRoot);$path=Join-Path $root 'program/spsupp_x86.dll';Assert-UnlinkedPath $root;Assert-UnlinkedPath $path
@@ -2519,15 +2609,20 @@ function Get-OwnedSourceTwainProduct($Receipt,[string]$RuntimeRoot,[string]$Evid
     }
     if($null -eq $p -or $Receipt.architecture -isnot [string] -or $Receipt.architecture -cne 'x64' -or
        $Receipt.sourcePin.coreCommit -isnot [string] -or $Receipt.sourcePin.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
-       ($p.schemaVersion -isnot [long] -and $p.schemaVersion -isnot [int]) -or $p.schemaVersion -ne 1 -or
+       ($p.schemaVersion -isnot [long] -and $p.schemaVersion -isnot [int]) -or $p.schemaVersion -ne 2 -or
        $p.kind -cne 'source-built-x86-twain-companion' -or $p.architecture -cne 'x64' -or
        $p.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or $p.path -cne 'program/twain32shim.exe' -or
        $p.sourceIntent -cne 'twain-32bit-driver-process-bridge' -or $p.role -cne 'x86CompatibilityHelper' -or
        ($p.machine -isnot [long] -and $p.machine -isnot [int]) -or $p.machine -ne 332) {throw 'Source TWAIN role is not reviewed.'}
+    Assert-NativeAtlKeys $p @('schemaVersion','kind','architecture','coreCommit','path','role','machine','size','sha256','buildBinding',
+        'sourceIntent','sourceProofs','configuredX86','linkTarget','nativePeer','installedArchive','exports','imports','dependencyPolicy',
+        'fullEngineQualified','acceptanceEligible','guiVerified','locationContract','buildOutput','nativePeerBuildOutput','staticRuntimeSourceProofs')
     if($p.configuredX86 -isnot [bool] -or -not $p.configuredX86 -or
        $p.fullEngineQualified -isnot [bool] -or $p.fullEngineQualified -or $p.acceptanceEligible -isnot [bool] -or $p.acceptanceEligible -or
        $p.guiVerified -isnot [bool] -or $p.guiVerified -or @($p.sourceProofs).Count -ne 25 -or @($p.exports).Count -ne 0 -or
        $p.dependencyPolicy -cne 'x86-twain-os-only-no-private-shadow-v1') {throw 'Source TWAIN metadata cannot qualify an engine.'}
+    $staticRuntimeDescriptor=[pscustomobject]@{condition='WNT_X86_64_MSC';sources=$p.staticRuntimeSourceProofs}
+    Assert-NativeX64CompanionStaticRuntimeSourceBinding $Receipt.sourceHooks.x86CompanionStaticRuntime $staticRuntimeDescriptor (Join-Path ([IO.Path]::GetFullPath($EvidenceDirectory)) 'source-recipe')
     foreach($name in @('sourceCommit','sourceTree')) {
         if($p.buildBinding.$name -isnot [string] -or $Receipt.$name -isnot [string] -or $p.buildBinding.$name -cnotmatch '^[0-9a-f]{40}$' -or
            $p.buildBinding.$name -cne $Receipt.$name) {throw 'Source TWAIN belongs to a different source tree.'}
@@ -2543,10 +2638,34 @@ function Get-OwnedSourceTwainProduct($Receipt,[string]$RuntimeRoot,[string]$Evid
         if(($identity.size -isnot [long] -and $identity.size -isnot [int]) -or $identity.size -lt 64 -or $identity.size -gt 16777216 -or
            $identity.sha256 -isnot [string] -or $identity.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Source TWAIN binary identity is invalid.'}
     }
+    # Schema 2 keeps the gbuild bookkeeping prefix separate from physical build products.
+    Assert-NativeAtlKeys $p.locationContract @('schemaVersion','kind','coreCommit','sourceProofs','sourceRelativeInstRoot','libraryFolder','binaryFolder','configurationSha256')
+    $location=$p.locationContract
+    if(($location.schemaVersion -isnot [long] -and $location.schemaVersion -isnot [int]) -or $location.schemaVersion -ne 1 -or
+       $location.kind -cne 'gbuild-instdir-location-v1' -or $location.coreCommit -cne $p.coreCommit -or
+       $location.sourceRelativeInstRoot -cne 'instdir' -or $location.libraryFolder -cne 'program' -or $location.binaryFolder -cne 'program' -or
+       $location.configurationSha256 -isnot [string] -or $location.configurationSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $Receipt.configurationSha256 -isnot [string] -or $Receipt.configurationSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $location.configurationSha256 -cne $Receipt.configurationSha256 -or @($location.sourceProofs).Count -ne 3) {throw 'Source TWAIN location or configuration differs.'}
+    $locationSourcePaths=@('solenv/gbuild/TargetLocations.mk','solenv/gbuild/Helper.mk','solenv/gbuild/Executable.mk')
+    for($i=0;$i -lt $locationSourcePaths.Count;$i++) {
+        $sourceProof=$location.sourceProofs[$i];Assert-NativeAtlKeys $sourceProof @('path','bytes','gitBlob','sha256')
+        if($sourceProof.path -cne $locationSourcePaths[$i] -or ($sourceProof.bytes -isnot [long] -and $sourceProof.bytes -isnot [int]) -or
+           $sourceProof.bytes -le 0 -or $sourceProof.gitBlob -isnot [string] -or $sourceProof.gitBlob -cnotmatch '^[0-9a-f]{40}$' -or
+           $sourceProof.sha256 -isnot [string] -or $sourceProof.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Source TWAIN location source identity is invalid.'}
+    }
+    Assert-NativeAtlKeys $p.linkTarget @('kind','path')
+    foreach($output in @($p.buildOutput,$p.nativePeerBuildOutput)) {
+        Assert-NativeAtlKeys $output @('path','size','sha256')
+        if(($output.size -isnot [long] -and $output.size -isnot [int]) -or $output.size -lt 64 -or $output.size -gt 16777216 -or
+           $output.sha256 -isnot [string] -or $output.sha256 -cnotmatch '^[0-9a-f]{64}$') {throw 'Source TWAIN physical build identity is invalid.'}
+    }
     if(($p.nativePeer.machine -isnot [long] -and $p.nativePeer.machine -isnot [int]) -or $p.nativePeer.machine -ne 34404 -or
        $p.nativePeer.path -cne 'program/scnlo.dll' -or $p.nativePeer.role -cne 'nativeX64' -or
-       $p.linkTarget.path -cne 'workdir/LinkTarget/Executable/twain32shim.exe' -or $p.linkTarget.size -ne $p.size -or
-       $p.linkTarget.sha256 -cne $p.sha256) {throw 'Source TWAIN source target or native scanner peer differs.'}
+       $p.linkTarget.kind -cne 'gbuild-bookkeeping-prefix' -or $p.linkTarget.path -cne 'workdir/LinkTarget/Executable/twain32shim.exe' -or
+       $p.buildOutput.path -cne 'instdir/program/twain32shim.exe' -or $p.buildOutput.size -ne $p.size -or $p.buildOutput.sha256 -cne $p.sha256 -or
+       $p.nativePeerBuildOutput.path -cne 'instdir/program/scnlo.dll' -or $p.nativePeerBuildOutput.size -ne $p.nativePeer.size -or
+       $p.nativePeerBuildOutput.sha256 -cne $p.nativePeer.sha256) {throw 'Source TWAIN source target or native scanner peer differs.'}
     $root=[IO.Path]::GetFullPath($RuntimeRoot);$path=Join-Path $root 'program/twain32shim.exe';Assert-UnlinkedPath $root;Assert-UnlinkedPath $path
     if((Get-Item -LiteralPath $path).Length -ne $p.size) {throw 'Source TWAIN product size changed.'}
     $data=[IO.File]::ReadAllBytes($path)
@@ -2739,14 +2858,15 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 "    'suite.tests.test_native_source_recipe.ActualSourceRecipeTests.test_x64_harfbuzz_other_profiles_keep_original_argv_and_environment',",
                 "    'suite.tests.test_native_source_recipe.ActualSourceRecipeTests.test_x64_harfbuzz_rejects_invalid_compilers_and_conversion_before_meson',",
                 "    'suite.tests.test_native_source_recipe.ActualSourceRecipeTests.test_x64_harfbuzz_real_cygwin_uses_builtin_host_and_actual_path_conversion',",
+                "    'suite.tests.source_x86_companion_crt_selection.GbuildSelectionTests.test_both_real_recipes_select_static_only_for_the_exact_x64_msc_profile',",
                 ']','result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames(names))',
-                'if result.testsRun != 4 or result.skipped or not result.wasSuccessful():','    raise SystemExit(1)','PY')
+                'if result.testsRun != 5 or result.skipped or not result.wasSuccessful():','    raise SystemExit(1)','PY')
             Invoke-CygwinScript $bash $cygpath $harfbuzzGate $work (Join-Path $evidence 'harfbuzz-native-meson-tests')|Out-Null
             $receipt.harfbuzzNativeMesonReplayChecksExecuted=$true
         }
         $python=(Get-Command python -ErrorAction Stop).Source
         $receipt.stage='real-source-recipe-tests';Assert-NativeBuildTimeRemaining
-        Invoke-LoggedCommand $python @('-m','unittest','suite.tests.test_native_source_recipe','suite.tests.test_native_flex_fatal','-v') $repo (Join-Path $evidence 'source-recipe-tests') -EnvironmentOverrides @{OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE=$source;OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE='1'} -NativeEnvironment:($Architecture -ceq 'x64')|Out-Null
+        Invoke-LoggedCommand $python @('-m','unittest','suite.tests.test_native_source_recipe','suite.tests.test_native_flex_fatal','suite.tests.test_x86_companion_static_runtime.StaticRuntimeTests','-v') $repo (Join-Path $evidence 'source-recipe-tests') -EnvironmentOverrides @{OPENGEUL_NATIVE_SOURCE_RECIPE_SOURCE=$source;OPENGEUL_NATIVE_SOURCE_RECIPE_REQUIRE_SOURCE='1'} -NativeEnvironment:($Architecture -ceq 'x64')|Out-Null
         $receipt.sourceRecipeChecksExecuted=$true
         $receipt.stage='install-authenticated-source-hooks';Assert-NativeBuildTimeRemaining
         $sourceEvidence=Join-Path $evidence 'source-recipe';New-Item -ItemType Directory $sourceEvidence|Out-Null
@@ -2755,6 +2875,12 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.sourceHooks=$hooks.sourceHooks;$receipt.winAccFocusOrderSourcePatch=$hooks.winAccFocusOrderSourcePatch;$receipt.sourceRecipeProof=$hooks.sourceRecipeProof
         $receipt.flexFatalCompatibilitySourcePatch=$hooks.flexFatalCompatibilitySourcePatch
         Assert-NativeSourceRecipeBinding $receipt $Architecture $sourceEvidence
+        if($Architecture -ceq 'x64') {
+            foreach($staticRuntimePin in $manifest.windowsX86CompanionStaticRuntime.sources) {
+                Assert-UnlinkedPath (Join-Path $source $staticRuntimePin.path)
+                Confirm-FileIdentity (Join-Path $source $staticRuntimePin.path) $staticRuntimePin.afterSize SHA256 $staticRuntimePin.afterSha256|Out-Null
+            }
+        }
         foreach($dotnetPin in $manifest.windowsDotnetProjectGraph.sources) {
             Assert-UnlinkedPath (Join-Path $source $dotnetPin.path)
             Confirm-FileIdentity (Join-Path $source $dotnetPin.path) $dotnetPin.afterSize SHA256 $dotnetPin.afterSha256|Out-Null
@@ -2890,9 +3016,13 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 $receipt.stage='source-companion-audit';Assert-NativeBuildTimeRemaining
                 $companionScript=Join-Path $repo 'suite/engine-build/capture_source_companion.py'
                 $companionContext=Join-Path $commands 'source-companion-context.json'
+                $x86StaticRuntimeEvidence=@($receipt.sourceHooks.x86CompanionStaticRuntime.recipes|ForEach-Object {
+                    [ordered]@{path=$_.path;original=$_.evidence.original;effective=$_.evidence.effective}
+                })
                 Write-BuildJson $companionContext ([ordered]@{schemaVersion=1;architecture='x64';coreCommit=$receipt.sourcePin.coreCommit;
                     buildBinding=[ordered]@{sourceCommit=$receipt.sourceCommit;sourceTree=$receipt.sourceTree;sourceRun=$receipt.sourceRun;runAttempt=$receipt.runAttempt;recipeSha256=$receipt.sourceRecipeProof.recipeSha256};
-                    stageReceiptSha256=$receipt.installedRuntimeStage.receipt.sha256})
+                    stageReceiptSha256=$receipt.installedRuntimeStage.receipt.sha256;sourceEvidenceDirectory=$sourceEvidence;
+                    x86StaticRuntimeEvidence=$x86StaticRuntimeEvidence})
                 $companionArguments=@('-I','-B',$companionScript,'--source',$source,'--runtime',$instdir,'--stage',(Join-Path $evidence 'installed-runtime-stage.json'),'--context',$companionContext,'--evidence',$evidence)
                 Invoke-LoggedCommand $python $companionArguments $repo (Join-Path $evidence 'source-companion-capture') -TimeoutMinutes 1 -NativeEnvironment -NumericOnly|Out-Null
                 $companionProofPath=Join-Path $evidence 'source-companion-proof.json'
@@ -2905,6 +3035,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 Write-BuildJson $twainContext ([ordered]@{schemaVersion=1;architecture='x64';coreCommit=$receipt.sourcePin.coreCommit;
                     buildBinding=[ordered]@{sourceCommit=$receipt.sourceCommit;sourceTree=$receipt.sourceTree;sourceRun=$receipt.sourceRun;runAttempt=$receipt.runAttempt;recipeSha256=$receipt.sourceRecipeProof.recipeSha256};
                     stageReceiptSha256=$receipt.installedRuntimeStage.receipt.sha256;sourceEvidenceDirectory=$sourceEvidence;
+                    x86StaticRuntimeEvidence=$x86StaticRuntimeEvidence;
                     cliPolicyEvidence=[ordered]@{original=$receipt.sourceHooks.cliPublisherPolicyPlatform.evidence.original;effective=$receipt.sourceHooks.cliPublisherPolicyPlatform.evidence.effective}})
                 $twainArguments=@('-I','-B',$twainScript,'--source',$source,'--runtime',$instdir,'--stage',(Join-Path $evidence 'installed-runtime-stage.json'),'--context',$twainContext,'--evidence',$evidence)
                 Invoke-LoggedCommand $python $twainArguments $repo (Join-Path $evidence 'source-twain-capture') -TimeoutMinutes 1 -NativeEnvironment -NumericOnly|Out-Null
@@ -2952,6 +3083,10 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 }
                 Confirm-FileIdentity (Join-Path $source $manifest.windowsHarfbuzzNativeMesonPaths.path) $manifest.windowsHarfbuzzNativeMesonPaths.afterSize SHA256 $manifest.windowsHarfbuzzNativeMesonPaths.afterSha256|Out-Null
                 Confirm-FileIdentity (Join-Path $source $manifest.windowsCliPublisherPolicyPlatform.path) $manifest.windowsCliPublisherPolicyPlatform.afterSize SHA256 $manifest.windowsCliPublisherPolicyPlatform.afterSha256|Out-Null
+                foreach($staticRuntimePin in $manifest.windowsX86CompanionStaticRuntime.sources) {
+                    Assert-UnlinkedPath (Join-Path $source $staticRuntimePin.path)
+                    Confirm-FileIdentity (Join-Path $source $staticRuntimePin.path) $staticRuntimePin.afterSize SHA256 $staticRuntimePin.afterSha256|Out-Null
+                }
             }
             foreach($dotnetPin in $manifest.windowsDotnetProjectGraph.sources) {
                 Assert-UnlinkedPath (Join-Path $source $dotnetPin.path)

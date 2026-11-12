@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
 POLICY_SHA256 = 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 RECIPES = {'arm64': ('windows-arm64-v1', ['arm64Full', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph']),
-           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph'])}
+           'x64': ('windows-x64-common-v2', ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'x86CompanionStaticRuntime', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph'])}
 DOTNET_GRAPH_SOURCES = (
     ('solenv/gbuild/DotnetLibrary.mk', 5315, 'f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b',
      5728, 'cc1e4a62d0d97681b1742ada794af15945e465af86d4d2f54b38b245c8889db3'),
@@ -60,6 +60,7 @@ def _installer(filename):
 
 ARM = _installer('enable_firebird_arm64')
 WINACC = _installer('apply_winacc_focus_order')
+X86_CRT = _installer('apply_x86_companion_crt')
 
 
 def _decode_json(raw):
@@ -185,6 +186,8 @@ def _select_plan(lock, policy_raw, architecture):
                     or cli_policy['condition'] != 'WNT_X86_64'):
                 raise ValueError('source-recipe-input')
             common.append(_pin(cli_policy, CLI_POLICY_PATH))
+            X86_CRT.descriptor(lock['windowsX86CompanionStaticRuntime'])
+            common.extend(_pin(pin, pin['path']) for pin in lock['windowsX86CompanionStaticRuntime']['sources'])
             guarded = [row for row in guarded if row['path'] not in (LOADER_PATH, ZSTD_PATH, *ATL_PATHS, HARFBUZZ_PATH)]
         payloads = [('winacc-focus-order.patch', winacc['patch'])]
         dependencies = []
@@ -651,6 +654,12 @@ def _validate_common(inputs, lock, payloads, architecture):
         for pin in _atl_pins(lock): _atl_bytes(inputs[pin['path']], pin)
         _harfbuzz_bytes(inputs[HARFBUZZ_PATH], lock['windowsHarfbuzzNativeMesonPaths'])
         _cli_policy_bytes(inputs[CLI_POLICY_PATH], lock['windowsCliPublisherPolicyPlatform'])
+        for pin in lock['windowsX86CompanionStaticRuntime']['sources']:
+            X86_CRT.transform(inputs[pin['path']], pin)
+
+
+def _install_x86_companion_static_runtime(source, evidence, pin):
+    return X86_CRT.install(source, evidence, pin)
 
 
 def apply_native_source(source_root: Path, evidence_directory: Path, *, architecture: str) -> dict:
@@ -695,6 +704,7 @@ def apply_native_source(source_root: Path, evidence_directory: Path, *, architec
                  'atlNativePaths': _install_atl_native_paths(source, evidence, lock['windowsAtlNativePaths']),
                  'harfbuzzNativeMesonPaths': _install_harfbuzz_native_meson_paths(source, evidence, lock['windowsHarfbuzzNativeMesonPaths']),
                  'cliPublisherPolicyPlatform': _install_cli_policy_platform(source, evidence, lock['windowsCliPublisherPolicyPlatform']),
+                 'x86CompanionStaticRuntime': _install_x86_companion_static_runtime(source, evidence, lock['windowsX86CompanionStaticRuntime']),
                  'nativeBuildVerified': False, 'basePersistenceVerified': False}
     winacc = WINACC.install(source, evidence, CORE)
     flex = _install_flex_fatal_compat(source, evidence, lock['flexFatalCompatibility'], architecture)

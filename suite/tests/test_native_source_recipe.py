@@ -22,11 +22,12 @@ ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / 'suite/engine-build'
 CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
 ORDERS = {'arm64': ['arm64Full', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph'],
-          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph']}
+          'x64': ['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'x86CompanionStaticRuntime', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph']}
 RECIPES = {'arm64': 'windows-arm64-v1', 'x64': 'windows-x64-common-v2'}
 GPG_PATH = 'solenv/gbuild/platform/com_MSC_defs.mk'
 GPG_CONDITION = 'WNT_X86_64 && BUILD_PLATFORM=%cygwin'
 GPG_FIXTURE = ROOT / 'suite/tests/fixtures/native-gpg-build-compiler/com_MSC_defs.mk'
+STATIC_RUNTIME_FIXTURE = ROOT / 'suite/tests/fixtures/twain-source-9dea'
 
 
 def load(name):
@@ -117,7 +118,7 @@ class RecipePolicyTests(unittest.TestCase):
         arm = module._select_plan(lock, policy, 'arm64'); x64 = module._select_plan(lock, policy, 'x64')
         self.assertEqual('9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
-        self.assertEqual((22, 4), (len(x64['sources']), len(x64['armGuardedSources'])))
+        self.assertEqual((24, 4), (len(x64['sources']), len(x64['armGuardedSources'])))
         self.assertNotIn(pin['path'], [r['path'] for r in x64['armGuardedSources']])
         for field, value in [('path', '../escape'), ('condition', 'WNT_AARCH64'), ('size', True),
                              ('afterSize', 1.5), ('sha256', '0' * 64), ('afterSha256', 'invalid'), ('extra', False)]:
@@ -142,9 +143,9 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual('9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe',
                          hashlib.sha256(json.dumps(arm, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest())
         selected = module._select_plan(lock, policy, 'x64')
-        self.assertEqual((22, 4), (len(selected['sources']), len(selected['armGuardedSources'])))
+        self.assertEqual((24, 4), (len(selected['sources']), len(selected['armGuardedSources'])))
         self.assertEqual(['moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks',
-                          'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph'], selected['recipe']['hooks'])
+                          'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'x86CompanionStaticRuntime', 'winAccFocusOrder', 'flexFatalCompatibility', 'dotnetProjectGraph'], selected['recipe']['hooks'])
         guarded = {r['path'] for r in selected['armGuardedSources']}
         self.assertTrue(guarded.isdisjoint(r['path'] for r in original))
         for mutate in [lambda d: d.update(extra=False), lambda d: d.update(condition='WNT_AARCH64'),
@@ -224,7 +225,7 @@ class RecipePolicyTests(unittest.TestCase):
             self.assertEqual(ORDERS[architecture], plan['recipe']['hooks'])
             self.assertEqual(RECIPES[architecture], plan['recipeId'])
             self.assertEqual(13 if architecture == 'arm64' else 4, len(plan['armGuardedSources']))
-            self.assertEqual(20 if architecture == 'arm64' else 22, len(plan['sources']))
+            self.assertEqual(20 if architecture == 'arm64' else 24, len(plan['sources']))
             self.assertIn('sourceDependencies', plan)
             self.assertEqual(1 if architecture == 'arm64' else 0, len(plan['sourceDependencies']))
 
@@ -252,6 +253,11 @@ class RecipePolicyTests(unittest.TestCase):
                      lambda p: p['windowsFirebirdLoaderPath'].update(size=True),
                      lambda p: p['windowsFirebirdLoaderPath'].update(afterSize=1.5),
                      lambda p: p['windowsFirebirdLoaderPath'].update(unknown=True),
+                     lambda p: p.pop('windowsX86CompanionStaticRuntime'),
+                     lambda p: p['windowsX86CompanionStaticRuntime'].update(condition='WNT_AARCH64'),
+                     lambda p: p['windowsX86CompanionStaticRuntime'].update(unknown=True),
+                     lambda p: p['windowsX86CompanionStaticRuntime']['sources'].reverse(),
+                     lambda p: p['windowsX86CompanionStaticRuntime']['sources'][0].update(afterSize=True),
                      lambda p: p['atlConsumerNativePaths']['recipes'].reverse(),
                      lambda p: p['winAccFocusOrder']['sources'].pop()]
         for mutate in mutations:
@@ -290,7 +296,7 @@ class RecipePolicyTests(unittest.TestCase):
         self.assertEqual('9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe',
             hashlib.sha256(json.dumps(arm,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest())
         self.assertEqual((20,13),(len(arm['sources']),len(arm['armGuardedSources'])))
-        self.assertEqual((22,4),(len(x64['sources']),len(x64['armGuardedSources'])))
+        self.assertEqual((24,4),(len(x64['sources']),len(x64['armGuardedSources'])))
         self.assertEqual(GPG_PATH,x64['sources'][9]['path'])
         self.assertNotIn(GPG_PATH,[row['path'] for row in arm['sources']])
         for field,value in [('path','../escape'),('condition','WNT_AARCH64'),('size',True),
@@ -343,8 +349,18 @@ class ActualSourceRecipeTests(unittest.TestCase):
 
     def install(self, architecture):
         if architecture == 'x64':
-            self.gpg_input(); self.policy_input()
+            self.gpg_input(); self.policy_input(); self.static_runtime_inputs()
         return self.module.apply_native_source(self.source, self.evidence, architecture=architecture)
+
+    def static_runtime_inputs(self):
+        for pin in self.lock['windowsX86CompanionStaticRuntime']['sources']:
+            original = (STATIC_RUNTIME_FIXTURE / pin['path']).read_bytes()
+            self.assertEqual(pin['size'], len(original))
+            self.assertEqual(pin['sha256'], hashlib.sha256(original).hexdigest())
+            target = self.source / pin['path']
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(original)
 
     def policy_input(self):
         relative = 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'
@@ -658,7 +674,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
         self.assertEqual(before,{p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
     def test_gpg_input_drift_is_rejected_before_any_source_or_evidence_write(self):
-        target=self.gpg_input();self.policy_input();target.write_bytes(target.read_bytes()+b'\n')
+        target=self.gpg_input();self.policy_input();self.static_runtime_inputs();target.write_bytes(target.read_bytes()+b'\n')
         before={p.relative_to(self.source).as_posix():p.read_bytes() for p in self.source.rglob('*') if p.is_file()}
         with self.assertRaises(ValueError):self.install('x64')
         self.assertEqual([],list(self.evidence.iterdir()))
@@ -846,6 +862,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
         atl = self.module._install_atl_native_paths
         meson = self.module._install_harfbuzz_native_meson_paths
         cli_policy = self.module._install_cli_policy_platform
+        static_runtime = self.module._install_x86_companion_static_runtime
         flex = self.module._install_flex_fatal_compat
         dotnet = self.module._install_dotnet_project_graph
         def common(*args): events.append('moduleBootstrap'); return bootstrap(*args)
@@ -855,6 +872,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
         def atl_paths(*args): events.append('atlNativePaths'); return atl(*args)
         def meson_paths(*args): events.append('harfbuzzNativeMesonPaths'); return meson(*args)
         def cli_platform(*args): events.append('cliPublisherPolicyPlatform'); return cli_policy(*args)
+        def companion_runtime(*args): events.append('x86CompanionStaticRuntime'); return static_runtime(*args)
         def focus(*args): events.append('winAccFocusOrder'); return winacc(*args)
         def fatal(*args): events.append('flexFatalCompatibility'); return flex(*args)
         def graph(*args): events.append('dotnetProjectGraph'); return dotnet(*args)
@@ -866,13 +884,14 @@ class ActualSourceRecipeTests(unittest.TestCase):
                 patch.object(self.module, '_install_atl_native_paths', side_effect=atl_paths), \
                 patch.object(self.module, '_install_harfbuzz_native_meson_paths', side_effect=meson_paths), \
                 patch.object(self.module, '_install_cli_policy_platform', side_effect=cli_platform), \
+                patch.object(self.module, '_install_x86_companion_static_runtime', side_effect=companion_runtime), \
                 patch.object(self.module.WINACC, 'install', side_effect=focus), \
                 patch.object(self.module, '_install_flex_fatal_compat', side_effect=fatal), \
                 patch.object(self.module, '_install_dotnet_project_graph', side_effect=graph):
             result = self.install('x64')
         self.proof(result, 'x64'); self.assertEqual(ORDERS['x64'], events)
         hooks = result['sourceHooks']
-        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform',
+        self.assertEqual({'kind', 'architecture', 'moduleBootstrap', 'firebirdLoaderPath', 'zstdSourceLinks', 'gpgBuildCompilerPath', 'atlNativePaths', 'harfbuzzNativeMesonPaths', 'cliPublisherPolicyPlatform', 'x86CompanionStaticRuntime',
                           'dotnetProjectGraph', 'nativeBuildVerified', 'basePersistenceVerified'}, set(hooks))
         self.assertEqual('native-windows-common-source-hooks', hooks['kind']); self.assertEqual('x64', hooks['architecture'])
         self.assertIs(hooks['nativeBuildVerified'], False); self.assertIs(hooks['basePersistenceVerified'], False)
@@ -892,6 +911,30 @@ class ActualSourceRecipeTests(unittest.TestCase):
         for field in ['nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified']:
             self.assertIs(proof[field], False)
 
+        descriptor = self.lock['windowsX86CompanionStaticRuntime']; proof = hooks['x86CompanionStaticRuntime']
+        self.assertEqual({'schemaVersion', 'kind', 'coreCommit', 'architecture', 'condition', 'recipes',
+                          'nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified'}, set(proof))
+        self.assertEqual(1, proof['schemaVersion'])
+        self.assertEqual('windows-x64-x86-companion-static-runtime-source-hooks', proof['kind'])
+        self.assertEqual(CORE, proof['coreCommit']); self.assertEqual('x64', proof['architecture'])
+        self.assertEqual(descriptor['condition'], proof['condition']); self.assertEqual(2, len(proof['recipes']))
+        self.assertEqual([pin['path'] for pin in descriptor['sources']], [row['path'] for row in proof['recipes']])
+        for pin, row in zip(descriptor['sources'], proof['recipes']):
+            self.assertEqual({'path', 'beforeBytes', 'afterBytes', 'beforeSha256', 'afterSha256', 'evidence'}, set(row))
+            for field, key in [('beforeBytes', 'size'), ('afterBytes', 'afterSize'),
+                               ('beforeSha256', 'sha256'), ('afterSha256', 'afterSha256')]:
+                self.assertEqual(pin[key], row[field])
+            self.assertEqual({'original', 'effective'}, set(row['evidence']))
+            for phase, key in [('original', 'sha256'), ('effective', 'afterSha256')]:
+                path = Path(row['evidence'][phase])
+                self.assertEqual(self.evidence / (phase + '-x64-' + Path(pin['path']).name), path)
+                self.assertEqual(pin[key], hashlib.sha256(path.read_bytes()).hexdigest())
+                self.assertEqual((STATIC_RUNTIME_FIXTURE / pin['path']).read_bytes() if phase == 'original' else
+                                 (self.source / pin['path']).read_bytes(), path.read_bytes())
+            self.assertEqual(pin['afterSha256'], hashlib.sha256((self.source / pin['path']).read_bytes()).hexdigest())
+        for field in ['nativeBuildVerified', 'fullEngineQualified', 'acceptanceEligible', 'guiVerified']:
+            self.assertIs(proof[field], False)
+
     def test_x64_leaves_all_four_remaining_arm_only_targets_unchanged(self):
         result = self.install('x64'); self.proof(result, 'x64')
         changed = {name for name, raw in self.inputs.items() if (self.source / name).read_bytes() != raw}
@@ -899,14 +942,20 @@ class ActualSourceRecipeTests(unittest.TestCase):
         policy_path = 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'
         if (self.source / policy_path).read_bytes() != (ROOT / 'suite/tests/fixtures/native-cli-policy' / policy_path).read_bytes():
             changed.add(policy_path)
+        for pin in self.lock['windowsX86CompanionStaticRuntime']['sources']:
+            if (self.source / pin['path']).read_bytes() != (STATIC_RUNTIME_FIXTURE / pin['path']).read_bytes():
+                changed.add(pin['path'])
         self.assertEqual({'bin/unpack-sources', self.lock['winAccFocusOrder']['path'],
                           self.lock['flexFatalCompatibility']['path'],
                           *(pin['path'] for pin in self.lock['windowsDotnetProjectGraph']['sources']),
                           self.lock['windowsFirebirdLoaderPath']['path'],
                           self.lock['windowsZstdSourceLinks']['path'], GPG_PATH, self.lock['windowsHarfbuzzNativeMesonPaths']['path'],
                           *(pin['path'] for pin in self.lock['windowsAtlNativePaths']['recipes']),
+                          *(pin['path'] for pin in self.lock['windowsX86CompanionStaticRuntime']['sources']),
                           'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'}, changed)
-        self.assertEqual(set(self.inputs)|{GPG_PATH, 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk'}, {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
+        self.assertEqual(set(self.inputs)|{GPG_PATH, 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk',
+                         *(pin['path'] for pin in self.lock['windowsX86CompanionStaticRuntime']['sources'])},
+                         {p.relative_to(self.source).as_posix() for p in self.source.rglob('*') if p.is_file()})
 
     def test_every_input_drift_rejects_before_any_recipe_write(self):
         for name, raw in self.inputs.items():
@@ -915,6 +964,15 @@ class ActualSourceRecipeTests(unittest.TestCase):
             for architecture in architectures:
                 with self.subTest(path=name, architecture=architecture), self.assertRaises(ValueError): self.install(architecture)
                 self.assertEqual([], list(self.evidence.iterdir()))
+            target.write_bytes(raw); self.unchanged()
+        self.static_runtime_inputs()
+        for pin in self.lock['windowsX86CompanionStaticRuntime']['sources']:
+            name = pin['path']; target = self.source / name; raw = target.read_bytes()
+            target.write_bytes(raw + b'\n')
+            before = {p.relative_to(self.source).as_posix(): p.read_bytes() for p in self.source.rglob('*') if p.is_file()}
+            with self.subTest(path=name, architecture='x64'), self.assertRaises(ValueError): self.install('x64')
+            self.assertEqual([], list(self.evidence.iterdir()))
+            self.assertEqual(before, {p.relative_to(self.source).as_posix(): p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
             target.write_bytes(raw); self.unchanged()
 
     def test_evidence_collision_and_overlapping_directories_reject_before_write(self):
@@ -966,7 +1024,7 @@ class ActualSourceRecipeTests(unittest.TestCase):
             self.assertEqual(1, loader.call_count)
 
     def test_cli_and_repeat_application_fail_closed(self):
-        self.gpg_input(); self.policy_input()
+        self.gpg_input(); self.policy_input(); self.static_runtime_inputs()
         command = [sys.executable, str(ENGINE / 'apply_native_source.py'), '--libreoffice-source', str(self.source),
                    '--evidence-directory', str(self.evidence), '--architecture', 'x64']
         result = subprocess.run(command, capture_output=True, timeout=20)

@@ -1,6 +1,7 @@
 """Controlled partial TWAIN component capture, never a qualified Full fixture."""
 from pathlib import Path
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -22,7 +23,7 @@ class TwainCaptureTests(unittest.TestCase):
     def fixture(self,label):
         root=self.root/label;source=root/'source';shutil.copytree(FIXTURES,source)
         runtime=root/'runtime';(runtime/'program').mkdir(parents=True);evidence=root/'evidence';evidence.mkdir()
-        (source/'config_host.mk').write_text('OS=WNT\nCPUNAME=X86_64\nCXX_X86_BINARY=owned-synthetic-compiler\n')
+        (source/'config_host.mk').write_text('OS=WNT\nCPUNAME=X86_64\nCOM=MSC\nCXX_X86_BINARY=owned-synthetic-compiler\n'+'SRCDIR='+str(source)+'\nINSTROOT='+str(source/'instdir')+'\nLIBO_LIB_FOLDER=program\nLIBO_BIN_FOLDER=program\n')
         policy=source/'cli_ure/CliNativeLibrary_cli_cppuhelper.mk';original=policy.read_bytes()
         marker=b'$(eval $(call gb_CliNativeLibrary_CliNativeLibrary,cli_cppuhelper))\n'
         added=b'\nifeq ($(OS)_$(CPUNAME),WNT_X86_64)\n$(eval $(call gb_CliNativeLibrary_set_platform,cli_cppuhelper,x64))\nendif\n'
@@ -33,7 +34,7 @@ class TwainCaptureTests(unittest.TestCase):
         exe=twain_image();peer=peer_image()
         for path,data in [('program/twain32shim.exe',exe),('program/scnlo.dll',peer)]:
             (runtime/path).write_bytes(data)
-        for path,data in [('workdir/LinkTarget/Executable/twain32shim.exe',exe),('workdir/LinkTarget/Library/scnlo.dll',peer)]:
+        for path,data in [('instdir/program/twain32shim.exe',exe),('instdir/program/scnlo.dll',peer)]:
             p=source/path;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)
         archive=source/'workdir/installation/owned/archive/install/partial-twain-component.zip';archive.parent.mkdir(parents=True)
         with zipfile.ZipFile(archive,'w') as z:
@@ -44,6 +45,18 @@ class TwainCaptureTests(unittest.TestCase):
                    archives=[dict(kind='main',path=str(archive),bytes=archive.stat().st_size,sha256=sha(archive.read_bytes()))])
         stage_path=evidence/'installed-runtime-stage.json';stage_path.write_text(json.dumps(stage))
         context=dict(schemaVersion=1,architecture='x64',coreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276',buildBinding=dict(sourceCommit='1'*40,sourceTree='2'*40,sourceRun=123,runAttempt=1,recipeSha256='3'*64),stageReceiptSha256=sha(stage_path.read_bytes()),sourceEvidenceDirectory=str(recipe),cliPolicyEvidence=dict(original=str(original_path),effective=str(effective_path)))
+        recipe=evidence/'source-recipe';recipe.mkdir(exist_ok=True)
+        fixture_root=Path(__file__).parent/'fixtures/twain-source-9dea'
+        descriptor=json.loads((ROOT/'suite/engine-build/source-build.json').read_bytes())['windowsX86CompanionStaticRuntime']
+        for pin in descriptor['sources']:
+            target=source/pin['path'];target.parent.mkdir(parents=True,exist_ok=True)
+            if not target.exists():target.write_bytes((fixture_root/pin['path']).read_bytes())
+        spec=importlib.util.spec_from_file_location('capture_fixture_crt',ROOT/'suite/engine-build/apply_x86_companion_crt.py')
+        installer=importlib.util.module_from_spec(spec);spec.loader.exec_module(installer)
+        installed=installer.install(source,recipe,descriptor)
+        self.static_runtime_source_hook=installed
+        context['sourceEvidenceDirectory']=str(recipe)
+        context['x86StaticRuntimeEvidence']=[dict(path=row['path'],**row['evidence'])for row in installed['recipes']]
         context_path=root/'context.json';context_path.write_text(json.dumps(context))
         return source,runtime,stage_path,context_path,evidence
     def run_capture(self,paths,*,validate=False):
