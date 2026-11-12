@@ -28,9 +28,9 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import engine_smoke as baseline
 
-PYPDF_VERSION = '6.21.0'
-PYPDF_WHEEL_SHA256 = '3aec619699dacb1b73f57e87d9adaa4424814517b2cc028de20adba5a37af4c4'
-PYPDF_METADATA = 'https://pypi.org/pypi/pypdf/6.21.0/json'
+PYPDF_VERSION = '7.0.1'
+PYPDF_WHEEL_SHA256 = '6131b764b046282357037309e7ef2a1b7679d4a5c53eed3db2bfbf7c673ddc2b'
+PYPDF_METADATA = 'https://pypi.org/pypi/pypdf/7.0.1/json'
 PRODUCTION_REPORT = 'pdf-production.json'
 VERIFICATION_REPORT = 'pdf-verification.json'
 FONT = 'Malgun Gothic'

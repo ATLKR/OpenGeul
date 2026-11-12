@@ -78,7 +78,7 @@ class HomeWorkflowChecks:
         self.assertIn('runs-on: windows-2025', source)
         self.assertIn('architecture: x64', source)
         self.assertIn('persist-credentials: false', source)
-        self.assertIn('pywinauto==0.6.9 Pillow==12.3.0', source)
+        self.assertIn('pywinauto==0.6.9 Pillow==13.0.0', source)
         self.assertIn('./suite/scripts/build-suite.ps1 -Architecture x64', run_code(step_by_id(FOCUSED, 'build')))
         self.assertNotIn('fetch-source-engine.ps1', source)
         self.assertNotIn('cargo ', source)

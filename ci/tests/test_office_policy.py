@@ -55,6 +55,24 @@ class OfficePolicyTests(unittest.TestCase):
         self.assertTrue(self.policy.audit(suite_workflow(), workflow_path=SUITE))
         self.assertTrue(self.policy.audit(engine_workflow(), workflow_path=ENGINE))
 
+    def test_owned_writer_only_may_use_its_existing_arm64_150_minute_envelope(self):
+        value=workflow('writer-server-observer',**{'runs-on':'windows-11-arm','timeout-minutes':150})
+        self.assertTrue(self.policy.audit(value,workflow_path=SUITE))
+        for context in (None,ENGINE,'.github/workflows/copied.yml'):
+            with self.subTest(context=context),self.assertRaises(ValueError):
+                self.policy.audit(value,workflow_path=context)
+        value['jobs']['copied-writer']=value['jobs'].pop('writer-server-observer')
+        with self.assertRaises(ValueError):self.policy.audit(value,workflow_path=SUITE)
+
+    def test_owned_writer_envelope_rejects_other_runners_matrix_and_larger_deadlines(self):
+        for mutation in ({'runs-on':'windows-2025'},{'runs-on':'self-hosted'},
+                         {'strategy':{'matrix':{}}},{'strategy':None},
+                         {'timeout-minutes':151},{'timeout-minutes':'${{ inputs.timeout }}'}):
+            value=workflow('writer-server-observer',**{'runs-on':'windows-11-arm','timeout-minutes':150})
+            value['jobs']['writer-server-observer'].update(mutation)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):
+                self.policy.audit(value,workflow_path=SUITE)
+
     def test_missing_or_other_paths_cannot_borrow_an_office_envelope(self):
         for name, value in ((SUITE, suite_workflow()), (ENGINE, engine_workflow())):
             for other in (None, Path(name).name, name.replace('.yml', '.yaml'),

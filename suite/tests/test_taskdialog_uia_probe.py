@@ -29,7 +29,7 @@ class TaskDialogProbeTests(unittest.TestCase):
             self.assertIn(literal,source);self.assertIn(literal,product)
         for literal in ('TaskDialog.ShowDialog(owner, page)','DefaultButton = save','AllowCancel = true','TaskDialogIcon.Information'):
             self.assertIn(literal,source)
-        self.assertIn('8.0.32',project);self.assertIn('PerMonitorV2',project)
+        self.assertIn('10.0.15',project);self.assertIn('PerMonitorV2',project)
         self.assertNotIn('MessageBox.Show',source)
 
     def test_titlebar_close_is_preserved_in_observational_stability_without_product_qualification(self):
@@ -62,7 +62,7 @@ class TaskDialogProbeTests(unittest.TestCase):
         path=ROOT/'.github/workflows/office-taskdialog-uia-probe.yml'
         self.assertTrue(path.is_file(),'Focused UIA workflow is required')
         text=path.read_text();self.assertIn('windows-2025',text);self.assertIn('if: always()',text)
-        self.assertIn('pywinauto==0.6.9 Pillow==12.3.0',text)
+        self.assertIn('pywinauto==0.6.9 Pillow==13.0.0',text)
         self.assertNotIn('build-suite.ps1',text);self.assertNotIn('LibreOffice',text)
 
     def test_observer_calls_shared_selector_read_only_with_exact_live_binding(self):

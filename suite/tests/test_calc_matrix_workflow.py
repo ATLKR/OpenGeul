@@ -58,12 +58,12 @@ class CalcMatrixWorkflowTests(unittest.TestCase):
         unit_index = next(i for i, step in enumerate(steps)
                           if field(step, 'id') == 'suite-unit-shell')
         image_steps = [(i, run_code(step)) for i, step in enumerate(steps)
-                       if 'python -m pip install Pillow==12.3.0' in step]
+                       if 'python -m pip install Pillow==13.0.0' in step]
         self.assertEqual(len(image_steps), 1)
         image_index, code = image_steps[0]
         self.assertLess(image_index, unit_index,
                         'PNG checkpoint unit checks need Pillow before discovery')
-        command = 'python -m pip install Pillow==12.3.0'
+        command = 'python -m pip install Pillow==13.0.0'
         self.assertIn('if ($LASTEXITCODE -ne 0)', code[code.index(command) + len(command):])
 
     def test_independent_probes_precede_existing_fixture_mutations(self):

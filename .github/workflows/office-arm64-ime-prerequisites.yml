@@ -33,7 +33,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force .work/suite-korean-readiness | Out-Null
-          python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+          python -m pip install pywinauto==0.6.9 Pillow==13.0.0
           if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 automation prerequisites failed.' }
           python -c "import platform,pywinauto,PIL; print(platform.machine(),pywinauto.__version__,PIL.__version__)"
           if ($LASTEXITCODE -ne 0) { throw 'Native ARM64 automation imports failed.' }

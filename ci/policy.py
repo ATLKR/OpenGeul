@@ -17,6 +17,7 @@ ACTIONS = {
     'actions/checkout': 'fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
     'actions/setup-node': 'a0853c24544627f65ddf259abe73b1d18a591444',
     'actions/setup-python': 'ece7cb06caefa5fff74198d8649806c4678c61a1',
+    'actions/setup-dotnet': '0f4a354dd5547a28c70b7853dbd95d5b67886e73',
     'actions/upload-artifact': 'ea165f8d65b6e75b540449e92b4886f43607fa02',
 }
 
@@ -80,6 +81,12 @@ def audit(workflow, *, workflow_path=None):
                     or strategy.get('matrix')!=expected):
                 raise ValueError(f'{name}: require the reviewed two-architecture Office matrix')
             candidates=[row['runner'] for row in expected['include']]
+            timeout_limit=150
+        elif workflow_path=='.github/workflows/office-suite.yml' and name=='writer-server-observer':
+            strategy=job.get('strategy',{})
+            if runner!='windows-11-arm' or not isinstance(strategy,dict) or 'matrix' in strategy:
+                raise ValueError(f'{name}: require one fixed owned Writer ARM64 diagnostic job')
+            candidates=[runner]
             timeout_limit=150
         elif workflow_path=='.github/workflows/office-native-engine.yml' and name=='native-firebird-and-office':
             strategy=job.get('strategy',{})

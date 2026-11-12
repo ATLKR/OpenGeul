@@ -37,7 +37,7 @@ class StructuredMcpWorkflowTests(unittest.TestCase):
         compile='cargo build --locked --target $target --example opengeul-structured-fixtures'
         self.assertIn(compile,build)
         self.assertLess(build.index('cargo run --locked --target $target --example opengeul-fixtures'),build.index(compile))
-        self.assertIn('python -m pip install Pillow==12.3.0',build)
+        self.assertIn('python -m pip install Pillow==13.0.0',build)
         self.assertIn('debug/examples/opengeul-structured-fixtures.exe',build)
         self.assertIn("python (Join-Path $root 'e2e/structured_cli_mcp/stage_structured.py') generate",build)
         self.assertIn('e2e/structured_cli_mcp/stage_structured.py seal',build)

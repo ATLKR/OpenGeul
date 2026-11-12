@@ -25,8 +25,8 @@ def write_json(path,value):
 
 def stub_sources():
     project='''<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>
-<OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework>
-<UseWindowsForms>true</UseWindowsForms><RuntimeFrameworkVersion>8.0.32</RuntimeFrameworkVersion>
+<OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework>
+<UseWindowsForms>true</UseWindowsForms><RuntimeFrameworkVersion>10.0.15</RuntimeFrameworkVersion>
 <TargetLatestRuntimePatch>false</TargetLatestRuntimePatch><RollForward>Disable</RollForward>
 <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode><ImplicitUsings>enable</ImplicitUsings>
 <Nullable>enable</Nullable><AssemblyName>TaskDialogProbe</AssemblyName>
@@ -194,7 +194,7 @@ def observe(binding_path):
             owner=json.loads(owner_file.read_bytes())
             if (owner['pid']!=expected['pid'] or owner['creationTime']!=expected['creationTime']
                     or os.path.normcase(owner['image'])!=os.path.normcase(expected['image'])
-                    or owner['framework']!='.NET 8.0.32' or owner['processArchitecture']!='X64'):
+                    or owner['framework']!='.NET 10.0.15' or owner['processArchitecture']!='X64'):
                 raise RuntimeError('Stub owner receipt differs from original retained process/runtime')
             owner_hwnd=owner['ownerHwnd'];native=api.window(owner_hwnd)
             if native['pid']!=binding['pid'] or native['name']!=CAPTION:raise RuntimeError('Stub owner HWND differs')
@@ -285,7 +285,7 @@ def controller(output):
     stub=worker=None;api=None
     try:
         if os.name!='nt':raise RuntimeError('Actual Windows UIA is required')
-        for package,expected in [('pywinauto','0.6.9'),('Pillow','12.3.0')]:
+        for package,expected in [('pywinauto','0.6.9'),('Pillow','13.0.0')]:
             if importlib.metadata.version(package)!=expected:raise RuntimeError('Pinned automation package differs: '+package)
         repo=Path(__file__).resolve().parents[2]
         head=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()

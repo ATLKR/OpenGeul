@@ -27,10 +27,15 @@ jobs:
       with:
         python-version: '3.12'
         architecture: x64
+    - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73
+      with:
+        dotnet-version: '10.0.404'
+        skip-lts-prepass: true
+        architecture: x64
     - name: Prepare pinned native UI tools
       shell: pwsh
       run: |
-        python -m pip install pywinauto==0.6.9 Pillow==12.3.0
+        python -m pip install pywinauto==0.6.9 Pillow==13.0.0
         if ($LASTEXITCODE -ne 0) { throw 'Native UI prerequisites failed.' }
     - name: Verify Home routing and owned shutdown regressions
       shell: pwsh

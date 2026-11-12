@@ -157,7 +157,7 @@ class PdfExportOracleTests(unittest.TestCase):
         self.assertEqual(len(report['cases']), 5)
         self.assertEqual([row['pageCount'] for row in report['cases']], [2, 1, 2, 1, 1])
         self.assertTrue(all('한글' in row['pageText'][0] for row in report['cases']))
-        self.assertEqual(report['verifier']['version'], '6.21.0')
+        self.assertEqual(report['verifier']['version'], '7.0.1')
         self.assertIs(report['guiVerified'], False)
         self.assertIs(report['physicalPrintingVerified'], False)
 

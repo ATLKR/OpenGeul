@@ -90,8 +90,8 @@ Base는 데이터베이스 URL·현재 연결·등록된 드라이버와 Java �
 
 ## Windows에서 빌드
 
-PowerShell 7, Python 3.12 이상, .NET 8 SDK, Git과 인터넷 연결이 필요합니다.
-Suite는 .NET Windows Desktop 8.0.32와 고정한 Office 26.8.1.1 x64 입력을 사용합니다.
+PowerShell 7, Python 3.12 이상, .NET SDK 10.0.404, Git과 인터넷 연결이 필요합니다.
+Suite는 .NET Windows Desktop 10.0.15와 고정한 Office 26.8.1.1 x64 입력을 사용합니다.
 공식 배포의 SHA256과 HWP 원본 개발 패키지의 SHA256은 아키텍처별
 `config/runtime.lock.json`과 `config/runtime.arm64.lock.json`에 고정되어 있습니다. 새 작업 폴더와 새 출력 경로를 사용해야 합니다.
 

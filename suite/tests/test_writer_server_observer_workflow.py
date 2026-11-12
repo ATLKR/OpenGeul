@@ -52,8 +52,8 @@ class Workflow(unittest.TestCase):
         raw=FIXTURE.read_bytes();self.assertEqual(hashlib.sha256(raw).hexdigest(),FIXTURE_SHA256)
         fixture=json.loads(raw);candidate=self.candidate()
         actual=candidate.split('jobs:\n',1)[1].split('\n  writer-server-observer:',1)[0]
-        actual=actual.replace("if: github.event.repository.private == false && github.ref != 'refs/heads/"+BRANCH+"'",
-            'if: github.event.repository.private == false',1)
+        from suite.tests.reviewed_normal_workflow import original_normal_oracle_text
+        actual=original_normal_oracle_text(actual)
         self.assertEqual(hashlib.sha256(actual.encode()).hexdigest(),fixture['normalJobTextSha256'])
         self.assertIn("permissions:\n  contents: read\n  actions: read\n",candidate)
         self.assertIn('OPENGEUL_SUITE_RUN_MODE: acceptance',candidate)
