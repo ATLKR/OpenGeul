@@ -15,6 +15,7 @@ import json
 import mmap
 import ime_notification_caller as notification
 import ime_compartment_protocol as compartment
+import ime_command3_finalization as finalization
 import math
 import os
 from pathlib import Path
@@ -489,6 +490,15 @@ struct State { uint32_t magic,version,pid,tid; volatile LONG count,overflow;
     opengeul_ime::CompartmentConfig compartmentConfig;opengeul_ime::CompartmentRecord compartment;
     opengeul_ime::ProfileLanguageRecord profileLanguage; };
 static State* shared = nullptr;
+#include "ime_command3_finalization.h"
+struct ObserverMapping { State state;opengeul_ime::finalization::Section finalization; };
+static_assert(offsetof(ObserverMapping,state)==0 && offsetof(ObserverMapping,finalization)==sizeof(State),"mapping prefix");
+static const bool finalizationEnabled=__FINALIZATION_ENABLED__;
+static const opengeul_ime::finalization::Config expectedFinalization={
+    opengeul_ime::finalization::Magic,1,sizeof(opengeul_ime::finalization::Config),sizeof(opengeul_ime::finalization::Section),
+    sizeof(ObserverMapping),offsetof(ObserverMapping,finalization),1,__FINALIZATION_PID__,__FINALIZATION_TID__,0,
+    __FINALIZATION_HWND__,__FINALIZATION_ROOT__,__FINALIZATION_CREATED__,__FINALIZATION_EPOCH_LOW__,__FINALIZATION_EPOCH_HIGH__};
+static opengeul_ime::finalization::Section* finalizationShared=nullptr;
 static HANDLE mapping = nullptr;
 static TF_INPUTPROCESSORPROFILE oldProfile = {};
 static bool haveOldProfile = false;
@@ -504,7 +514,22 @@ static bool connect() {
     if (!shared) {
         mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,L"__MAPPING__");
         if (!mapping) return false;
-        shared=(State*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(State));
+        if(finalizationEnabled) {
+            // The OS must map the full requested range before any tail read.
+            auto* full=static_cast<ObserverMapping*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(ObserverMapping)));
+            if(!full){CloseHandle(mapping);mapping=nullptr;return false;}
+            const auto& c=full->finalization.config;FILETIME made{},exited{},kernel{},user{};
+            if(!opengeul_ime::finalization::Valid(c,expectedFinalization)
+                ||full->state.magic!=0x4f47494d||full->state.version!=4
+                ||full->state.pid!=c.pid||full->state.tid!=c.tid
+                ||full->state.targetHwnd!=c.targetHwnd||full->state.rootHwnd!=c.rootHwnd
+                ||c.pid!=GetCurrentProcessId()||c.tid!=GetCurrentThreadId()
+                ||!GetProcessTimes(GetCurrentProcess(),&made,&exited,&kernel,&user)
+                ||((uint64_t(made.dwHighDateTime)<<32)|made.dwLowDateTime)!=c.creationTime) {
+                UnmapViewOfFile(full);CloseHandle(mapping);mapping=nullptr;return false;
+            }
+            shared=&full->state;finalizationShared=&full->finalization;
+        } else shared=(State*)MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(State));
         if(shared && shared->notificationConfig.enabled) {
             notificationAdmission=shared->notificationConfig;
             notificationDeadline=shared->modeDiagnosticDeadline;notificationFrequency=shared->modeDiagnosticFrequency;
@@ -515,7 +540,8 @@ static bool connect() {
         }
     }
     return shared && shared->magic==0x4f47494d && shared->version==4
-        && shared->pid==GetCurrentProcessId() && shared->tid==GetCurrentThreadId();
+        && shared->pid==GetCurrentProcessId() && shared->tid==GetCurrentThreadId()
+        && (!finalizationEnabled || opengeul_ime::finalization::MappingBound(shared,finalizationShared,expectedFinalization));
 }
 static ITfInputProcessorProfileMgr* profiles() {
     CLSID clsid; IID iid;
@@ -588,6 +614,7 @@ static bool observe_imm(HWND hwnd) {
     ImmReleaseContext(hwnd,context);
     return shared->immConversionSucceeded!=0;
 }
+#include "ime_command3_finalization_windows.h"
 static bool notification_clock(uint64_t& stamp) {
     auto& row=shared->notification;
     if(!haveNotificationAdmission || std::memcmp(&notificationAdmission,&shared->notificationConfig,sizeof(notificationAdmission))
@@ -831,10 +858,12 @@ static void command(HWND hwnd, UINT sequence) {
             }
         }
     } else if (sequence<1 || sequence>4) failure(-44);
+    if(sequence==3)capture_finalization(1,sequence,limits);
     TF_INPUTPROCESSORPROFILE current={};
     shared->activeLanguage=0;shared->activeProfileType=0;shared->activeProfileLayout=0;
     shared->activeClsid[0]=0;shared->activeProfile[0]=0;
     shared->activeProfileHresult=mgr ? mgr->GetActiveProfile(category,&current) : E_UNEXPECTED;
+    if(sequence==3)capture_finalization(2,sequence,limits);
     if (mgr) {
         if (shared->activeProfileHresult==S_OK) {
             shared->activeLanguage=current.langid;shared->activeProfileType=current.dwProfileType;
@@ -843,6 +872,7 @@ static void command(HWND hwnd, UINT sequence) {
         }
         mgr->Release();
     }
+    if(sequence==3)capture_finalization(3,sequence,limits);
     if (!budget(limits)) failure(-20);
     if(sequence==3 && !shared->status && shared->compartmentConfig.enabled) {
         if(!opengeul_ime::NotificationBaseline(shared->threadMode) || !compartment_install(limits))failure(-48);
@@ -1061,6 +1091,27 @@ extern "C" __declspec(dllexport) unsigned int ReadNotification(State* source,ope
     return 1;
 }
 extern "C" __declspec(dllexport) unsigned int StateSize() { return sizeof(State); }
+extern "C" __declspec(dllexport) unsigned int NativeMappingSize() { return sizeof(ObserverMapping); }
+extern "C" __declspec(dllexport) unsigned int ReadCommand3Finalization(
+    ObserverMapping* source,UINT mappingBytes,const opengeul_ime::finalization::Config* expected,
+    opengeul_ime::finalization::Section* result,UINT* ackBefore,UINT* ackAfter) {
+    // Controller-side numeric acquire; no mapping/output pointers retained.
+    if(!source||!expected||!result||!ackBefore||!ackAfter||mappingBytes!=sizeof(ObserverMapping)
+        ||!finalizationEnabled||!opengeul_ime::finalization::Valid(*expected,expectedFinalization))return 0;
+    const auto start=reinterpret_cast<uintptr_t>(source),out=reinterpret_cast<uintptr_t>(result);
+    if(out>=start ? out-start<sizeof(ObserverMapping) : start-out<sizeof(*result))return 0;
+    auto& state=source->state;auto& section=source->finalization;
+    if(state.magic!=0x4f47494d||state.version!=4
+        ||state.pid!=expected->pid||state.tid!=expected->tid||state.targetHwnd!=expected->targetHwnd||state.rootHwnd!=expected->rootHwnd
+        ||!opengeul_ime::finalization::Valid(section.config,*expected))return 0;
+    *ackBefore=UINT(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&state.ack),0,0));
+    const auto before=uint32_t(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&section.publishedMask),0,0));
+    MemoryBarrier();CopyMemory(result,&section,sizeof(*result));MemoryBarrier();
+    const auto after=uint32_t(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&section.publishedMask),0,0));
+    *ackAfter=UINT(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&state.ack),0,0));
+    for(unsigned i=0;i<3;++i)if(!(before&(1u<<i)))result->rows[i]={};
+    return before==after&&before==result->publishedMask&&*ackBefore==*ackAfter?1:2;
+}
 extern "C" __declspec(dllexport) unsigned int DisableCompartment(State* source) {
     if(!source || source->magic!=0x4f47494d || source->version!=4)return 0;
     InterlockedExchange((volatile LONG*)&source->compartment.lease.disabled,1);
@@ -1176,15 +1227,15 @@ def discover_msvc(folder, vswhere, *, architecture='x64', setup_deadline=None, c
     return result.stdout.strip()
 
 
-def compile_observer(folder, mapping, profile, *, architecture='x64', setup_deadline=None, clock=time.monotonic):
+def compile_observer(folder, mapping, profile, *, architecture='x64', setup_deadline=None, clock=time.monotonic, finalization_config=None):
     native_arch.require_architecture(architecture)
     remaining_setup(setup_deadline, 60, clock=clock)
     source, library = folder / 'ime-observer.cpp', folder / 'ime-observer.dll'
     for name in ('ime_thread_mode.h', 'ime_thread_mode_windows.h', 'ime_command_admission.h', 'ime_typed_origin.h', 'ime_profile_language.h',
-                 'ime_notification_caller.h','ime_compartment_protocol.h','ime_compartment_lease.h','ime_compartment_windows.h','ascii_message_protocol.h','bounded_stack_windows.h','bounded_plugin_origin_windows.h'):
+                 'ime_command3_finalization.h','ime_command3_finalization_windows.h','ime_notification_caller.h','ime_compartment_protocol.h','ime_compartment_lease.h','ime_compartment_windows.h','ascii_message_protocol.h','bounded_stack_windows.h','bounded_plugin_origin_windows.h'):
         (folder / name).write_bytes(Path(__file__).with_name(name).read_bytes())
-    source.write_text(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
-        .replace('__CLSID__', profile['providerClsid']).replace('__PROFILE__', profile['profileGuid']), encoding='utf-8')
+    source.write_text(finalization.render_source(OBSERVER_SOURCE.replace('__MAPPING__', mapping.replace('\\', '\\\\'))
+        .replace('__CLSID__', profile['providerClsid']).replace('__PROFILE__', profile['profileGuid']),finalization_config), encoding='utf-8')
     compiler = shutil.which('cl.exe')
     command = ['cl.exe', '/nologo', '/LD', '/O2', '/MT', '/EHsc', '/utf-8', str(source),
                '/link', '/MACHINE:' + ('ARM64' if architecture == 'arm64' else 'X64'), '/OUT:' + str(library), 'user32.lib', 'imm32.lib', 'ole32.lib', 'oleaut32.lib', 'uuid.lib']
@@ -1238,7 +1289,7 @@ def retain_ime_composition_publication(record, observer, *, before_input=False):
 
 
 class CompositionObserver:
-    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None, diagnose_ime_mode=False, notification_binding=None, capture_ime_compartment=False):
+    def __init__(self, api, root, child, focus, pid, folder, profile, *, architecture='x64', setup_deadline=None, diagnose_ime_mode=False, notification_binding=None, capture_ime_compartment=False, command3_binding=None):
         assert type(diagnose_ime_mode) is bool
         remaining_setup(setup_deadline, 60)
         self.native_architecture = native_arch.validate_native_architecture(
@@ -1268,7 +1319,22 @@ class CompositionObserver:
             assert setup_deadline is not None,'Mode diagnostic requires the original setup deadline'
             self.mode_diagnostic_budget=native_mode.counter_budget(setup_deadline,clock=time.monotonic)
         self.mapping_name = 'Local\\OpenGeulIme_' + uuid.uuid4().hex
-        self.mapping = mmap.mmap(-1, ctypes.sizeof(NativeState), tagname=self.mapping_name)
+        self.mapping=None;self.finalization_config=None
+        if command3_binding is not None:
+            assert type(command3_binding)is dict and set(command3_binding)=={'creationTime'}
+            nonce=uuid.uuid4().int
+            self.finalization_config=finalization.config(state_bytes=ctypes.sizeof(NativeState),pid=pid,tid=self.tid,hwnd=focus,root=root,
+                created=command3_binding['creationTime'],epoch=(nonce&((1<<64)-1),nonce>>64))
+            library=compile_observer(folder,self.mapping_name,profile,architecture=architecture,setup_deadline=setup_deadline,
+                finalization_config=self.finalization_config)
+            native_arch.require_native_pe(library,architecture)
+            self.dll=ctypes.WinDLL(str(library),use_last_error=True)
+            self.dll.StateSize.restype=ctypes.c_uint32;self.dll.NativeMappingSize.restype=ctypes.c_uint32
+            self.finalization_mapping_type=finalization.mapping_type(NativeState)
+            assert self.dll.StateSize()==ctypes.sizeof(NativeState) and self.dll.NativeMappingSize()==ctypes.sizeof(self.finalization_mapping_type)
+            self.finalization_source=finalization.source_identity(Path(__file__))
+            self.mapping=finalization.allocate(self.mapping_name,ctypes.sizeof(self.finalization_mapping_type),finalization.NativeMappingPort())
+        else:self.mapping=mmap.mmap(-1,ctypes.sizeof(NativeState),tagname=self.mapping_name)
         state = NativeState()
         state.magic, state.version, state.pid, state.tid = 0x4f47494d, 4, pid, self.tid
         state.targetHwnd, state.rootHwnd = focus, root
@@ -1279,15 +1345,19 @@ class CompositionObserver:
         if diagnose_ime_mode:
             state.modeDiagnosticDeadline,state.modeDiagnosticFrequency=self.mode_diagnostic_budget
             state.modeDiagnosticEnabled=1
-        self.mapping[:] = bytes(state)
+        if self.finalization_config is None:self.mapping[:]=bytes(state)
+        else:
+            section=finalization.Section();section.config=self.finalization_config
+            self.mapping[:]=bytes(state)+bytes(section)
         try:
-            library = compile_observer(folder, self.mapping_name, profile,
-                architecture=architecture, setup_deadline=setup_deadline)
+            if self.finalization_config is None:
+                library = compile_observer(folder, self.mapping_name, profile,
+                    architecture=architecture, setup_deadline=setup_deadline)
         except BaseException:
             self.close()
             raise
         native_arch.require_native_pe(library, architecture)
-        self.dll = ctypes.WinDLL(str(library), use_last_error=True)
+        if self.finalization_config is None:self.dll = ctypes.WinDLL(str(library), use_last_error=True)
         self.dll.StateSize.restype = ctypes.c_uint32
         assert self.dll.StateSize() == ctypes.sizeof(NativeState), 'Native observer memory layout differs from controller'
         if diagnose_ime_mode:
@@ -1588,6 +1658,21 @@ class CompositionObserver:
             pid=self.pid, tid=self.tid, hwnd=self.focus, deadline=self.mode_diagnostic_budget[0],
             frequency=self.mode_diagnostic_budget[1], command3=command3)
 
+    def finalization_diagnostics(self):
+        if self.finalization_config is None:return None
+        self.dll.ReadCommand3Finalization.argtypes=[ctypes.POINTER(self.finalization_mapping_type),ctypes.c_uint32,
+            ctypes.POINTER(finalization.Config),ctypes.POINTER(finalization.Section),ctypes.POINTER(ctypes.c_uint32),ctypes.POINTER(ctypes.c_uint32)]
+        self.dll.ReadCommand3Finalization.restype=ctypes.c_uint32
+        view=self.finalization_mapping_type.from_buffer(self.mapping)
+        output=finalization.Section();before=ctypes.c_uint32();after=ctypes.c_uint32()
+        try:copied=self.dll.ReadCommand3Finalization(ctypes.byref(view),ctypes.sizeof(view),ctypes.byref(self.finalization_config),ctypes.byref(output),ctypes.byref(before),ctypes.byref(after))
+        finally:del view
+        if copied!=1:return dict(schemaVersion=1,statusCode=0,copyReturn=int(copied),acceptanceEligible=False,causalAttributionProved=False)
+        original=next((row for row in self.commands if row['command']==3),None)
+        if original is None or 'requestedBudget'not in original:return dict(schemaVersion=1,statusCode=0,copyReturn=0,acceptanceEligible=False,causalAttributionProved=False)
+        budget=original['requestedBudget']
+        return finalization.decode(output,expected=self.finalization_config,expected_source=self.finalization_source,expected_budget=(budget['counter'],budget['frequency']),ack_before=before.value,ack_after=after.value)
+
     def close(self):
         errors = []
         if getattr(self, 'capture_ime_compartment', False) and getattr(self, 'mapping', None) is not None and hasattr(self, 'dll'):
@@ -1676,6 +1761,9 @@ def physical_key(observer, token, record):
 
 
 def retain_ime_message_diagnostics(record, observer):
+    if getattr(observer,'finalization_config',None)is not None and 'imeCommand3Finalization'not in record:
+        try:record['imeCommand3Finalization']=observer.finalization_diagnostics()
+        except BaseException:record['imeCommand3Finalization']=dict(schemaVersion=1,statusCode=0,copyReturn=0,acceptanceEligible=False,causalAttributionProved=False)
     if getattr(observer,'diagnose_ime_mode',False) and 'imeModeDiagnostics' not in record:
         try:record['imeModeDiagnostics']=observer.mode_diagnostics()
         except Exception as exc:record['imeModeDiagnostics']=dict(status='unavailable',acceptanceEligible=False,error=(type(exc).__name__+': '+str(exc))[:240])
@@ -1865,7 +1953,7 @@ def dispose_calc_dispatch_shell(process, original, deadline, *, engine=None, liv
     return receipt
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False, calc_dispatch_transport=None, compartment_sink=None,source_admission=None):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False, calc_dispatch_transport=None, compartment_sink=None,source_admission=None,capture_command3_finalization=False):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
@@ -1880,6 +1968,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
     assert calc_dispatch_transport is None or (module == 'calc' and readiness['nativeMachine'] == 0xaa64
         and not any((diagnose_navigation, diagnose_ime_mode, diagnose_focus, capture_ime_caller,
             capture_ime_compartment, plugin_origin))), 'Calc dispatch requires one isolated ARM64 case'
+    assert type(capture_command3_finalization)is bool
+    assert not capture_command3_finalization or not any((diagnose_navigation,diagnose_ime_mode,diagnose_focus,capture_ime_caller,capture_ime_compartment,calc_dispatch_transport is not None))
     name = 'ime-' + module
     if diagnose_focus:name+='-'+diagnostic_suffix
     folder = output / name
@@ -1896,6 +1986,10 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
               'file': str(source), 'success': False, 'imeVerified': False, 'stage': 'attach',
               'inputMethod': 'SendInput-scancode', 'unicodeInputUsed': False, 'keyTokens': [],
               'readiness': readiness, 'architecture': {0x8664: 'x64', 0xaa64: 'arm64'}[readiness['nativeMachine']]}
+    case_ime_oracles_passed=False
+    if capture_command3_finalization:
+        record.update(kind='native-ime-command3-finalization-diagnostic',acceptanceEligible=False,
+            imeVerified=False,caseImeOraclesPassed=False)
     if diagnose_ime_mode:record.update(kind='native-ime-mode-diagnostic',acceptanceEligible=False)
     if diagnose_focus:record.update(kind='native-focus-diagnostic',acceptanceEligible=False)
     if calc_dispatch_transport is not None:record.update(kind='calc-save-dispatch-diagnostic',acceptanceEligible=False)
@@ -1996,7 +2090,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             architecture=record['architecture'], setup_deadline=setup_deadline,
             **({'diagnose_ime_mode':True} if diagnose_ime_mode else {}),
             **({'notification_binding':dict(creationTime=keyboard.binding['officeCreationTime'],plugin=plugin_origin)} if capture_ime_caller or capture_ime_compartment else {}),
-            **({'capture_ime_compartment':True} if capture_ime_compartment else {}))
+            **({'capture_ime_compartment':True} if capture_ime_compartment else {}),
+            **({'command3_binding':{'creationTime':keyboard.binding['officeCreationTime']}}if capture_command3_finalization else {}))
         record.update(nativeArchitecture=observer.native_architecture, targetArchitecture=observer.target_architecture)
         assert observer.tid == keyboard.tid, 'Native observer differs from retained keyboard editor thread'
         keyboard.setup_complete()
@@ -2093,6 +2188,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             afterSha256=hashlib.sha256(source.read_bytes()).hexdigest(),
             originalFixtureUnchanged=hashlib.sha256(original.read_bytes()).hexdigest() == before)
         assert record['originalFixtureUnchanged'], 'IME test altered the engine baseline fixture'
+        if capture_command3_finalization:case_ime_oracles_passed=record.get('imeVerified') is True
         if diagnose_ime_mode:record.update(caseImeOraclesPassed=record.get('imeVerified') is True,imeVerified=False,acceptanceEligible=False)
         return record
     except Exception as exc:
@@ -2219,6 +2315,9 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
                 from editor_capture_diagnostic import cohort_cleanup_confirmed
                 if not cohort_cleanup_confirmed(record):
                     record.update(success=False,focusCohortStopped='Original shell/engine exit or retained handle release unconfirmed')
+            if capture_command3_finalization:
+                record.update(kind='native-ime-command3-finalization-diagnostic',acceptanceEligible=False,
+                    imeVerified=False,caseImeOraclesPassed=case_ime_oracles_passed)
             if not return_from_diagnostic_cleanup and not capture_ime_compartment: write_result(output, name, record)
             if capture_ime_compartment and compartment_sink is not None:
                 try: compartment_sink(record)
@@ -2464,6 +2563,15 @@ def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architectur
     return 0 if success else 1
 
 
+def _diagnostic_ci_binding(architecture):
+    """Reuse the existing owner-push diagnostic gate; no receipt selects context."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('navigation_ci_admission', Path(__file__).resolve().parents[2] / 'e2e/native31_suite_prepare.py')
+    admission = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(admission)
+    return admission.validate_context(os.environ,admission.read_event(),architecture,os.name)
+
+
 def _admit_source_reader(suite,architecture,requested_architecture):
     """Explicit prelaunch gate; no menu cohort, input fence or serialized authority."""
     if requested_architecture is None:return None
@@ -2490,6 +2598,7 @@ def main(argv=None):
     parser.add_argument('--matched-plugin-proof',type=Path)
     parser.add_argument('--capture-ime-caller',action='store_true')
     parser.add_argument('--capture-ime-compartment',action='store_true')
+    parser.add_argument('--capture-command3-finalization',action='store_true')
     parser.add_argument('--source-qualified-reader',choices=('x64','arm64'))
     parser.add_argument('--verify-one', choices=dict(INPUT_CASES))
     parser.add_argument('--file', type=Path)
@@ -2503,6 +2612,7 @@ def main(argv=None):
     architecture = native_arch.require_architecture(inventory.get('architecture'))
     controller = native_arch.validate_native_architecture(native_arch.observe_native_architecture(), architecture)
     assert sum(bool(value) for value in (args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus,args.diagnose_calc_dispatch))<=1,'Reopen and diagnostic modes are mutually exclusive'
+    assert not args.capture_command3_finalization or not any((args.verify_one,args.diagnose_navigation,args.diagnose_ime_mode,args.diagnose_focus,args.diagnose_calc_dispatch))
     if args.diagnose_calc_dispatch:
         assert args.expected_engine_source_commit, 'Externally pinned diagnostic engine source is required'
         diagnostic_overlay = require_calc_dispatch_suite(suite, inventory,
@@ -2523,6 +2633,7 @@ def main(argv=None):
         observed = reopen_one(suite, args.file.resolve(), args.verify_one)
         with args.reopen_output.open('x', encoding='utf-8') as stream: json.dump(observed, stream, ensure_ascii=False, indent=2)
         return 0
+    if args.capture_command3_finalization:binding=_diagnostic_ci_binding(architecture)
     source_admission=_admit_source_reader(suite,architecture,args.source_qualified_reader)
     assert args.fixtures and args.readiness and args.output, 'Generated fixtures, readiness and fresh output are required'
     for path in (args.suite, args.fixtures, args.readiness, args.output):
@@ -2532,12 +2643,7 @@ def main(argv=None):
     assert not any(str(path).startswith(('\\\\', '//')) for path in (suite, fixtures, output)), 'Only local test paths are accepted'
     if args.diagnose_navigation or args.diagnose_ime_mode or args.diagnose_focus or args.diagnose_calc_dispatch:
         # Same source-bound owner-push/first-attempt admission as the native suite.
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('navigation_ci_admission', Path(__file__).resolve().parents[2] / 'e2e/native31_suite_prepare.py')
-        admission = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(admission)
-        validate_context, read_event = admission.validate_context, admission.read_event
-        binding = validate_context(os.environ, read_event(), architecture, os.name)
+        binding = _diagnostic_ci_binding(architecture)
         if args.diagnose_calc_dispatch:
             assert diagnostic_overlay['admittedSuiteSourceCommit'] == binding['sourceCommit'], 'Diagnostic Suite differs from admitted CI source'
     output.mkdir(parents=True, exist_ok=False)
@@ -2568,7 +2674,22 @@ def main(argv=None):
         return 0 if success else 1
     results = collect_cases([('ime-' + module, lambda module=module, extension=extension:
         case(suite, fixtures, output, readiness, module, extension, prepared_library=prepared_library,
+            **({'capture_command3_finalization':True}if args.capture_command3_finalization else {}),
             **source_menu_replay_options(source_admission))) for module, extension in INPUT_CASES], output)
+    if args.capture_command3_finalization:
+        # These extra IMM getters can affect callbacks/timing. The original
+        # oracles remain facts, and cannot qualify this instrumented cohort.
+        assert all(type(row)is dict and row.get('kind')=='native-ime-command3-finalization-diagnostic'
+            and row.get('imeVerified')is False and row.get('acceptanceEligible')is False
+            and type(row.get('caseImeOraclesPassed'))is bool for row in results), 'Finalization diagnostic returned a normal or unclassified case'
+        oracle_count=sum(row['caseImeOraclesPassed'] for row in results)
+        success=len(results)==3 and all(row.get('success')is True and row['caseImeOraclesPassed'] for row in results)
+        report=dict(schemaVersion=1,kind='native-ime-command3-finalization-diagnostic',success=success,
+            acceptanceEligible=False,imeVerified=False,caseImeOraclesPassed=oracle_count==3,
+            passedCaseImeOracleCount=oracle_count,suiteOnly=True,tests=results,runBinding=binding,
+            architecture=architecture,nativeArchitecture=controller,expectedCaseCount=3)
+        (output/'results.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+        return 0 if success else 1
     success = len(results) == 3 and all(row.get('success') is True and row.get('imeVerified') is True for row in results)
     report = {'schemaVersion': 1, 'kind': 'native-korean-ime', 'success': success,
               'imeVerified': success, 'suiteOnly': True, 'tests': results,
