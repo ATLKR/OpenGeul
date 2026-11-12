@@ -114,6 +114,12 @@ def source_menu_replay_options(source_admission):
     return {} if source_admission is None else dict(source_admission=source_admission)
 
 
+def source_reader_options(source_admission, *, inventory_sha256):
+    """Forward private reader authority; actual readers validate the sealed object."""
+    return {} if source_admission is None else dict(source_admission=source_admission,
+        inventory_sha256=inventory_sha256)
+
+
 def click_owned_editor(api, process, hwnd, parent, child, office_pid, record):
     from editor_click_readiness import click_editor_once
     return click_editor_once(api.require_foreground, process, hwnd, parent, child, office_pid, record)
@@ -1404,16 +1410,19 @@ class CalcModelContext:
             creation=retained_writer_shell(self.process,self.suite,self.receipt['originalShell'])
             identity_file,data=_packaged_identity_file(self.suite,'suite-inventory.json')
             self.inventory,self.inventory_sha256=json.loads(data),identity_file['sha256']
+            self.source_admission=source_menu_action_options(self.process).get('source_admission')
             self.destination=self.output/'calc-model-reader'
             self.receipt['readerOutput']=str(self.destination)
             a=self.attachment
             self.reader=OwnedModelReader(self.suite,self.destination,expected_service=calc_model_barrier.SERVICE,
                 getter_contract=calc_model_barrier.GETTERS,shell_pid=self.process.pid,expected_shell_creation=creation,
-                suite_hwnd=a['hwnd'],parent_hwnd=a['parent'],child_hwnd=a['child'],office_pid=a['officePid'],expected_url=self.expected_url)
+                suite_hwnd=a['hwnd'],parent_hwnd=a['parent'],child_hwnd=a['child'],office_pid=a['officePid'],expected_url=self.expected_url,
+                **source_reader_options(self.source_admission,inventory_sha256=self.inventory_sha256))
             before=self.reader.start(self.deadline);self.receipt['beforeInput']=before
             self.plan=calc_model_barrier.freeze_expectation(before['bindingBefore'],self.baseline,marker,before,
                 suite_root=self.suite,original_shell=self.receipt['originalShell'],inventory=self.inventory,
-                inventory_sha256=self.inventory_sha256,expected_url=self.expected_url,started_at=started)
+                inventory_sha256=self.inventory_sha256,expected_url=self.expected_url,started_at=started,
+                **source_menu_replay_options(self.source_admission))
             self.receipt['expectation']=self.plan.receipt()
             return self.plan
         except BaseException as exc:
@@ -1428,7 +1437,8 @@ class CalcModelContext:
             calc_model_barrier.finalize_completion(plan,self.receipt,cleanup,time.monotonic())
             self.record['calcModelCompletionReplay']=calc_model_barrier.replay_completion(self.receipt,
                 suite_root=self.suite,inventory=self.inventory,inventory_sha256=self.inventory_sha256,
-                binding=plan.binding,baseline=self.baseline,expected_url=self.expected_url,marker=plan.marker)
+                binding=plan.binding,baseline=self.baseline,expected_url=self.expected_url,marker=plan.marker,
+                **source_menu_replay_options(self.source_admission))
             self.record['calcModelCompletionVerified']=True
             self.persist()
         except BaseException as exc:

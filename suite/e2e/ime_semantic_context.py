@@ -659,17 +659,19 @@ def _source_uri(path):
     return parsed.as_uri()
 
 
-def _sample(observation,context,inventory,*,previous=None):
+def _sample(observation,context,inventory,*,previous=None,source_admission=None):
     """Validate all ownership/safety first; only typed GUI states may be pending."""
     from writer_model_barrier import require_original_shell,require_python_identity
     from writer_model_reader import require_owned_model_observation,require_calc_a1_selection
     from calc_pending_input import require_pending_receipt
     from calc_save_smoke import require_uncommitted_cells
+    from windows_smoke import source_reader_options
     module=context['module'];suite=context['suiteRoot'];native=context['expectedNative']
     binding=observation['bindingBefore'];_same_native(binding,native)
     assert binding['documentUrl']==context['expectedUrl'], 'Semantic reader document URL changed'
     require_owned_model_observation(observation,binding,suite,
-        expected_service=SERVICES[module],getter_contract=GETTERS[module])
+        expected_service=SERVICES[module],getter_contract=GETTERS[module],
+        **source_reader_options(source_admission,inventory_sha256=context['inventorySha256']))
     require_original_shell(context['originalShell'],binding,suite)
     require_python_identity(observation['pythonIdentity'],suite,inventory,context['inventorySha256'])
     assert context['startedAt']<=_time(observation['readStartedAt'])<=_time(observation['readFinishedAt'])<context['readerDeadline'], 'Semantic read exceeded its original deadline'
@@ -704,9 +706,10 @@ def _sample(observation,context,inventory,*,previous=None):
 
 
 def require_ime_semantic_context(context,*,module,expected_native,setup_deadline,now,
-                                 phase='pre',expected_prefix=None):
+                                 phase='pre',expected_prefix=None,source_admission=None):
     """Pure replay of original getter observations and their natural cleanup."""
     from writer_model_reader import require_model_reader_cleanup
+    from windows_smoke import source_reader_options,source_menu_replay_options
     _phase(module,phase,expected_prefix)
     assert isinstance(context,dict) and type(context.get('schemaVersion')) is int and context['schemaVersion']==1
     assert context.get('kind')=='ime-semantic-editing-context' and context.get('success') is True
@@ -732,18 +735,19 @@ def require_ime_semantic_context(context,*,module,expected_native,setup_deadline
         assert isinstance(timing,dict) and set(timing)=={'requestedAt','receivedAt'}
         assert start<=_time(timing['requestedAt'])<=_time(observation['readStartedAt'])<=_time(observation['readFinishedAt'])<=_time(timing['receivedAt'])<deadline, 'Actual semantic request/receive order changed'
         if index:assert _time(timings[index-1]['receivedAt'])<=_time(timing['requestedAt'])
-        ready=_sample(observation,context,inventory,previous=previous)
+        ready=_sample(observation,context,inventory,previous=previous,**source_menu_replay_options(source_admission))
         assert ready is (index==len(observations)-1), 'Semantic poll history differs from actual first readiness'
         previous=observation
     assert context['observation']==observations[-1]
     cleanup=context['cleanup']
     require_model_reader_cleanup(cleanup,previous['bindingBefore'],deadline,
-        expected_service=SERVICES[module],getter_contract=GETTERS[module])
+        expected_service=SERVICES[module],getter_contract=GETTERS[module],
+        **source_reader_options(source_admission,inventory_sha256=context['inventorySha256']))
     assert _time(previous['readFinishedAt'])<=_time(cleanup['startedAt'])<=_time(cleanup['finishedAt'])<=finish<deadline, 'Semantic natural cleanup order changed'
     if phase=='post':
         prior=context['preContext']
         require_ime_semantic_context(prior,module=module,expected_native=expected_native,
-            setup_deadline=setup,now=start,phase='pre')
+            setup_deadline=setup,now=start,phase='pre',**source_menu_replay_options(source_admission))
         assert prior['sourcePath']==context['sourcePath'] and prior['baseline']==baseline
         assert prior['originalShell']==context['originalShell'] and prior['inventorySha256']==context['inventorySha256']
         assert prior['observation']['bindingBefore']['privatePipe']==previous['bindingBefore']['privatePipe']
@@ -756,10 +760,11 @@ def require_ime_semantic_context(context,*,module,expected_native,setup_deadline
 
 def observe_ime_semantic_setup(suite,source,original_bytes,record,setup_deadline,*,
         original_shell,expected_native,require_current,phase='pre',expected_prefix=None,
-        reader_factory=None,clock=time.monotonic,pause=time.sleep):
+        reader_factory=None,clock=time.monotonic,pause=time.sleep,source_admission=None):
     """Observe without input; keep the original setup/reader deadline through close."""
     from writer_model_reader import OwnedModelReader,require_model_reader_cleanup
     from writer_style_smoke import _packaged_identity_file
+    from windows_smoke import source_reader_options,source_menu_replay_options
     suite,source=Path(suite).resolve(),Path(source).absolute()
     module=record.get('module');_phase(module,phase,expected_prefix)
     started=_time(clock());setup_deadline=_time(setup_deadline)
@@ -782,7 +787,7 @@ def observe_ime_semantic_setup(suite,source,original_bytes,record,setup_deadline
         else:
             assert len(history)==1 and history[0] is prior, 'POST requires the exact actual PRE context'
             require_ime_semantic_context(prior,module=module,expected_native=expected_native,
-                setup_deadline=setup_deadline,now=started,phase='pre')
+                setup_deadline=setup_deadline,now=started,phase='pre',**source_menu_replay_options(source_admission))
             context['preContext']=copy.deepcopy(prior)
             keys=('module','asciiPrefix','prefixInputLayout','windowHwnd','childHwnd','keyboardFocusHwnd','editorTid','asciiEditorInputs')
             context['asciiEvidence']={key:copy.deepcopy(record[key]) for key in keys}
@@ -805,7 +810,8 @@ def observe_ime_semantic_setup(suite,source,original_bytes,record,setup_deadline
             shell_pid=expected_native['shellPid'],expected_shell_creation=expected_native['shellCreationTime'],
             suite_hwnd=expected_native['suiteHwnd'],parent_hwnd=expected_native['parentHwnd'],
             child_hwnd=expected_native['childHwnd'],office_pid=expected_native['officePid'],
-            expected_url=source.as_uri(),clock=clock)
+            expected_url=source.as_uri(),clock=clock,
+            **source_reader_options(source_admission,inventory_sha256=identity['sha256']))
         context['readerStartAttempted']=True
         previous=None
         for index in range(MAX_SAMPLES):
@@ -817,7 +823,7 @@ def observe_ime_semantic_setup(suite,source,original_bytes,record,setup_deadline
             context['sampleTimings'].append(dict(requestedAt=requested,receivedAt=received))
             assert requested<=_time(observation['readStartedAt'])<=_time(observation['readFinishedAt'])<=received<deadline, 'Actual semantic request/receive order changed'
             require_current()
-            ready=_sample(observation,context,inventory,previous=previous)
+            ready=_sample(observation,context,inventory,previous=previous,**source_menu_replay_options(source_admission))
             assert _time(clock())<deadline, 'Semantic observation arrived after its original deadline'
             assert len(json.dumps(context,ensure_ascii=False).encode('utf-8'))<=MAX_CONTEXT_BYTES
             if ready:break
@@ -835,7 +841,8 @@ def observe_ime_semantic_setup(suite,source,original_bytes,record,setup_deadline
                 context['cleanup']=reader.close(deadline)
                 if context['observations']:
                     require_model_reader_cleanup(context['cleanup'],context['observations'][-1]['bindingBefore'],deadline,
-                        expected_service=SERVICES[module],getter_contract=GETTERS[module])
+                        expected_service=SERVICES[module],getter_contract=GETTERS[module],
+                        **source_reader_options(source_admission,inventory_sha256=identity['sha256']))
                     assert _time(context['observations'][-1]['readFinishedAt'])<=_time(context['cleanup']['startedAt']), 'Semantic reader cleanup precedes observation'
             except BaseException as exc:
                 cleanup_failures.append(exc);context['cleanupErrors'].append(type(exc).__name__[:80]+': '+str(exc)[:1024])
@@ -845,7 +852,8 @@ def observe_ime_semantic_setup(suite,source,original_bytes,record,setup_deadline
                 context['diskAfterSha256']=hashlib.sha256(source.read_bytes()).hexdigest()
                 require_current();context['finishedAt']=_time(clock());context['success']=True
                 require_ime_semantic_context(context,module=module,expected_native=expected_native,
-                    setup_deadline=setup_deadline,now=context['finishedAt'],phase=phase,expected_prefix=expected_prefix)
+                    setup_deadline=setup_deadline,now=context['finishedAt'],phase=phase,expected_prefix=expected_prefix,
+                    **source_menu_replay_options(source_admission))
                 require_current()
                 finished=_time(clock())
                 assert context['finishedAt']<=finished<deadline, 'Semantic replay/return exceeded its original reader deadline'

@@ -25,7 +25,7 @@ import zipfile
 # E2E CLIs put only this directory on sys.path, including from external cwd.
 # Resolve canonical dependencies from this checked-in file, never a bare fallback.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from suite import payload, prepare
+from suite import payload, prepare, source_contracts
 
 
 # Fixed reviewed harness inputs, never a supplied lock path or packaged lock.
@@ -354,21 +354,46 @@ def _hash_provider_members(archive: Path, *, deadline: float) -> tuple[_Provider
     return tuple(result)
 
 
+def _runtime_source_contract(runtime: dict):
+    """Select reviewed source metadata; this grants no runtime or input authority."""
+    if type(runtime) is not dict or runtime.get('format') != 'source-built-zip':
+        raise ValueError('Source menu requires a reviewed source-built runtime')
+    for pin in (source_contracts.LEGACY_SOURCE, source_contracts.NEW_SOURCE):
+        fields = dict(version=pin['version'], sourceCoreCommit=pin['coreCommit'],
+                      sourceUrl=pin['url'], sourceSha256=pin['sha256'])
+        if all(type(runtime.get(key)) is str and runtime[key] == value
+               for key, value in fields.items()):
+            return source_contracts.contract_for_source_pin(dict(pin))
+    raise ValueError('Source menu source core/version/archive tuple differs')
+
+
 def _recipe_identity(proof: dict, runtime: dict, architecture: str) -> str:
+    contract = _runtime_source_contract(runtime)
     patch = proof.get('winAccFocusOrderSourcePatch')
-    if (runtime.get('sourceCoreCommit') != _CORE or not isinstance(patch, dict)
+    if contract is source_contracts.NEW:
+        if source_contracts.contract_for_source_pin(proof.get('sourcePin')) is not contract:
+            raise ValueError('Source menu source recipe metadata differs')
+        expected = source_contracts.new_source_only_expectations(proof['sourcePin'], architecture)
+        fields = dict(expected.winacc_fields)
+    else:
+        fields = _PATCH_FIELDS
+    if (not isinstance(patch, dict)
             or any(type(patch.get(key)) is not type(value) or patch[key] != value
-                   for key, value in _PATCH_FIELDS.items())
+                   for key, value in fields.items())
             or _canonical(patch.get('sourceFiles')) != _canonical(_PATCH_FILES)
-            or architecture == 'arm64' and proof.get('sourceRecipeProof') is not None):
+            or contract is source_contracts.LEGACY and architecture == 'arm64'
+               and proof.get('sourceRecipeProof') is not None):
         raise ValueError('Source menu source core or reviewed WinAcc recipe differs')
-    # ARM's historical Full proof has no sourceRecipeProof. Its independently
-    # locked manifest and fixed common patch remain bound, without today's x64
-    # manifest. The existing x64 validator already enforces its complete recipe.
+    # Preserve the historical ARM proof. New source profiles independently need
+    # their complete architecture recipe and same-run WinAcc/Flex source evidence.
+    if contract is source_contracts.NEW:
+        prepare._source_new_recipe(proof, architecture)
     recipe = dict(architecture=prepare.native_machine(architecture),
         sourceManifestSha256=runtime['sourceBuild']['patchManifestSha256'],
-        winAccPatch=dict(_PATCH_FIELDS, sourceFiles=_PATCH_FILES),
+        winAccPatch=dict(fields, sourceFiles=_PATCH_FILES),
         sourceRecipe=proof.get('sourceRecipeProof'))
+    if contract is source_contracts.NEW:
+        recipe['flexFatalCompatibilitySourcePatch'] = proof['flexFatalCompatibilitySourcePatch']
     return hashlib.sha256(_canonical(recipe)).hexdigest()
 
 
@@ -386,6 +411,7 @@ class SourceMenuAdmission:
     admission_sha256: str
     _providers: tuple[_ProviderIdentity, ...] = field(repr=False)
     _summary: Mapping[str, object] = field(repr=False)
+    _source_contract: source_contracts.SourceContract = field(repr=False)
     _seal: object = field(repr=False, compare=False)
 
     def __init__(self):
@@ -393,9 +419,17 @@ class SourceMenuAdmission:
 
     def _require_admitted(self) -> None:
         if (getattr(self, '_seal', None) is not _ADMISSION_SEAL
+                or getattr(self, '_source_contract', None) is not source_contracts.LEGACY
+                   and getattr(self, '_source_contract', None) is not source_contracts.NEW
+                or self._summary.get('sourceCoreCommit') != self._source_contract.core
                 or tuple((item.member.role, item.member.member_name)
                          for item in self._providers) != _PROVIDERS):
             raise ValueError('Source menu context was not admitted with both providers')
+
+    def source_contract(self):
+        """Return the profile fixed only after external Full/ZIP/provider admission."""
+        self._require_admitted()
+        return self._source_contract
 
     def summary(self) -> Mapping[str, object]:
         """Closed immutable numeric/binary identity summary, without local paths."""
@@ -433,8 +467,9 @@ def admit_source_menu_runtime(suite: Path, *, architecture: str, engine_zip: Pat
     runtime = lock.get('runtime')
     if (type(lock.get('schemaVersion')) is not int or lock['schemaVersion'] != 1
             or lock.get('architecture') != architecture or not isinstance(runtime, dict)
-            or runtime.get('sourceCoreCommit') != _CORE):
+            or runtime.get('format') != 'source-built-zip'):
         raise ValueError('Source menu requires an external reviewed source runtime lock')
+    contract = _runtime_source_contract(runtime)
     try:
         prepare.validate_source_build_lock(runtime, architecture=architecture)
     except ValueError:
@@ -497,7 +532,7 @@ def admit_source_menu_runtime(suite: Path, *, architecture: str, engine_zip: Pat
     body = dict(schemaVersion=1, architecture=prepare.native_machine(architecture),
         lockSha256=lock_sha, receiptSha256=runtime['sourceBuild']['receiptSha256'],
         engineZipSha256=runtime['sha256'], inventorySha256=inventory_sha,
-        sourceCoreCommit=_CORE, sourceRecipeSha256=recipe_sha,
+        sourceCoreCommit=contract.core, sourceRecipeSha256=recipe_sha,
         providers=[dict(role=item.member.role, size=item.member.size, sha256=item.member.sha256)
                    for item in providers])
     admission_sha = hashlib.sha256(_canonical(dict(suiteRoot=str(suite), summary=body))).hexdigest()
@@ -507,6 +542,6 @@ def admit_source_menu_runtime(suite: Path, *, architecture: str, engine_zip: Pat
     admitted = object.__new__(SourceMenuAdmission)
     for key, value in (('suite_root', suite), ('architecture', architecture),
             ('admission_sha256', admission_sha), ('_providers', tuple(providers)),
-            ('_summary', summary), ('_seal', _ADMISSION_SEAL)):
+            ('_summary', summary), ('_source_contract', contract), ('_seal', _ADMISSION_SEAL)):
         object.__setattr__(admitted, key, value)
     return admitted

@@ -671,12 +671,14 @@ class WriterModelContext:
             shell_creation=retained_writer_shell(self.case.process,self.case.suite,self.receipt['originalShell'])
             inventory_file, data = _packaged_identity_file(self.case.suite, 'suite-inventory.json')
             self.inventory, self.inventory_sha256 = json.loads(data), inventory_file['sha256']
+            self.source_admission=native.source_menu_action_options(self.case.process).get('source_admission')
             attachment = self.attachment
             destination = self.case.output / 'writer-model-readers' / self.case.name / ('edit-%02d' % len(receipts))
             self.receipt['readerOutput'] = str(destination)
             self.reader = OwnedWriterReader(self.case.suite, destination, shell_pid=self.case.process.pid,
                 suite_hwnd=attachment['hwnd'], parent_hwnd=attachment['parent'], child_hwnd=attachment['child'],
-                office_pid=attachment['officePid'], expected_shell_creation=shell_creation,expected_url=self.expected_url)
+                office_pid=attachment['officePid'], expected_shell_creation=shell_creation,expected_url=self.expected_url,
+                **native.source_reader_options(self.source_admission,inventory_sha256=self.inventory_sha256))
             before = self.reader.start(self.deadline)
             self.receipt['beforeInput'] = before
             binding = before['bindingBefore']
@@ -685,7 +687,7 @@ class WriterModelContext:
                 assert native_binding == self.native_binding, 'Original frame generation changed between edits'
             self.plan = freeze_expectation(binding, self.baseline, self.completed_markers, marker, before,
                 suite_root=self.case.suite,original_shell=self.receipt['originalShell'], inventory=self.inventory, inventory_sha256=self.inventory_sha256,
-                started_at=started, timeout_seconds=12.0)
+                started_at=started, timeout_seconds=12.0,**native.source_menu_replay_options(self.source_admission))
             self.native_binding = native_binding
             self.receipt['expectation'] = self.plan.receipt()
             return self.plan
@@ -762,7 +764,8 @@ class Case:
             urls = {key: context.expected_url for key, context in self.writer_model_contexts.items()}
             self.record['writerModelReplay'] = replay_case_completions(self.record, suite_root=self.suite,
                 inventory=json.loads(inventory_data), inventory_sha256=inventory_file['sha256'],
-                baseline_body=self.writer_model_baseline['bodyText'], expected_urls=urls)
+                baseline_body=self.writer_model_baseline['bodyText'], expected_urls=urls,
+                **native.source_menu_action_options(self.process))
             self.record.update(success=True, stage='complete')
             return self.record
         except Exception as exc:

@@ -4,7 +4,7 @@ This synchronizes a new harness. It neither repairs text nor establishes the
 cause of earlier physical input loss. Portable replay performs no filesystem,
 Windows API, UNO, focus, input or model mutation operations.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import copy
 import hashlib
 import json
@@ -108,6 +108,7 @@ class Expectation:
     inventory_json: str
     inventory_sha256: str
     original_shell_json: str
+    source_admission: object = field(default=None, repr=False, compare=False)
 
     @property
     def binding(self): return json.loads(self.binding_json)
@@ -124,7 +125,10 @@ class Expectation:
 
 
 def freeze_expectation(binding, baseline_body, completed_markers, next_marker, before_input,
-                       *, suite_root, original_shell, inventory, inventory_sha256, started_at, timeout_seconds=MAX_SECONDS):
+                       *, suite_root, original_shell, inventory, inventory_sha256, started_at,
+                       timeout_seconds=MAX_SECONDS, source_admission=None):
+    from writer_model_reader import require_reader_source_context
+    require_reader_source_context(source_admission,suite_root,inventory_sha256)
     start = _time(started_at)
     assert type(timeout_seconds) in (float, int) and math.isfinite(timeout_seconds) and 0 < timeout_seconds <= MAX_SECONDS, 'Invalid bounded completion budget'
     baseline = _text(baseline_body)
@@ -135,7 +139,8 @@ def freeze_expectation(binding, baseline_body, completed_markers, next_marker, b
     require_original_shell(original_shell,binding,suite_root)
     prior = baseline + ''.join(markers); expected = prior + next_marker
     plan = Expectation(str(_path(str(suite_root))),baseline,markers,next_marker,prior,expected,start,
-        start+timeout_seconds,_json(binding),_json(before_input),_json(inventory),inventory_sha256,_json(original_shell))
+        start+timeout_seconds,_json(binding),_json(before_input),_json(inventory),inventory_sha256,_json(original_shell),
+        source_admission=source_admission)
     assert _text(before_input['bodyText']) == prior, 'Before-input model differs from independently frozen prior body'
     assert validate_observation(plan,before_input,prior) == 'pending'
     return plan
@@ -155,7 +160,9 @@ def validate_observation(plan, observation, previous_body):
     require_python_identity(observation.get('pythonIdentity'),plan.suite_root,plan.inventory,plan.inventory_sha256)
     # The backend owns raw typed native/UNO evidence and its mandatory portable replay.
     from writer_model_reader import require_owned_observation
-    require_owned_observation(observation,binding,plan.suite_root)
+    source_context = ({} if plan.source_admission is None else
+        dict(source_admission=plan.source_admission,inventory_sha256=plan.inventory_sha256))
+    require_owned_observation(observation,binding,plan.suite_root,**source_context)
     frozen = json.loads(plan.before_input_json)
     assert observation['helperLaunch']==frozen['helperLaunch'], 'Actual owned observer launch receipt changed between reads'
     assert observation['systemConsoleHost']==frozen['systemConsoleHost'], 'Frozen system console host witness changed'
@@ -223,7 +230,9 @@ def finalize_completion(plan, record, cleanup, finished_at):
     assert record.get('state') == 'model-complete' and record.get('success') is True
     try:
         from writer_model_reader import require_reader_cleanup
-        require_reader_cleanup(cleanup,plan.binding,plan.deadline)
+        source_context = ({} if plan.source_admission is None else
+            dict(source_admission=plan.source_admission,inventory_sha256=plan.inventory_sha256))
+        require_reader_cleanup(cleanup,plan.binding,plan.deadline,**source_context)
         finished = _time(finished_at)
         assert _time(record['modelEqualityAt']) <= _time(cleanup['startedAt']) <= _time(cleanup['finishedAt']) <= finished <= plan.deadline, 'Reader cleanup is not after equality and within the original absolute budget'
         frozen=json.loads(plan.before_input_json)
@@ -253,7 +262,7 @@ def finalize_completion(plan, record, cleanup, finished_at):
 
 
 def replay_completion(receipt, *, suite_root, inventory, inventory_sha256,
-                      binding, baseline_body, completed_markers, next_marker):
+                      binding, baseline_body, completed_markers, next_marker, source_admission=None):
     """Independently replay one final raw receipt against external expectations."""
     assert isinstance(receipt,dict) and type(receipt.get('schemaVersion')) is int and receipt['schemaVersion'] == 1
     assert receipt.get('kind') == 'writer-model-completion' and receipt.get('state') == 'complete' and receipt.get('success') is True
@@ -262,7 +271,8 @@ def replay_completion(receipt, *, suite_root, inventory, inventory_sha256,
     assert raw['binding'] == binding and raw['baselineBody'] == _text(baseline_body)
     plan = freeze_expectation(binding,baseline_body,completed_markers,next_marker,raw['beforeInput'],
         suite_root=suite_root,original_shell=raw['originalShell'],inventory=inventory,inventory_sha256=inventory_sha256,
-        started_at=start,timeout_seconds=deadline-start)
+        started_at=start,timeout_seconds=deadline-start,
+        **({} if source_admission is None else dict(source_admission=source_admission)))
     assert raw == plan.receipt() and receipt['deadline'] == plan.deadline, 'Completion expectation or budget changed'
     rows = receipt['observations']; assert isinstance(rows,list) and 0 < len(rows) <= MAX_READS
     previous, last_time = plan.prior_body,_time(raw['beforeInput']['readFinishedAt'])
@@ -281,7 +291,7 @@ def replay_completion(receipt, *, suite_root, inventory, inventory_sha256,
 
 
 def replay_case_completions(record, *, suite_root, inventory, inventory_sha256,
-                            baseline_body, expected_urls):
+                            baseline_body, expected_urls, source_admission=None):
     """Portable whole-case replay; caller supplies independent body/URL anchors.
 
     expected_urls maps the source-derived edited (Suite HWND, child HWND) pairs to
@@ -327,7 +337,8 @@ def replay_case_completions(record, *, suite_root, inventory, inventory_sha256,
         before=ledgers.setdefault(key,[])
         replayed=replay_completion(receipt,suite_root=suite_root,inventory=inventory,
             inventory_sha256=inventory_sha256,binding=binding,baseline_body=baseline_body,
-            completed_markers=before,next_marker=marker)
+            completed_markers=before,next_marker=marker,
+            **({} if source_admission is None else dict(source_admission=source_admission)))
         assert previous_finished<=replayed['startedAt'], 'Original edit completion intervals overlap or are reordered'
         previous_finished=replayed['finishedAt']
         total_reads+=replayed['reads'];before.append(marker)

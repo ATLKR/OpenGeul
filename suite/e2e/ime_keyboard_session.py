@@ -28,11 +28,12 @@ def _number(value): return type(value) in (int, float) and math.isfinite(value)
 
 class IMEKeyboardSession:
     def __init__(self, api, process, root, parent, child, pid, module, record,
-                 setup_deadline, *, probe=None, clock=time.monotonic, retain_evidence=True):
+                 setup_deadline, *, probe=None, clock=time.monotonic, retain_evidence=True, source_admission=None):
         assert module in SETUP and _number(setup_deadline)
         assert type(retain_evidence) is bool, 'Keyboard evidence retention requires an explicit boolean'
         self.retain_evidence = retain_evidence
         self.api, self.process, self.module, self.record = api, process, module, record
+        self.source_admission=source_admission  # Private controller context; never serialized.
         self.clock, self.deadline, self.setup_deadline = clock, setup_deadline, setup_deadline
         assert clock() < setup_deadline <= clock() + 60, 'IME setup deadline exceeds its shared bound'
         for value in (root, parent, child, pid): assert type(value) is int and value > 0
@@ -343,6 +344,7 @@ class IMEKeyboardSession:
     def navigate_calc(self,suite,source,original_bytes,*,original_shell,reader_factory=None):
         def navigate():
             from ime_calc_navigation import observe_calc_navigation,require_calc_navigation
+            from windows_smoke import source_menu_replay_options
             assert self.module=='calc' and self.phase=='focused', 'Calc navigation cannot repeat or reorder'
             assert self.calc_navigation is None and len(self.receipt['actions'])==1
             assert original_shell['pid']==self.shell['pid'] and original_shell['handleValue']==self.shell['handleValue']
@@ -367,10 +369,10 @@ class IMEKeyboardSession:
             context=observe_calc_navigation(suite,source,original_bytes,self.record,self.setup_deadline,
                 original_shell=original_shell,expected_native=self.binding,
                 require_current=self.require_calc_navigation_target,send_home=home,
-                reader_factory=reader_factory,clock=self.clock)
+                reader_factory=reader_factory,clock=self.clock,**source_menu_replay_options(self.source_admission))
             assert context is self.calc_navigation is self.record.get('calcNavigationContext')
             require_calc_navigation(context,suite=suite,expected_native=self.binding,expected_url=self.calc_navigation_url,
-                setup_deadline=self.setup_deadline,now=self.clock())
+                setup_deadline=self.setup_deadline,now=self.clock(),**source_menu_replay_options(self.source_admission))
             assert context['homeCommand'] is self.receipt['actions'][1]
             self.phase='calc-navigation-ready'
             self.receipt['calcNavigationReadiness']=dict(finishedAt=context['finishedAt'],
@@ -379,11 +381,13 @@ class IMEKeyboardSession:
         return self._run(navigate)
     def _replay_semantic(self, phase):
         from ime_semantic_context import require_ime_semantic_context
+        from windows_smoke import source_menu_replay_options
         if self.module=='calc':
             from ime_calc_navigation import require_calc_navigation,_time as _time_navigation
             assert self.calc_navigation is not None and self.record.get('calcNavigationContext') is self.calc_navigation, 'Actual Calc navigation proof changed or is missing'
             require_calc_navigation(self.calc_navigation,suite=self.process.opengeul_suite_root,
-                expected_native=self.binding,expected_url=self.calc_navigation_url,setup_deadline=self.setup_deadline,now=self.clock())
+                expected_native=self.binding,expected_url=self.calc_navigation_url,setup_deadline=self.setup_deadline,now=self.clock(),
+                **source_menu_replay_options(self.source_admission))
             readiness=self.receipt['calcNavigationReadiness'];actions=self.receipt['actions']
             assert [row['shortcut'] for row in actions]==['CTRL_F6','CTRL_HOME','F2','CTRL_END']
             assert self.calc_navigation['homeCommand'] is actions[1]
@@ -401,7 +405,8 @@ class IMEKeyboardSession:
         context=self.semantic_pre if phase=='pre' else self.semantic_post
         result=require_ime_semantic_context(context,module=self.module,expected_native=self.binding,
             setup_deadline=self.setup_deadline,now=self.clock(),phase=phase,
-            expected_prefix=None if phase=='pre' else self.record.get('asciiPrefix'))
+            expected_prefix=None if phase=='pre' else self.record.get('asciiPrefix'),
+            **source_menu_replay_options(self.source_admission))
         self._budget()
         return result
     def semantic_ready(self, context, *, phase):
@@ -491,7 +496,8 @@ class IMEKeyboardSession:
             from korean_ime_smoke import validate_restoration, require_ime_save_disposition
             assert self.phase=='composition', 'IME save requires completed setup and composition'
             validate_restoration(restoration)
-            require_ime_save_disposition(self.record, restoration)
+            from windows_smoke import source_menu_replay_options
+            require_ime_save_disposition(self.record, restoration,**source_menu_replay_options(self.source_admission))
             assert self.record.get('layoutRestored') is True and self.record.get('prefixInputLayout')==restoration['previousLayout']==US_LAYOUT, 'IME save requires exact original US restoration'
             assert _number(save_deadline) and self.clock()<save_deadline<=self.clock()+30, 'IME save deadline exceeds original bound'
             self.deadline=save_deadline

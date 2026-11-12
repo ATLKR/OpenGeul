@@ -21,6 +21,7 @@ import stat
 import sys
 import time
 import traceback
+from types import ModuleType
 from urllib.parse import unquote, urlsplit
 
 MAX_JSON_BYTES = 2 * 1024 * 1024
@@ -668,7 +669,38 @@ def _require_uno(raw,binding,*,contract=_WRITER_CONTRACT):
     assert raw.get('modelService')==contract.service and raw.get('documentUrl')==binding['documentUrl'], 'Foreign Writer model or URL' if contract==_WRITER_CONTRACT else 'Foreign Calc model or URL'
 
 
-def _reader_member(row,binding,suite_root,alive,*,exiting=False):
+_LEGACY_READER_MEMBER='Office/program/python-core-3.13.15/bin/python.exe'
+_NEW_READER_MEMBER='Office/program/python-core-3.13.17/bin/python.exe'
+
+
+def _reader_member_for_contract(contract):
+    """Closed path data only; callers still need an admitted runtime context."""
+    contracts=sys.modules.get('suite.source_contracts')
+    if type(contracts) is not ModuleType:
+        raise ValueError('Reader source metadata module is not already loaded')
+    if contract is getattr(contracts,'LEGACY',None):return _LEGACY_READER_MEMBER
+    if contract is getattr(contracts,'NEW',None):return _NEW_READER_MEMBER
+    raise ValueError('Reader source metadata contract is not reviewed')
+
+
+def require_reader_source_context(source_admission,suite_root,inventory_sha256):
+    """Select from the caller's sealed Full admission, never from raw receipts."""
+    if source_admission is None:return _LEGACY_READER_MEMBER
+    gate=sys.modules.get('native_menu_source_admission')
+    if (type(gate) is not ModuleType
+            or type(source_admission) is not getattr(gate,'SourceMenuAdmission',None)
+            or type(inventory_sha256) is not str or not re.fullmatch('[0-9a-f]{64}',inventory_sha256)):
+        raise ValueError('Reader requires the admitted source context and external inventory digest')
+    summary=source_admission.summary();contract=source_admission.source_contract()
+    try:same_root=_path(str(source_admission.suite_root))==_path(str(suite_root))
+    except (AssertionError,TypeError):same_root=False
+    if (not same_root or summary.get('inventorySha256')!=inventory_sha256
+            or summary.get('sourceCoreCommit')!=contract.core):
+        raise ValueError('Reader source admission differs from Suite root or inventory')
+    return _reader_member_for_contract(contract)
+
+
+def _reader_member(row,binding,suite_root,alive,*,exiting=False,core_member=_LEGACY_READER_MEMBER):
     assert isinstance(row,dict) and row.get('inOwnedJob') is True and row.get('isInJobApiSucceeded') is True
     _positive(row.get('jobHandleValue'))
     assert _positive(row.get('pid')) not in (binding['shellPid'],binding['officePid'])
@@ -677,7 +709,8 @@ def _reader_member(row,binding,suite_root,alive,*,exiting=False):
     image=_path(row.get('image'))
     assert image.startswith(root+('\\' if '\\' in root else '/'))
     tail=image[len(root)+1:].replace('\\','/')
-    assert tail=='python.exe' or re.fullmatch(r'python-core-3\.13\.15/bin/python\.exe',tail), 'Reader job contains a foreign executable'
+    assert type(core_member) is str and core_member in (_LEGACY_READER_MEMBER,_NEW_READER_MEMBER), 'Reader core expectation is not reviewed'
+    assert tail=='python.exe' or _path(image)==_path(_join(suite_root,core_member)), 'Reader job contains a foreign executable'
     assert type(row.get('waitResult')) is int and type(row.get('exitCode')) is int
     assert row.get('waitResult')==(258 if alive else 0) and row.get('exitCode')==(0 if exiting else 259 if alive else 0), 'Reader did not exit normally' if not alive else 'Reader is not alive'
     assert not exiting or alive, 'Only an unsignaled release sample can be pending'
@@ -758,7 +791,8 @@ def _require_launch(receipt,job=None):
     return pid,process_handle,job_handle
 
 
-def _require_owned_observation(observation,binding,suite_root,contract):
+def _require_owned_observation(observation,binding,suite_root,contract,*,source_admission=None,inventory_sha256=None):
+    core_member=require_reader_source_context(source_admission,suite_root,inventory_sha256)
     assert isinstance(observation,dict) and observation.get('kind')==contract.kind
     assert observation.get('bindingBefore')==binding==observation.get('bindingAfter')
     for key in ('retainedProcessHandle','readOnlyObservation','sameFrameControllerModelVerified','readCallCleanupSucceeded','readerStillRetained'):
@@ -775,7 +809,9 @@ def _require_owned_observation(observation,binding,suite_root,contract):
     _require_uno(uno.get('before'),binding,contract=contract);_require_uno(uno.get('after'),binding,contract=contract)
     assert uno['before']['proxyIdentity']==uno['after']['proxyIdentity']
     assert uno['before']['proxyIdentity']['helperPid']==observation.get('readerProcess',{}).get('pid')
-    _reader_member(observation.get('readerProcess'),binding,suite_root,True)
+    _reader_member(observation.get('readerProcess'),binding,suite_root,True,core_member=core_member)
+    if source_admission is not None:
+        assert observation.get('pythonIdentity',{}).get('inventorySha256')==inventory_sha256, 'Reader observation inventory differs from admitted source context'
     _require_launch(observation.get('helperLaunch'),observation['readerProcess']['jobHandleValue'])
     assert _path(observation['helperLaunch']['steps'][1]['application'])==_path(_join(suite_root,'Office/program/python.exe'))
     observed=observation.get('pythonIdentity',{}).get('observed',{})
@@ -812,14 +848,14 @@ def _require_owned_observation(observation,binding,suite_root,contract):
     return observation
 
 
-def require_owned_observation(observation,binding,suite_root):
+def require_owned_observation(observation,binding,suite_root,*,source_admission=None,inventory_sha256=None):
     """Replay the unchanged fixed Writer contract, with no native calls or I/O."""
-    return _require_owned_observation(observation,binding,suite_root,_WRITER_CONTRACT)
+    return _require_owned_observation(observation,binding,suite_root,_WRITER_CONTRACT,source_admission=source_admission,inventory_sha256=inventory_sha256)
 
 
-def require_owned_model_observation(observation,binding,suite_root,*,expected_service,getter_contract):
+def require_owned_model_observation(observation,binding,suite_root,*,expected_service,getter_contract,source_admission=None,inventory_sha256=None):
     """Pure replay against an explicit caller-selected service/getter pair."""
-    return _require_owned_observation(observation,binding,suite_root,_model_contract(expected_service,getter_contract))
+    return _require_owned_observation(observation,binding,suite_root,_model_contract(expected_service,getter_contract),source_admission=source_admission,inventory_sha256=inventory_sha256)
 
 
 def _require_job_census(group,job,deadline):
@@ -877,7 +913,7 @@ def _require_cleanup_censuses(cleanup,job,members,deadline):
     if len(final['calls'])>=2:assert final in anomalies, 'Resolved final census lost incomplete-call history'
 
 
-def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRACT):
+def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRACT,source_admission=None,inventory_sha256=None):
     """Replay final helper quiescence separately from every still-retained read."""
     assert isinstance(cleanup,dict) and cleanup.get('kind')==contract.cleanup_kind
     assert cleanup.get('deadline')==deadline and _finite(cleanup.get('startedAt'))<=_finite(cleanup.get('finishedAt'))<=_finite(deadline)
@@ -885,13 +921,14 @@ def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRA
     # Infer only a lexical root, never resolve a recorded Windows path on Linux.
     image=binding['expectedImage'];p=PureWindowsPath(image)
     root=str(p.parents[2]) if p.is_absolute() else str(PurePosixPath(image).parents[2])
+    core_member=require_reader_source_context(source_admission,root,inventory_sha256)
     _require_pair(cleanup.get('nativeBefore'),cleanup.get('nativeAfter'),binding,root)
     members=cleanup.get('readerMembers')
     assert isinstance(members,list) and members and len(members)<=128
     assert len({r.get('pid') for r in members})==len(members)
     console=require_console_host_witness(cleanup.get('systemConsoleHost'),cleanup.get('systemConsoleHostRecheck'))
     assert isinstance(cleanup.get('systemConsoleHostRecheck'),dict)
-    roles=[_job_member(member,binding,root,False,console) for member in members]
+    roles=[_job_member(member,binding,root,False,console,core_member=core_member) for member in members]
     assert roles.count('owned-console-host')<=1,'Multiple ancillary console hosts are not accepted'
     for member in members:_require_member_state_sample(member)
     samples=cleanup.get('memberStateSamples')
@@ -911,7 +948,7 @@ def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRA
         for key in ('pid','creationTime','handleValue','jobHandleValue','image'):
             assert row[key]==final[row['pid']][key], 'Retained member generation/HANDLE changed'
         exiting=row['phase']=='release' and (row['waitResult'],row['exitCode'])==(258,0)
-        _job_member(row,binding,root,row['waitResult']==258,console,exiting=exiting)
+        _job_member(row,binding,root,row['waitResult']==258,console,exiting=exiting,core_member=core_member)
         key=(row['pid'],row['handleValue'])
         assert key not in terminal or row['waitResult']==0, 'Terminated retained process became unsignaled'
         if row['waitResult']==0:terminal.add(key)
@@ -931,8 +968,8 @@ def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRA
     assert [row.get('handleValue') for row in helper_closures if row['kind']=='profile-directory']==[helper_profile['witness']['handleValue']], 'Actual helper profile DIRECTORY HANDLE was not closed'
     readers=[r for r in members if r['pid']==ack.get('readerPid')]
     assert len(readers)==1
-    _reader_member(readers[0],binding,root,False)
-    assert _path(readers[0]['image'])==_path(_join(root,'Office/program/python-core-3.13.15/bin/python.exe')), 'Release acknowledgement is not the actual core Python reader'
+    _reader_member(readers[0],binding,root,False,core_member=core_member)
+    assert _path(readers[0]['image'])==_path(_join(root,core_member)), 'Release acknowledgement is not the actual core Python reader'
     job=_positive(cleanup.get('jobHandleValue'))
     launch_pid,launch_handle,_=_require_launch(cleanup.get('helperLaunch'),job)
     assert _path(cleanup['helperLaunch']['steps'][1]['application'])==_path(_join(root,'Office/program/python.exe'))
@@ -949,21 +986,21 @@ def _require_physical_cleanup(cleanup,binding,deadline,*,contract=_WRITER_CONTRA
 
 
 
-def require_reader_cleanup(cleanup,binding,deadline):
+def require_reader_cleanup(cleanup,binding,deadline,*,source_admission=None,inventory_sha256=None):
     """A successful model context additionally requires complete physical cleanup."""
     assert isinstance(binding,dict),'No Writer model binding was established'
     assert cleanup.get('binding')==binding and cleanup.get('cleanupSucceeded') is True
     assert cleanup.get('physicalCleanupSucceeded') is True and cleanup.get('contextQualified') is True
-    return _require_physical_cleanup(cleanup,binding,deadline)
+    return _require_physical_cleanup(cleanup,binding,deadline,source_admission=source_admission,inventory_sha256=inventory_sha256)
 
 
-def require_model_reader_cleanup(cleanup,binding,deadline,*,expected_service,getter_contract):
+def require_model_reader_cleanup(cleanup,binding,deadline,*,expected_service,getter_contract,source_admission=None,inventory_sha256=None):
     """Use the same raw cleanup proof, with an explicit expected model kind."""
     contract=_model_contract(expected_service,getter_contract)
     assert isinstance(binding,dict), 'No explicit model binding was established'
     assert cleanup.get('binding')==binding and cleanup.get('cleanupSucceeded') is True
     assert cleanup.get('physicalCleanupSucceeded') is True and cleanup.get('contextQualified') is True
-    return _require_physical_cleanup(cleanup,binding,deadline,contract=contract)
+    return _require_physical_cleanup(cleanup,binding,deadline,contract=contract,source_admission=source_admission,inventory_sha256=inventory_sha256)
 
 
 def _numeric_failure_code(exc):
@@ -1334,7 +1371,7 @@ class _SystemConsoleHost:
         return dict(kind='system-console-file',handleValue=int(handle),result=result,lastError=error)
 
 
-def _job_member(row,binding,suite_root,alive,console,*,exiting=False):
+def _job_member(row,binding,suite_root,alive,console,*,exiting=False,core_member=_LEGACY_READER_MEMBER):
     if _path(row.get('image'))==_path(console['path']):
         assert row.get('inOwnedJob') is True and row.get('isInJobApiSucceeded') is True
         for key in ('pid','creationTime','handleValue','jobHandleValue'):_positive(row.get(key))
@@ -1343,7 +1380,7 @@ def _job_member(row,binding,suite_root,alive,console,*,exiting=False):
         assert type(row.get('exitCode')) is int and row['exitCode']==(0 if exiting else 259 if alive else 0)
         assert not exiting or alive
         return 'owned-console-host'
-    _reader_member(row,binding,suite_root,alive,exiting=exiting);return 'packaged-python'
+    _reader_member(row,binding,suite_root,alive,exiting=exiting,core_member=core_member);return 'packaged-python'
 
 
 
@@ -1590,14 +1627,22 @@ class OwnedWriterReader:
     _contract=_WRITER_CONTRACT
     _helper_flag='--helper'
 
-    def __init__(self,suite,output,*,shell_pid,expected_shell_creation,suite_hwnd,parent_hwnd,child_hwnd,office_pid,expected_url,clock=time.monotonic):
+    def __init__(self,suite,output,*,shell_pid,expected_shell_creation,suite_hwnd,parent_hwnd,child_hwnd,office_pid,expected_url,clock=time.monotonic,source_admission=None,inventory_sha256=None):
         self.config=dict(suite=str(suite),shell_pid=shell_pid,expected_shell_creation=expected_shell_creation,suite_hwnd=suite_hwnd,parent_hwnd=parent_hwnd,
             child_hwnd=child_hwnd,office_pid=office_pid,expected_url=expected_url)
         self.suite=Path(suite);self.output=Path(output);self.clock=clock;self.binding=None
+        self._source_admission=source_admission;self._source_inventory_sha256=inventory_sha256
+        self._reader_core_member=require_reader_source_context(source_admission,str(suite),inventory_sha256)
         self.deadline=None;self.anchor=None;self.process=None;self.diagnostics=None;self.members={}
         self.member_state_samples=[]
         self.job_census_anomalies=[];self.last_job_census=None;self.job_census_sequence=0
         self.sequence=0;self.closed=False;self.failed=False;self.last_observation=None;self.first_error=None;self.forced=False;self.auxiliary_errors=[];self.attempted_observation=None;self.helper_launch=None;self.console=None
+
+    def _source_replay_options(self):
+        if self._source_admission is None:return {}
+        current=require_reader_source_context(self._source_admission,str(self.suite),self._source_inventory_sha256)
+        assert current==self._reader_core_member, 'Original reader source profile changed'
+        return dict(source_admission=self._source_admission,inventory_sha256=self._source_inventory_sha256)
 
     def _remaining(self,deadline):
         _finite(deadline)
@@ -1659,7 +1704,7 @@ class OwnedWriterReader:
             rows.append(row)
         if self.console:
             roles=[_job_member(row,self.anchor.base,str(self.suite),row['waitResult']==258,self.console.witness,
-                exiting=releasing and (row['waitResult'],row['exitCode'])==(258,0)) for row in rows]
+                exiting=releasing and (row['waitResult'],row['exitCode'])==(258,0),core_member=self._reader_core_member) for row in rows]
             assert roles.count('owned-console-host')<=1,'Multiple ancillary console hosts are not accepted'
         return rows
 
@@ -1727,6 +1772,8 @@ class OwnedWriterReader:
             assert type(reply.get('sequence')) is int and reply['sequence']==issued_sequence and reply.get('action')==action, 'Calc program RPC envelope differs'
             require_calc_pending_program_phase(result,expected_action=action,expected_sequence=issued_sequence)
         identity=require_packaged_python(self.suite,result['pythonIdentity']['observed'])
+        if self._source_admission is not None:
+            require_reader_source_context(self._source_admission,str(self.suite),identity['inventorySha256'])
         assert identity==result['pythonIdentity'],'Helper Python identity changed between actual file checks'
         member=[r for r in self._member_snapshots() if r['pid']==reply.get('readerPid')]
         assert len(member)==1,'Actual reader PID was not retained in the private job'
@@ -1740,7 +1787,7 @@ class OwnedWriterReader:
         if self.binding is None:self.binding=derived
         assert derived==self.binding,'Original Writer binding changed'
         result.update(bindingBefore=dict(self.binding),bindingAfter=dict(self.binding))
-        _require_owned_observation(result,self.binding,str(self.suite),self._contract);self._remaining(deadline)
+        _require_owned_observation(result,self.binding,str(self.suite),self._contract,**self._source_replay_options());self._remaining(deadline)
         _atomic_json(self.output/f'observation-{self.sequence-1:03d}.json',result)
         self._remaining(deadline)
         self.last_observation=result
@@ -1808,7 +1855,7 @@ class OwnedWriterReader:
             cleanup['finishedAt']=self.clock()
             cleanup['cleanupSucceeded']=not cleanup['errors'] and not cleanup['terminated'] and cleanup['finishedAt']<=deadline
             if cleanup['cleanupSucceeded']:
-                try:_require_physical_cleanup(cleanup,self.anchor.base,deadline,contract=self._contract)
+                try:_require_physical_cleanup(cleanup,self.anchor.base,deadline,contract=self._contract,**self._source_replay_options())
                 except BaseException as exc:error(exc);cleanup['cleanupSucceeded']=False
             cleanup['physicalCleanupSucceeded']=cleanup['cleanupSucceeded']
             cleanup['contextQualified']=self.binding is not None and not self.failed and self.first_error is None
@@ -1824,11 +1871,11 @@ class OwnedModelReader(OwnedWriterReader):
     _helper_flag='--model-helper'
 
     def __init__(self,suite,output,*,expected_service,getter_contract,shell_pid,expected_shell_creation,
-                 suite_hwnd,parent_hwnd,child_hwnd,office_pid,expected_url,clock=time.monotonic):
+                 suite_hwnd,parent_hwnd,child_hwnd,office_pid,expected_url,clock=time.monotonic,source_admission=None,inventory_sha256=None):
         self._contract=_model_contract(expected_service,getter_contract)
         super().__init__(suite,output,shell_pid=shell_pid,expected_shell_creation=expected_shell_creation,
             suite_hwnd=suite_hwnd,parent_hwnd=parent_hwnd,child_hwnd=child_hwnd,office_pid=office_pid,
-            expected_url=expected_url,clock=clock)
+            expected_url=expected_url,clock=clock,source_admission=source_admission,inventory_sha256=inventory_sha256)
         self.config.update(expected_service=expected_service,getter_contract=getter_contract)
 
     def start(self,deadline):

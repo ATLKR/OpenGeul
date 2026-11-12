@@ -132,10 +132,100 @@ ARM64_COMPANION_PE_ADMISSIONS = {
 }
 
 
+# Exact nonexecuted templates from Python-3.13.17.tar.xz, authenticated by
+# LibreOffice core 9dea406ab7695df6325b11b0e19fdca8db4b7276 download.lst:
+# SHA256 6020bd10aff3bf4821be16f088ebb1591beb7b811dcd8fab1da8f7c22a7b27e7.
+# The Python pre-action extracts setuptools 79.0.1 and pip 26.2.2 wheels;
+# ExternalPackage_python3.mk explicitly packages these fourteen members.
+PYTHON17_PE_TEMPLATES = {
+    'Office/program/python-core-3.13.17/lib/setuptools/cli-32.exe': {
+        'machine': 332, 'role': 'pythonLauncherTemplate',
+        'sha256': '32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb'},
+    'Office/program/python-core-3.13.17/lib/setuptools/cli-64.exe': {
+        'machine': 34404, 'role': 'pythonLauncherTemplate',
+        'sha256': 'bbb3de5707629e6a60a0c238cd477b28f07f0066982fda953fa6fcec39073a4a'},
+    'Office/program/python-core-3.13.17/lib/setuptools/cli-arm64.exe': {
+        'machine': 43620, 'role': 'pythonLauncherTemplate',
+        'sha256': 'b9a7d08da880dfac8bcf548eba4b06fb59b6f09b17d33148a0f6618328926c61'},
+    'Office/program/python-core-3.13.17/lib/setuptools/cli.exe': {
+        'machine': 332, 'role': 'pythonLauncherTemplate',
+        'sha256': '32acc1bc543116cbe2cff10cb867772df2f254ff2634c870aef0b46c4b696fdb'},
+    'Office/program/python-core-3.13.17/lib/setuptools/gui-32.exe': {
+        'machine': 332, 'role': 'pythonLauncherTemplate',
+        'sha256': '85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c'},
+    'Office/program/python-core-3.13.17/lib/setuptools/gui-64.exe': {
+        'machine': 34404, 'role': 'pythonLauncherTemplate',
+        'sha256': '3471b6140eadc6412277dbbefe3fef8c345a0f1a59776086b80a3618c3a83e3b'},
+    'Office/program/python-core-3.13.17/lib/setuptools/gui-arm64.exe': {
+        'machine': 43620, 'role': 'pythonLauncherTemplate',
+        'sha256': 'e694f4743405c8b5926ff457db6fe7f1a12dec7c16a9c3864784d3f4e07ae097'},
+    'Office/program/python-core-3.13.17/lib/setuptools/gui.exe': {
+        'machine': 332, 'role': 'pythonLauncherTemplate',
+        'sha256': '85dae1e95d77845f2cb59bcac3d4afe74bbe4c91a9bcc5bf4a71cd43104dbe7c'},
+    'Office/program/python-core-3.13.17/lib/pip/_vendor/distlib/t32.exe': {
+        'machine': 332, 'role': 'pythonLauncherTemplate',
+        'sha256': '6b4195e640a85ac32eb6f9628822a622057df1e459df7c17a12f97aeabc9415b'},
+    'Office/program/python-core-3.13.17/lib/pip/_vendor/distlib/t64-arm.exe': {
+        'machine': 43620, 'role': 'pythonLauncherTemplate',
+        'sha256': 'ebc4c06b7d95e74e315419ee7e88e1d0f71e9e9477538c00a93a9ff8c66a6cfc'},
+    'Office/program/python-core-3.13.17/lib/pip/_vendor/distlib/t64.exe': {
+        'machine': 34404, 'role': 'pythonLauncherTemplate',
+        'sha256': '81a618f21cb87db9076134e70388b6e9cb7c2106739011b6a51772d22cae06b7'},
+    'Office/program/python-core-3.13.17/lib/pip/_vendor/distlib/w32.exe': {
+        'machine': 332, 'role': 'pythonLauncherTemplate',
+        'sha256': '47872cc77f8e18cf642f868f23340a468e537e64521d9a3a416c8b84384d064b'},
+    'Office/program/python-core-3.13.17/lib/pip/_vendor/distlib/w64-arm.exe': {
+        'machine': 43620, 'role': 'pythonLauncherTemplate',
+        'sha256': 'c5dc9884a8f458371550e09bd396e5418bf375820a31b9899f6499bf391c7b2e'},
+    'Office/program/python-core-3.13.17/lib/pip/_vendor/distlib/w64.exe': {
+        'machine': 34404, 'role': 'pythonLauncherTemplate',
+        'sha256': '7a319ffaba23a017d7b1e18ba726ba6c54c53d6446db55f92af53c279894f8ad'},
+}
+
+_PYTHON_TEMPLATE_SOURCES = {
+    'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1': {
+        'version': '26.8.1.1',
+        'sourceUrl': 'https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz',
+        'sourceSha256': '296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785'},
+    '9dea406ab7695df6325b11b0e19fdca8db4b7276': {
+        'version': '26.8.2.2',
+        'sourceUrl': 'https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz',
+        'sourceSha256': 'f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7'},
+}
+
+
 def _architecture(architecture: str) -> str:
     if not isinstance(architecture, str) or architecture not in NATIVE_MACHINES:
         raise ValueError(f'Unsupported Suite architecture: {architecture!r}')
     return architecture
+
+
+def _python_template_admissions(core_commit: str, architecture: str, version: str) -> dict:
+    """Select only reviewed foreign templates for one exact source core/version."""
+    architecture = _architecture(architecture)
+    if (not isinstance(core_commit, str) or core_commit not in _PYTHON_TEMPLATE_SOURCES
+            or version != _PYTHON_TEMPLATE_SOURCES[core_commit]['version']):
+        raise ValueError('Python templates require an exact reviewed source core/version')
+    if core_commit == '9dea406ab7695df6325b11b0e19fdca8db4b7276':
+        pins = PYTHON17_PE_TEMPLATES
+    else:
+        pins = (COMPANION_PE_ADMISSIONS if architecture == 'x64'
+                else ARM64_COMPANION_PE_ADMISSIONS)
+    return {name: dict(pin) for name, pin in pins.items()
+            if pin['role'] == 'pythonLauncherTemplate'
+            and pin['machine'] != NATIVE_MACHINES[architecture]}
+
+
+def _source_python_template_admissions(runtime: dict, architecture: str) -> dict:
+    """Require the validated source-built runtime's exact archive identity."""
+    if not isinstance(runtime, dict) or runtime.get('format') != 'source-built-zip':
+        raise ValueError('Python source template admission requires a source-built runtime')
+    pins = _python_template_admissions(runtime.get('sourceCoreCommit'), architecture,
+                                       runtime.get('version'))
+    source = _PYTHON_TEMPLATE_SOURCES[runtime['sourceCoreCommit']]
+    if any(runtime.get(key) != source[key] for key in ('sourceUrl', 'sourceSha256')):
+        raise ValueError('Python source template archive identity differs from the reviewed core')
+    return pins
 
 
 def _name(name: str) -> str:
@@ -407,6 +497,7 @@ def _metadata(root: Path, files: dict, *, architecture: str):
                 or path not in files or files[path]['sha256'] != sha):
             raise ValueError(f'Preserved runtime legal file mismatch: {name}')
         aliases.add(name.casefold())
+    return runtime
 
 
 def _pe(path: Path, *, companion: dict | None = None, architecture: str = 'x64'):
@@ -486,14 +577,12 @@ def _validate(root: Path, files: dict, *, architecture: str):
     if {'office/program/opengeul-calc-dispatch-diagnostic.json',
             'calc-dispatch-diagnostic.json'} & {name.casefold() for name in files}:
         raise ValueError('Diagnostic engine cannot qualify a distributable Suite payload')
-    _metadata(root, files, architecture=architecture)
-    companions = (COMPANION_PE_ADMISSIONS if architecture == 'x64'
-                  else ARM64_COMPANION_PE_ADMISSIONS)
-    if architecture == 'x64' and _json(root/'suite-provenance.json')['runtime'].get('format') == 'source-built-zip':
-        # Source-built AnyCPU assemblies have their own authenticated producer
-        # inventory. MSI-specific native x86 helpers/publisher bytes grant no
-        # source-engine exception; ordinary managed CLR checks still apply.
-        companions = {name:pin for name,pin in companions.items() if pin['role']=='pythonLauncherTemplate'}
+    runtime = _metadata(root, files, architecture=architecture)
+    if runtime.get('format', 'msi') == 'source-built-zip':
+        companions = _source_python_template_admissions(runtime, architecture)
+    else:
+        companions = (COMPANION_PE_ADMISSIONS if architecture == 'x64'
+                      else ARM64_COMPANION_PE_ADMISSIONS)
     for name in files:
         path = root/name
         with path.open('rb') as stream:

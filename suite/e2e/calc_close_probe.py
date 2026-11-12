@@ -93,9 +93,10 @@ def report(rows):
 
 class CalcCloseCase(lifecycle.Case):
     """Reuse owned Suite dialog/window helpers without Writer model operations."""
-    def __init__(self,suite,fixtures,output,choice,*,prepared_library):
+    def __init__(self,suite,fixtures,output,choice,*,prepared_library,source_admission=None):
         self.suite,self.fixtures,self.root=suite,fixtures,output
         self.prepared_library=prepared_library
+        self.source_admission=source_admission;self._source_inventory_sha256=None
         self.choice,self.name=choice,'calc-close-'+choice
         self.output=output/self.name;self.output.mkdir(exist_ok=False)
         self.api=None;self.process=None;self.reader=None;self.deadline=None;self.cleanup_proof=None
@@ -110,7 +111,8 @@ class CalcCloseCase(lifecycle.Case):
         try:cleanup=self.reader.close(self.deadline)
         finally:self.reader=None
         require_model_reader_cleanup(cleanup,binding,self.deadline,expected_service=calc_model_barrier.SERVICE,
-            getter_contract=self.reader_getter_contract)
+            getter_contract=self.reader_getter_contract,
+            **native.source_reader_options(self.source_admission,inventory_sha256=self._source_inventory_sha256))
         return cleanup
 
     def start_reader(self,folder):
@@ -122,7 +124,8 @@ class CalcCloseCase(lifecycle.Case):
         self.reader=OwnedModelReader(self.suite,self.output/folder,expected_service=calc_model_barrier.SERVICE,
             getter_contract=self.reader_getter_contract,shell_pid=self.process.pid,
             expected_shell_creation=self.creation,suite_hwnd=self.hwnd,parent_hwnd=self.parent,
-            child_hwnd=self.child,office_pid=self.office_pid,expected_url=self.source.as_uri())
+            child_hwnd=self.child,office_pid=self.office_pid,expected_url=self.source.as_uri(),
+            **native.source_reader_options(self.source_admission,inventory_sha256=self._source_inventory_sha256))
         return self.reader.start(self.deadline)
 
     def choose_existing_prompt(self,deadline=None):
@@ -228,6 +231,7 @@ class CalcCloseCase(lifecycle.Case):
             self.record['originalShell']={}
             self.creation=lifecycle.retained_writer_shell(self.process,self.suite,self.record['originalShell'])
             identity,data=_packaged_identity_file(self.suite,'suite-inventory.json');inventory=json.loads(data)
+            self._source_inventory_sha256=identity['sha256']
             self.record['stage']='observe-before-input'
             before=self.start_reader('before-close-reader');self.record['beforeInput']=before
             calc_save.require_uncommitted_cells(before,self.baseline)
@@ -240,7 +244,8 @@ class CalcCloseCase(lifecycle.Case):
             self.record['beforeClose']=pending
             calc_save.require_pending_input_observations(before,selected,editing,pending,self.baseline,marker(self.choice),suite=self.suite,inventory=inventory,
                 inventory_sha256=identity['sha256'],original_shell=self.record['originalShell'],
-                expected_url=self.source.as_uri(),deadline=self.deadline)
+                expected_url=self.source.as_uri(),deadline=self.deadline,
+                **native.source_menu_replay_options(self.source_admission))
             self.record['uncommittedBeforeCloseVerified']=True
             self.record['beforeCloseActions'].append('observe-uncommitted')
             self.record['readerCleanup']=self.close_reader(before['bindingBefore'])
@@ -266,7 +271,8 @@ class CalcCloseCase(lifecycle.Case):
                 after=self.start_reader('after-cancel-reader');self.record['afterCancel']=after
                 from writer_model_reader import require_owned_model_observation
                 require_owned_model_observation(after,after['bindingBefore'],self.suite,
-                    expected_service=calc_model_barrier.SERVICE,getter_contract=calc_save.LEGACY_PENDING_GETTERS)
+                    expected_service=calc_model_barrier.SERVICE,getter_contract=calc_save.LEGACY_PENDING_GETTERS,
+                    **native.source_reader_options(self.source_admission,inventory_sha256=self._source_inventory_sha256))
                 require_same_native_binding(before['bindingBefore'],after['bindingBefore'])
                 from writer_model_reader import canonical_profile_projection
                 old=before['nativeSnapshots']['controllerBefore'];new=after['nativeSnapshots']['controllerBefore']
@@ -334,7 +340,9 @@ class CalcCloseCase(lifecycle.Case):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite',required=True,type=Path);parser.add_argument('--fixtures',required=True,type=Path)
-    parser.add_argument('--output',required=True,type=Path);args=parser.parse_args()
+    parser.add_argument('--output',required=True,type=Path)
+    parser.add_argument('--source-qualified-reader',choices=('x64','arm64'))
+    args=parser.parse_args()
     if os.name!='nt' or not __debug__:raise RuntimeError('Actual Windows execution with assertions is required')
     for path in (args.suite,args.fixtures,args.output):
         assert not str(path).startswith(('\\\\','//')) and '..' not in path.parts
@@ -342,9 +350,11 @@ def main():
     suite,fixtures,output=args.suite.resolve(),args.fixtures.resolve(),args.output.resolve()
     assert suite!=output and suite not in output.parents and output not in suite.parents
     assert fixtures!=output and fixtures not in output.parents and output not in fixtures.parents
+    source_admission=calc_save._admit_source_reader(suite,args.source_qualified_reader)
     output.mkdir(parents=True,exist_ok=False)
     prepared_library=native.prepare_ascii_cohort(suite,output)
-    definitions=[('calc-close-'+choice,lambda choice=choice:CalcCloseCase(suite,fixtures,output,choice,prepared_library=prepared_library).run()) for choice in CHOICES]
+    definitions=[('calc-close-'+choice,lambda choice=choice:CalcCloseCase(suite,fixtures,output,choice,prepared_library=prepared_library,
+        **native.source_menu_replay_options(source_admission)).run()) for choice in CHOICES]
     results=native.collect_cases(definitions,output);summary=report(results)
     (output/'results.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
     return 0 if summary['success'] else 1

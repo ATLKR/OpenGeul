@@ -18,6 +18,7 @@ from counted_editor_shortcuts import input_buffer, shortcut_events
 from ime_calc_setup import NATIVE_KEYS, _error, _time
 from ime_semantic_context import MAX_CONTEXT_BYTES, _encode_inventory, _inventory
 from writer_model_barrier import _path
+from windows_smoke import source_menu_replay_options, source_reader_options
 from writer_model_reader import (CALC_PENDING_INITIAL_GETTER_CONTRACT,
     OwnedModelReader, require_calc_a1_selection, require_calc_pending_program_phase,
     require_model_reader_cleanup, _same_selection_fact)
@@ -29,7 +30,7 @@ def _size(context):
     assert len(json.dumps(context, ensure_ascii=False, allow_nan=False).encode()) <= MAX_CONTEXT_BYTES, 'Calc navigation receipt exceeds original semantic context cap'
 
 
-def _row(context, row, *, suite, sequence, expected_url):
+def _row(context, row, *, suite, sequence, expected_url, source_admission=None):
     assert context['expectedUrl'] == expected_url, 'Calc navigation document URL changed'
     native = context['expectedNative']
     assert isinstance(native, dict) and set(native) == NATIVE_KEYS
@@ -46,19 +47,22 @@ def _row(context, row, *, suite, sequence, expected_url):
     require_pending_observation(row, row, context['baseline'], suite=suite,
         inventory=_inventory(context), inventory_sha256=context['inventorySha256'],
         original_shell=context['originalShell'], expected_url=expected_url,
-        deadline=context['readerDeadline'], getter_contract=CALC_PENDING_INITIAL_GETTER_CONTRACT)
+        deadline=context['readerDeadline'], getter_contract=CALC_PENDING_INITIAL_GETTER_CONTRACT,
+        **source_menu_replay_options(source_admission))
     assert context['startedAt'] <= _time(row['readStartedAt']) <= _time(row['readFinishedAt']) <= context['readerDeadline']
     assert row['pendingInput']['editor'] is None, 'Calc navigation must precede the original F2 edit entry'
     return row
 
 
-def _selected(context, *, suite, expected_url):
-    initial = _row(context, context['initial'], suite=suite, sequence=0, expected_url=expected_url)
-    selected = _row(context, context['afterCtrlHome'], suite=suite, sequence=1, expected_url=expected_url)
+def _selected(context, *, suite, expected_url, source_admission=None):
+    options = source_menu_replay_options(source_admission)
+    initial = _row(context, context['initial'], suite=suite, sequence=0, expected_url=expected_url, **options)
+    selected = _row(context, context['afterCtrlHome'], suite=suite, sequence=1, expected_url=expected_url, **options)
     require_pending_observation(initial, selected, context['baseline'], suite=suite,
         inventory=_inventory(context), inventory_sha256=context['inventorySha256'],
         original_shell=context['originalShell'], expected_url=expected_url,
-        deadline=context['readerDeadline'], getter_contract=CALC_PENDING_INITIAL_GETTER_CONTRACT)
+        deadline=context['readerDeadline'], getter_contract=CALC_PENDING_INITIAL_GETTER_CONTRACT,
+        **options)
     require_calc_a1_selection(selected['calcSelection'])
     require_pending_receipt(selected['pendingInput'], selected['bindingBefore']['childHwnd'],
         previous=initial['pendingInput'])
@@ -84,7 +88,7 @@ def _selected(context, *, suite, expected_url):
     return selected
 
 
-def require_calc_navigation(context, *, suite, expected_native, expected_url, setup_deadline, now):
+def require_calc_navigation(context, *, suite, expected_native, expected_url, setup_deadline, now, source_admission=None):
     """Pure replay: a success flag cannot replace either RPC or its release."""
     _size(context)
     assert type(context.get('schemaVersion')) is int and context['schemaVersion'] == 1
@@ -97,9 +101,11 @@ def require_calc_navigation(context, *, suite, expected_native, expected_url, se
     original = bytes.fromhex(context['sourceBytesHex'])
     assert _same_selection_fact(calc_model_barrier.baseline_from_ooxml(original), context['baseline'])
     assert context['diskBeforeSha256'] == context['diskAfterSha256'] == context['baseline']['sourceSha256']
-    selected = _selected(context, suite=suite, expected_url=expected_url)
+    selected = _selected(context, suite=suite, expected_url=expected_url,
+        **source_menu_replay_options(source_admission))
     require_model_reader_cleanup(context['cleanup'], selected['bindingBefore'], deadline,
-        expected_service=calc_model_barrier.SERVICE, getter_contract=CALC_PENDING_INITIAL_GETTER_CONTRACT)
+        expected_service=calc_model_barrier.SERVICE, getter_contract=CALC_PENDING_INITIAL_GETTER_CONTRACT,
+        **source_reader_options(source_admission, inventory_sha256=context['inventorySha256']))
     assert (selected['readFinishedAt'] <= _time(context['cleanup']['startedAt'])
             <= _time(context['cleanup']['finishedAt']) <= _time(context['finishedAt'])
             <= _time(now) < _time(setup_deadline))
@@ -109,7 +115,7 @@ def require_calc_navigation(context, *, suite, expected_native, expected_url, se
 
 def observe_calc_navigation(suite, source, original_bytes, record, setup_deadline, *,
         original_shell, expected_native, require_current, send_home,
-        reader_factory=None, clock=time.monotonic):
+        reader_factory=None, clock=time.monotonic, source_admission=None):
     """Own exactly start0, one CtrlHome, read1, and one release under one bound."""
     suite, source = Path(suite), Path(source)
     expected_url = source.as_uri()
@@ -146,14 +152,17 @@ def observe_calc_navigation(suite, source, original_bytes, record, setup_deadlin
             shell_pid=expected_native['shellPid'], expected_shell_creation=expected_native['shellCreationTime'],
             suite_hwnd=expected_native['suiteHwnd'], parent_hwnd=expected_native['parentHwnd'],
             child_hwnd=expected_native['childHwnd'], office_pid=expected_native['officePid'],
-            expected_url=expected_url, clock=clock)
+            expected_url=expected_url, clock=clock,
+            **source_reader_options(source_admission, inventory_sha256=identity['sha256']))
         current(); context['readerStartAttempted'] = True
         initial = context['initial'] = reader.start(deadline)
-        _row(context, initial, suite=suite, sequence=0, expected_url=expected_url); _size(context); current()
+        _row(context, initial, suite=suite, sequence=0, expected_url=expected_url,
+            **source_menu_replay_options(source_admission)); _size(context); current()
         context['homeCommand'] = send_home()
         current()
         selected = context['afterCtrlHome'] = reader.read(deadline)
-        _selected(context, suite=suite, expected_url=expected_url); _size(context); current()
+        _selected(context, suite=suite, expected_url=expected_url,
+            **source_menu_replay_options(source_admission)); _size(context); current()
     except BaseException as exc:
         primary = exc; context['error'] = _error(exc)
         raise
@@ -164,7 +173,8 @@ def observe_calc_navigation(suite, source, original_bytes, record, setup_deadlin
                 if initial is not None:
                     require_model_reader_cleanup(context['cleanup'], initial['bindingBefore'], deadline,
                         expected_service=calc_model_barrier.SERVICE,
-                        getter_contract=CALC_PENDING_INITIAL_GETTER_CONTRACT)
+                        getter_contract=CALC_PENDING_INITIAL_GETTER_CONTRACT,
+                        **source_reader_options(source_admission, inventory_sha256=identity['sha256']))
             except BaseException as exc:
                 cleanup_errors.append(exc); context['cleanupErrors'].append(_error(exc))
         if primary is None and not cleanup_errors:
@@ -174,7 +184,8 @@ def observe_calc_navigation(suite, source, original_bytes, record, setup_deadlin
                 context['finishedAt'] = _time(clock())
                 context['success'] = True
                 require_calc_navigation(context, suite=suite, expected_native=expected_native, expected_url=expected_url,
-                    setup_deadline=setup_deadline, now=clock())
+                    setup_deadline=setup_deadline, now=clock(),
+                    **source_menu_replay_options(source_admission))
             except BaseException as exc:
                 context['success'] = False
                 cleanup_errors.append(exc); context['cleanupErrors'].append(_error(exc))

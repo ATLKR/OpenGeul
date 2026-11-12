@@ -208,7 +208,7 @@ class SourceMenuAdmissionTests(PayloadFixture):
         with self.assertRaises(ValueError):
             self.admit()
 
-    def test_rejects_consistent_other_core_accepted_by_generic_source_validators(self):
+    def test_rejects_consistent_unreviewed_core_at_payload_and_menu_boundaries(self):
         other = 'e'*40
         self.proof = json.loads(json.dumps(self.proof).replace(SOURCE_CORE, other))
         self.runtime['sourceCoreCommit'] = other
@@ -218,8 +218,9 @@ class SourceMenuAdmissionTests(PayloadFixture):
             self.proof['runtimeBuildIdentity']['files'][name]['sha256'] = digest(raw)
             self.proof['runtimeBuildIdentity']['finalVerification']['files'][name]['sha256'] = digest(raw)
         self.branding['source']['buildId'] = other
-        self.seal(copy_runtime=True)
-        prepare.validate_source_build_receipt(self.runtime, self.receipt, architecture='arm64')
+        self.seal(copy_runtime=True, inventory=False)
+        with self.assertRaises(ValueError):
+            payload.create_inventory(self.root, architecture='arm64')
         with self.assertRaises(ValueError):
             self.admit()
 

@@ -697,7 +697,16 @@ jobs:
         OPENGEUL_SUITE_NOTICE_SCOPE: '13'
       shell: pwsh
       run: |
-        python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save
+        $sourceReaderArgs = @()
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {
+          if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+            if ('${{ matrix.architecture }}' -cnotin @('x64', 'arm64')) { throw 'Unsupported source reader architecture.' }
+            $sourceReaderArgs = @('--source-qualified-reader', '${{ matrix.architecture }}')
+          } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+            throw 'Unsupported Suite runtime format for the model reader.'
+          }
+        }
+        python suite/e2e/calc_save_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-save @sourceReaderArgs
         if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+S verification failed.' }
       if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: Calc Ctrl+S 성공·실패 뒤 패키지 불변 확인
@@ -722,7 +731,16 @@ jobs:
         OPENGEUL_SUITE_NOTICE_SCOPE: '1'
       shell: pwsh
       run: |
-        python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close
+        $sourceReaderArgs = @()
+        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {
+          if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+            if ('${{ matrix.architecture }}' -cnotin @('x64', 'arm64')) { throw 'Unsupported source reader architecture.' }
+            $sourceReaderArgs = @('--source-qualified-reader', '${{ matrix.architecture }}')
+          } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+            throw 'Unsupported Suite runtime format for the model reader.'
+          }
+        }
+        python suite/e2e/calc_close_probe.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --output .work/suite-calc-close @sourceReaderArgs
         if ($LASTEXITCODE -ne 0) { throw 'Physical Calc pending-cell Ctrl+W choice probe failed.' }
       if: "(env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' || (env.OPENGEUL_SUITE_RUN_MODE == 'ime-mode-diagnostic' && matrix.architecture == 'arm64')) && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: Calc Ctrl+W 성공·실패 뒤 패키지 불변 확인
@@ -858,7 +876,14 @@ jobs:
         OPENGEUL_SUITE_DIAGNOSTICS: ${{ github.workspace }}/.work/suite-worker-diagnostics
       shell: pwsh
       run: |
-        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime
+        $sourceReaderArgs = @()
+        if ($env:SUITE_RUNTIME_FORMAT -ceq 'source-built-zip') {
+          if ('${{ matrix.architecture }}' -cnotin @('x64', 'arm64')) { throw 'Unsupported source reader architecture.' }
+          $sourceReaderArgs = @('--source-qualified-reader', '${{ matrix.architecture }}')
+        } elseif ($env:SUITE_RUNTIME_FORMAT -cne 'msi') {
+          throw 'Unsupported Suite runtime format for the model reader.'
+        }
+        python suite/e2e/korean_ime_smoke.py --suite $env:SUITE_PACKAGE --fixtures .work/suite-engine/fixtures --readiness .work/suite-korean-readiness/readiness.json --output .work/suite-korean-ime @sourceReaderArgs
         if ($LASTEXITCODE -ne 0) { throw 'Actual Korean IME composition and content verification failed.' }
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success' && steps.readiness.outcome == 'success')"
     - name: IME 입력·엔진 크래시 원본 기록 즉시 보존

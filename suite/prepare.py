@@ -26,6 +26,11 @@ try:
 except ModuleNotFoundError:
     from crt import crt_names, is_vc_crt_file
 
+try:
+    from suite.source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations
+except ModuleNotFoundError:
+    from source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations
+
 # Compatibility name retains the existing public x64 family.
 MSI_VC_DEPENDENCIES = frozenset(crt_names())
 
@@ -499,6 +504,201 @@ def _source_x64_harfbuzz_source(value,manifest,*,evidence_parent: PureWindowsPat
             raise ValueError('x64 HarfBuzz evidence basename or shared loader parent differs')
 
 
+def _source_new_plan(manifest: dict, architecture: str) -> dict:
+    """Reconstruct only the separate, reviewed 9dea source-only recipe."""
+    expected=new_source_only_expectations(dict(NEW_SOURCE),architecture)
+    def pin(value,after=None):
+        result=dict(path=archive_path(value['path']),beforeSha256=value['sha256'],
+            afterSha256=value['afterSha256'] if after is None else after)
+        if any(not _source_digest(result[key]) for key in ('beforeSha256','afterSha256')):
+            raise ValueError('New source recipe hash differs')
+        for old,new in (('size','beforeBytes'),('afterSize','afterBytes')):
+            if old in value:
+                if not _source_positive(value[old]) or value[old]>1024*1024:
+                    raise ValueError('New source recipe byte bound differs')
+                result[new]=value[old]
+        return result
+    try:
+        winacc=manifest['winAccFocusOrder'];common=[pin(manifest['moduleBootstrap'])]
+        for value in winacc['sources']:
+            common.append(pin(value,winacc['afterSha256'] if value['path']==winacc['path'] else value['sha256']))
+        common[1]['afterBytes']=winacc['afterBytes'];common.append(pin(manifest['flexFatalCompatibility']))
+        guarded=[manifest[key] for key in ('configureSource','sourceHook','icuBuildPath','zstdSourceLinks')]
+        guarded += [manifest[key]['recipe'] for key in ('mddsEquality','pythonNativeHost','atlNativePaths')]
+        guarded += manifest['atlConsumerNativePaths']['recipes']+[manifest['harfbuzzNativeMesonPaths']['recipe']]
+        guarded=[pin(value) for value in guarded]
+        if architecture=='x64':
+            atl=_source_x64_atl_pins(manifest)
+            common += [pin(manifest[key]) for key in ('windowsFirebirdLoaderPath','windowsZstdSourceLinks','windowsGpgBuildCompilerPath')]
+            common += [pin(value) for value in atl]
+            common += [pin(_source_x64_harfbuzz_pin(manifest)),pin(manifest['windowsCliPublisherPolicyPlatform'])]
+            moved={manifest[key]['path'] for key in ('windowsFirebirdLoaderPath','windowsZstdSourceLinks','windowsHarfbuzzNativeMesonPaths')}
+            moved.update(value['path'] for value in atl)
+            guarded=[value for value in guarded if value['path'] not in moved]
+        payloads=[('winacc-focus-order.patch',winacc['patch'])];dependencies=[]
+        if architecture=='arm64':
+            upstream=manifest['mddsEquality']['upstreamPatch']
+            dependencies=[dict(path='external/mdds/'+upstream['filename'],beforeSha256=upstream['sha256'],afterSha256=upstream['sha256'])]
+            payloads += [('firebird-windows-arm64.patch',manifest['portPatch']),
+                ('libreoffice-enable-arm64-firebird.patch',manifest['configurePatch']),
+                ('opengeul-arm64-equality.patch.1',manifest['mddsEquality']['patch']),
+                ('opengeul-native-arm64-tools.targets',manifest['pythonNativeHost']['targets'])]
+        selected=[]
+        for name,value in payloads:
+            if value['filename']!=name:raise ValueError('New source payload name differs')
+            row=dict(filename=name,sha256=value['sha256'])
+            if 'size' in value:row['size']=value['size']
+            selected.append(row)
+        recipe_id=expected.recipe_fields['recipeId']
+        plan=dict(recipeId=recipe_id,recipe=manifest['nativeSourceRecipes'][recipe_id],sources=common+guarded,
+            armGuardedSources=guarded,sourceDependencies=dependencies,payloads=selected)
+        digest=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
+        if digest!=expected.recipe_fields['recipeSha256']:
+            raise ValueError('New source plan differs from its reviewed architecture recipe')
+        return plan
+    except (KeyError,TypeError,IndexError,AttributeError) as error:
+        raise ValueError('New source plan is malformed') from error
+
+
+def _source_new_evidence(value, names: dict, *, parent: PureWindowsPath | None = None) -> PureWindowsPath:
+    """Validate producer-side descriptors only; raw sources are not ZIP members."""
+    if type(value) is not dict or set(value)!=set(names):
+        raise ValueError('New source retained evidence fields differ')
+    for field,name in names.items():
+        path=_source_windows_path(value[field])
+        archive_path('/'.join(path.parts[1:]))
+        if str(path)!=value[field] or path.name!=name or not path.parent.name:
+            raise ValueError('New source evidence descriptor is not canonical')
+        if parent is None:parent=path.parent
+        if str(path.parent)!=str(parent):
+            raise ValueError('New source evidence descriptors belong to different runs')
+    return parent
+
+
+def _source_new_arm_hooks(hooks: dict, manifest: dict, parent: PureWindowsPath) -> None:
+    """Replay the actual ARM producer's closed hook fields and retained paths."""
+    fields=dict(schemaVersion=1,status='source-hook-installed-native-build-pending',architecture='arm64',
+        libreofficeVersion=NEW.version,firebirdVersion=NEW.firebird_version,
+        sourceHook=manifest['sourceHook']['path'],beforeSha256=manifest['sourceHook']['sha256'],afterSha256=manifest['sourceHook']['afterSha256'],
+        portPatchSha256=manifest['portPatch']['sha256'],configurePatchSha256=manifest['configurePatch']['sha256'],
+        configureBeforeSha256=manifest['configureSource']['sha256'],configureAfterSha256=manifest['configureSource']['afterSha256'],
+        nativeBuildVerified=False,basePersistenceVerified=False)
+    names=('icuBuildPath','zstdSourceLinks','mddsEquality','pythonNativeHost','atlNativePaths','atlConsumerNativePaths','harfbuzzNativeMesonPaths')
+    if (set(hooks)!=set(fields)|{'moduleBootstrap',*names}
+            or not _source_exact({key:hooks[key] for key in fields},fields)):
+        raise ValueError('New ARM source hook group/pinned source identities differ')
+    for field in names:
+        if field=='atlConsumerNativePaths':continue
+        config=manifest[field];pin=config.get('recipe',config);value=hooks[field]
+        expected=dict(path=pin['path'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'])
+        if 'scope' in config:expected['scope']=config['scope']
+        if field=='zstdSourceLinks':expected['archive']=config['archive']
+        if field=='mddsEquality':expected.update(patchSha256=config['patch']['sha256'],upstreamPatchSha256=config['upstreamPatch']['sha256'])
+        evidence_names={side:side+'-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')}
+        if field=='pythonNativeHost':
+            if type(value) is not dict:raise ValueError('New ARM Python source hook differs')
+            path=_source_windows_path(value.get('targetsPath'))
+            archive_path('/'.join(path.parts[1:]))
+            if (str(path)!=value['targetsPath'] or tuple(path.parts[-3:])!=('external','python3','opengeul-native-arm64-tools.targets')
+                    or len(path.parts)<5):
+                raise ValueError('New ARM generated Python target descriptor differs')
+            source_root=path.parents[2]
+            if source_root==parent or source_root in parent.parents or parent in source_root.parents:
+                raise ValueError('New ARM generated source and retained evidence roots overlap')
+            expected.update(targetsSha256=config['targets']['sha256'],targetsPath=value['targetsPath'])
+            evidence_names['targets']='effective-opengeul-native-arm64-tools.targets'
+        if (type(value) is not dict or set(value)!=set(expected)|{'evidence'}
+                or not _source_exact({key:value[key] for key in expected},expected)):
+            raise ValueError('New ARM source hook pinned metadata differs')
+        _source_new_evidence(value['evidence'],evidence_names,parent=parent)
+    value=hooks['atlConsumerNativePaths'];config=manifest['atlConsumerNativePaths']
+    if (type(value) is not dict or set(value)!={'scope','recipes'}
+            or not _source_exact(value['scope'],config['scope']) or type(value['recipes']) is not list
+            or len(value['recipes'])!=len(config['recipes'])):
+        raise ValueError('New ARM ATL consumer group differs')
+    for row,pin in zip(value['recipes'],config['recipes']):
+        expected=dict(path=pin['path'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'])
+        if (type(row) is not dict or set(row)!=set(expected)|{'evidence'}
+                or not _source_exact({key:row[key] for key in expected},expected)):
+            raise ValueError('New ARM ATL consumer recipe order/identity differs')
+        _source_new_evidence(row['evidence'],{side:side+'-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')},parent=parent)
+
+
+def _source_new_recipe(proof: dict, architecture: str) -> None:
+    """Source-only recipe/WinAcc/Flex replay; never a normal Full qualification."""
+    try:
+        if type(proof) is not dict or contract_for_source_pin(proof.get('sourcePin')) is not NEW:
+            raise ValueError('New source recipe requires the exact reviewed core/archive tuple')
+        expected=new_source_only_expectations(proof['sourcePin'],architecture)
+        path=Path(__file__).resolve().parent/'engine-build/source-build.26.8.2.2.json'
+        info=path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or getattr(info,'st_file_attributes',0)&0x400
+                or not 0<info.st_size<=1024*1024):
+            raise ValueError('New source manifest must be a bounded unaliased snapshot')
+        raw=path.read_bytes()
+        if (hashlib.sha256(raw).hexdigest()!=expected.source_manifest_sha256
+                or proof.get('sourcePortManifestSha256')!=expected.source_manifest_sha256
+                or proof.get('nativeTargetsSha256')!=expected.native_targets_sha256):
+            raise ValueError('New source manifest/policy differs from its separate reviewed profile')
+        manifest=json.loads(raw);plan=_source_new_plan(manifest,architecture)
+        recipe=dict(expected.recipe_fields);recipe['hookOrder']=list(expected.hooks)
+        recipe['armGuardedSources']=[dict(path=row['path'],beforeSha256=row['beforeSha256'],
+            sha256=row['beforeSha256'] if architecture=='x64' else row['afterSha256'],unchanged=architecture=='x64')
+            for row in plan['armGuardedSources']]
+        if not _source_exact(proof.get('sourceRecipeProof'),recipe):
+            raise ValueError('New source recipe/guard identities or typed false flags differ')
+        hooks=proof.get('sourceHooks');bootstrap=manifest['moduleBootstrap']
+        fields=dict(path=bootstrap['path'],beforeSha256=bootstrap['sha256'],afterSha256=bootstrap['afterSha256'])
+        if (type(hooks) is not dict or hooks.get('architecture')!=architecture
+                or hooks.get('nativeBuildVerified') is not False or hooks.get('basePersistenceVerified') is not False
+                or type(hooks.get('moduleBootstrap')) is not dict
+                or set(hooks['moduleBootstrap'])!=set(fields)|{'evidence'}
+                or not _source_exact({key:hooks['moduleBootstrap'][key] for key in fields},fields)):
+            raise ValueError('New source bootstrap identity/source-only context differs')
+        parent=_source_new_evidence(hooks['moduleBootstrap']['evidence'],
+            dict(original='original-unpack-sources',effective='effective-unpack-sources'))
+        pin=manifest['winAccFocusOrder'];patch=proof.get('winAccFocusOrderSourcePatch');fields=dict(expected.winacc_fields)
+        fields['sourceFiles']=[dict(path=row['path'],beforeBytes=row['size'],
+            afterBytes=pin['afterBytes'] if row['path']==pin['path'] else row['size'],beforeSha256=row['sha256'],
+            afterSha256=pin['afterSha256'] if row['path']==pin['path'] else row['sha256']) for row in pin['sources']]
+        if (type(patch) is not dict or set(patch)!=set(fields)|{'evidence'}
+                or not _source_exact({key:patch[key] for key in fields},fields)):
+            raise ValueError('New WinAcc source-only proof differs')
+        _source_new_evidence(patch['evidence'],dict(original='original-AccObjectWinManager.cxx',
+            effective='effective-AccObjectWinManager.cxx',patch='winacc-focus-order.patch'),parent=parent)
+        flex=proof.get('flexFatalCompatibilitySourcePatch');fields=dict(expected.flex_fields)
+        if (type(flex) is not dict or set(flex)!=set(fields)|{'evidence'}
+                or not _source_exact({key:flex[key] for key in fields},fields)):
+            raise ValueError('New Flex source-only proof differs')
+        _source_new_evidence(flex['evidence'],{side:side+'-'+architecture+'-sqlflex.l' for side in ('original','effective')},parent=parent)
+        if architecture=='arm64':
+            _source_new_arm_hooks(hooks,manifest,parent)
+            return
+        pairs=(('firebirdLoaderPath','windowsFirebirdLoaderPath','windows-firebird-loader-path-source-hook'),
+            ('zstdSourceLinks','windowsZstdSourceLinks','windows-zstd-source-links-source-hook'),
+            ('gpgBuildCompilerPath','windowsGpgBuildCompilerPath','windows-gpg-build-compiler-path-source-hook'),
+            ('harfbuzzNativeMesonPaths','windowsHarfbuzzNativeMesonPaths','windows-x64-harfbuzz-native-meson-source-hook'),
+            ('cliPublisherPolicyPlatform','windowsCliPublisherPolicyPlatform','windows-x64-cli-publisher-policy-platform-source-hook'))
+        if (set(hooks)!={'kind','architecture','moduleBootstrap','atlNativePaths','nativeBuildVerified','basePersistenceVerified',*(row[0] for row in pairs)}
+                or hooks.get('kind')!='native-windows-common-source-hooks'):
+            raise ValueError('New x64 common hook group differs')
+        for field,pin_name,kind in pairs:
+            pin=manifest[pin_name];value=hooks[field]
+            fields=dict(schemaVersion=1,kind=kind,path=pin['path'],condition=pin['condition'],
+                beforeBytes=pin['size'],afterBytes=pin['afterSize'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],
+                nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+            if (type(value) is not dict or set(value)!=set(fields)|{'evidence'}
+                    or not _source_exact({key:value[key] for key in fields},fields)):
+                raise ValueError('New x64 source-only hook differs')
+            _source_new_evidence(value['evidence'],{side:side+'-x64-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')},parent=parent)
+        _source_x64_atl_source(hooks['atlNativePaths'],manifest,evidence_parent=parent)
+        for index,value in enumerate(hooks['atlNativePaths']['recipes'],1):
+            pin=_source_x64_atl_pins(manifest)[index-1]
+            _source_new_evidence(value['evidence'],{side:side+'-x64-atl-'+format(index,'02d')+'-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')},parent=parent)
+    except (KeyError,TypeError,IndexError,AttributeError,OSError) as error:
+        raise ValueError('New source-only receipt is incomplete') from error
+
+
 def _source_x64_recipe(proof: dict) -> None:
     folder=Path(__file__).resolve().parent/'engine-build'
     raw=(folder/'source-build.json').read_bytes();manifest=json.loads(raw)
@@ -619,18 +819,24 @@ def _source_x64_retirement(base: dict) -> None:
         if not found:raise ValueError('x64 Base retirement lacks the independently observed engine generation')
 
 
-def _source_python_templates() -> dict:
+def _source_python_templates(proof: dict | None = None) -> dict:
     try:
-        from suite.payload import COMPANION_PE_ADMISSIONS
+        from suite.payload import COMPANION_PE_ADMISSIONS, _source_python_template_admissions
     except ModuleNotFoundError:
-        from payload import COMPANION_PE_ADMISSIONS
+        from payload import COMPANION_PE_ADMISSIONS, _source_python_template_admissions
+    source=proof.get('sourcePin') if isinstance(proof,dict) else None
+    if isinstance(source,dict) and source.get('coreCommit')==NEW.core:
+        if contract_for_source_pin(source) is not NEW:raise ValueError('New Python family requires the exact source profile')
+        runtime=dict(format='source-built-zip',version=source['version'],sourceCoreCommit=source['coreCommit'],
+            sourceUrl=source['url'],sourceSha256=source['sha256'])
+        return {name.removeprefix('Office/'):pin for name,pin in _source_python_template_admissions(runtime,'x64').items()}
     return {name.removeprefix('Office/'):pin for name,pin in COMPANION_PE_ADMISSIONS.items()
             if pin['role']=='pythonLauncherTemplate'}
 
 
 def _source_x64_inventory(proof: dict) -> dict:
     root=_source_windows_path(proof['appLocalCrt']['programDirectory']).parent
-    inventory=proof.get('productInventory');templates=_source_python_templates()
+    inventory=proof.get('productInventory');templates=_source_python_templates(proof)
     if not isinstance(inventory,list) or not 0 < len(inventory) <= 100_000:
         raise ValueError('x64 source product inventory is missing or exceeds bounds')
     result={};counts=dict(nativeX64=0,managedAnyCpu=0,pythonLauncherTemplate=0)
@@ -695,7 +901,8 @@ def _source_build_x64(proof: dict, runtime: dict, target: dict) -> None:
     _source_x64_preflight(proof)
     _source_x64_atl_inputs(proof)
     _source_x64_prerequisites(proof)
-    _source_x64_recipe(proof)
+    if proof.get('sourcePin',{}).get('coreCommit')==NEW.core:_source_new_recipe(proof,'x64')
+    else:_source_x64_recipe(proof)
     _source_x64_retirement(proof['baseProof'])
     _source_x64_inventory(proof)
     external=proof.get('externalSources');stage=proof.get('installedRuntimeStage')
@@ -737,7 +944,7 @@ def _source_build_x64(proof: dict, runtime: dict, target: dict) -> None:
 
 def _source_x64_runtime(runtime_root: Path, proof: dict) -> None:
     """Replay every PE against the authenticated producer, including disguised PEs."""
-    expected=_source_x64_inventory(proof);templates=_source_python_templates();actual=set()
+    expected=_source_x64_inventory(proof);templates=_source_python_templates(proof);actual=set()
     try:
         from suite.payload import _pe
         from suite.pe_imports import read_pe_imports
@@ -810,6 +1017,11 @@ def validate_source_build_lock(runtime: dict, *, architecture: str) -> dict:
                 or build['nativeTargetsSha256'] != 'ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
                 or target['proofVersion'] != 2):
             raise ValueError('x64 v2 source-build lock requires independent source tree, driver and reviewed policy pins')
+    elif runtime['sourceCoreCommit']==NEW.core:
+        if (not isinstance(build.get('sourceTree'),str) or not re.fullmatch(r'[0-9a-f]{40}',build['sourceTree'])
+                or not digest(build.get('driverSha256'))
+                or build.get('nativeTargetsSha256')!='ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'):
+            raise ValueError('New ARM source lock requires independent tree, driver and policy pins')
     return build
 
 
@@ -869,6 +1081,12 @@ def validate_source_build_receipt(runtime: dict, receipt: Path, *, architecture:
             or {'BREAKPAD', 'ONLINEUPDATE'} & {token.upper() for token in config['BUILD_TYPE'].split()}):
         raise ValueError('Source-build receipt configuration does not prove native internal Firebird and disabled OEM services')
     _source_build_identity(proof, runtime['sourceCoreCommit'])
+    if source.get('coreCommit')==NEW.core:
+        if (contract_for_source_pin(source) is not NEW or proof.get('acceptanceEligible') is not True
+                or type(proof.get('runAttempt')) is not int or proof['runAttempt']!=1
+                or any(proof.get(key)!=build.get(key) for key in ('sourceTree','driverSha256','nativeTargetsSha256'))):
+            raise ValueError('New source qualification differs from independent external pins')
+        if architecture=='arm64':_source_new_recipe(proof,architecture)
     base = proof.get('baseProof')
     if (not isinstance(base, dict) or type(base.get('schemaVersion')) is not int or base['schemaVersion'] != version
             or base.get('passed') is not True or base.get('guiVerified') is not False
@@ -940,21 +1158,14 @@ def _source_build_identity(proof: dict, core: str) -> dict:
         raise ValueError('Source-build identity mode differs from original identities')
     if mode == 'installed-no-git-fallback':
         # A mode tag or a general installer-label regex never authorizes admission.
-        expected_config = dict(LIBO_VERSION_MAJOR='26', LIBO_VERSION_MINOR='8', LIBO_VERSION_MICRO='1',
-                               LIBO_VERSION_PATCH='1', LIBO_VERSION_SUFFIX='')
-        expected_source = dict(version='26.8.1.1', coreCommit='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1',
-            url='https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz',
-            size=302435508, sha256='296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785')
+        expected_source = source
+        derivation = fallback_identity_expectation(source)
+        expected_config = derivation['configuration']
         config = proof.get('configuration')
         if (source != expected_source or core != expected_source['coreCommit']
                 or not isinstance(config, dict) or any(config.get(k) != v for k, v in expected_config.items())):
             raise ValueError('Installed identity fallback requires exact authenticated source/configuration')
-        build = config['LIBO_VERSION_MAJOR'] + config['LIBO_VERSION_MINOR'] + '0'
-        normalized = re.search(r'(\w+?)(\d+)', build).group(2)
-        fallback = normalized + '(Build:' + config['LIBO_VERSION_PATCH'] + ')'
-        derivation = dict(rule='libreoffice-26.8.1.1-installer-no-git-v1', configuration=expected_config,
-                          build=build, normalizedBuild=normalized, installerBuildId=config['LIBO_VERSION_PATCH'],
-                          buildid=fallback)
+        fallback = derivation['buildid']
         if (identity.get('identityMode') != mode or original != fallback
                 or identity.get('installedFallbackDerivation') != derivation):
             raise ValueError('Installed identity fallback derivation differs from authenticated installer formula')

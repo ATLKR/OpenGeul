@@ -892,7 +892,8 @@ def require_case_result(record,suite,*,source_admission=None):
     if spec.get('module')=='calc':
         from home_calc_close import require_calc_reader_context,_home_origin
         source=Path(copies[0]['path']) if copies else None
-        binding=require_calc_reader_context(record['calcReader'],suite,source.as_uri() if source else '',spec.get('extension'))
+        binding=require_calc_reader_context(record['calcReader'],suite,source.as_uri() if source else '',spec.get('extension'),
+            **native.source_menu_replay_options(source_admission))
         assert binding['shellCreationTime']==record['originalShell']['nativeCreation']['fileTime']
         frame,=frames;assert (binding['officePid'],binding['officeCreationTime'],binding['suiteHwnd'])==(frame['officePid'],frame['officeCreationTime'],frame['hwnd'])
         _home_origin(suite,SimpleNamespace(pid=pid,args=record['shellCommand']),record,source,spec.get('extension'))
@@ -921,7 +922,8 @@ def require_case_result(record,suite,*,source_admission=None):
         values=[]
         for phase in ('before','after'):
             context=record['sharedWriter'+phase.title()]
-            binding=require_reader_context(context,suite,Path(copies[0]['path']).as_uri(),WRITER_MODEL_SERVICE,WRITER_GETTER_CONTRACT)
+            binding=require_reader_context(context,suite,Path(copies[0]['path']).as_uri(),WRITER_MODEL_SERVICE,WRITER_GETTER_CONTRACT,
+                **native.source_menu_replay_options(source_admission))
             assert binding['shellCreationTime']==record['originalShell']['nativeCreation']['fileTime']
             assert context['success'] is True and (binding['suiteHwnd'],binding['officePid'],binding['officeCreationTime'])==(frames[0]['hwnd'],frames[0]['officePid'],frames[0]['officeCreationTime'])
             values.append(dict(record['sharedWriterFiles'][phase],context=context))

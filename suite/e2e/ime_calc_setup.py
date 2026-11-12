@@ -16,6 +16,7 @@ import calc_model_barrier
 from calc_pending_input import require_pending_receipt
 from calc_save_smoke import require_uncommitted_cells
 from writer_model_barrier import _path, require_original_shell, require_python_identity
+from windows_smoke import source_menu_replay_options, source_reader_options
 from writer_model_reader import (CALC_PENDING_GETTER_CONTRACT, OwnedModelReader,
     require_calc_a1_selection, require_model_reader_cleanup,
     require_owned_model_observation)
@@ -38,7 +39,7 @@ def _error(exc):
 
 def validate_calc_setup(observation, *, suite, baseline, prefix, inventory,
                         inventory_sha256, original_shell, expected_native,
-                        expected_url, started_at, deadline):
+                        expected_url, started_at, deadline, source_admission=None):
     """Validate exactly one retained model/selection/pending-buffer observation."""
     start, end = _time(started_at), _time(deadline)
     assert start < end, 'Calc IME observation has no remaining setup budget'
@@ -58,7 +59,8 @@ def validate_calc_setup(observation, *, suite, baseline, prefix, inventory,
     assert binding['documentUrl'] == expected_url, 'Calc IME reader document URL differs'
     require_owned_model_observation(observation, binding, suite,
         expected_service=calc_model_barrier.SERVICE,
-        getter_contract=CALC_PENDING_GETTER_CONTRACT)
+        getter_contract=CALC_PENDING_GETTER_CONTRACT,
+        **source_reader_options(source_admission, inventory_sha256=inventory_sha256))
     require_original_shell(original_shell, binding, suite)
     require_python_identity(observation['pythonIdentity'], suite, inventory, inventory_sha256)
     assert start <= _time(observation['readStartedAt']) <= _time(observation['readFinishedAt']) <= end, 'Calc IME observation is stale or outside setup deadline'
@@ -71,7 +73,7 @@ def validate_calc_setup(observation, *, suite, baseline, prefix, inventory,
 
 def observe_calc_setup(suite, source, original_bytes, record, setup_deadline, *,
                        original_shell, expected_native, require_current,
-                       reader_factory=None, clock=time.monotonic):
+                       reader_factory=None, clock=time.monotonic, source_admission=None):
     """Own one existing reader and prove its natural cleanup before returning.
 
     A failed/partial launch is still closed once. The original failure remains
@@ -113,7 +115,8 @@ def observe_calc_setup(suite, source, original_bytes, record, setup_deadline, *,
             parent_hwnd=expected_native['parentHwnd'],
             child_hwnd=expected_native['childHwnd'],
             office_pid=expected_native['officePid'],
-            expected_url=source.as_uri(), clock=clock)
+            expected_url=source.as_uri(), clock=clock,
+            **source_reader_options(source_admission, inventory_sha256=identity['sha256']))
         context['readerStartAttempted'] = True
         observation = reader.start(deadline)
         context['observation'] = observation
@@ -121,7 +124,8 @@ def observe_calc_setup(suite, source, original_bytes, record, setup_deadline, *,
             prefix=record['asciiPrefix'], inventory=inventory,
             inventory_sha256=identity['sha256'], original_shell=original_shell,
             expected_native=expected_native, expected_url=source.as_uri(),
-            started_at=started, deadline=deadline)
+            started_at=started, deadline=deadline,
+            **source_menu_replay_options(source_admission))
     except BaseException as exc:
         primary = exc
         context['error'] = _error(exc)
@@ -134,7 +138,8 @@ def observe_calc_setup(suite, source, original_bytes, record, setup_deadline, *,
                     require_model_reader_cleanup(context['cleanup'],
                         observation['bindingBefore'], deadline,
                         expected_service=calc_model_barrier.SERVICE,
-                        getter_contract=CALC_PENDING_GETTER_CONTRACT)
+                        getter_contract=CALC_PENDING_GETTER_CONTRACT,
+                        **source_reader_options(source_admission, inventory_sha256=identity['sha256']))
                     assert (_time(observation['readFinishedAt'])
                         <= _time(context['cleanup']['startedAt'])
                         <= _time(context['cleanup']['finishedAt']) <= deadline), 'Calc IME reader cleanup order differs from its single observation'

@@ -27,7 +27,8 @@ import uuid
 
 from windows_smoke import (Windows, INPUT_CASES, capture_failure, close_document,
     close_home, collect_cases, launch_suite, activate_owned_suite, package_text, require_engine_fixture,
-    stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input, _payload_guard)
+    stop_owned_test_process, verified_attachment, wait_for, write_result, ascii_input, _payload_guard,
+    source_menu_replay_options)
 from engine_smoke import verify_content
 import native_suite_architecture as native_arch
 import ime_thread_mode as native_mode
@@ -275,7 +276,7 @@ def _require_precommand_retirement_join(record):
     assert (admission['editorTid'], admission['focusHwnd']) == (record['editorTid'], record['keyboardFocusHwnd'])
 
 
-def original_ime_profile(record):
+def original_ime_profile(record,*,source_admission=None):
     """Use the original POST reader's native directory witness, never the proof."""
     from writer_model_reader import canonical_profile_projection
     from ime_semantic_context import require_ime_semantic_context
@@ -288,7 +289,8 @@ def original_ime_profile(record):
     # Replay at the retained historical completion anchor. Reopen/save time
     # cannot renew setup or manufacture a fresh native observation.
     require_ime_semantic_context(context,module=record['module'],expected_native=native,
-        setup_deadline=deadline,now=context['finishedAt'],phase='post',expected_prefix=record['asciiPrefix'])
+        setup_deadline=deadline,now=context['finishedAt'],phase='post',expected_prefix=record['asciiPrefix'],
+        **source_menu_replay_options(source_admission))
     readiness = keyboard['semanticReadiness']
     assert type(readiness) is list and len(readiness) == 2
     for row, phase, source in zip(readiness, ('pre', 'post'), (context['preContext'], context)):
@@ -305,19 +307,19 @@ def original_ime_profile(record):
     return canonical_profile_projection(raw['profileDirectory']['witness'], raw['profileUrl'])
 
 
-def require_ime_save_disposition(record, restoration, *, expected_policy=5, expected_source=None):
+def require_ime_save_disposition(record, restoration, *, expected_policy=5, expected_source=None,source_admission=None):
     assert record['restoration'] == restoration
     origin, facts = require_tsf_pipeline(record,expected_policy=expected_policy,expected_source=expected_source)
     if origin == 'empty':
         from ime_engine_retirement import require_ime_retirement_admission
         require_ime_retirement_admission(record['imeEngineRetirement'], expected_native=record['imeKeyboardSession']['expectedNative'],
             expected_run=record['readiness']['source'], expected_case=record['case'], expected_source=record['readiness']['source']['sourceCommit'],
-            expected_original_profile=original_ime_profile(record))
+            expected_original_profile=original_ime_profile(record,**source_menu_replay_options(source_admission)))
         _require_precommand_retirement_join(record)
     return facts
 
 
-def validate_ime_evidence(record, *, expected_policy=5, expected_source=None):
+def validate_ime_evidence(record, *, expected_policy=5, expected_source=None,source_admission=None):
     architecture = native_arch.require_architecture(record.get('architecture', 'x64'))
     for field in ('nativeArchitecture', 'targetArchitecture'):
         if architecture == 'arm64' or field in record:
@@ -357,7 +359,7 @@ def validate_ime_evidence(record, *, expected_policy=5, expected_source=None):
         _require_precommand_retirement_join(record)
         require_ime_engine_retirement(record['imeEngineRetirement'], expected_native=record['imeKeyboardSession']['expectedNative'],
             expected_run=record['readiness']['source'], expected_case=record['case'], expected_source=record['readiness']['source']['sourceCommit'],
-            expected_original_profile=original_ime_profile(record))
+            expected_original_profile=original_ime_profile(record,**source_menu_replay_options(source_admission)))
         assert record['imeCommands'][3]['startedAt'] <= record['imeEngineRetirement']['proofPhase']['closeReturnedAt'], 'Engine retirement predates the original restoration command'
     assert record['prefixInputLayout'] == record['restoration']['previousLayout'], 'ASCII setup and original input-state capture used different layouts'
     return {'imeVerified': True, 'backspaceCompositionVerified': True, **facts,
@@ -1863,7 +1865,7 @@ def dispose_calc_dispatch_shell(process, original, deadline, *, engine=None, liv
     return receipt
 
 
-def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False, calc_dispatch_transport=None, compartment_sink=None):
+def case(suite, fixtures, output, readiness, module, extension, *, prepared_library, diagnose_navigation=False, diagnose_ime_mode=False, diagnose_focus=False, diagnostic_suffix=None, plugin_origin=None, capture_ime_caller=False, capture_ime_compartment=False, calc_dispatch_transport=None, compartment_sink=None,source_admission=None):
     from pywinauto import Desktop
     from windows_smoke import click_owned_editor, prepare_editor_focus
     from ime_engine_retirement import admit_ime_retirement
@@ -1913,7 +1915,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
             remaining_setup(setup_deadline, 10))
         keyboard = IMEKeyboardSession(api, process, hwnd, parent, child, office_pid,
             module, record, setup_deadline,
-            **({} if calc_dispatch_transport is None and not capture_ime_compartment else dict(retain_evidence=False)))
+            **({} if calc_dispatch_transport is None and not capture_ime_compartment else dict(retain_evidence=False)),
+            **source_menu_replay_options(source_admission))
         keyboard.start()
         record['stage'] = 'focus-editor'
         def click():
@@ -1955,7 +1958,8 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         pre = observe_ime_semantic_setup(suite, source, original_bytes, record, setup_deadline,
             original_shell=retained_setup_shell(process, suite, keyboard),
             expected_native=dict(keyboard.binding),
-            require_current=lambda: keyboard.require_context_target('imeSemanticContext'), phase='pre')
+            require_current=lambda: keyboard.require_context_target('imeSemanticContext'), phase='pre',
+            **source_menu_replay_options(source_admission))
         keyboard.semantic_ready(pre, phase='pre')
         if diagnose_navigation:
             from navigation_diagnostic import stop_navigation_keyboard
@@ -1978,14 +1982,15 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         post = observe_ime_semantic_setup(suite, source, original_bytes, record, setup_deadline,
             original_shell=retained_setup_shell(process, suite, keyboard),
             expected_native=dict(keyboard.binding),
-            require_current=lambda: keyboard.require_context_target('imeSemanticContext'), phase='post', expected_prefix=record['asciiPrefix'])
+            require_current=lambda: keyboard.require_context_target('imeSemanticContext'), phase='post', expected_prefix=record['asciiPrefix'],
+            **source_menu_replay_options(source_admission))
         keyboard.semantic_ready(post, phase='post')
         if module == 'calc':
             record['stage'] = 'verify-calc-context-before-ime-observer'
             observe_calc_setup(suite, source, original_bytes, record, setup_deadline,
                 original_shell=retained_setup_shell(process, suite, keyboard),
                 expected_native=dict(keyboard.binding),
-                require_current=lambda: keyboard.require_context_target('calcSetupContext'))
+                require_current=lambda: keyboard.require_context_target('calcSetupContext'),**source_menu_replay_options(source_admission))
         record['stage'] = 'install-owned-thread-observer'
         observer = CompositionObserver(api, hwnd, child, focus, office_pid, folder, readiness['profile'],
             architecture=record['architecture'], setup_deadline=setup_deadline,
@@ -2002,7 +2007,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         retirement = admit_ime_retirement(keyboard=keyboard, original_shell=process, suite=suite,
             case_name=name, record=record, setup_deadline=setup_deadline,
             run_binding=readiness['source'], diagnostics_root=Path(os.environ['OPENGEUL_SUITE_DIAGNOSTICS']),
-            original_profile=original_ime_profile(record))
+            original_profile=original_ime_profile(record,**source_menu_replay_options(source_admission)))
         active = observer.command(1, setup_deadline=setup_deadline)
         wait_for(lambda: int(api.user.GetKeyboardLayout(observer.tid) or 0) & 0xffff == 0x0412,
             remaining_setup(setup_deadline, 10))
@@ -2083,7 +2088,7 @@ def case(suite, fixtures, output, readiness, module, extension, *, prepared_libr
         (folder / 'reopen.log').write_bytes(reopened.stdout + reopened.stderr)
         assert reopened.returncode == 0, 'Actual Office Korean-content reopen failed; inspect reopen.log'
         record['reopened'] = json.loads(result_path.read_text(encoding='utf-8'))
-        record.update(validate_ime_evidence(record))
+        record.update(validate_ime_evidence(record,**source_menu_replay_options(source_admission)))
         record.update(success=True, cleanClose=True, stage='complete', beforeSha256=before,
             afterSha256=hashlib.sha256(source.read_bytes()).hexdigest(),
             originalFixtureUnchanged=hashlib.sha256(original.read_bytes()).hexdigest() == before)
@@ -2240,7 +2245,7 @@ def _open_plugin_proof(suite,proof_path,budget):
     return PluginFileLease(suite/'Office/program/vclplug_winlo.dll',proof,budget,runtime=file_api)
 
 
-def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,module='calc'):
+def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,module='calc',source_admission=None):
     assert module in ('calc','writer'), 'Unsupported focus module'
     assert module!='writer' or (architecture=='arm64' and proof_path is None), 'Writer ordering is one unmatched native ARM64 case'
     expected_count=1 if module=='writer' else 3
@@ -2258,7 +2263,8 @@ def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_
         for index in range(1,expected_count+1):
             suffix=f'focus-{index:02d}';name='ime-'+module+'-'+suffix
             rows=collect_cases([(name,lambda suffix=suffix:case(suite,fixtures,output,readiness,module,
-                dict(INPUT_CASES)[module],prepared_library=prepared_library,diagnose_focus=True,diagnostic_suffix=suffix,**private))],output)
+                dict(INPUT_CASES)[module],prepared_library=prepared_library,diagnose_focus=True,diagnostic_suffix=suffix,**private,
+                **source_menu_replay_options(source_admission)))],output)
             results.extend(rows)
             from editor_capture_diagnostic import cohort_cleanup_confirmed
             if len(rows)!=1 or not cohort_cleanup_confirmed(rows[0]):break
@@ -2289,7 +2295,7 @@ def run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,proof_
     return 0 if success else 1
 
 
-def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path):
+def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path,*,source_admission=None):
     """One original Writer case; only a closed numeric projection is retained."""
     from ascii_message_preparation import _Budget
     import ime_compartment_report as publisher
@@ -2307,7 +2313,7 @@ def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,bind
         prepared=ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture,budget=budget)
         case(suite,fixtures,output,readiness,'writer',dict(INPUT_CASES)['writer'],
             prepared_library=prepared,diagnose_ime_mode=True,capture_ime_compartment=True,
-            plugin_origin=lease.binding(),compartment_sink=retain)
+            plugin_origin=lease.binding(),compartment_sink=retain,**source_menu_replay_options(source_admission))
     except BaseException as exc:
         primary=exc
     finally:
@@ -2355,10 +2361,11 @@ def run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,bind
     return 0 if success else 1
 
 
-def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,capture_caller=False,capture_compartment=False):
+def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path=None,*,capture_caller=False,capture_compartment=False,source_admission=None):
     if capture_compartment:
         assert not capture_caller, 'Compartment callback excludes notification capture'
-        return run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path)
+        return run_compartment_diagnostic(suite,fixtures,output,readiness,architecture,binding,proof_path,
+            **source_menu_replay_options(source_admission))
     lease=None;primary=None;cleanup_error=None;results=[]
     try:
         assert not proof_path or ((capture_caller or capture_compartment) and architecture=='arm64'),'Matched proof requires ARM64 caller diagnosis'
@@ -2373,7 +2380,7 @@ def run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,pro
             capture_ime_compartment=capture_compartment,plugin_origin=None if lease is None else lease.binding())
         module='writer' if capture_compartment else 'calc'
         results=collect_cases([('ime-'+module,lambda:case(suite,fixtures,output,readiness,module,dict(INPUT_CASES)[module],
-            prepared_library=prepared,diagnose_ime_mode=True,**extra))],output)
+            prepared_library=prepared,diagnose_ime_mode=True,**extra,**source_menu_replay_options(source_admission)))],output)
     except BaseException as exc:
         primary=exc;raise
     finally:
@@ -2418,7 +2425,7 @@ def calc_dispatch_report(record):
     return report
 
 
-def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architecture, binding):
+def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architecture, binding,*,source_admission=None):
     assert architecture == 'arm64', 'Calc dispatch diagnosis requires native ARM64'
     from calc_dispatch_diagnostic import DiagnosticTransport
     prepared = ascii_input.prepare_observer(output/'ascii-observer-preparation',architecture=architecture)
@@ -2426,7 +2433,7 @@ def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architectur
     try:
         try:
             record = case(suite,fixtures,output,readiness,'calc','xlsx',
-                prepared_library=prepared,calc_dispatch_transport=transport)
+                prepared_library=prepared,calc_dispatch_transport=transport,**source_menu_replay_options(source_admission))
         except Exception:
             # The ordinary collector persists exception text and the full case.
             # Retain only the already projected diagnostic, including cleanup.
@@ -2457,6 +2464,18 @@ def run_calc_dispatch_diagnostic(suite, fixtures, output, readiness, architectur
     return 0 if success else 1
 
 
+def _admit_source_reader(suite,architecture,requested_architecture):
+    """Explicit prelaunch gate; no menu cohort, input fence or serialized authority."""
+    if requested_architecture is None:return None
+    if requested_architecture!=architecture:
+        raise ValueError('Source reader architecture differs from the Suite inventory')
+    from native_menu_source_selection import _input_paths
+    from native_menu_source_admission import admit_source_menu_runtime
+    _,archive,receipt=_input_paths(architecture)
+    return admit_source_menu_runtime(suite,architecture=architecture,
+        engine_zip=archive[0],receipt=receipt[0],deadline=time.monotonic()+150.)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite', type=Path, required=True)
@@ -2471,6 +2490,7 @@ def main(argv=None):
     parser.add_argument('--matched-plugin-proof',type=Path)
     parser.add_argument('--capture-ime-caller',action='store_true')
     parser.add_argument('--capture-ime-compartment',action='store_true')
+    parser.add_argument('--source-qualified-reader',choices=('x64','arm64'))
     parser.add_argument('--verify-one', choices=dict(INPUT_CASES))
     parser.add_argument('--file', type=Path)
     parser.add_argument('--reopen-output', type=Path)
@@ -2497,10 +2517,13 @@ def main(argv=None):
     assert not args.matched_plugin_proof or (architecture=='arm64' and (args.diagnose_focus=='calc' or args.capture_ime_caller or args.capture_ime_compartment)),'Matched binding requires scoped ARM64 diagnosis'
     assert not args.capture_ime_caller or architecture=='x64' or args.matched_plugin_proof is not None,'ARM64 caller proof required'
     if args.verify_one:
+        if args.source_qualified_reader is not None:
+            raise ValueError('Independent UNO reopen does not consume reader authority')
         assert args.file and args.reopen_output, 'The owned reopen fixture and receipt are required'
         observed = reopen_one(suite, args.file.resolve(), args.verify_one)
         with args.reopen_output.open('x', encoding='utf-8') as stream: json.dump(observed, stream, ensure_ascii=False, indent=2)
         return 0
+    source_admission=_admit_source_reader(suite,architecture,args.source_qualified_reader)
     assert args.fixtures and args.readiness and args.output, 'Generated fixtures, readiness and fresh output are required'
     for path in (args.suite, args.fixtures, args.readiness, args.output):
         assert not path.is_symlink() and not getattr(path, 'is_junction', lambda: False)(), 'Linked test paths are not accepted'
@@ -2523,16 +2546,20 @@ def main(argv=None):
         expected_readiness = {key:binding[key] for key in ('sourceCommit','runAttempt','architecture','repository','job')}
         expected_readiness['sourceRun'] = binding['runId']
         assert readiness['source'] == expected_readiness, 'Korean readiness differs from admitted CI run'
-        return run_calc_dispatch_diagnostic(suite,fixtures,output,readiness,architecture,binding)
+        return run_calc_dispatch_diagnostic(suite,fixtures,output,readiness,architecture,binding,
+            **source_menu_replay_options(source_admission))
     if args.diagnose_focus:
-        return run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,module=args.diagnose_focus)
+        return run_focus_cohort(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,module=args.diagnose_focus,
+            **source_menu_replay_options(source_admission))
     if args.diagnose_ime_mode:
-        return run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,capture_caller=args.capture_ime_caller,capture_compartment=args.capture_ime_compartment)
+        return run_mode_diagnostic(suite,fixtures,output,readiness,architecture,binding,args.matched_plugin_proof,capture_caller=args.capture_ime_caller,capture_compartment=args.capture_ime_compartment,
+            **source_menu_replay_options(source_admission))
     prepared_library = ascii_input.prepare_observer(output / 'ascii-observer-preparation', architecture=architecture)
     if args.diagnose_navigation:
         module = args.diagnose_navigation
         results = collect_cases([('ime-' + module, lambda: case(suite, fixtures, output, readiness,
-            module, dict(INPUT_CASES)[module], prepared_library=prepared_library, diagnose_navigation=True))], output)
+            module, dict(INPUT_CASES)[module], prepared_library=prepared_library, diagnose_navigation=True,
+            **source_menu_replay_options(source_admission)))], output)
         success = len(results) == 1 and results[0].get('success') is True
         report = dict(schemaVersion=1, kind='native-navigation-diagnostic', success=success,
             acceptanceEligible=False, imeVerified=False, tests=results, runBinding=binding,
@@ -2540,7 +2567,8 @@ def main(argv=None):
         (output / 'results.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
         return 0 if success else 1
     results = collect_cases([('ime-' + module, lambda module=module, extension=extension:
-        case(suite, fixtures, output, readiness, module, extension, prepared_library=prepared_library)) for module, extension in INPUT_CASES], output)
+        case(suite, fixtures, output, readiness, module, extension, prepared_library=prepared_library,
+            **source_menu_replay_options(source_admission))) for module, extension in INPUT_CASES], output)
     success = len(results) == 3 and all(row.get('success') is True and row.get('imeVerified') is True for row in results)
     report = {'schemaVersion': 1, 'kind': 'native-korean-ime', 'success': success,
               'imeVerified': success, 'suiteOnly': True, 'tests': results,

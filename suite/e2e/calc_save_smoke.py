@@ -156,14 +156,14 @@ def require_host_trace(rows,shell_pid):
 
 
 def require_pending_observation(before,now,baseline,*,suite,inventory,inventory_sha256,original_shell,expected_url,deadline,
-                                getter_contract=calc_model_barrier.GETTERS):
+                                getter_contract=calc_model_barrier.GETTERS,source_admission=None):
     from writer_model_barrier import require_original_shell,require_python_identity
     from writer_model_reader import require_owned_model_observation
     binding=before['bindingBefore'];assert binding['documentUrl']==expected_url
     require_original_shell(original_shell,binding,suite)
     for row in (before,now):
         require_owned_model_observation(row,binding,suite,expected_service=calc_model_barrier.SERVICE,
-            getter_contract=getter_contract)
+            getter_contract=getter_contract,**native.source_reader_options(source_admission,inventory_sha256=inventory_sha256))
         require_python_identity(row['pythonIdentity'],suite,inventory,inventory_sha256)
         assert row['readStartedAt']<=row['readFinishedAt']<=deadline
         require_uncommitted_cells(row,baseline)
@@ -306,7 +306,7 @@ def await_reopen_job(helper,probe,record,*,clock=time.monotonic,pause=time.sleep
         raise
 
 
-def physical_case(suite,fixtures,output,*,prepared_library):
+def physical_case(suite,fixtures,output,*,prepared_library,source_admission=None):
     from calc_failure_cleanup import bind_pre_input_cleanup,finish_pre_input_cleanup
     from generated_calc_close import freeze_saved_calc_copy
     from pywinauto import Desktop
@@ -358,11 +358,14 @@ def physical_case(suite,fixtures,output,*,prepared_library):
         record['originalShell']={};creation=retained_writer_shell(process,suite,record['originalShell'])
         identity,data=_packaged_identity_file(suite,'suite-inventory.json')
         inventory=json.loads(data)
+        if source_admission is None:
+            source_admission=native.source_menu_action_options(process).get('source_admission')
         deadline=time.monotonic()+calc_model_barrier.MAX_SECONDS
         observer_never_started=False  # Intent precedes construction/start; None is not a launch witness.
         reader=OwnedModelReader(suite,output/'active-cell-reader',expected_service=calc_model_barrier.SERVICE,
             getter_contract=PENDING_GETTERS,shell_pid=process.pid,expected_shell_creation=creation,
-            suite_hwnd=hwnd,parent_hwnd=parent,child_hwnd=child,office_pid=office_pid,expected_url=source.as_uri())
+            suite_hwnd=hwnd,parent_hwnd=parent,child_hwnd=child,office_pid=office_pid,expected_url=source.as_uri(),
+            **native.source_reader_options(source_admission,inventory_sha256=identity['sha256']))
         record['stage']='observe-clean-before-input'
         before=reader.start(deadline);record['beforeInput']=before
         require_uncommitted_cells(before,baseline)
@@ -375,13 +378,14 @@ def physical_case(suite,fixtures,output,*,prepared_library):
         record['beforeSave']=pending
         require_pending_input_observations(before,selected,editing,pending,baseline,MARKER,suite=suite,inventory=inventory,
             inventory_sha256=identity['sha256'],original_shell=record['originalShell'],
-            expected_url=source.as_uri(),deadline=deadline)
+            expected_url=source.as_uri(),deadline=deadline,**native.source_menu_replay_options(source_admission))
         record['uncommittedBeforeSaveVerified']=True
         try:cleanup=reader.close(deadline)
         finally:reader=None
         record['readerCleanup']=cleanup
         require_model_reader_cleanup(cleanup,before['bindingBefore'],deadline,
-            expected_service=calc_model_barrier.SERVICE,getter_contract=PENDING_GETTERS)
+            expected_service=calc_model_barrier.SERVICE,getter_contract=PENDING_GETTERS,
+            **native.source_reader_options(source_admission,inventory_sha256=identity['sha256']))
         record['observerClosedBeforeSave']=True
         # No focus action, input acceptance or model setter may occur here.
         api.require_editor_focus(hwnd,child)
@@ -457,13 +461,28 @@ def physical_case(suite,fixtures,output,*,prepared_library):
         write_result(output,CASE,record)
 
 
+def _admit_source_reader(suite,architecture):
+    """Read-only prelaunch admission; no source-menu selection or input grant."""
+    if architecture is None:return None
+    if type(architecture) is not str or architecture not in ('x64','arm64'):
+        raise ValueError('Source reader architecture is unsupported')
+    from native_menu_source_selection import _input_paths
+    from native_menu_source_admission import admit_source_menu_runtime
+    _,archive,receipt=_input_paths(architecture)
+    return admit_source_menu_runtime(suite,architecture=architecture,
+        engine_zip=archive[0],receipt=receipt[0],deadline=time.monotonic()+150.)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite',type=Path,required=True);parser.add_argument('--fixtures',type=Path)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--verify-reopen',action='store_true');parser.add_argument('--owned-fixture',type=Path)
+    parser.add_argument('--source-qualified-reader',choices=('x64','arm64'))
     args=parser.parse_args()
     if os.name!='nt' or not __debug__:raise RuntimeError('Physical Calc save qualification requires Windows')
+    if args.verify_reopen and args.source_qualified_reader is not None:
+        raise ValueError('Independent reopen does not accept a source-reader context')
     for path in (args.suite,args.output):
         assert not str(path).startswith(('\\\\','//')) and '..' not in path.parts
         for part in (path,*path.parents):
@@ -484,10 +503,12 @@ def main():
         assert not part.is_symlink() and not getattr(part,'is_junction',lambda:False)(),'Linked fixture roots are forbidden'
     fixtures=args.fixtures.resolve()
     assert fixtures!=output and fixtures not in output.parents and output not in fixtures.parents
+    source_admission=_admit_source_reader(suite,args.source_qualified_reader)
     output.mkdir(parents=True,exist_ok=False)
     prepared_library=native.prepare_ascii_cohort(suite,output)
     try:
-        record=physical_case(suite,fixtures,output,prepared_library=prepared_library)
+        record=physical_case(suite,fixtures,output,prepared_library=prepared_library,
+            **native.source_menu_replay_options(source_admission))
     except BaseException as exc:
         result=output/(CASE+'-result.json')
         if result.is_file():record=json.loads(result.read_text(encoding='utf-8'))

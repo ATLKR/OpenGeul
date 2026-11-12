@@ -69,11 +69,13 @@ def _home_origin(suite,process,record,source,extension):
 
 def freeze_home_calc_close(suite,process,bound,record,*,source=None,extension=None):
     from home_routing_smoke import _unlinked
+    import windows_smoke as native
     _unlinked(Path(suite))
     if source is not None:_unlinked(Path(source))
     suite=Path(suite).resolve();source=Path(source).resolve() if source is not None else None
     context=record['calcReader'];assert context.get('success') is True and not context.get('error')
-    binding=require_calc_reader_context(context,suite,source.as_uri() if source else '',extension)
+    binding=require_calc_reader_context(context,suite,source.as_uri() if source else '',extension,
+        **native.source_menu_action_options(process))
     assert record['windowHwnd']==binding['suiteHwnd'] and record['childHwnd']==binding['childHwnd']
     assert record['officePid']==binding['officePid'] and record['parentHwnd']==binding['parentHwnd']
     origin=_home_origin(suite,process,record,source,extension)
@@ -112,16 +114,20 @@ def require_home_calc_cells(value,extension):
     return value
 
 
-def require_reader_context(context,suite,expected_url,expected_service,getter_contract):
+def require_reader_context(context,suite,expected_url,expected_service,getter_contract,*,source_admission=None):
+    from windows_smoke import source_reader_options
     observation=context['observation'];binding=observation['bindingBefore'];cleanup=context['cleanup']
     assert binding['documentUrl']==expected_url
-    require_owned_model_observation(observation,binding,suite,expected_service=expected_service,getter_contract=getter_contract)
+    source_context=source_reader_options(source_admission,inventory_sha256=context['inventorySha256'])
+    require_owned_model_observation(observation,binding,suite,expected_service=expected_service,getter_contract=getter_contract,
+        **source_context)
     require_original_shell(context['originalShell'],binding,suite)
     require_python_identity(observation['pythonIdentity'],suite,context['inventory'],context['inventorySha256'])
     start,deadline,finish=(_finite(context[key]) for key in ('startedAt','deadline','finishedAt'))
     assert deadline==start+12
     assert start<=observation['readStartedAt']<=observation['readFinishedAt']<=cleanup['startedAt']<=cleanup['finishedAt']<=finish<=deadline
-    require_model_reader_cleanup(cleanup,binding,deadline,expected_service=expected_service,getter_contract=getter_contract)
+    require_model_reader_cleanup(cleanup,binding,deadline,expected_service=expected_service,getter_contract=getter_contract,
+        **source_context)
     for key in ('helperLaunch','systemConsoleHost'):assert cleanup[key]==observation[key]
     original=observation['readerProcess'];members=[row for row in cleanup['readerMembers'] if row['pid']==original['pid']]
     assert len(members)==1 and cleanup['releaseAcknowledgement']['readerPid']==original['pid']
@@ -141,8 +147,10 @@ def require_reader_context(context,suite,expected_url,expected_service,getter_co
     return binding
 
 
-def require_calc_reader_context(context,suite,expected_url,extension):
-    binding=require_reader_context(context,suite,expected_url,CALC_MODEL_SERVICE,CALC_GETTER_CONTRACT)
+def require_calc_reader_context(context,suite,expected_url,extension,*,source_admission=None):
+    from windows_smoke import source_menu_replay_options
+    binding=require_reader_context(context,suite,expected_url,CALC_MODEL_SERVICE,CALC_GETTER_CONTRACT,
+        **source_menu_replay_options(source_admission))
     require_home_calc_cells(context['observation'],extension)
     return binding
 
@@ -155,6 +163,7 @@ def observe_home_calc(suite,output,process,attachment,source,extension,record):
 def observe_home_model(suite,output,process,attachment,source,record,key,service,getters,check):
     """One existing-frame getter, with no navigation, mutation or retry."""
     import lifecycle_smoke
+    import windows_smoke as native
     from writer_model_reader import OwnedModelReader
     from writer_style_smoke import _packaged_identity_file
     started=time.monotonic();deadline=started+12;reader=None;failure=None
@@ -164,9 +173,11 @@ def observe_home_model(suite,output,process,attachment,source,record,key,service
         creation=lifecycle_smoke.retained_writer_shell(process,suite,context['originalShell'])
         identity,data=_packaged_identity_file(suite,'suite-inventory.json')
         context.update(inventory=json.loads(data),inventorySha256=identity['sha256'])
+        source_admission=native.source_menu_action_options(process).get('source_admission')
         reader=OwnedModelReader(suite,output,expected_service=service,getter_contract=getters,
             shell_pid=process.pid,expected_shell_creation=creation,suite_hwnd=attachment['hwnd'],parent_hwnd=attachment['parent'],
-            child_hwnd=attachment['child'],office_pid=attachment['officePid'],expected_url=source.as_uri() if source else '')
+            child_hwnd=attachment['child'],office_pid=attachment['officePid'],expected_url=source.as_uri() if source else '',
+            **native.source_reader_options(source_admission,inventory_sha256=identity['sha256']))
         context['observation']=reader.start(deadline)
         check(context['observation'])
     except BaseException as exc:
@@ -179,7 +190,8 @@ def observe_home_model(suite,output,process,attachment,source,record,key,service
                 if failure is None:failure=later
         context['finishedAt']=time.monotonic()
     if failure is not None:raise failure
-    require_reader_context(context,suite,source.as_uri() if source else '',service,getters)
+    require_reader_context(context,suite,source.as_uri() if source else '',service,getters,
+        **native.source_menu_replay_options(source_admission))
     context['success']=True
     return context
 

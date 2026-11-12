@@ -1560,6 +1560,7 @@ def _admission_words_v4(admission,expected):
     if type(admission) is not SourceMenuAdmission or not digest(expected):
         raise ValueError('A frozen source admission is required')
     summary=admission.summary()
+    contract=admission.source_contract()
     keys={'schemaVersion','architecture','admissionSha256','lockSha256','receiptSha256',
         'engineZipSha256','inventorySha256','sourceRecipeSha256','sourceCoreCommit','providers'}
     if (set(summary)!=keys or type(summary['schemaVersion']) is not int or summary['schemaVersion']!=1
@@ -1567,7 +1568,7 @@ def _admission_words_v4(admission,expected):
             or admission.admission_sha256!=expected or summary['admissionSha256']!=expected
             or any(not digest(summary[key]) for key in ('admissionSha256','lockSha256','receiptSha256',
                 'engineZipSha256','inventorySha256','sourceRecipeSha256'))
-            or summary['sourceCoreCommit']!='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'):
+            or summary['sourceCoreCommit']!=contract.core):
         raise ValueError('The source admission identity differs')
     providers=summary['providers']
     if (type(providers) is not tuple or len(providers)!=2 or any(

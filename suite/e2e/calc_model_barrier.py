@@ -3,7 +3,7 @@
 This synchronizes a new harness. It does not repair input, establish the cause
 of the earlier failed run, or establish a product fix.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import copy
 import hashlib
 import io
@@ -132,6 +132,7 @@ class Expectation:
     inventory_json:str
     inventory_sha256:str
     original_shell_json:str
+    source_admission:object=field(default=None,repr=False,compare=False)
 
     @property
     def baseline(self):return json.loads(self.baseline_json)
@@ -147,7 +148,9 @@ class Expectation:
 
 
 def freeze_expectation(binding,baseline,marker,before_input,*,suite_root,original_shell,inventory,
-                       inventory_sha256,expected_url,started_at,timeout_seconds=MAX_SECONDS):
+                       inventory_sha256,expected_url,started_at,timeout_seconds=MAX_SECONDS,source_admission=None):
+    from writer_model_reader import require_reader_source_context
+    require_reader_source_context(source_admission,suite_root,inventory_sha256)
     start=_time(started_at)
     assert type(timeout_seconds) in (float,int) and math.isfinite(timeout_seconds) and 0<timeout_seconds<=MAX_SECONDS,'Invalid bounded completion budget'
     baseline=copy.deepcopy(_baseline(baseline));binding=_binding(copy.deepcopy(binding),suite_root)
@@ -156,7 +159,8 @@ def freeze_expectation(binding,baseline,marker,before_input,*,suite_root,origina
     require_original_shell(original_shell,binding,suite_root)
     _cells(before_input)
     plan=Expectation(str(_path(str(suite_root))),_json(baseline),marker,expected_url,baseline['a1Text']+marker,
-        start,start+timeout_seconds,_json(binding),_json(before_input),_json(inventory),inventory_sha256,_json(original_shell))
+        start,start+timeout_seconds,_json(binding),_json(before_input),_json(inventory),inventory_sha256,_json(original_shell),
+        source_admission=source_admission)
     assert before_input.get('a1Text')==baseline['a1Text'] and before_input.get('isModified') is False,'Before-input model is not the independent clean baseline'
     assert validate_observation(plan,before_input,baseline['a1Text'])=='pending'
     return plan
@@ -184,7 +188,10 @@ def _retained(plan,observation):
 def validate_observation(plan,observation,previous_text):
     from writer_model_reader import require_owned_model_observation
     assert isinstance(plan,Expectation) and isinstance(observation,dict)
-    require_owned_model_observation(observation,plan.binding,plan.suite_root,expected_service=SERVICE,getter_contract=GETTERS)
+    source_context=({} if plan.source_admission is None else
+        dict(source_admission=plan.source_admission,inventory_sha256=plan.inventory_sha256))
+    require_owned_model_observation(observation,plan.binding,plan.suite_root,
+        expected_service=SERVICE,getter_contract=GETTERS,**source_context)
     assert plan.started_at<=_time(observation.get('readStartedAt'))<=_time(observation.get('readFinishedAt'))<=plan.deadline,'Calc read exceeded original absolute budget'
     require_python_identity(observation.get('pythonIdentity'),plan.suite_root,plan.inventory,plan.inventory_sha256)
     _retained(plan,observation)
@@ -229,7 +236,10 @@ def finalize_completion(plan,record,cleanup,finished_at):
     from writer_model_reader import require_model_reader_cleanup
     assert record.get('state')=='model-complete' and record.get('success') is True
     try:
-        require_model_reader_cleanup(cleanup,plan.binding,plan.deadline,expected_service=SERVICE,getter_contract=GETTERS)
+        source_context=({} if plan.source_admission is None else
+            dict(source_admission=plan.source_admission,inventory_sha256=plan.inventory_sha256))
+        require_model_reader_cleanup(cleanup,plan.binding,plan.deadline,
+            expected_service=SERVICE,getter_contract=GETTERS,**source_context)
         finished=_time(finished_at)
         assert _time(record['modelEqualityAt'])<=_time(cleanup['startedAt'])<=_time(cleanup['finishedAt'])<=finished<=plan.deadline,'Calc observer cleanup is outside original completion budget'
         frozen=json.loads(plan.before_input_json)
@@ -254,7 +264,8 @@ def finalize_completion(plan,record,cleanup,finished_at):
         record.update(cleanup=copy.deepcopy(cleanup),state='failed',success=False,error=type(exc).__name__+': '+str(exc),traceback=traceback.format_exc());raise
 
 
-def replay_completion(receipt,*,suite_root,inventory,inventory_sha256,binding,baseline,expected_url,marker=MARKER):
+def replay_completion(receipt,*,suite_root,inventory,inventory_sha256,binding,baseline,expected_url,
+                      marker=MARKER,source_admission=None):
     """Pure raw replay using caller-supplied independent baseline/inventory/URL."""
     assert isinstance(receipt,dict) and type(receipt.get('schemaVersion')) is int and receipt['schemaVersion']==1
     assert receipt.get('kind')=='calc-model-completion' and receipt.get('state')=='complete' and receipt.get('success') is True
@@ -265,7 +276,8 @@ def replay_completion(receipt,*,suite_root,inventory,inventory_sha256,binding,ba
     assert _json(receipt.get('beforeInput'))==_json(raw['beforeInput']),'Top-level before-input observation differs from expectation'
     plan=freeze_expectation(binding,baseline,marker,raw['beforeInput'],suite_root=suite_root,
         original_shell=raw['originalShell'],inventory=inventory,inventory_sha256=inventory_sha256,
-        expected_url=expected_url,started_at=start,timeout_seconds=deadline-start)
+        expected_url=expected_url,started_at=start,timeout_seconds=deadline-start,
+        **({} if source_admission is None else dict(source_admission=source_admission)))
     assert _json(raw)==_json(plan.receipt()) and receipt['deadline']==plan.deadline,'Calc frozen expectation changed'
     rows=receipt['observations'];assert isinstance(rows,list) and 0<len(rows)<MAX_READS
     previous=plan.baseline['a1Text'];last=_time(raw['beforeInput']['readFinishedAt'])
