@@ -111,22 +111,26 @@ class SourceOnlyExpectations:
     winacc_fields: object
     qualifies_runtime: bool=field(default=False,init=False)
 
+ARM_49744_RECIPE_OWNER = MappingProxyType({'sourceCommit': '49744d20edd3932917a618c68b3700d7f9f1b8ed', 'sourceTree': '95ad954e01638bbabdf0f11926f302eb09723bcd', 'sourceRun': 43253800021, 'runAttempt': 1})
+
+
 def new_source_only_expectations(pin,architecture):
     contract=contract_for_source_pin(pin)
     if contract is not NEW or type(architecture) is not str or architecture not in ('arm64','x64'):
         raise ValueError('Exact new source and reviewed native architecture are required')
-    manifest='9bf183e354ee1f68158233bad959ac8a756c3e667cb0892760b98c44aabb8e50'
+    manifest='37fba766084127e2fdf2f51c3108290a39ddfdaa895af03c68d3cfc8b35d2020'
     targets='ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
     if architecture=='arm64':
+        manifest='9bf183e354ee1f68158233bad959ac8a756c3e667cb0892760b98c44aabb8e50'
         hooks=('arm64Full','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')
         recipe_id='windows-arm64-v1';guarded=13
         recipe_sha='9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe'
     else:
         hooks=('moduleBootstrap','firebirdLoaderPath','zstdSourceLinks','gpgBuildCompilerPath',
-               'atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform',
+               'atlNativePaths','harfbuzzNativeMesonPaths','cliPublisherPolicyPlatform','x86CompanionStaticRuntime',
                'winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph')
         recipe_id='windows-x64-common-v2';guarded=4
-        recipe_sha='66704ff304812a3181912c38723e4d0333670055dbb0c879e46fcc1ea961324d'
+        recipe_sha='26a58083e03132ea83a6def9ef4b2c432660a7e8bbcf75063bb325797db8ef4b'
     flags=dict(nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
     recipe=dict(schemaVersion=1,kind='native-engine-source-recipe-install',architecture=architecture,
         recipeId=recipe_id,policySha256=targets,manifestSha256=manifest,

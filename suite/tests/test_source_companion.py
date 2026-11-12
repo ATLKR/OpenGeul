@@ -51,7 +51,7 @@ class SourceCompanionTests(unittest.TestCase):
         dll=image();helper=image(native=True);(self.runtime/'program/spsupp_x86.dll').write_bytes(dll);(self.runtime/'program/spsupp_helper.exe').write_bytes(helper)
         sha=lambda b:hashlib.sha256(b).hexdigest()
         self.binding=dict(sourceCommit='1'*40,sourceTree='2'*40,sourceRun=123,runAttempt=1,recipeSha256='3'*64)
-        component=dict(schemaVersion=1,kind='source-built-x86-sharepoint-companion',architecture='x64',coreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276',path='program/spsupp_x86.dll',role='x86CompatibilityHelper',machine=332,size=len(dll),sha256=sha(dll),buildBinding=dict(self.binding),sourceIntent='sharepoint-inproc-32bit-com-client',sourceProofs=copy.deepcopy(payload.SOURCE_COMPANION_SOURCE_PINS),configuredX86=True,linkTarget=dict(path='workdir/LinkTarget/Library/spsupp_x86.dll',size=len(dll),sha256=sha(dll)),nativeHelper=dict(path='program/spsupp_helper.exe',machine=34404,role='nativeX64',size=len(helper),sha256=sha(helper)),installedArchive=dict(kind='main',size=1024,sha256='4'*64,stageReceiptSha256='5'*64),exports=list(EXPORTS),imports=dict(normal=['kernel32.dll'],delay=[]),dependencyPolicy='x86-os-only-no-private-shadow-v1',fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+        component=dict(schemaVersion=2,kind='source-built-x86-sharepoint-companion',architecture='x64',coreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276',path='program/spsupp_x86.dll',role='x86CompatibilityHelper',machine=332,size=len(dll),sha256=sha(dll),buildBinding=dict(self.binding),sourceIntent='sharepoint-inproc-32bit-com-client',sourceProofs=copy.deepcopy(payload.SOURCE_COMPANION_SOURCE_PINS),staticRuntimeSourceProofs=copy.deepcopy(payload.SOURCE_X86_COMPANION_CRT_PINS),configuredX86=True,linkTarget=dict(kind='gbuild-bookkeeping-prefix',path='workdir/LinkTarget/Library/spsupp_x86.dll'),buildOutput=dict(path='instdir/program/spsupp_x86.dll',size=len(dll),sha256=sha(dll)),nativeHelperBuildOutput=dict(path='instdir/program/spsupp_helper.exe',size=len(helper),sha256=sha(helper)),locationContract=dict(schemaVersion=1,kind='gbuild-instdir-location-v1',coreCommit=payload._SOURCE_COMPANION_CORE,sourceProofs=copy.deepcopy(payload.SOURCE_COMPANION_LOCATION_PINS),configurationSha256='6'*64,sourceRelativeInstRoot='instdir',libraryFolder='program',binaryFolder='program'),nativeHelper=dict(path='program/spsupp_helper.exe',machine=34404,role='nativeX64',size=len(helper),sha256=sha(helper)),installedArchive=dict(kind='main',size=1024,sha256='4'*64,stageReceiptSha256='5'*64),exports=list(EXPORTS),imports=dict(normal=['kernel32.dll'],delay=[]),dependencyPolicy='x86-os-only-no-private-shadow-v1',fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
         return component
     def test_exact_component_and_actual_bytes_are_separate_from_full_authority(self):
         p=self.setup_component();admitted=payload._source_companion_component(p,self.binding)
@@ -77,14 +77,14 @@ class SourceCompanionTests(unittest.TestCase):
             with self.subTest(field=key),self.assertRaises(ValueError):payload._source_companion_component(q,self.binding)
     def test_linktarget_and_native_helper_identities_must_join(self):
         p=self.setup_component()
-        q=copy.deepcopy(p);q['linkTarget']['sha256']='0'*64
+        q=copy.deepcopy(p);q['buildOutput']['sha256']='0'*64
         with self.assertRaises(ValueError):payload._source_companion_component(q,self.binding)
         (self.runtime/'program/spsupp_helper.exe').write_bytes(image())
         with self.assertRaises(ValueError):payload._source_companion_runtime(self.runtime,p)
     def test_export_drift_clr_and_forwarders_reject(self):
         p=self.setup_component()
         for value in (image(exports=EXPORTS[:-1]),image(clr=True),image(forwarder=True)):
-            q=copy.deepcopy(p);q['size']=len(value);q['sha256']=hashlib.sha256(value).hexdigest();q['linkTarget'].update(size=len(value),sha256=q['sha256']);(self.runtime/'program/spsupp_x86.dll').write_bytes(value)
+            q=copy.deepcopy(p);q['size']=len(value);q['sha256']=hashlib.sha256(value).hexdigest();q['buildOutput'].update(size=len(value),sha256=q['sha256']);(self.runtime/'program/spsupp_x86.dll').write_bytes(value)
             with self.assertRaises(ValueError):payload._source_companion_runtime(self.runtime,q)
     def test_vc_unknown_import_and_private_system_shadow_reject(self):
         p=self.setup_component()

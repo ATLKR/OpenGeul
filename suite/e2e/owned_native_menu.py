@@ -761,7 +761,7 @@ def _run(api,process,document,record,operation,*,gesture=False,probe=None,clock=
                 elif operation.startswith('disabled-'):
                     target=operation[len('disabled-'):]
                     value.update(disabledSnapshot=observe(target,enabled=False),disabledObserved=True)
-                else:
+                elif operation!='open-escape' or diagnostic:
                     discarded_observe('save')
                     if diagnostic:raise NativeIdentityDiagnosticTerminal('Diagnostic point returned without its terminal marker')
                 if operation=='open-outside':

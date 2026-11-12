@@ -86,6 +86,39 @@ class WriterProducerTests(unittest.TestCase):
         result=subprocess.run([self.pwsh,'-NoLogo','-NoProfile','-File',str(script)],capture_output=True,text=True,env=self.environment,timeout=30)
         self.assertEqual(0,result.returncode,result.stdout+'\n'+result.stderr);return result.stdout.strip()
 
+    def legacy_source_pin_fixture(self):
+        # This retained observer source targets bf6/26.8.1.1 independently of
+        # the application's currently qualified normal runtime.
+        source=json.loads((ROOT/'suite/tests/fixtures/native-source-tar/source.json').read_bytes())['sourceArchive']
+        self.assertEqual(source['version'],'26.8.1.1')
+        self.assertEqual(source['coreCommit'],'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1')
+        path=self.root/'legacy-source-pin.json'
+        path.write_text(json.dumps(dict(schemaVersion=1,runtime=dict(
+            version=source['version'],sourceUrl=source['url'],sourceSha256=source['sha256']))))
+        return path
+
+    def test_legacy_source_pin_rejects_newer_version_and_changed_archive_hash(self):
+        original=json.loads(self.legacy_source_pin_fixture().read_bytes())
+        digest=original['runtime']['sourceSha256']
+        changed_digest=('0' if digest[0]!='0' else '1')+digest[1:]
+        for field,value in (('version','26.8.2.2'),('sourceSha256',changed_digest)):
+            with self.subTest(field=field):
+                changed=json.loads(json.dumps(original));changed['runtime'][field]=value
+                path=self.root/('rejected-'+field+'.json');path.write_text(json.dumps(changed))
+                self.assertEqual('closed-rejection',self.ps(f"$rejected=$false;try{{Get-SourcePin {quote(path)}|Out-Null}}catch{{$rejected=$true}};if(-not $rejected){{throw 'Legacy source guard accepted a different pin'}};'closed-rejection'"))
+
+    def test_observer_installer_rejects_one_changed_source_byte_before_writes(self):
+        package=ROOT/'suite/engine-build/writer-server-observer-diagnostic'
+        source=self.root/'changed-lo';shutil.copytree(package/'tests/upstream',source)
+        (source/'include').mkdir(exist_ok=True)
+        manifest=json.loads((package/'source-lock.json').read_bytes())
+        changed=source/manifest['sources'][0]['path']
+        raw=changed.read_bytes();changed.write_bytes(bytes([raw[0]^1])+raw[1:])
+        before={str(path.relative_to(source)):path.read_bytes() for path in source.rglob('*') if path.is_file()}
+        installer=load('writer_drift_installer',package/'install.py')
+        with self.assertRaises(ValueError):installer.install(source,'windows-arm64')
+        self.assertEqual(before,{str(path.relative_to(source)):path.read_bytes() for path in source.rglob('*') if path.is_file()})
+
     def test_modes_are_mutually_exclusive_and_writer_never_qualifies(self):
         proof=json.loads(self.ps("Get-NativeEngineBuildMode Full -WriterServerObserverDiagnostic|ConvertTo-Json -Compress"))
         self.assertEqual('native-office-engine-writer-server-observer-diagnostic',proof['kind'])
@@ -116,9 +149,7 @@ foreach($key in $binding.Keys){$bad=$binding.Clone();$bad[$key]=$null;$rejected=
         for name in ('install.py','source-lock.json','source.patch','wire-schema.json','wire.h','atomic.h','descriptor.h','private_sink.hxx','recorder.h','session.h','observer_api.hxx','native.cpp'):
             shutil.copyfile(package/name,target/name)
         evidence=self.root/'evidence';evidence.mkdir()
-        from suite.tests import test_payload
-        baseline=Path(test_payload.__file__).resolve().parents[2]
-        lock=self.root/'runtime.lock.json';shutil.copyfile(baseline/'suite/config/runtime.arm64.lock.json',lock)
+        lock=self.legacy_source_pin_fixture()
         raw=self.ps(f"$script:NativeEngineBuildBudget=New-NativeBuildBudget -MaximumMinutes 1;$pin=Get-SourcePin {quote(lock)};Install-WriterServerObserverSource {quote(source)} {quote(repo)} {quote(sys.executable)} {quote(evidence)} $pin -ChildEnvironment {self.installer_environment()}|ConvertTo-Json -Depth 12 -Compress")
         proof=json.loads(raw.splitlines()[-1])
         self.assertTrue(proof['passed']);self.assertFalse(proof['fullEngineQualified']);self.assertFalse(proof['acceptanceEligible']);self.assertFalse(proof['guiVerified'])

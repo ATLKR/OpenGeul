@@ -56,6 +56,11 @@ class WiringTests(unittest.TestCase):
                         continue  # 별도 test_qa_upload가 원본 QA 입력·16 MiB 제한을 검사한다.
                     if s.get('id')=='synthetic-pdfs-evidence':
                         self.assertIn(job,('virtual-print','virtual-print-arm64'));continue  # exact7+manifest 전송은 별도 합성 PDF 계약 검사.
+                    if s.get('id')=='paired-print-evidence':
+                        self.assertEqual(job,'virtual-print');self.assertEqual(s['with']['path'],'paired-print-evidence/')
+                        self.assertIn("steps.paired-print-admit.outcome == 'success'",s['if'])
+                        self.assertTrue(any(p.get('id')=='paired-print-admit' and 'ci/paired_print_evidence.py' in p.get('run','') for p in steps[:i]))
+                        continue  # 원래8개 성공 수집과 분리된 exact9 비수용 비교 allowlist는 별도 계약 검사.
                     if 'native-transport/native-install.json' in s.get('with',{}).get('path',''):
                         self.assertEqual(job,'msix-native-arm64');continue  # exact3 transport 검사기는 별도로 검사한다.
                     self.assertGreater(i,pack[0]);self.assertEqual(s['with']['path'],'bounded-evidence/')

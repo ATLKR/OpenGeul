@@ -1076,6 +1076,7 @@ jobs:
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-e2e-inputs${env:E2E_INPUT_SUFFIX}-$env:GITHUB_RUN_ID" --dir inputs
         gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name "opengeul-wasm-$env:GITHUB_RUN_ID" --dir wasm-input
     - name: 독립 PDF 검사·기본 프린터·합성 문서 준비
+      id: print-inputs
       shell: pwsh
       run: |
         $PSNativeCommandUseErrorActionPreference=$true
@@ -1089,6 +1090,7 @@ jobs:
         python e2e/print_fixtures.py print-fixtures
         node e2e/verify_print_fixtures.mjs wasm-input print-fixtures
     - name: 실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사
+      id: normal-print
       shell: pwsh
       run: python -u e2e/virtual_print.py --exe runtime/OpenGeul.exe --inputs inputs/e2e-fixtures --fixtures print-fixtures --out print-evidence
     - name: 성공한 고정 합성 인쇄 PDF 원본만 크기 제한하여 보존
@@ -1120,6 +1122,30 @@ jobs:
         path: bounded-evidence/
         retention-days: 1
         if-no-files-found: warn
+        compression-level: 9
+    - name: 같은 합성 입력으로 고정 HWP 1.1.4와 현재 제품 인쇄 비교 진단
+      id: paired-print
+      if: always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false && github.event_name == 'pull_request' && github.event.pull_request.draft == true && github.event.pull_request.head.repo.full_name == 'ATLKR/OpenGeul' && github.event.pull_request.head.ref == 'work/opengeul-office-arm64' && matrix.os == 'windows-2025' && steps.print-inputs.outcome == 'success' && (steps.normal-print.outcome == 'success' || steps.normal-print.outcome == 'failure')
+      shell: pwsh
+      run: |
+        $ErrorActionPreference='Stop'
+        $PSNativeCommandUseErrorActionPreference=$true
+        $provenanceSha=(Get-FileHash -Algorithm SHA256 package/provenance.json).Hash.ToLowerInvariant()
+        python -u e2e/paired_print_run.py --run-paired-print --acquire-legacy --harness-source $env:GITHUB_SHA --run-id $env:GITHUB_RUN_ID --run-attempt $env:GITHUB_RUN_ATTEMPT --current-provenance-sha256 $provenanceSha --package package --wasm wasm-input --inputs inputs/e2e-fixtures --fixtures print-fixtures --legacy-cache paired-locked-inputs --legacy-runtime paired-legacy-runtime --current-runtime paired-current-runtime --work paired-private-attempts --output paired-print-evidence
+    - name: 비교 진단 원본·소유 종료·동일 입력·크기와 source 바인딩 독립 재검증
+      id: paired-print-admit
+      if: always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false && github.event_name == 'pull_request' && github.event.pull_request.draft == true && github.event.pull_request.head.repo.full_name == 'ATLKR/OpenGeul' && github.event.pull_request.head.ref == 'work/opengeul-office-arm64' && matrix.os == 'windows-2025' && (steps.paired-print.outcome == 'success' || steps.paired-print.outcome == 'failure')
+      shell: pwsh
+      run: python ci/paired_print_evidence.py --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID --expected-attempt $env:GITHUB_RUN_ATTEMPT
+    - name: 독립 검증된 비수용 비교 PDF·래스터·숫자 기록만 별도 전송
+      id: paired-print-evidence
+      if: always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false && github.event_name == 'pull_request' && github.event.pull_request.draft == true && github.event.pull_request.head.repo.full_name == 'ATLKR/OpenGeul' && github.event.pull_request.head.ref == 'work/opengeul-office-arm64' && matrix.os == 'windows-2025' && steps.paired-print-admit.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-paired-print-windows-2025-${{ github.run_id }}-${{ github.run_attempt }}
+        path: paired-print-evidence/
+        retention-days: 1
+        if-no-files-found: error
         compression-level: 9
     if: github.event.repository.private == false
   virtual-print-arm64:

@@ -27,9 +27,9 @@ except ModuleNotFoundError:
     from crt import crt_names, is_vc_crt_file
 
 try:
-    from suite.source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation
+    from suite.source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation, ARM_49744_RECIPE_OWNER
 except ModuleNotFoundError:
-    from source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation
+    from source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation, ARM_49744_RECIPE_OWNER
 
 # Compatibility name retains the existing public x64 family.
 MSI_VC_DEPENDENCIES = frozenset(crt_names())
@@ -513,6 +513,29 @@ def _source_new_dotnet_pins(manifest: dict) -> list:
     return [dict(row) for row in expected['sources']]
 
 
+def _source_new_x86_crt_pins(manifest):
+    from suite.payload import SOURCE_X86_COMPANION_CRT_PINS
+    expected=dict(condition='WNT_X86_64_MSC',sources=SOURCE_X86_COMPANION_CRT_PINS)
+    if not _source_exact(manifest.get('windowsX86CompanionStaticRuntime'),expected):
+        raise ValueError('New x86 static runtime source descriptor differs')
+    return [dict(row)for row in SOURCE_X86_COMPANION_CRT_PINS]
+
+
+def _source_new_x86_crt_hook(value,manifest,parent):
+    fields=dict(schemaVersion=1,kind='windows-x64-x86-companion-static-runtime-source-hooks',
+        coreCommit=NEW.core,architecture='x64',condition='WNT_X86_64_MSC',nativeBuildVerified=False,
+        fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+    if type(value)is not dict or set(value)!=set(fields)|{'recipes'} or not _source_exact({k:value[k]for k in fields},fields):
+        raise ValueError('New x86 static runtime hook differs')
+    rows=value['recipes'];pins=_source_new_x86_crt_pins(manifest)
+    if type(rows)is not list or len(rows)!=2:raise ValueError('New x86 static runtime source pair missing')
+    for row,pin in zip(rows,pins):
+        fields=dict(path=pin['path'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'])
+        if type(row)is not dict or set(row)!=set(fields)|{'evidence'} or not _source_exact({k:row[k]for k in fields},fields):
+            raise ValueError('New x86 static runtime ordered source pair differs')
+        _source_new_evidence(row['evidence'],{side:side+'-x64-'+pin['path'].rsplit('/',1)[-1]for side in ('original','effective')},parent=parent)
+
+
 def _source_new_plan(manifest: dict, architecture: str) -> dict:
     """Reconstruct only the separate, reviewed 9dea source-only recipe."""
     expected=new_source_only_expectations(dict(NEW_SOURCE),architecture)
@@ -542,6 +565,7 @@ def _source_new_plan(manifest: dict, architecture: str) -> dict:
             common += [pin(manifest[key]) for key in ('windowsFirebirdLoaderPath','windowsZstdSourceLinks','windowsGpgBuildCompilerPath')]
             common += [pin(value) for value in atl]
             common += [pin(_source_x64_harfbuzz_pin(manifest)),pin(manifest['windowsCliPublisherPolicyPlatform'])]
+            common += [pin(value) for value in _source_new_x86_crt_pins(manifest)]
             moved={manifest[key]['path'] for key in ('windowsFirebirdLoaderPath','windowsZstdSourceLinks','windowsHarfbuzzNativeMesonPaths')}
             moved.update(value['path'] for value in atl)
             guarded=[value for value in guarded if value['path'] not in moved]
@@ -656,13 +680,24 @@ def _source_new_arm_hooks(hooks: dict, manifest: dict, parent: PureWindowsPath) 
         _source_new_evidence(row['evidence'],{side:side+'-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')},parent=parent)
 
 
+def _source_new_arm_recipe_owner(proof):
+    # Select only this producer's source metadata; external Full pins still authenticate it.
+    fields=dict(ARM_49744_RECIPE_OWNER)
+    if type(proof)is not dict or not _source_exact({key:proof.get(key)for key in fields},fields):
+        raise ValueError('ARM source recipe requires the exact fixed producer run and tree')
+
+
 def _source_new_recipe(proof: dict, architecture: str) -> None:
     """Source-only recipe/WinAcc/Flex replay; never a normal Full qualification."""
     try:
         if type(proof) is not dict or contract_for_source_pin(proof.get('sourcePin')) is not NEW:
             raise ValueError('New source recipe requires the exact reviewed core/archive tuple')
         expected=new_source_only_expectations(proof['sourcePin'],architecture)
-        path=Path(__file__).resolve().parent/'engine-build/source-build.26.8.2.2.json'
+        if architecture=='arm64':
+            _source_new_arm_recipe_owner(proof)
+            filename='source-build.26.8.2.2.arm64-49744.json'
+        else:filename='source-build.26.8.2.2.json'
+        path=Path(__file__).resolve().parent/'engine-build'/filename
         info=path.lstat()
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or getattr(info,'st_file_attributes',0)&0x400
                 or not 0<info.st_size<=1024*1024):
@@ -712,7 +747,7 @@ def _source_new_recipe(proof: dict, architecture: str) -> None:
             ('gpgBuildCompilerPath','windowsGpgBuildCompilerPath','windows-gpg-build-compiler-path-source-hook'),
             ('harfbuzzNativeMesonPaths','windowsHarfbuzzNativeMesonPaths','windows-x64-harfbuzz-native-meson-source-hook'),
             ('cliPublisherPolicyPlatform','windowsCliPublisherPolicyPlatform','windows-x64-cli-publisher-policy-platform-source-hook'))
-        if (set(hooks)!={'kind','architecture','moduleBootstrap','atlNativePaths','dotnetProjectGraph','nativeBuildVerified','basePersistenceVerified',*(row[0] for row in pairs)}
+        if (set(hooks)!={'kind','architecture','moduleBootstrap','atlNativePaths','dotnetProjectGraph','x86CompanionStaticRuntime','nativeBuildVerified','basePersistenceVerified',*(row[0] for row in pairs)}
                 or hooks.get('kind')!='native-windows-common-source-hooks'):
             raise ValueError('New x64 common hook group differs')
         for field,pin_name,kind in pairs:
@@ -724,6 +759,7 @@ def _source_new_recipe(proof: dict, architecture: str) -> None:
                     or not _source_exact({key:value[key] for key in fields},fields)):
                 raise ValueError('New x64 source-only hook differs')
             _source_new_evidence(value['evidence'],{side:side+'-x64-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')},parent=parent)
+        _source_new_x86_crt_hook(hooks['x86CompanionStaticRuntime'],manifest,parent)
         _source_x64_atl_source(hooks['atlNativePaths'],manifest,evidence_parent=parent)
         for index,value in enumerate(hooks['atlNativePaths']['recipes'],1):
             pin=_source_x64_atl_pins(manifest)[index-1]

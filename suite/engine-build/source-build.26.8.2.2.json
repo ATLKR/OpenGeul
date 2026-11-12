@@ -497,6 +497,7 @@
         "atlNativePaths",
         "harfbuzzNativeMesonPaths",
         "cliPublisherPolicyPlatform",
+        "x86CompanionStaticRuntime",
         "winAccFocusOrder",
         "flexFatalCompatibility",
         "dotnetProjectGraph"
@@ -615,6 +616,25 @@
         "sha256": "5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272",
         "afterSize": 5555,
         "afterSha256": "09987ad29eb2afac9f2ff7a973bd2b7c32ccd54f286a4281610b5bc89fe939f7"
+      }
+    ]
+  },
+  "windowsX86CompanionStaticRuntime": {
+    "condition": "WNT_X86_64_MSC",
+    "sources": [
+      {
+        "path": "shell/Library_spsupp_x86.mk",
+        "size": 1444,
+        "sha256": "68a515669d5730ef7ce4d23def0c288110b259ba01e89aa3bb3275d33b496c56",
+        "afterSize": 1630,
+        "afterSha256": "5b1c4729b8861e72422ba08cc6d8af5b5adc69c721f5f877991c7c915fe486a3"
+      },
+      {
+        "path": "extensions/Executable_twain32shim.mk",
+        "size": 1235,
+        "sha256": "9dfc8323e9d5af2611a9330fd67d7244a248825af1ce73aa7bd9ecdea1d674c4",
+        "afterSize": 1425,
+        "afterSha256": "f669bc99d15f302aed5a6dd9af94c700ff9a0add204166a1e029d8f9093b1c61"
       }
     ]
   }

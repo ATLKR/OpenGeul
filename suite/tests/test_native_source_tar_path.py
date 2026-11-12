@@ -33,6 +33,12 @@ class NativeSourceTarPathTests(unittest.TestCase):
         (self.core/'bin/unpack-sources').chmod(0o755)
         self.script=self.root/'make-target.sh';self.evidence=self.root/'evidence';self.evidence.mkdir()
         self.manifest=json.loads((FIXTURE/'source.json').read_text())
+        # The retained legacy producer keeps its own exact 26.8.1.1 source pin.
+        # The application's independently qualified runtime may be newer.
+        self.source_pin_fixture=self.root/'legacy-source-pin.json'
+        source=self.manifest['sourceArchive']
+        self.source_pin_fixture.write_text(json.dumps(dict(schemaVersion=1,runtime=dict(
+            version=source['version'],sourceUrl=source['url'],sourceSha256=source['sha256']))))
         self.assertEqual(self.manifest['fragment']['sha256'],hashlib.sha256((FIXTURE/'get-submodules.mk').read_bytes()).hexdigest())
         self.assertEqual(self.manifest['unpackFixture']['sha256'],hashlib.sha256((FIXTURE/'unpack-sources').read_bytes()).hexdigest())
 
@@ -55,7 +61,7 @@ $write=@($ast.FindAll({{param($node) $node -is [Management.Automation.Language.C
  $node.Extent.Text.Contains('make -j$Jobs $target')}},$true))
 if($write.Count -ne 1) {{throw 'Expected one actual make-target recipe generation statement'}}
 Invoke-Expression $write[0].Extent.Text
-[pscustomobject]@{{pins=@(Get-ExtraSourcePins);sourcePin=(Get-SourcePin {quote(ROOT/'suite/config/runtime.arm64.lock.json')});configure=@(Get-ConfigureArguments)}}|ConvertTo-Json -Depth 6 -Compress
+[pscustomobject]@{{pins=@(Get-ExtraSourcePins);sourcePin=(Get-SourcePin {quote(self.source_pin_fixture)});configure=@(Get-ConfigureArguments)}}|ConvertTo-Json -Depth 6 -Compress
 """)
         data=json.loads(raw.splitlines()[-1]);self.assertEqual(self.manifest['sourceArchive'],data['sourcePin'])
         self.assertIn('--with-lang=en-US ko',data['configure'])
@@ -137,5 +143,16 @@ Invoke-Expression $copies[0].Extent.Text
 """)
         self.assertEqual(self.script.read_bytes(),(self.evidence/'make-ExternalProject_firebird.sh').read_bytes())
 
+
+
+
+    def test_legacy_source_pin_fixture_keeps_the_original_guard_closed_to_newer_or_changed_inputs(self):
+        original=json.loads(self.source_pin_fixture.read_text())
+        self.assertEqual(original['runtime']['version'],'26.8.1.1')
+        for field,value in [('version','26.8.2.2'),('sourceSha256','0'*64)]:
+            changed=json.loads(json.dumps(original));changed['runtime'][field]=value
+            path=self.root/('rejected-'+field+'.json');path.write_text(json.dumps(changed))
+            result=self.ps("$rejected=$false; try { Get-SourcePin "+quote(path)+"|Out-Null } catch { $rejected=$true }; if(-not $rejected) { throw 'Legacy source guard accepted a different pin' }; 'closed-rejection'")
+            self.assertEqual(result,'closed-rejection')
 
 if __name__=='__main__':unittest.main()

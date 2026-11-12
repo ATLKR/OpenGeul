@@ -10,7 +10,7 @@ from suite.source_contracts import NEW_SOURCE, LEGACY_SOURCE, new_source_only_ex
 
 ROOT=Path(__file__).resolve().parents[2]
 MANIFEST=ROOT/'suite/engine-build/source-build.26.8.2.2.json'
-MANIFEST_SHA='9bf183e354ee1f68158233bad959ac8a756c3e667cb0892760b98c44aabb8e50'
+MANIFEST_SHA='37fba766084127e2fdf2f51c3108290a39ddfdaa895af03c68d3cfc8b35d2020'
 PARENT='C:\\build\\evidence\\source-recipe'
 FLAGS=dict(nativeBuildVerified=False,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
 
@@ -25,12 +25,13 @@ class PrepareSourceProfileV2Tests(unittest.TestCase):
         self.assertTrue(callable(value),'Missing preparatory source-profile consumer API')
         return value
 
-    def manifest(self):
-        self.assertTrue(MANIFEST.is_file(),'Missing independently reviewed per-core manifest')
-        return json.loads(MANIFEST.read_bytes())
+    def manifest(self,architecture='x64'):
+        path=MANIFEST if architecture=='x64'else MANIFEST.with_name('source-build.26.8.2.2.arm64-49744.json')
+        self.assertTrue(path.is_file(),'Missing independently reviewed per-core manifest')
+        return json.loads(path.read_bytes())
 
     def source_only(self,architecture):
-        manifest=self.manifest();expected=new_source_only_expectations(dict(NEW_SOURCE),architecture)
+        manifest=self.manifest(architecture);expected=new_source_only_expectations(dict(NEW_SOURCE),architecture)
         plan=self.require('_source_new_plan')(manifest,architecture)
         recipe=dict(expected.recipe_fields);recipe['hookOrder']=list(expected.hooks)
         recipe['armGuardedSources']=[dict(path=row['path'],beforeSha256=row['beforeSha256'],
@@ -53,6 +54,7 @@ class PrepareSourceProfileV2Tests(unittest.TestCase):
                     beforeBytes=pin['size'],afterBytes=pin['afterSize'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],
                     evidence=evidence({side:side+'-x64-'+pin['path'].rsplit('/',1)[-1] for side in ('original','effective')}),**FLAGS)
             rows=[]
+            hooks['x86CompanionStaticRuntime']=dict(schemaVersion=1,kind='windows-x64-x86-companion-static-runtime-source-hooks',coreCommit=NEW_SOURCE['coreCommit'],architecture='x64',condition='WNT_X86_64_MSC',recipes=[dict(path=pin['path'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],evidence=evidence({side:side+'-x64-'+pin['path'].rsplit('/',1)[-1]for side in ('original','effective')}))for pin in manifest['windowsX86CompanionStaticRuntime']['sources']],**FLAGS)
             for index,pin in enumerate(consumer._source_x64_atl_pins(manifest),1):
                 rows.append(dict(path=pin['path'],beforeBytes=pin['size'],afterBytes=pin['afterSize'],
                     beforeSha256=pin['sha256'],afterSha256=pin['afterSha256'],
@@ -93,9 +95,11 @@ class PrepareSourceProfileV2Tests(unittest.TestCase):
             afterSha256=pin['afterSha256'] if row['path']==pin['path'] else row['sha256']) for row in pin['sources']]
         winacc['evidence']=evidence(dict(original='original-AccObjectWinManager.cxx',effective='effective-AccObjectWinManager.cxx',patch='winacc-focus-order.patch'))
         flex=dict(expected.flex_fields);flex['evidence']=evidence({side:side+'-'+architecture+'-sqlflex.l' for side in ('original','effective')})
-        return dict(sourcePin=dict(NEW_SOURCE),sourcePortManifestSha256=MANIFEST_SHA,
+        result=dict(sourcePin=dict(NEW_SOURCE),sourcePortManifestSha256=expected.source_manifest_sha256,
             nativeTargetsSha256=expected.native_targets_sha256,sourceRecipeProof=recipe,
             sourceHooks=hooks,winAccFocusOrderSourcePatch=winacc,flexFatalCompatibilitySourcePatch=flex)
+        if architecture=='arm64':result.update(dict(consumer.ARM_49744_RECIPE_OWNER))
+        return result
 
     def check(self,proof,architecture):
         return self.require('_source_new_recipe')(proof,architecture)
@@ -105,9 +109,9 @@ class PrepareSourceProfileV2Tests(unittest.TestCase):
 
     def test_both_canonical_plans_and_source_only_proofs(self):
         for architecture,count,guards,digest in [('arm64',20,13,'9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe'),
-                ('x64',22,4,'66704ff304812a3181912c38723e4d0333670055dbb0c879e46fcc1ea961324d')]:
+                ('x64',24,4,'26a58083e03132ea83a6def9ef4b2c432660a7e8bbcf75063bb325797db8ef4b')]:
             with self.subTest(architecture=architecture):
-                plan=self.require('_source_new_plan')(self.manifest(),architecture)
+                plan=self.require('_source_new_plan')(self.manifest(architecture),architecture)
                 self.assertEqual((len(plan['sources']),len(plan['armGuardedSources'])),(count,guards))
                 self.assertEqual(hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest(),digest)
                 proof=self.source_only(architecture);before=copy.deepcopy(proof)
@@ -213,5 +217,20 @@ class PrepareSourceProfileV2Tests(unittest.TestCase):
         for architecture in ('arm64','x64'):
             with self.assertRaises(ValueError):consumer.validate_source_build_lock(runtime,architecture=architecture)
 
+
+    def test_x86_crt_original_effective_pair_is_required_and_same_run_without_native_authority(self):
+        proof=self.source_only('x64');self.check(proof,'x64')
+        hook=proof['sourceHooks']['x86CompanionStaticRuntime']
+        for kind in ('missing','reorder','float-size','old-effective','foreign-parent','flag','extra'):
+            row=copy.deepcopy(proof);value=row['sourceHooks']['x86CompanionStaticRuntime']
+            if kind=='missing':row['sourceHooks'].pop('x86CompanionStaticRuntime')
+            elif kind=='reorder':value['recipes'].reverse()
+            elif kind=='float-size':value['recipes'][0]['beforeBytes']=float(value['recipes'][0]['beforeBytes'])
+            elif kind=='old-effective':value['recipes'][0]['afterSha256']=value['recipes'][0]['beforeSha256']
+            elif kind=='foreign-parent':value['recipes'][0]['evidence']['original']='C:\\other\\original-x64-Library_spsupp_x86.mk'
+            elif kind=='flag':value['nativeBuildVerified']=True
+            else:value['extra']=False
+            with self.subTest(kind=kind),self.assertRaises(ValueError):self.check(row,'x64')
+        self.assertNotIn('artifact',proof)
 
 if __name__=='__main__':unittest.main()

@@ -227,7 +227,21 @@ class FocusedBoundaryTests(unittest.TestCase):
                     if isinstance(child,ast.FunctionDef) and child.name in names:
                         result['.'.join(path)]=hashlib.sha256(ast.dump(child,include_attributes=False).encode()).hexdigest()
                     visit(child,path)
-            visit(ast.parse(text));return result
+            tree=ast.parse(text)
+            run,=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='_run']
+            # The sole reviewed behavior change skips an unused initial Save
+            # snapshot for normal open-escape; diagnostic profile 3 keeps it.
+            # Reverse exactly that elif into the original else. The immutable
+            # whole-body ledger must then match; no new _run hash is admitted.
+            reviewed=ast.dump(ast.parse("operation!='open-escape' or diagnostic",mode='eval').body,
+                include_attributes=False)
+            changes=[(node,node.orelse[0]) for node in ast.walk(run)
+                if isinstance(node,ast.If) and len(node.orelse)==1 and isinstance(node.orelse[0],ast.If)
+                and ast.dump(node.orelse[0].test,include_attributes=False)==reviewed]
+            self.assertEqual(len(changes),1)
+            parent,branch=changes[0];self.assertEqual(branch.orelse,[])
+            parent.orelse=branch.body
+            visit(tree);return result
         self.assertEqual(len(baseline['functionAstSha256']),14)
         expected=dict(baseline['functionAstSha256'])
         # Reviewed numerical observation-only additions; the original fixture
@@ -237,7 +251,29 @@ class FocusedBoundaryTests(unittest.TestCase):
             'NativeMenuProbe._call':'623593105c52e0ca55123a5657219db5c4f8d5185df633410061fdc529eed8bf',
             'NativeMenuProbe._provider_timeout':'59f21ee61a2f3b1db167293603a1b1bf9e2d5e06e530c7453792ba1606ea434b',
         })
-        self.assertEqual(expected,functions((BASE/'suite/e2e/owned_native_menu.py').read_text()))
+        source=(BASE/'suite/e2e/owned_native_menu.py').read_text()
+        self.assertEqual(expected,functions(source))
+        condition="elif operation!='open-escape' or diagnostic:"
+        self.assertEqual(source.count(condition),1)
+        for wrong in ("elif operation!='open-escape':","elif True:"):
+            with self.subTest(rejectedCondition=wrong):
+                with self.assertRaises(AssertionError):functions(source.replace(condition,wrong,1))
+        # Inversion preserves every original statement, including the profile3
+        # observation, budget and cleanup. It cannot erase unrelated mutations.
+        mutations=(("                    discarded_observe('save')\n                    if diagnostic:",
+                    "                    pass\n                    if diagnostic:"),
+                   ('def budget():assert clock()<deadline,','def budget():assert clock()<=deadline,'),
+                   ('probe.close_engine(handle)','True'))
+        run,=[node for node in ast.parse(source).body if isinstance(node,ast.FunctionDef) and node.name=='_run']
+        run_source=ast.get_source_segment(source,run)
+        self.assertIsInstance(run_source,str);self.assertEqual(source.count(run_source),1)
+        for before,after in mutations:
+            with self.subTest(protectedStatement=before.split('(')[0].strip()):
+                self.assertEqual(run_source.count(before),1)
+                changed=functions(source.replace(run_source,run_source.replace(before,after,1),1))
+                self.assertNotEqual(changed['_run'],expected['_run'])
+                self.assertEqual({k:v for k,v in changed.items() if k!='_run'},
+                    {k:v for k,v in expected.items() if k!='_run'})
 
 
 

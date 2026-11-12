@@ -669,14 +669,166 @@ def _source_companion_identity(value,path,machine,role=None):
             or role and value['role']!=role):
         raise ValueError('Invalid exact source companion binary identity')
 
+SOURCE_X86_COMPANION_CRT_PINS = [{'path': 'shell/Library_spsupp_x86.mk', 'size': 1444, 'sha256': '68a515669d5730ef7ce4d23def0c288110b259ba01e89aa3bb3275d33b496c56', 'afterSize': 1630, 'afterSha256': '5b1c4729b8861e72422ba08cc6d8af5b5adc69c721f5f877991c7c915fe486a3'}, {'path': 'extensions/Executable_twain32shim.mk', 'size': 1235, 'sha256': '9dfc8323e9d5af2611a9330fd67d7244a248825af1ce73aa7bd9ecdea1d674c4', 'afterSize': 1425, 'afterSha256': 'f669bc99d15f302aed5a6dd9af94c700ff9a0add204166a1e029d8f9093b1c61'}]
+
+
+SOURCE_COMPANION_LOCATION_PINS = [{'bytes': 24547, 'gitBlob': 'f99db6521cd67cacb14b80a8505d4f3f14f4edc9', 'path': 'solenv/gbuild/TargetLocations.mk', 'sha256': 'a5b0b1186c3bc5afa3a955887e14a9fdacfe7ab8dff1a40eca9de6b1767250ed'}, {'bytes': 14492, 'gitBlob': '25bc378e3783fc4da9c0236229129d0f2c4b4982', 'path': 'solenv/gbuild/Helper.mk', 'sha256': '968bb797d966c4c75b77132e25ba1e42d762943b7c2e4a43593b0bddcc4e17f9'}, {'bytes': 10945, 'gitBlob': '48d91258e1bb95a6cda672fa38d15c9465a10e92', 'path': 'solenv/gbuild/Executable.mk', 'sha256': '13894f6c469a26ed2b8d6be12287dafa485ce86549cffabf2be94fe8e29445b1'}]
+
+
+def _source_companion_location_contract(value):
+    keys={'schemaVersion','kind','coreCommit','sourceProofs','configurationSha256',
+          'sourceRelativeInstRoot','libraryFolder','binaryFolder'}
+    if (type(value) is not dict or set(value)!=keys or type(value['schemaVersion']) is not int
+            or value['schemaVersion']!=1 or value['kind']!='gbuild-instdir-location-v1'
+            or value['coreCommit']!=_SOURCE_COMPANION_CORE
+            or value['sourceProofs']!=SOURCE_COMPANION_LOCATION_PINS
+            or any(type(row)is not dict or set(row)!=set(pin) or type(row.get('bytes'))is not int for row,pin in zip(value['sourceProofs'],SOURCE_COMPANION_LOCATION_PINS))
+            or type(value['configurationSha256']) is not str or not SHA.fullmatch(value['configurationSha256'])
+            or value['sourceRelativeInstRoot']!='instdir' or value['libraryFolder']!='program'
+            or value['binaryFolder']!='program'):
+        raise ValueError('Unreviewed source companion location contract')
+    return value
+
+
+def _source_companion_locations(source,runtime,raw_config):
+    # Parse actual configured output roots; never infer one from the staged root.
+    source=Path(source).absolute();runtime=Path(runtime).absolute()
+    if type(raw_config) is not bytes or not 0<len(raw_config)<=2*1024*1024:
+        raise ValueError('Invalid companion configuration bytes')
+    text=raw_config.decode('utf-8','strict');values={}
+    for name in ('OS','CPUNAME','SRCDIR','INSTROOT','LIBO_LIB_FOLDER','LIBO_BIN_FOLDER'):
+        rows=re.findall(r'^[ \t]*(?:export[ \t]+)?'+name+r'[ \t]*=[ \t]*(.*)$',text,re.M)
+        if len(rows)!=1 or not rows[0].strip():raise ValueError('Ambiguous companion output configuration')
+        values[name]=rows[0].strip()
+    if values['OS']!='WNT' or values['CPUNAME']!='X86_64' or any(values[k]!='program' for k in ('LIBO_LIB_FOLDER','LIBO_BIN_FOLDER')):
+        raise ValueError('Unreviewed companion output platform')
+    def native_path(value):
+        if any(ord(c)<32 for c in value) or any(c in value for c in '$\"\''):
+            raise ValueError('Unresolved companion configuration path')
+        value=value.replace('\\','/')
+        if any(part in ('.','..') for part in value.split('/')):
+            raise ValueError('Aliased companion output path')
+        match=re.fullmatch(r'/cygdrive/([A-Za-z])/(.+)',value)
+        if match:value=match[1]+':/'+match[2]
+        result=Path(value)
+        if not result.is_absolute():raise ValueError('Companion output root must be absolute')
+        return result
+    configured_source=native_path(values['SRCDIR']);instroot=native_path(values['INSTROOT'])
+    if configured_source!=source or instroot!=source/'instdir' or instroot==runtime or runtime.is_relative_to(instroot) or instroot.is_relative_to(runtime):
+        raise ValueError('Source physical output and staged runtime must be separate owned roots')
+    for directory in (source,instroot,runtime):
+        for current in (directory,*directory.parents):
+            info=current.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0)&0x400:
+                raise ValueError('Companion output directory is linked')
+        if not directory.is_dir():raise ValueError('Companion output root is not a directory')
+    proof=dict(schemaVersion=1,kind='gbuild-instdir-location-v1',coreCommit=_SOURCE_COMPANION_CORE,
+               sourceProofs=[dict(row)for row in SOURCE_COMPANION_LOCATION_PINS],
+               configurationSha256=hashlib.sha256(raw_config).hexdigest(),sourceRelativeInstRoot='instdir',
+               libraryFolder='program',binaryFolder='program')
+    return instroot,proof
+
+
+def _source_companion_build_output(record,path,expected):
+    if (type(expected) is not dict or type(expected.get('size')) is not int
+            or not 64<=expected['size']<=16*1024*1024
+            or type(expected.get('sha256')) is not str or not SHA.fullmatch(expected['sha256'])
+            or type(record) is not dict or set(record)!={'path','size','sha256'} or record['path']!=path
+            or type(record['size']) is not int or record['size']!=expected['size']
+            or record['sha256']!=expected['sha256']):
+        raise ValueError('Source physical build product differs from staged bytes')
+
+
+def _source_companion_static_runtime_contract(rows):
+    if type(rows)is not list or len(rows)!=2:raise ValueError('X86 static runtime source pair missing')
+    for row,pin in zip(rows,SOURCE_X86_COMPANION_CRT_PINS):
+        if (type(row)is not dict or set(row)!=set(pin) or any(type(row[k])is not int for k in ('size','afterSize')) or row!=pin):
+            raise ValueError('X86 static runtime typed source pair differs')
+
+
+def _source_companion_static_runtime_sources(source,source_evidence,records,read,deadline):
+    # Actual same-run retained originals, effective copies, and current source all join.
+    source=Path(source).absolute();source_evidence=Path(source_evidence).absolute()
+    if type(records) is not list or len(records)!=2:raise ValueError('Missing x86 static runtime source evidence')
+    result={}
+    for pin,row in zip(SOURCE_X86_COMPANION_CRT_PINS,records):
+        if type(row) is not dict or set(row)!={'path','original','effective'} or row['path']!=pin['path']:
+            raise ValueError('Unreviewed x86 static runtime evidence order')
+        values={}
+        for side in ('original','effective'):
+            raw_path=row[side]
+            if type(raw_path) is not str or not Path(raw_path).is_absolute() or '..' in Path(raw_path).parts:
+                raise ValueError('X86 static runtime evidence is not canonical')
+            path=Path(raw_path)
+            if str(path)!=raw_path:raise ValueError('X86 static runtime evidence spelling is not canonical')
+            if path.parent!=source_evidence or path.name!=side+'-x64-'+Path(pin['path']).name:
+                raise ValueError('X86 static runtime source evidence belongs to another run')
+            raw=read(path,512*1024,deadline)
+            size=pin['size'] if side=='original' else pin['afterSize'];sha=pin['sha256'] if side=='original'else pin['afterSha256']
+            if len(raw)!=size or hashlib.sha256(raw).hexdigest()!=sha:
+                raise ValueError('X86 static runtime retained source differs')
+            values[side]=raw
+        if read(source/pin['path'],512*1024,deadline)!=values['effective']:
+            raise ValueError('X86 static runtime current source differs')
+        result[pin['path']]=values
+    return result
+
+
+def _source_companion_diagnostic():
+    return dict(schemaVersion=1,fileRoleCode=0,substageCode=0,readCompleteMask=0,identityVerifiedMask=0,
+                comparisonAttemptMask=0,sizeEqualMask=0,hashEqualMask=0,fileObservations=[])
+
+
+def _source_companion_observe_pe(role,path,diagnostic,*,read_exports=True):
+    diagnostic['fileRoleCode']=role;diagnostic['substageCode']=1
+    result=_source_companion_pe(path,read_exports=read_exports)
+    # A successful retained read has already enforced before/after handle/path identity.
+    diagnostic['readCompleteMask']|=1<<(role-1);diagnostic['identityVerifiedMask']|=1<<(role-1)
+    diagnostic['fileObservations'].append(dict(fileRoleCode=role,size=result['size'],sha256=result['sha256'],
+        machine=result['machine'],optionalMagic=result['optionalMagic'],clrRva=result['clrRva'],clrSize=result['clrSize']))
+    diagnostic['substageCode']=2
+    return result
+
+
+def _source_companion_observe_join(role,actual,expected_size,expected_sha,diagnostic):
+    diagnostic['fileRoleCode']=role;diagnostic['substageCode']=3
+    diagnostic['comparisonAttemptMask']|=1<<(role-1)
+    size_match=actual['size']==expected_size;hash_match=actual['sha256']==expected_sha
+    if size_match:diagnostic['sizeEqualMask']|=1<<(role-1)
+    if hash_match:diagnostic['hashEqualMask']|=1<<(role-1)
+    return size_match and hash_match
+
+
+def _source_companion_closed_exception(error,diagnostic,capture_function,failure_type):
+    # No exception message, repr, args, arbitrary locals or paths are read.
+    from suite.pe_imports import _Reader
+    classes={failure_type:1,FileNotFoundError:2,PermissionError:3,OSError:4,ValueError:5,
+             TimeoutError:6,EOFError:7,struct.error:8,zipfile.BadZipFile:9}
+    diagnostic['exceptionTypeCode']=classes.get(type(error),0)
+    registry={capture_function.__code__:(1,1),_source_companion_regular.__code__:(2,2),
+              _source_companion_pe.__code__:(2,3),_source_companion_observe_pe.__code__:(2,4),
+              _source_companion_observe_join.__code__:(2,5),_source_companion_locations.__code__:(2,6),
+              _source_companion_component.__code__:(2,7),_source_twain_component.__code__:(2,8)}
+    for ordinal,name in enumerate(('read','rva_bytes','name','directory'),1):
+        method=getattr(_Reader,name,None)
+        if hasattr(method,'__code__'):registry[method.__code__]=(3,ordinal)
+    diagnostic.update(sourceFrameCode=0,sourceFunctionCode=0,sourceLine=0)
+    trace=error.__traceback__
+    while trace is not None:
+        match=registry.get(trace.tb_frame.f_code)
+        if match:diagnostic.update(sourceFrameCode=match[0],sourceFunctionCode=match[1],sourceLine=trace.tb_lineno)
+        trace=trace.tb_next
+    return diagnostic
+
+
 def _source_companion_component(component,build_binding):
     """Validate component consistency, never Full authentication or launch authority."""
     _source_companion_binding(build_binding)
     keys={'schemaVersion','kind','architecture','coreCommit','path','role','machine','size','sha256','buildBinding',
-          'sourceIntent','sourceProofs','configuredX86','linkTarget','nativeHelper','installedArchive',
+          'sourceIntent','sourceProofs','staticRuntimeSourceProofs','configuredX86','linkTarget','buildOutput','nativeHelperBuildOutput','locationContract','nativeHelper','installedArchive',
           'exports','imports','dependencyPolicy','fullEngineQualified','acceptanceEligible','guiVerified'}
     if (type(component) is not dict or set(component)!=keys or type(component['schemaVersion']) is not int
-            or component['schemaVersion']!=1 or component['kind']!='source-built-x86-sharepoint-companion'
+            or component['schemaVersion']!=2 or component['kind']!='source-built-x86-sharepoint-companion'
             or component['architecture']!='x64' or component['coreCommit']!=_SOURCE_COMPANION_CORE
             or component['path']!=_SOURCE_COMPANION_PATH or component['role']!='x86CompatibilityHelper'
             or type(component['machine']) is not int or component['machine']!=0x14c
@@ -689,11 +841,12 @@ def _source_companion_component(component,build_binding):
     _source_companion_binding(component['buildBinding'])
     if component['buildBinding']!=build_binding:raise ValueError('Source companion belongs to a different build')
     if component['sourceProofs']!=SOURCE_COMPANION_SOURCE_PINS:raise ValueError('Source companion original source proof differs')
-    target=component['linkTarget']
-    if (type(target) is not dict or set(target)!={'path','size','sha256'}
-            or target['path']!='workdir/LinkTarget/Library/spsupp_x86.dll'
-            or type(target['size']) is not int or target['size']!=component['size']
-            or target['sha256']!=component['sha256']):raise ValueError('Source companion linktarget differs from installed bytes')
+    if component['linkTarget']!={'kind':'gbuild-bookkeeping-prefix','path':'workdir/LinkTarget/Library/spsupp_x86.dll'}:
+        raise ValueError('Source logical bookkeeping target differs')
+    _source_companion_static_runtime_contract(component['staticRuntimeSourceProofs'])
+    _source_companion_location_contract(component['locationContract'])
+    _source_companion_build_output(component['buildOutput'],'instdir/program/spsupp_x86.dll',component)
+    _source_companion_build_output(component['nativeHelperBuildOutput'],'instdir/program/spsupp_helper.exe',component['nativeHelper'])
     _source_companion_identity(component['nativeHelper'],'program/spsupp_helper.exe',0x8664,'nativeX64')
     archive=component['installedArchive']
     if (type(archive) is not dict or set(archive)!={'kind','size','sha256','stageReceiptSha256'} or archive['kind']!='main'
@@ -790,6 +943,18 @@ def _source_companion_runtime(runtime_root,component):
         if item.name.casefold() in imported:raise ValueError('Private product file shadows a source companion system dependency')
     return True
 
+def _source_companion_configuration_join(proof,component,twain):
+    # Consistency only: this helper cannot authenticate or admit a Full runtime.
+    configuration=proof.get('configurationSha256') if type(proof)is dict else None
+    if type(configuration)is not str or not SHA.fullmatch(configuration):
+        raise ValueError('Source companion parent configuration identity missing')
+    for family in (component,twain):
+        location=family.get('locationContract') if type(family)is dict else None
+        _source_companion_location_contract(location)
+        if location['configurationSha256']!=configuration:
+            raise ValueError('Source companion location belongs to another configuration')
+
+
 def _source_companion_admissions(runtime,proof,*,architecture):
     """Internal Full consumer consistency only; external receipt pins remain mandatory."""
     if type(runtime) is not dict or type(proof) is not dict:raise ValueError('Source companion requires authenticated Full context')
@@ -816,11 +981,12 @@ def _source_companion_admissions(runtime,proof,*,architecture):
     twain=proof.get('sourceTwainProof');second=_source_twain_component(twain,binding)
     if twain['installedArchive']!=component['installedArchive']:
         raise ValueError('Source companion families belong to different installed archives')
+    _source_companion_configuration_join(proof,component,twain)
     return {**result,**second}
 
 
 # Exact original/effective source intent for the separate TWAIN executable.
-SOURCE_TWAIN_SOURCE_PINS = [{'bytes': 31916, 'gitBlob': '3a9b342e6d805541daed7fad5c82fa68dd73d7fe', 'path': 'Repository.mk', 'sha256': '987811db83fe6937d0d959bc602c3d7828c9c8569469eb56cc72c6cb3c47bc6a', 'effectiveBytes': 31916, 'effectiveSha256': '987811db83fe6937d0d959bc602c3d7828c9c8569469eb56cc72c6cb3c47bc6a'}, {'bytes': 1009, 'gitBlob': '0fa51671410a901e276cadb0ff04dc360b0e52b2', 'path': 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk', 'sha256': '7c776454bb55e541da3a937c8edf44166cb3d3837789b95c0359ec52c8df9bba', 'effectiveBytes': 1119, 'effectiveSha256': '6519e9014c32f8323e3501f49d189e6da428b3d3b1f85d7ad96471aedcfd051f'}, {'bytes': 803, 'gitBlob': 'b1cdc680d9db8ed0fca486a5987b3d417e364c47', 'path': 'cli_ure/Module_cli_ure.mk', 'sha256': '1c707e8e3386c8c291c7b7f8bebb642346c0154235d3e2e5b5751f651ef70dd8', 'effectiveBytes': 803, 'effectiveSha256': '1c707e8e3386c8c291c7b7f8bebb642346c0154235d3e2e5b5751f651ef70dd8'}, {'bytes': 410, 'gitBlob': '627a3a564f278c5c45475b955fa6a78c47fafdc2', 'path': 'cli_ure/source/native/cli_cppuhelper_config', 'sha256': 'dc009c1b46573a1264d97af8a2231defac0f6ce6f74011da9a51da096140e327', 'effectiveBytes': 410, 'effectiveSha256': 'dc009c1b46573a1264d97af8a2231defac0f6ce6f74011da9a51da096140e327'}, {'bytes': 1456, 'gitBlob': '11cd9e737649f4dbd8a6905acd70c995c4c08965', 'path': 'cli_ure/version/version.txt', 'sha256': '208f1e0dd84a774d81ba96dff023d2791cb0243ec43dd45dff79c94abd49f985', 'effectiveBytes': 1456, 'effectiveSha256': '208f1e0dd84a774d81ba96dff023d2791cb0243ec43dd45dff79c94abd49f985'}, {'bytes': 1235, 'gitBlob': 'f063f7d6e3b404436ee3e8d9194b40dbd53ff6b8', 'path': 'extensions/Executable_twain32shim.mk', 'sha256': '9dfc8323e9d5af2611a9330fd67d7244a248825af1ce73aa7bd9ecdea1d674c4', 'effectiveBytes': 1235, 'effectiveSha256': '9dfc8323e9d5af2611a9330fd67d7244a248825af1ce73aa7bd9ecdea1d674c4'}, {'bytes': 1453, 'gitBlob': '51c48fbfdf68f0aca927f5cd19d431bf7201e770', 'path': 'extensions/Library_scn.mk', 'sha256': '76ef7253efb58b17def410e2f09fd5f4ca4b3558823a7e76632a779e28928eb4', 'effectiveBytes': 1453, 'effectiveSha256': '76ef7253efb58b17def410e2f09fd5f4ca4b3558823a7e76632a779e28928eb4'}, {'bytes': 2607, 'gitBlob': 'b1cc40d8dd7949ee4004c9e6d06467e1eb3666ee', 'path': 'extensions/Module_extensions.mk', 'sha256': '6566d4579d64ef7918d326011808fda07d5ab5f537c1b47dc3bb6f564fad09e3', 'effectiveBytes': 2607, 'effectiveSha256': '6566d4579d64ef7918d326011808fda07d5ab5f537c1b47dc3bb6f564fad09e3'}, {'bytes': 19760, 'gitBlob': '933531526f7a8635f735a71fb2715fc43c8d9015', 'path': 'extensions/source/scanner/scanwin.cxx', 'sha256': 'd2feb91be2435d3eaf4f8be83041271994e4052e891de25aedaaa7c4b26edb7d', 'effectiveBytes': 19760, 'effectiveSha256': 'd2feb91be2435d3eaf4f8be83041271994e4052e891de25aedaaa7c4b26edb7d'}, {'bytes': 18601, 'gitBlob': 'a1e17773196868cd38b1d1e4f2555bb0bef50625', 'path': 'extensions/source/scanner/twain32shim.cxx', 'sha256': '1afedfa7aba7ffe50f85bc9166ab58a3cf6d4ab3addf1871514cc60a992c1369', 'effectiveBytes': 18601, 'effectiveSha256': '1afedfa7aba7ffe50f85bc9166ab58a3cf6d4ab3addf1871514cc60a992c1369'}, {'bytes': 1883, 'gitBlob': 'c9e87ee8bb57336f036d31658a82480b271da790', 'path': 'extensions/source/scanner/twain32shim.hxx', 'sha256': 'b6ae52cf7a4ef5ed8fc0933f9b79de8ec26b47e25cc27caed9403eefc55c63e3', 'effectiveBytes': 1883, 'effectiveSha256': 'b6ae52cf7a4ef5ed8fc0933f9b79de8ec26b47e25cc27caed9403eefc55c63e3'}, {'bytes': 617, 'gitBlob': '7d01a7b020ed40730d5b444f1d758d47dd42007f', 'path': 'scp2/InstallModule_spsupp.mk', 'sha256': 'a5af6a9d18768b21b77faa7de35e87c31d35ecb52ea8eb161cfc6e8b8c2a5efa', 'effectiveBytes': 617, 'effectiveSha256': 'a5af6a9d18768b21b77faa7de35e87c31d35ecb52ea8eb161cfc6e8b8c2a5efa'}, {'bytes': 1879, 'gitBlob': 'ba1ec46020286eb722c2bbda91e1738d502c06ac', 'path': 'scp2/source/spsupp/module_spsupp.scp', 'sha256': '281d881eaa2ca541c43c4673ea49a5fde526c422f478122f4193c5ae4d10eb1e', 'effectiveBytes': 1879, 'effectiveSha256': '281d881eaa2ca541c43c4673ea49a5fde526c422f478122f4193c5ae4d10eb1e'}, {'bytes': 1067, 'gitBlob': 'c905118bef5849f60e638b8ac97d3183edb2757a', 'path': 'shell/Executable_spsupp_helper.mk', 'sha256': 'b96bc08051232b47ec5cdd9083fe4fa752e614fdb72149d4f4387d575cb2f407', 'effectiveBytes': 1067, 'effectiveSha256': 'b96bc08051232b47ec5cdd9083fe4fa752e614fdb72149d4f4387d575cb2f407'}, {'bytes': 1444, 'gitBlob': '17183d8b92dabca94901efa7cb097b5391d089e8', 'path': 'shell/Library_spsupp_x86.mk', 'sha256': '68a515669d5730ef7ce4d23def0c288110b259ba01e89aa3bb3275d33b496c56', 'effectiveBytes': 1444, 'effectiveSha256': '68a515669d5730ef7ce4d23def0c288110b259ba01e89aa3bb3275d33b496c56'}, {'bytes': 2469, 'gitBlob': '58a598714a055f2058b1f7269f76ba0ed639d0b5', 'path': 'shell/Module_shell.mk', 'sha256': '062d0ccc982bb925b4d2119bc5ec9e8b1987a07854eb69980f72853e2837f4be', 'effectiveBytes': 2469, 'effectiveSha256': '062d0ccc982bb925b4d2119bc5ec9e8b1987a07854eb69980f72853e2837f4be'}, {'bytes': 18091, 'gitBlob': '701deef38f50bb566e3623c458638d116ace6ee9', 'path': 'shell/source/win32/spsupp/COMOpenDocuments.cxx', 'sha256': '4bafc6680d374c9b88b8dd145f2ac0f550da83e0b41344938bd0236b985946c8', 'effectiveBytes': 18091, 'effectiveSha256': '4bafc6680d374c9b88b8dd145f2ac0f550da83e0b41344938bd0236b985946c8'}, {'bytes': 177, 'gitBlob': 'f6828a3e8d43c72d31c62f5f222a7bfa8a4a0a28', 'path': 'shell/source/win32/spsupp/spsupp.def', 'sha256': '8f7d97fafa4653525b766d502221948ed1d97ffe9d5e42069677169b418ddcd7', 'effectiveBytes': 177, 'effectiveSha256': '8f7d97fafa4653525b766d502221948ed1d97ffe9d5e42069677169b418ddcd7'}, {'bytes': 5445, 'gitBlob': '45d5f47b13a1c066526ba389e2d2d10e941f15b2', 'path': 'shell/source/win32/spsupp/spsupp.idl', 'sha256': '750fc59aa7035aa468a3fa238438554a60d4150db650cbe2971694f645842ccb', 'effectiveBytes': 5445, 'effectiveSha256': '750fc59aa7035aa468a3fa238438554a60d4150db650cbe2971694f645842ccb'}, {'bytes': 5099, 'gitBlob': 'ea82e041c19e161d298ffb6a63126d080c697dae', 'path': 'shell/source/win32/spsupp/spsuppServ.cxx', 'sha256': 'd20edcb195f5576e15cfb1691830d445b6da4de3de00838dc595910173823598', 'effectiveBytes': 5099, 'effectiveSha256': 'd20edcb195f5576e15cfb1691830d445b6da4de3de00838dc595910173823598'}, {'bytes': 7146, 'gitBlob': '9c97e036fe2b8a4d4589f8dbae28d724512e2faf', 'path': 'solenv/gbuild/CliAssembly.mk', 'sha256': 'da616d706d48e9fd274be62bd177fe25239a654850d6c68f2769135c13c8bab7', 'effectiveBytes': 7146, 'effectiveSha256': 'da616d706d48e9fd274be62bd177fe25239a654850d6c68f2769135c13c8bab7'}, {'bytes': 3693, 'gitBlob': '9e19ccd709b59c2e3e0a84ff91db69076f1941d5', 'path': 'solenv/gbuild/CliNativeLibrary.mk', 'sha256': '22b98aa8dcef01fb3355a38a8de642289191385ab4f352dbd2ed3ff87c2d3e19', 'effectiveBytes': 3693, 'effectiveSha256': '22b98aa8dcef01fb3355a38a8de642289191385ab4f352dbd2ed3ff87c2d3e19'}, {'bytes': 16781, 'gitBlob': 'e58dc3974466f98667978b3ecde5a1e63752c345', 'path': 'solenv/gbuild/Library.mk', 'sha256': '1cab3987867b8e27fc395f1ef8145cfe6f791fa747f214aa69424e554b5e96d0', 'effectiveBytes': 16781, 'effectiveSha256': '1cab3987867b8e27fc395f1ef8145cfe6f791fa747f214aa69424e554b5e96d0'}, {'bytes': 111066, 'gitBlob': '3550b856dd60a597bb38df36aab6a30702686784', 'path': 'solenv/gbuild/LinkTarget.mk', 'sha256': '075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8', 'effectiveBytes': 111066, 'effectiveSha256': '075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8'}, {'bytes': 29428, 'gitBlob': '6e3a6da1a578bf66ca4bbd0377f86d3c4112a322', 'path': 'solenv/gbuild/platform/com_MSC_class.mk', 'sha256': 'e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada', 'effectiveBytes': 29428, 'effectiveSha256': 'e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada'}]
+SOURCE_TWAIN_SOURCE_PINS = [{'bytes': 31916, 'gitBlob': '3a9b342e6d805541daed7fad5c82fa68dd73d7fe', 'path': 'Repository.mk', 'sha256': '987811db83fe6937d0d959bc602c3d7828c9c8569469eb56cc72c6cb3c47bc6a', 'effectiveBytes': 31916, 'effectiveSha256': '987811db83fe6937d0d959bc602c3d7828c9c8569469eb56cc72c6cb3c47bc6a'}, {'bytes': 1009, 'gitBlob': '0fa51671410a901e276cadb0ff04dc360b0e52b2', 'path': 'cli_ure/CliNativeLibrary_cli_cppuhelper.mk', 'sha256': '7c776454bb55e541da3a937c8edf44166cb3d3837789b95c0359ec52c8df9bba', 'effectiveBytes': 1119, 'effectiveSha256': '6519e9014c32f8323e3501f49d189e6da428b3d3b1f85d7ad96471aedcfd051f'}, {'bytes': 803, 'gitBlob': 'b1cdc680d9db8ed0fca486a5987b3d417e364c47', 'path': 'cli_ure/Module_cli_ure.mk', 'sha256': '1c707e8e3386c8c291c7b7f8bebb642346c0154235d3e2e5b5751f651ef70dd8', 'effectiveBytes': 803, 'effectiveSha256': '1c707e8e3386c8c291c7b7f8bebb642346c0154235d3e2e5b5751f651ef70dd8'}, {'bytes': 410, 'gitBlob': '627a3a564f278c5c45475b955fa6a78c47fafdc2', 'path': 'cli_ure/source/native/cli_cppuhelper_config', 'sha256': 'dc009c1b46573a1264d97af8a2231defac0f6ce6f74011da9a51da096140e327', 'effectiveBytes': 410, 'effectiveSha256': 'dc009c1b46573a1264d97af8a2231defac0f6ce6f74011da9a51da096140e327'}, {'bytes': 1456, 'gitBlob': '11cd9e737649f4dbd8a6905acd70c995c4c08965', 'path': 'cli_ure/version/version.txt', 'sha256': '208f1e0dd84a774d81ba96dff023d2791cb0243ec43dd45dff79c94abd49f985', 'effectiveBytes': 1456, 'effectiveSha256': '208f1e0dd84a774d81ba96dff023d2791cb0243ec43dd45dff79c94abd49f985'}, {'bytes': 1235, 'gitBlob': 'f063f7d6e3b404436ee3e8d9194b40dbd53ff6b8', 'path': 'extensions/Executable_twain32shim.mk', 'sha256': '9dfc8323e9d5af2611a9330fd67d7244a248825af1ce73aa7bd9ecdea1d674c4', 'effectiveBytes': 1425, 'effectiveSha256': 'f669bc99d15f302aed5a6dd9af94c700ff9a0add204166a1e029d8f9093b1c61'}, {'bytes': 1453, 'gitBlob': '51c48fbfdf68f0aca927f5cd19d431bf7201e770', 'path': 'extensions/Library_scn.mk', 'sha256': '76ef7253efb58b17def410e2f09fd5f4ca4b3558823a7e76632a779e28928eb4', 'effectiveBytes': 1453, 'effectiveSha256': '76ef7253efb58b17def410e2f09fd5f4ca4b3558823a7e76632a779e28928eb4'}, {'bytes': 2607, 'gitBlob': 'b1cc40d8dd7949ee4004c9e6d06467e1eb3666ee', 'path': 'extensions/Module_extensions.mk', 'sha256': '6566d4579d64ef7918d326011808fda07d5ab5f537c1b47dc3bb6f564fad09e3', 'effectiveBytes': 2607, 'effectiveSha256': '6566d4579d64ef7918d326011808fda07d5ab5f537c1b47dc3bb6f564fad09e3'}, {'bytes': 19760, 'gitBlob': '933531526f7a8635f735a71fb2715fc43c8d9015', 'path': 'extensions/source/scanner/scanwin.cxx', 'sha256': 'd2feb91be2435d3eaf4f8be83041271994e4052e891de25aedaaa7c4b26edb7d', 'effectiveBytes': 19760, 'effectiveSha256': 'd2feb91be2435d3eaf4f8be83041271994e4052e891de25aedaaa7c4b26edb7d'}, {'bytes': 18601, 'gitBlob': 'a1e17773196868cd38b1d1e4f2555bb0bef50625', 'path': 'extensions/source/scanner/twain32shim.cxx', 'sha256': '1afedfa7aba7ffe50f85bc9166ab58a3cf6d4ab3addf1871514cc60a992c1369', 'effectiveBytes': 18601, 'effectiveSha256': '1afedfa7aba7ffe50f85bc9166ab58a3cf6d4ab3addf1871514cc60a992c1369'}, {'bytes': 1883, 'gitBlob': 'c9e87ee8bb57336f036d31658a82480b271da790', 'path': 'extensions/source/scanner/twain32shim.hxx', 'sha256': 'b6ae52cf7a4ef5ed8fc0933f9b79de8ec26b47e25cc27caed9403eefc55c63e3', 'effectiveBytes': 1883, 'effectiveSha256': 'b6ae52cf7a4ef5ed8fc0933f9b79de8ec26b47e25cc27caed9403eefc55c63e3'}, {'bytes': 617, 'gitBlob': '7d01a7b020ed40730d5b444f1d758d47dd42007f', 'path': 'scp2/InstallModule_spsupp.mk', 'sha256': 'a5af6a9d18768b21b77faa7de35e87c31d35ecb52ea8eb161cfc6e8b8c2a5efa', 'effectiveBytes': 617, 'effectiveSha256': 'a5af6a9d18768b21b77faa7de35e87c31d35ecb52ea8eb161cfc6e8b8c2a5efa'}, {'bytes': 1879, 'gitBlob': 'ba1ec46020286eb722c2bbda91e1738d502c06ac', 'path': 'scp2/source/spsupp/module_spsupp.scp', 'sha256': '281d881eaa2ca541c43c4673ea49a5fde526c422f478122f4193c5ae4d10eb1e', 'effectiveBytes': 1879, 'effectiveSha256': '281d881eaa2ca541c43c4673ea49a5fde526c422f478122f4193c5ae4d10eb1e'}, {'bytes': 1067, 'gitBlob': 'c905118bef5849f60e638b8ac97d3183edb2757a', 'path': 'shell/Executable_spsupp_helper.mk', 'sha256': 'b96bc08051232b47ec5cdd9083fe4fa752e614fdb72149d4f4387d575cb2f407', 'effectiveBytes': 1067, 'effectiveSha256': 'b96bc08051232b47ec5cdd9083fe4fa752e614fdb72149d4f4387d575cb2f407'}, {'bytes': 1444, 'gitBlob': '17183d8b92dabca94901efa7cb097b5391d089e8', 'path': 'shell/Library_spsupp_x86.mk', 'sha256': '68a515669d5730ef7ce4d23def0c288110b259ba01e89aa3bb3275d33b496c56', 'effectiveBytes': 1630, 'effectiveSha256': '5b1c4729b8861e72422ba08cc6d8af5b5adc69c721f5f877991c7c915fe486a3'}, {'bytes': 2469, 'gitBlob': '58a598714a055f2058b1f7269f76ba0ed639d0b5', 'path': 'shell/Module_shell.mk', 'sha256': '062d0ccc982bb925b4d2119bc5ec9e8b1987a07854eb69980f72853e2837f4be', 'effectiveBytes': 2469, 'effectiveSha256': '062d0ccc982bb925b4d2119bc5ec9e8b1987a07854eb69980f72853e2837f4be'}, {'bytes': 18091, 'gitBlob': '701deef38f50bb566e3623c458638d116ace6ee9', 'path': 'shell/source/win32/spsupp/COMOpenDocuments.cxx', 'sha256': '4bafc6680d374c9b88b8dd145f2ac0f550da83e0b41344938bd0236b985946c8', 'effectiveBytes': 18091, 'effectiveSha256': '4bafc6680d374c9b88b8dd145f2ac0f550da83e0b41344938bd0236b985946c8'}, {'bytes': 177, 'gitBlob': 'f6828a3e8d43c72d31c62f5f222a7bfa8a4a0a28', 'path': 'shell/source/win32/spsupp/spsupp.def', 'sha256': '8f7d97fafa4653525b766d502221948ed1d97ffe9d5e42069677169b418ddcd7', 'effectiveBytes': 177, 'effectiveSha256': '8f7d97fafa4653525b766d502221948ed1d97ffe9d5e42069677169b418ddcd7'}, {'bytes': 5445, 'gitBlob': '45d5f47b13a1c066526ba389e2d2d10e941f15b2', 'path': 'shell/source/win32/spsupp/spsupp.idl', 'sha256': '750fc59aa7035aa468a3fa238438554a60d4150db650cbe2971694f645842ccb', 'effectiveBytes': 5445, 'effectiveSha256': '750fc59aa7035aa468a3fa238438554a60d4150db650cbe2971694f645842ccb'}, {'bytes': 5099, 'gitBlob': 'ea82e041c19e161d298ffb6a63126d080c697dae', 'path': 'shell/source/win32/spsupp/spsuppServ.cxx', 'sha256': 'd20edcb195f5576e15cfb1691830d445b6da4de3de00838dc595910173823598', 'effectiveBytes': 5099, 'effectiveSha256': 'd20edcb195f5576e15cfb1691830d445b6da4de3de00838dc595910173823598'}, {'bytes': 7146, 'gitBlob': '9c97e036fe2b8a4d4589f8dbae28d724512e2faf', 'path': 'solenv/gbuild/CliAssembly.mk', 'sha256': 'da616d706d48e9fd274be62bd177fe25239a654850d6c68f2769135c13c8bab7', 'effectiveBytes': 7146, 'effectiveSha256': 'da616d706d48e9fd274be62bd177fe25239a654850d6c68f2769135c13c8bab7'}, {'bytes': 3693, 'gitBlob': '9e19ccd709b59c2e3e0a84ff91db69076f1941d5', 'path': 'solenv/gbuild/CliNativeLibrary.mk', 'sha256': '22b98aa8dcef01fb3355a38a8de642289191385ab4f352dbd2ed3ff87c2d3e19', 'effectiveBytes': 3693, 'effectiveSha256': '22b98aa8dcef01fb3355a38a8de642289191385ab4f352dbd2ed3ff87c2d3e19'}, {'bytes': 16781, 'gitBlob': 'e58dc3974466f98667978b3ecde5a1e63752c345', 'path': 'solenv/gbuild/Library.mk', 'sha256': '1cab3987867b8e27fc395f1ef8145cfe6f791fa747f214aa69424e554b5e96d0', 'effectiveBytes': 16781, 'effectiveSha256': '1cab3987867b8e27fc395f1ef8145cfe6f791fa747f214aa69424e554b5e96d0'}, {'bytes': 111066, 'gitBlob': '3550b856dd60a597bb38df36aab6a30702686784', 'path': 'solenv/gbuild/LinkTarget.mk', 'sha256': '075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8', 'effectiveBytes': 111066, 'effectiveSha256': '075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8'}, {'bytes': 29428, 'gitBlob': '6e3a6da1a578bf66ca4bbd0377f86d3c4112a322', 'path': 'solenv/gbuild/platform/com_MSC_class.mk', 'sha256': 'e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada', 'effectiveBytes': 29428, 'effectiveSha256': 'e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada'}]
 
 _SOURCE_TWAIN_PATH='program/twain32shim.exe'
 _SOURCE_TWAIN_OS_IMPORTS=frozenset(('kernel32.dll','user32.dll','ole32.dll','shell32.dll','gdi32.dll','advapi32.dll','ntdll.dll','msvcrt.dll'))
@@ -829,10 +995,10 @@ def _source_twain_component(component,build_binding):
     """TWAIN EXE profile, separate from the SharePoint in-process COM DLL."""
     _source_companion_binding(build_binding)
     keys={'schemaVersion','kind','architecture','coreCommit','path','role','machine','size','sha256','buildBinding',
-          'sourceIntent','sourceProofs','configuredX86','linkTarget','nativePeer','installedArchive','exports','imports',
+          'sourceIntent','sourceProofs','staticRuntimeSourceProofs','configuredX86','linkTarget','buildOutput','nativePeerBuildOutput','locationContract','nativePeer','installedArchive','exports','imports',
           'dependencyPolicy','fullEngineQualified','acceptanceEligible','guiVerified'}
     if (type(component) is not dict or set(component)!=keys or type(component['schemaVersion']) is not int
-            or component['schemaVersion']!=1 or component['kind']!='source-built-x86-twain-companion'
+            or component['schemaVersion']!=2 or component['kind']!='source-built-x86-twain-companion'
             or component['architecture']!='x64' or component['coreCommit']!=_SOURCE_COMPANION_CORE
             or component['path']!=_SOURCE_TWAIN_PATH or component['role']!='x86CompatibilityHelper'
             or type(component['machine']) is not int or component['machine']!=0x14c
@@ -844,11 +1010,12 @@ def _source_twain_component(component,build_binding):
     _source_companion_binding(component['buildBinding'])
     if component['buildBinding']!=build_binding:raise ValueError('Source TWAIN belongs to a different build')
     if component['sourceProofs']!=SOURCE_TWAIN_SOURCE_PINS:raise ValueError('TWAIN original/effective source proof differs')
-    target=component['linkTarget']
-    if (type(target) is not dict or set(target)!={'path','size','sha256'}
-            or target['path']!='workdir/LinkTarget/Executable/twain32shim.exe' or type(target['size']) is not int
-            or target['size']!=component['size'] or target['sha256']!=component['sha256']):
-        raise ValueError('TWAIN source target differs from installed bytes')
+    if component['linkTarget']!={'kind':'gbuild-bookkeeping-prefix','path':'workdir/LinkTarget/Executable/twain32shim.exe'}:
+        raise ValueError('Source logical bookkeeping target differs')
+    _source_companion_static_runtime_contract(component['staticRuntimeSourceProofs'])
+    _source_companion_location_contract(component['locationContract'])
+    _source_companion_build_output(component['buildOutput'],'instdir/program/twain32shim.exe',component)
+    _source_companion_build_output(component['nativePeerBuildOutput'],'instdir/program/scnlo.dll',component['nativePeer'])
     _source_companion_identity(component['nativePeer'],'program/scnlo.dll',0x8664,'nativeX64')
     archive=component['installedArchive']
     if (type(archive) is not dict or set(archive)!={'kind','size','sha256','stageReceiptSha256'} or archive['kind']!='main'

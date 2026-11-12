@@ -17,6 +17,7 @@ from advanced_edit_oracle import inspect_advanced_hwpx
 
 MAX_ZIP=16*1024*1024
 MAX_BROWSER_EXPANDED=32*1024*1024
+MAX_WASM=32*1024*1024
 MAX_ADVANCED=1024*1024
 ADVANCED_NAMES=frozenset('owned-'+n+'.hwpx' for n in ('blank','equation','field-filled','field-guide','grid','merged','nested','notes','page','shape','split','textbox'))
 ADVANCED_FILES=ADVANCED_NAMES|{'provenance.json','loadability.json'}
@@ -89,10 +90,12 @@ def zip_members(raw,*,browser):
     aliases=set();names=set()
     for e in entries:
         name=e.filename;parts=name.split('/');kind=stat.S_IFMT(e.external_attr>>16)
+        wasm_role=(name=='rhwp_bg.wasm' if not browser else re.fullmatch(r'hop/apps/studio-host/dist/assets/rhwp_bg-[A-Za-z0-9_-]{8}\.wasm',name)is not None)
+        file_cap=MAX_WASM if wasm_role else 16*1024*1024
         need(len(name)<=1024 and not any(p in ('','.','..')for p in parts) and '\\'not in name and ':'not in name
             and not PurePosixPath(name).is_absolute() and name.casefold()not in aliases and not e.is_dir()
             and kind in (0,stat.S_IFREG) and not e.flag_bits&1 and not e.external_attr&0x400
-            and 0<e.file_size<=16*1024*1024,'Unsafe, duplicate or oversized ZIP member')
+            and 0<e.file_size<=file_cap,'Unsafe, duplicate or oversized ZIP member')
         aliases.add(name.casefold());names.add(name)
     if browser:
         selected={'e2e-fixtures/advanced-owned/'+n for n in ADVANCED_FILES}
@@ -156,7 +159,7 @@ def admit(package,wasm,fixtures,receipt,*,backend,env,progress):
          'Original native input and native editor source commitments differ')
     progress['stage']='local-wasm'
     need({p.name for p in wasm.iterdir()}==set(wasm_artifacts.FILES)|{'OPEN_GEUL_WASM.json'},'Local WASM inventory differs')
-    local={n:read(wasm/n,16*1024*1024)for n in (*wasm_artifacts.FILES,'OPEN_GEUL_WASM.json')}
+    local={n:read(wasm/n,MAX_WASM if n=='rhwp_bg.wasm'else 16*1024*1024)for n in (*wasm_artifacts.FILES,'OPEN_GEUL_WASM.json')}
     need(qa.strict_json(local['OPEN_GEUL_WASM.json'])==expected_wasm,'Local WASM manifest differs from the native runtime source')
     qa.wasm_proof(expected_wasm)
     need(all(record(local[n])['sha256']==expected_wasm['artifacts'][n]for n in wasm_artifacts.FILES),'Local six WASM payload hashes differ')

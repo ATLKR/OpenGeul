@@ -30,7 +30,7 @@ class TwainTests(unittest.TestCase):
         self.runtime=self.root/'runtime';(self.runtime/'program').mkdir(parents=True)
         exe=twain_image();peer=peer_image();(self.runtime/'program/twain32shim.exe').write_bytes(exe);(self.runtime/'program/scnlo.dll').write_bytes(peer)
         digest=lambda b:hashlib.sha256(b).hexdigest();self.binding=dict(sourceCommit='1'*40,sourceTree='2'*40,sourceRun=123,runAttempt=1,recipeSha256='3'*64)
-        return dict(schemaVersion=1,kind='source-built-x86-twain-companion',architecture='x64',coreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276',path='program/twain32shim.exe',role='x86CompatibilityHelper',machine=332,size=len(exe),sha256=digest(exe),buildBinding=dict(self.binding),sourceIntent='twain-32bit-driver-process-bridge',sourceProofs=copy.deepcopy(payload.SOURCE_TWAIN_SOURCE_PINS),configuredX86=True,linkTarget=dict(path='workdir/LinkTarget/Executable/twain32shim.exe',size=len(exe),sha256=digest(exe)),nativePeer=dict(path='program/scnlo.dll',machine=34404,role='nativeX64',size=len(peer),sha256=digest(peer)),installedArchive=dict(kind='main',size=1024,sha256='4'*64,stageReceiptSha256='5'*64),exports=[],imports=dict(normal=['kernel32.dll'],delay=[]),dependencyPolicy='x86-twain-os-only-no-private-shadow-v1',fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+        return dict(schemaVersion=2,kind='source-built-x86-twain-companion',architecture='x64',coreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276',path='program/twain32shim.exe',role='x86CompatibilityHelper',machine=332,size=len(exe),sha256=digest(exe),buildBinding=dict(self.binding),sourceIntent='twain-32bit-driver-process-bridge',sourceProofs=copy.deepcopy(payload.SOURCE_TWAIN_SOURCE_PINS),staticRuntimeSourceProofs=copy.deepcopy(payload.SOURCE_X86_COMPANION_CRT_PINS),configuredX86=True,linkTarget=dict(kind='gbuild-bookkeeping-prefix',path='workdir/LinkTarget/Executable/twain32shim.exe'),buildOutput=dict(path='instdir/program/twain32shim.exe',size=len(exe),sha256=digest(exe)),nativePeerBuildOutput=dict(path='instdir/program/scnlo.dll',size=len(peer),sha256=digest(peer)),locationContract=dict(schemaVersion=1,kind='gbuild-instdir-location-v1',coreCommit=payload._SOURCE_COMPANION_CORE,sourceProofs=copy.deepcopy(payload.SOURCE_COMPANION_LOCATION_PINS),configurationSha256='6'*64,sourceRelativeInstRoot='instdir',libraryFolder='program',binaryFolder='program'),nativePeer=dict(path='program/scnlo.dll',machine=34404,role='nativeX64',size=len(peer),sha256=digest(peer)),installedArchive=dict(kind='main',size=1024,sha256='4'*64,stageReceiptSha256='5'*64),exports=[],imports=dict(normal=['kernel32.dll'],delay=[]),dependencyPolicy='x86-twain-os-only-no-private-shadow-v1',fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
     def test_exact_exe_and_scanner_peer_are_a_separate_nonqualifying_profile(self):
         p=self.component();result=payload._source_twain_component(p,self.binding)
         self.assertEqual(set(result),{'program/twain32shim.exe'});payload._source_twain_runtime(self.runtime,p)
@@ -55,7 +55,7 @@ class TwainTests(unittest.TestCase):
             b=bytearray(twain_image());struct.pack_into(fmt,b,offset,value);values.append(bytes(b))
         values.append(image())
         for ordinal,data in enumerate(values):
-            q=copy.deepcopy(p);q.update(size=len(data),sha256=hashlib.sha256(data).hexdigest());q['linkTarget'].update(size=len(data),sha256=q['sha256']);(self.runtime/'program/twain32shim.exe').write_bytes(data)
+            q=copy.deepcopy(p);q.update(size=len(data),sha256=hashlib.sha256(data).hexdigest());q['buildOutput'].update(size=len(data),sha256=q['sha256']);(self.runtime/'program/twain32shim.exe').write_bytes(data)
             with self.subTest(case=ordinal),self.assertRaises(ValueError):payload._source_twain_runtime(self.runtime,q)
     def test_native_scanner_peer_and_dependency_closure_cannot_be_replaced(self):
         p=self.component();q=copy.deepcopy(p);q['nativePeer']['role']='managedAnyCpu'
@@ -81,7 +81,7 @@ class TwainTests(unittest.TestCase):
         p=self.component();binary=bytearray(twain_image())
         struct.pack_into('<II',binary,0x98+96+13*8,0x1700,64)
         struct.pack_into('<II',binary,0x900,1,0x1780);binary[0x980:0x98b]=b'user32.dll\0'
-        data=bytes(binary);q=copy.deepcopy(p);q.update(size=len(data),sha256=hashlib.sha256(data).hexdigest());q['linkTarget'].update(size=len(data),sha256=q['sha256']);q['imports']['delay']=['user32.dll']
+        data=bytes(binary);q=copy.deepcopy(p);q.update(size=len(data),sha256=hashlib.sha256(data).hexdigest());q['buildOutput'].update(size=len(data),sha256=q['sha256']);q['imports']['delay']=['user32.dll']
         (self.runtime/'program/twain32shim.exe').write_bytes(data);payload._source_twain_runtime(self.runtime,q)
         shadow=self.runtime/'program/USER32.DLL';shadow.write_bytes(peer_image())
         with self.assertRaises(ValueError):payload._source_twain_runtime(self.runtime,q)
