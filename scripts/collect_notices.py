@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST_SKIA_NAMES = {'skia-safe', 'skia-bindings'}
@@ -93,8 +94,64 @@ REVIEWED_SOURCE_NOTICES = {
             'archiveMember':'package/formatstack.js'}}},
 }
 
+# Exact inherited declarations and separately reviewed SDK bytes; not legal clearance.
+WEBVIEW2_NOTICE_PINS = {'webview2-com': {'version': '0.39.1',
+                  'checksum': '3f89fca7a704cee10dcb3654c1dbb8941d1783132f1917358af75bec37a7d7e6',
+                  'normalizedManifestSha256': '4ba1c8935a5f535d18115242abbef3c73e9b2dd329a52b87f6f37b7adeae2421',
+                  'originalManifestSha256': 'bee8a11a0f7c152ff835ea5ca64bcb5558e8a6079be56eccc4086dddb383288c',
+                  'vcsSha256': '88413f4e9de3a9360fafb0d8c9a0fdf5a01a45d73f9ded314fa7b9ffa2108ace',
+                  'sourceCommit': 'edc2caf886175ccaebe86078c9cfe1ae2a187328',
+                  'sourcePath': 'crates/webview2-com',
+                  'workspaceManifestSha256': '86df68bbb014e816ac356a462838914d813ce6aaa1d11b2aa284941701c6c7c2'},
+ 'webview2-com-sys': {'version': '0.39.1',
+                      'checksum': 'b3a07132775117d6065853d9d1178157b8c90e228de47129d6bce2c7edebedfb',
+                      'normalizedManifestSha256': '1a3e5684710cb1d2e7e7afdd32af011a4a8038c259f6592ade3f871ca31cad7d',
+                      'originalManifestSha256': '00229c125c597e4f0ddb9e598738ee5b38a9086fd59eea6d2577cdda5f8e5875',
+                      'vcsSha256': 'd4137410068017c3f66fe98578f2fd40f0e76d3fd628fa361c758f3b262351c7',
+                      'sourceCommit': 'edc2caf886175ccaebe86078c9cfe1ae2a187328',
+                      'sourcePath': 'crates/bindings',
+                      'workspaceManifestSha256': '86df68bbb014e816ac356a462838914d813ce6aaa1d11b2aa284941701c6c7c2'},
+ 'webview2-com-macros': {'version': '0.8.1',
+                         'checksum': '67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54',
+                         'normalizedManifestSha256': 'b006cef88171ef3675df724a900cb31eb1f74158f77a20680915f1dbe95d457e',
+                         'originalManifestSha256': 'a615e325d5acebc64f6553724028cd5e3639397e534cef107f172540cb78d0fd',
+                         'vcsSha256': 'c24c2646f52e6cb4c1f382afc69fa99c0dc78d6d8e4316ade7e51707b4f9af8e',
+                         'sourceCommit': 'dffa41a8a46d3f5565eefbff2de57d38d399f158',
+                         'sourcePath': 'crates/callback-macros',
+                         'workspaceManifestSha256': '5d0444d55131aa8a4290fc3cd54bd8598e9528577ddf5c3368ee48a02e297f6d'}}
+WEBVIEW2_MIT_NOTICE = {'path': 'notices/webview2-rs-LICENSE.txt',
+ 'sha256': '0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73'}
+WEBVIEW2_SDK_NOTICE = {'version': '1.0.3800.47',
+ 'archiveSha256': '56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db',
+ 'catalogSha512': 'EASM6IwWa38ppWP825SH1xusVyN3fNCpi1xaDnHP80RVGgvCdBCwyw+Egqns3sdFSkWtDSp66Zj8NH6tFVmIiQ==',
+ 'sourceUrl': 'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg',
+ 'files': [{'path': 'notices/Microsoft.Web.WebView2-1.0.3800.47-LICENSE.txt',
+            'sha256': '0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55',
+            'archiveMember': 'LICENSE.txt'},
+           {'path': 'notices/Microsoft.Web.WebView2-1.0.3800.47-NOTICE.txt',
+            'sha256': '106423785c5b7eba0a8e61d1837f2132e9c828e20ad530f565d981c1df60dd90',
+            'archiveMember': 'NOTICE.txt'}],
+ 'assets': {'arm64/WebView2Loader.dll': {'bytes': 146536,
+                                         'sha256': 'a0de1844933a10c898f833771a85f0ab9a0e3c745d4715f63d2d9730f9416025'},
+            'arm64/WebView2Loader.dll.lib': {'bytes': 2916,
+                                             'sha256': 'd70271daa44507865ca0696cd1c1ede5e58e694eec74cb2d06e17dbbe205e9a2'},
+            'arm64/WebView2LoaderStatic.lib': {'bytes': 10505262,
+                                               'sha256': '4a1ca4b518337c508aa0d778b220c6e59558fce21f4fd0d79a6ea944dd9d5208'},
+            'x64/WebView2Loader.dll': {'bytes': 160880,
+                                       'sha256': '86545b66cdb0603bc26b626fb9ad610cb6e71f28d468f5ea66df23b03dda96d5'},
+            'x64/WebView2Loader.dll.lib': {'bytes': 2916,
+                                           'sha256': 'bfc8ccaaa056be95243a5b66a827e5849d2bb39676fca4dcc2053796d8e15c6d'},
+            'x64/WebView2LoaderStatic.lib': {'bytes': 10500472,
+                                             'sha256': '89c6b872783b8f6c3cedbff618adb42082d455c615453ae10cfc753f1e8f25d8'},
+            'x86/WebView2Loader.dll': {'bytes': 121448,
+                                       'sha256': '161dc6673084a31f64670ace8e61cb0e1b55af815b6c7c8217a0cdd8503454e2'},
+            'x86/WebView2Loader.dll.lib': {'bytes': 2998,
+                                           'sha256': 'a3ec0ee539d58fe72391f2e89cb814f96fab721c6d8d30953d152ea95dffad49'},
+            'x86/WebView2LoaderStatic.lib': {'bytes': 10465074,
+                                             'sha256': '0513f7e61304321f2d91e1851475be07e091042aa3640597e660608f72521e6c'}}}
 
-def reviewed_file(location: Path, name: str, expected: str) -> bytes:
+
+def reviewed_path(location: Path, name: str) -> Path:
     relative=Path(name)
     if relative.is_absolute() or '..' in relative.parts or '\\' in name or ':' in name:
         raise ValueError('Reviewed notice path must remain inside its package')
@@ -106,11 +163,80 @@ def reviewed_file(location: Path, name: str, expected: str) -> bytes:
         if component==location:break
     if not stat.S_ISREG(path.stat().st_mode) or not path.resolve().is_relative_to(location.resolve()):
         raise ValueError('Reviewed notice input must be a regular package file')
+    return path
+
+
+def reviewed_file(location: Path, name: str, expected: str) -> bytes:
+    path=reviewed_path(location,name)
     with path.open('rb') as stream:data=stream.read(2_000_001)
     if len(data)>2_000_000 or hashlib.sha256(data).hexdigest()!=expected:
         raise ValueError('Reviewed notice source/manifest differs from the exact reviewed bytes')
     data.decode('utf-8')
     return data
+
+
+def require_sdk_asset(location: Path, name: str, pin: dict) -> None:
+    path=reviewed_path(location,name)
+    expected=pin['bytes']
+    if type(expected) is not int or not 0<expected<=128*1024*1024 or path.stat().st_size!=expected:
+        raise ValueError('Reviewed SDK asset size differs from its exact public source')
+    count=0;digest=hashlib.sha256()
+    with path.open('rb') as stream:
+        while chunk:=stream.read(1024*1024):
+            count+=len(chunk)
+            if count>expected:raise ValueError('Reviewed SDK asset exceeded its exact size')
+            digest.update(chunk)
+    if count!=expected or digest.hexdigest()!=pin['sha256']:
+        raise ValueError('Reviewed SDK asset bytes differ from its exact public source')
+
+
+def collect_inherited_webview_notices(item: dict, location: Path, output: Path) -> list[dict]:
+    pin=WEBVIEW2_NOTICE_PINS.get(item['name'])
+    if pin is None:return []
+    registry='registry+https://github.com/rust-lang/crates.io-index'
+    if item['version']!=pin['version'] or item.get('license')!='MIT' or item.get('source')!=registry:
+        raise ValueError('Reviewed WebView2 registry package version/license/source requires review')
+    lock_path=reviewed_path(ROOT,'overlay/desktop-cargo.lock.toml')
+    with lock_path.open('rb') as stream:lock_bytes=stream.read(2_000_001)
+    if len(lock_bytes)>2_000_000:raise ValueError('Reviewed dependency lock exceeded its bound')
+    matches=[entry for entry in tomllib.loads(lock_bytes.decode('utf-8')).get('package',[])
+             if entry['name']==item['name'] and entry['version']==item['version']]
+    if len(matches)!=1 or matches[0].get('checksum')!=pin['checksum'] or matches[0].get('source')!=registry:
+        raise ValueError('Reviewed WebView2 crate checksum/source must match the frozen lock')
+    normalized=tomllib.loads(reviewed_file(location,'Cargo.toml',pin['normalizedManifestSha256']).decode('utf-8'))['package']
+    original=tomllib.loads(reviewed_file(location,'Cargo.toml.orig',pin['originalManifestSha256']).decode('utf-8'))['package']
+    vcs=json.loads(reviewed_file(location,'.cargo_vcs_info.json',pin['vcsSha256']))
+    if (normalized.get('name')!=item['name'] or normalized.get('version')!=item['version']
+            or normalized.get('license')!='MIT' or original.get('license')!={'workspace':True}
+            or vcs!={'git':{'sha1':pin['sourceCommit']},'path_in_vcs':pin['sourcePath']}):
+        raise ValueError('Reviewed WebView2 manifest inheritance or VCS identity changed')
+    mit=reviewed_file(ROOT,WEBVIEW2_MIT_NOTICE['path'],WEBVIEW2_MIT_NOTICE['sha256'])
+    source_url=f'https://raw.githubusercontent.com/wravery/webview2-rs/{pin["sourceCommit"]}/LICENSE'
+    provenance={'registryArchiveSha256':pin['checksum'],'sourceCommit':pin['sourceCommit'],
+        'sourcePath':pin['sourcePath'],'normalizedManifestSha256':pin['normalizedManifestSha256'],
+        'originalManifestSha256':pin['originalManifestSha256'],'vcsSha256':pin['vcsSha256'],
+        'reviewedWorkspaceManifestSha256':pin['workspaceManifestSha256'],
+        'scope':'Explicit Cargo workspace MIT inheritance; separate SDK notices are not substituted.'}
+    pending=[('reviewed/webview2-rs-LICENSE.txt',mit,{'sourcePath':'LICENSE',
+        'sha256':WEBVIEW2_MIT_NOTICE['sha256'],'sourceUrl':source_url,
+        'packageProvenance':provenance,'packageLicenseText':True})]
+    if item['name']=='webview2-com-sys':
+        sdk=WEBVIEW2_SDK_NOTICE
+        for name,asset in sdk['assets'].items():require_sdk_asset(location,name,asset)
+        for entry in sdk['files']:
+            raw=reviewed_file(ROOT,entry['path'],entry['sha256'])
+            pending.append(('reviewed/'+Path(entry['path']).name,raw,{
+                'sourceArchiveMember':entry['archiveMember'],'sha256':entry['sha256'],
+                'sourceUrl':sdk['sourceUrl'],'packageLicenseText':False,
+                'packageProvenance':{'id':'Microsoft.Web.WebView2','version':sdk['version'],
+                    'archiveSha256':sdk['archiveSha256'],'verifiedAssetHashes':sdk['assets'],
+                    'scope':'Whole SDK source notice; native-subset component inclusion and legal clearance not asserted.'}}))
+    records=[]
+    # Validate all package inputs, including SDK assets/notices, before new writes.
+    for filename,data,record in pending:
+        destination=output/filename;destination.parent.mkdir(parents=True,exist_ok=True)
+        destination.write_bytes(data);records.append({**record,'file':filename})
+    return records
 
 
 def collect_reviewed_notices(ecosystem: str, item: dict, location: Path, output: Path) -> list[dict]:
@@ -209,8 +335,11 @@ def collect_cargo(packages: list[dict], out: Path) -> list[dict]:
             record['supplementalNotices']=supplements
             texts.extend(entry['file'] for entry in supplements)
         reviewed=collect_reviewed_notices('cargo',item,location,out/ident)
+        reviewed+=collect_inherited_webview_notices(item,location,out/ident)
         if reviewed:
-            record['reviewedNotices']=reviewed
+            record['reviewedNotices']=[entry for entry in reviewed if entry['packageLicenseText']]
+            additional=[entry for entry in reviewed if not entry['packageLicenseText']]
+            if additional:record['additionalNotices']=additional
             texts.extend(entry['file'] for entry in reviewed if entry['packageLicenseText'])
         if item['name'] in RUST_SKIA_NAMES:
             if item['version'] != RUST_SKIA_VERSION or item.get('license') != 'MIT':
