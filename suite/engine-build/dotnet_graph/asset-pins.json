@@ -116,9 +116,9 @@
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     {
-      "bytes": 14919,
+      "bytes": 16323,
       "path": "runtime/bootstrap_errors.py",
-      "sha256": "618c3afef87790acdc3179d0db0a64b55101d6d1508e41dc7a4dd71dd0a88aae"
+      "sha256": "acc9e37195c423e8fcd7fe27b8e8b22b472d291c794dad6df768218ae00d0092"
     },
     {
       "bytes": 9885,

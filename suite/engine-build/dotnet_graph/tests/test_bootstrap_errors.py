@@ -219,9 +219,9 @@ class PipeCaptureTests(unittest.TestCase):
         self.assertEqual(api.capture_result(owned)['failureCode'],1)
 
     def test_unknown_code_and_total_pipe_byte_overflow_remain_closed(self):
-        for data in [b'error UNKNOWN12: SYNTHETIC_OPAQUE\n',b'x'*(1024*1024+1)]:
+        for data,can_continue in [(b'error UNKNOWN12: SYNTHETIC_OPAQUE\n',True),(b'x'*(1024*1024+1),False)]:
             m,w,k,api=self.api();cap=self.prepare(api,w);owned=self.owned(cap);k.data[101]=data
-            self.assertFalse(api.drain_capture(owned,9.,lambda:1.));api.close_capture(owned)
+            self.assertEqual(api.drain_capture(owned,9.,lambda:1.),can_continue);api.close_capture(owned)
             self.assertFalse(api.capture_result(owned)['complete'])
 
     def test_unknown_or_duplicate_numeric_code_records_are_rejected(self):
@@ -240,7 +240,7 @@ class ControllerCaptureTests(unittest.TestCase):
 
     def test_preflight_requires_separate_expected_codes_and_complete_cleanup(self):
         from runtime import controller
-        stream=lambda rows:{'complete':True,'unknown':False,'overflow':False,'codeObserved':bool(rows),'codes':rows}
+        stream=lambda rows:{'complete':True,'unknown':False,'overflow':False,'codeObserved':bool(rows),'codes':rows,'unknownShapes':[]}
         capture={'schemaVersion':1,'complete':True,'failureCode':0,'streams':[stream([[1,900001,1]]),stream([[4,900002,1]])],
             'handlesClosed':True,'parentReadsNoninheritable':True,'exactChildHandleList':True,'startupObserved':True}
         positive={'completed':True,'cleanupProved':True,'forcedCleanup':False,'children':[
@@ -279,7 +279,7 @@ class ControllerCaptureTests(unittest.TestCase):
             def drain_capture(self,*args,**kwargs):return True
             def close_capture(self,job):return True
             def capture_result(self,job):
-                row={'complete':True,'unknown':False,'overflow':False,'codeObserved':False,'codes':[]}
+                row={'complete':True,'unknown':False,'overflow':False,'codeObserved':False,'codes':[],'unknownShapes':[]}
                 return {'schemaVersion':1,'complete':True,'failureCode':0,'streams':[row,dict(row)],
                     'handlesClosed':True,'parentReadsNoninheritable':True,'exactChildHandleList':True,'startupObserved':True}
         clock=legacy.Clock();api=Api(clock,True,True)

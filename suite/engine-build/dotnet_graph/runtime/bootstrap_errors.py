@@ -20,7 +20,7 @@ class ErrorCodes:
         if max_bytes>1024*1024 or max_codes>64 or max_count>65535:
             raise ValueError('bootstrap_bound') from None
         self.max_bytes,self.max_codes,self.max_count=max_bytes,max_codes,max_count
-        self.offset=0;self._tail=b'';self._processed=-1;self._counts={}
+        self.offset=0;self._tail=b'';self._processed=-1;self._counts={};self._shapes={}
         self._finished=False;self.unknown=False;self.overflow=False
 
     def __repr__(self):return '<BootstrapErrorCodes private>'
@@ -30,6 +30,20 @@ class ErrorCodes:
         else:self.unknown=True
         raise ValueError('bootstrap_capture_rejected') from None
 
+    def _unknown(self,shape):
+        self.unknown=True
+        if self._shapes.get(shape,0)>=self.max_count:self._reject(overflow=True)
+        self._shapes[shape]=self._shapes.get(shape,0)+1
+
+    @staticmethod
+    def _shape(token):
+        # Only the already bounded invalid token is examined; never decoded.
+        if not token:return 2
+        if b'\x1b' in token:return 5
+        if any(token.startswith(family) for family in _FAMILY):return 4
+        if re.fullmatch(rb'[A-Z]{1,10}[0-9]{1,6}',token):return 3
+        return 6
+
     def _scan(self,raw,start,*,final):
         for match in _PREFIX.finditer(raw):
             position=start+match.start()
@@ -38,11 +52,11 @@ class ErrorCodes:
             colon=suffix.find(b':')
             if colon<0:
                 if len(suffix)<17 and not final:continue
-                self.unknown=True;self._processed=position;continue
+                self._processed=position;self._unknown(1);continue
             self._processed=position
             token=_CODE.fullmatch(suffix[:colon])
             if token is None or int(token[2])==0:
-                self.unknown=True;continue
+                self._unknown(self._shape(suffix[:colon]));continue
             key=(_FAMILY[token[1]],int(token[2]))
             if (key not in self._counts and len(self._counts)>=self.max_codes
                     or self._counts.get(key,0)>=self.max_count):self._reject(overflow=True)
@@ -63,6 +77,7 @@ class ErrorCodes:
             self._tail=b'';self._finished=True
         return {'complete':not(self.unknown or self.overflow),'unknown':self.unknown,
                 'overflow':self.overflow,'codeObserved':bool(self._counts),
+                'unknownShapes':[[shape,count] for shape,count in sorted(self._shapes.items())],
                 'codes':[[family,code,count] for (family,code),count in sorted(self._counts.items())]}
 
 
@@ -220,7 +235,9 @@ class BootstrapApi(win.NativeApi):
                         cap.failure=2;return False
                     if clock()>=deadline:cap.failure=1;return False
                     scanner=cap.streams[index];scanner.feed(scanner.offset,buffer.raw[:count.value])
-                    if scanner.unknown or scanner.overflow:cap.failure=4;return False
+                    # Lexical unknown is sticky incomplete evidence, not a
+                    # reason to terminate before later codes/natural exit.
+                    if scanner.overflow:cap.failure=3;return False
                 else:cap.failure=3;return False
             if final and not all(cap.eof):cap.failure=5;return False
             if clock()>=deadline:cap.failure=1;return False
@@ -259,7 +276,7 @@ def validate_capture(value):
     if any(type(value[k]) is not bool for k in flags) or type(value['streams']) is not list or len(value['streams'])!=2:
         raise ValueError('bootstrap_record') from None
     for stream in value['streams']:
-        if type(stream) is not dict or set(stream)!={'complete','unknown','overflow','codeObserved','codes'}:
+        if type(stream) is not dict or set(stream)!={'complete','unknown','overflow','codeObserved','codes','unknownShapes'}:
             raise ValueError('bootstrap_record') from None
         if any(type(stream[k]) is not bool for k in ('complete','unknown','overflow','codeObserved')):
             raise ValueError('bootstrap_record') from None
@@ -272,6 +289,16 @@ def validate_capture(value):
                 raise ValueError('bootstrap_record') from None
             seen.append(tuple(row[:2]))
         if seen!=sorted(set(seen)) or stream['codeObserved']!=bool(rows) or stream['complete']!=(not stream['unknown'] and not stream['overflow']):
+            raise ValueError('bootstrap_record') from None
+        shapes=stream['unknownShapes']
+        if type(shapes) is not list or len(shapes)>6:raise ValueError('bootstrap_record') from None
+        observed=[]
+        for row in shapes:
+            if (type(row) is not list or len(row)!=2 or any(type(n) is not int for n in row)
+                    or not 1<=row[0]<=6 or not 1<=row[1]<=65535):
+                raise ValueError('bootstrap_record') from None
+            observed.append(row[0])
+        if observed!=sorted(set(observed)) or (shapes and not stream['unknown']):
             raise ValueError('bootstrap_record') from None
     expected=(not value['failureCode'] and all(value[k] for k in flags-{'complete'}) and all(s['complete'] for s in value['streams']))
     # A producer with no EOF witness must use explicit incomplete failure code 7.
