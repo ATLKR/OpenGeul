@@ -58,7 +58,7 @@ class CommandLeaseWiringTests(unittest.TestCase):
         raw=fixtures.success_fixture();raw['commandProcessorBinding']=binding()
         outer={'completed':True,'cleanupProved':True,'forcedCleanup':False,'exitCode':0}
         report=ci_entry.public_report(ci_entry.require_context(fixtures.environment(),'x64'),outer,raw,command_binding=binding())
-        self.assertEqual(report['schemaVersion'],4);self.assertEqual(report['commandProcessorBinding'],binding())
+        self.assertEqual(report['schemaVersion'],5);self.assertEqual(report['commandProcessorBinding'],binding())
         self.assertTrue(report['sdkGatePassed']);self.assertFalse(report['qualification']);self.assertFalse(report['canService'])
         unknown=ci_entry.public_report(report['binding'],None,None)
         self.assertIsNone(unknown['commandProcessorBinding']);self.assertFalse(unknown['sdkGatePassed'])
@@ -107,7 +107,7 @@ class CommandLeaseWiringTests(unittest.TestCase):
             pairs=((approved_launch,'require_admission',lambda a,r:Admission()),(gate,'sys',types.SimpleNamespace(platform='win32')),
               (gate,'_owned_root',lambda p:root),(tools,'system_locations',locations_for),(owned_job_win32,'NativeApi',lambda:object()),
               (gate,'Runner',Runner),(gate,'child_environment',lambda *a:{}),(tools,'vs_metadata',lambda b:{}),
-              (tools,'installed_vs',lambda *a:vs),(tools,'installed_sdk',lambda *a:sdk),(tools,'cmd_path',lambda v:v),
+              (tools,'installed_vs',lambda *a:vs),(tools,'installed_sdk',lambda *a,**kw:sdk),(tools,'cmd_path',lambda v:v),
               (gate,'compile_batch',lambda *a:'fixed'),(tools,'read',read),(tools,'pe',pe))
             for module,name,value in pairs:stack.enter_context(mock.patch.object(module,name,value))
             result=gate.execute('x64',ROOT/'frozen-v2',root)

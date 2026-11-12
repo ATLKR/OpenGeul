@@ -65,7 +65,7 @@ class FailureObservationTests(unittest.TestCase):
     def test_failure_report_is_versioned_and_keeps_outer_unknown(self):
         m=self.api();value=m.failure_observation(m.CiFailure(3),5)
         report=m.public_report({'sourceCommit':'a'*40},None,None,failure=31,observation=value)
-        self.assertEqual(report['schemaVersion'],4);self.assertEqual(report['failureObservation'],value)
+        self.assertEqual(report['schemaVersion'],5);self.assertEqual(report['failureObservation'],value)
         self.assertIsNone(report['commandProcessorBinding'])
         self.assertFalse(report['sdkReportKnown']);self.assertIsNone(report['sdkStage'])
         self.assertFalse(report['envelopeKnown']);self.assertIsNone(report['envelopeCleanupProved'])

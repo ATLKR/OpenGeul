@@ -1433,9 +1433,9 @@ jobs:
           }
           $machine = if ($architecture -ceq 'x64') { 0x8664 } else { 0xaa64 }
           $base = Join-Path (Get-Location).Path 'suite/engine-build/packaged-context-sdk'
-          $entryPin = 'e2709a95602c71e565f3e8f8734e5d6774f1191aaab7b986cb80431774aa05c3'
+          $entryPin = 'aa9376cb1124f2f819b1fe588adb63a23bbc2b16d0e3f3da02d186c39ffb25ab'
           $bootstrapPin = '828cef4233ac7e2186c3ca5f112c10ca682a905ca3587fa6867a609046796c2d'
-          $manifestPin = 'd27b1bc5649c60d7e24cf43c8807668e161aaeb93de38f55943594c340bf67bf'
+          $manifestPin = '45401fe6becef555d8efd5f22149a7b2bebb9863bdeed96dc340ef5b8d04b2cf'
           foreach ($item in @(@('ci_entry.py',$entryPin),@('approved_launch.py',$bootstrapPin),@('approved-sdk-code.json',$manifestPin))) {
             $file = Join-Path $base $item[0]
             $info = Get-Item -LiteralPath $file -Force
@@ -1479,9 +1479,9 @@ jobs:
               $info = Get-Item -LiteralPath $file -Force
               if ($info.PSIsContainer -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $info.Length -lt 1 -or $info.Length -gt 8192) { throw 'Numeric SDK report path rejected.' }
               $report = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
-              $keys = @('schemaVersion','kind','binding','failureCode','sdkReportKnown','sdkStage','sdkGatePassed','nativeSdkCompiled','nativeLinked','negativeSmokePassed','qualification','canService','actualPackageObservation','osImplicitEffectsKnown','watchdogVerified','externalMonitorCandidateImplemented','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup','envelopeExitCode','approvedCodeManifestSha256','compiledEvidence','failureObservation','commandProcessorBinding','helperFailureCode','helperPhaseResults','helperFailureObservation')
+              $keys = @('schemaVersion','kind','binding','failureCode','sdkReportKnown','sdkStage','sdkGatePassed','nativeSdkCompiled','nativeLinked','negativeSmokePassed','qualification','canService','actualPackageObservation','osImplicitEffectsKnown','watchdogVerified','externalMonitorCandidateImplemented','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup','envelopeExitCode','approvedCodeManifestSha256','compiledEvidence','failureObservation','commandProcessorBinding','helperFailureCode','helperPhaseResults','helperFailureObservation','helperSdkCandidateObservation')
               if (@($report.PSObject.Properties.Name).Count -ne $keys.Count -or @($report.PSObject.Properties.Name | Where-Object { $_ -cnotin $keys }).Count -ne 0) { throw 'SDK numeric report schema rejected.' }
-              if ($report.schemaVersion -ne 4 -or $report.kind -cne 'packaged-context-sdk-ci' -or $report.qualification -isnot [bool] -or $report.qualification -or $report.canService -isnot [bool] -or $report.canService -or $report.actualPackageObservation -or $report.osImplicitEffectsKnown -or $report.watchdogVerified) { throw 'SDK diagnostic cannot grant product qualification.' }
+              if ($report.schemaVersion -ne 5 -or $report.kind -cne 'packaged-context-sdk-ci' -or $report.qualification -isnot [bool] -or $report.qualification -or $report.canService -isnot [bool] -or $report.canService -or $report.actualPackageObservation -or $report.osImplicitEffectsKnown -or $report.watchdogVerified) { throw 'SDK diagnostic cannot grant product qualification.' }
               if ($report.binding.sourceCommit -cne $env:GITHUB_SHA -or $report.binding.runId -ne [long]$env:GITHUB_RUN_ID -or $report.binding.runAttempt -ne 1 -or $report.binding.architectureCode -ne $machine -or $report.binding.repositoryId -ne 1405493151) { throw 'SDK numeric source binding rejected.' }
               # Closed OS-command binding: classification/change detection, no signature claim.
               if ($report.sdkGatePassed -isnot [bool]) { throw 'SDK pass state must be known.' }
@@ -1579,6 +1579,74 @@ jobs:
                   if ($observation.sourceLocationKnown -isnot [bool] -or $observation.sourceLocationKnown -ne ($frames.Count -gt 0) -or $observation.sourceFramesTruncated -isnot [bool]) { Reject-HelperObservation }
                   if ($observation.sourceFramesTruncated -and $frames.Count -ne 8) { Reject-HelperObservation }
               } $report
+              # Schema5: bounded SDK candidate first-failure observations, never an inventory.
+              & {
+                  param($value)
+                  function Reject-SdkCandidate { throw 'sdk_candidate_observation_rejected' }
+                  function Test-SdkCandidateLong($item,[long]$low,[long]$high) {
+                      return ($item -is [long] -and $item -ge $low -and $item -le $high)
+                  }
+                  function Test-SdkCandidateOptionalLong($item,[long]$low,[long]$high) {
+                      return ($null -eq $item -or (Test-SdkCandidateLong $item $low $high))
+                  }
+                  function Test-SdkCandidateKeys($item,[string[]]$keys) {
+                      if ($null -eq $item -or $item.GetType() -ne [System.Management.Automation.PSCustomObject]) { return $false }
+                      $actual=@($item.PSObject.Properties.Name)
+                      if ($actual.Count -ne $keys.Count) { return $false }
+                      foreach ($name in $actual) { if ($name -cnotin $keys) { return $false } }
+                      return $true
+                  }
+                  function Assert-SdkCandidateReason($reason,[long]$stage) {
+                      $keys=@('stageCode','exceptionKnown','exceptionTypeCode','nativeCode','errno','winerror','filesystemCode','fileRoleCode','observedLinkCount','sourceFrames','sourceLocationKnown','sourceFramesTruncated')
+                      if (-not (Test-SdkCandidateKeys $reason $keys)) { Reject-SdkCandidate }
+                      if (-not (Test-SdkCandidateLong $reason.stageCode 1 7) -or $reason.stageCode -ne $stage -or $reason.exceptionKnown -isnot [bool] -or -not (Test-SdkCandidateLong $reason.exceptionTypeCode 0 5)) { Reject-SdkCandidate }
+                      $kind=$reason.exceptionTypeCode
+                      if ($reason.exceptionKnown -ne ($kind -ne 0)) { Reject-SdkCandidate }
+                      if (-not (Test-SdkCandidateOptionalLong $reason.nativeCode 0 65535) -or -not (Test-SdkCandidateOptionalLong $reason.errno -2147483648 4294967295) -or -not (Test-SdkCandidateOptionalLong $reason.winerror -2147483648 4294967295)) { Reject-SdkCandidate }
+                      if (-not (Test-SdkCandidateOptionalLong $reason.filesystemCode 1 5) -or -not (Test-SdkCandidateOptionalLong $reason.fileRoleCode 1 3) -or -not (Test-SdkCandidateOptionalLong $reason.observedLinkCount 0 1048576)) { Reject-SdkCandidate }
+                      if (($kind -lt 1 -or $kind -gt 4) -and $null -ne $reason.nativeCode) { Reject-SdkCandidate }
+                      if ($kind -ne 5 -and ($null -ne $reason.errno -or $null -ne $reason.winerror)) { Reject-SdkCandidate }
+                      if ($kind -ne 2 -and ($null -ne $reason.filesystemCode -or $null -ne $reason.fileRoleCode -or $null -ne $reason.observedLinkCount)) { Reject-SdkCandidate }
+                      $frames=$reason.sourceFrames
+                      if ($null -eq $frames -or $frames.GetType() -ne [object[]] -or $frames.Count -gt 8) { Reject-SdkCandidate }
+                      foreach ($frame in $frames) {
+                          if (-not (Test-SdkCandidateKeys $frame @('fileCode','line')) -or -not (Test-SdkCandidateLong $frame.fileCode 1 6) -or -not (Test-SdkCandidateLong $frame.line 1 100000)) { Reject-SdkCandidate }
+                      }
+                      if ($reason.sourceLocationKnown -isnot [bool] -or $reason.sourceLocationKnown -ne ($frames.Count -gt 0) -or $reason.sourceFramesTruncated -isnot [bool]) { Reject-SdkCandidate }
+                      if ($reason.sourceFramesTruncated -and $frames.Count -ne 8) { Reject-SdkCandidate }
+                  }
+                  if ($null -eq $value -or $value.GetType() -ne [System.Management.Automation.PSCustomObject] -or 'helperSdkCandidateObservation' -cnotin @($value.PSObject.Properties.Name) -or $value.sdkReportKnown -isnot [bool]) { Reject-SdkCandidate }
+                  $data=$value.helperSdkCandidateObservation
+                  if (-not $value.sdkReportKnown) {
+                      if ($null -ne $data) { Reject-SdkCandidate }
+                      return
+                  }
+                  if ($null -eq $data) { return }
+                  if (-not (Test-SdkCandidateKeys $data @('operations','failures','failureCount','truncated'))) { Reject-SdkCandidate }
+                  $operations=$data.operations;$failures=$data.failures;$count=$data.failureCount
+                  if ($null -eq $operations -or $operations.GetType() -ne [object[]] -or $operations.Count -gt 2 -or $null -eq $failures -or $failures.GetType() -ne [object[]] -or $failures.Count -gt 4) { Reject-SdkCandidate }
+                  if (-not (Test-SdkCandidateLong $count 0 2147483647) -or $data.truncated -isnot [bool] -or $failures.Count -ne [Math]::Min(4,$count) -or $data.truncated -ne ($count -gt $failures.Count)) { Reject-SdkCandidate }
+                  $known=@{};[long]$sum=0
+                  for ($i=0;$i -lt $operations.Count;$i++) {
+                      $row=$operations[$i];[long]$code=$i+1
+                      if (-not (Test-SdkCandidateKeys $row @('operationCode','enumerationKnown','candidateCount')) -or -not (Test-SdkCandidateLong $row.operationCode 1 2) -or $row.operationCode -ne $code -or $row.enumerationKnown -isnot [bool]) { Reject-SdkCandidate }
+                      $stage=if ($code -eq 1) { 1 } else { 6 }
+                      if (-not (Test-SdkCandidateLong $value.sdkStage $stage 7)) { Reject-SdkCandidate }
+                      if ($row.enumerationKnown) {
+                          if (-not (Test-SdkCandidateLong $row.candidateCount 0 2147483647)) { Reject-SdkCandidate }
+                          $known[$code]=$row.candidateCount;$sum+=$row.candidateCount
+                      } elseif ($null -ne $row.candidateCount) { Reject-SdkCandidate }
+                  }
+                  if ($count -gt $sum) { Reject-SdkCandidate }
+                  foreach ($row in $failures) {
+                      if (-not (Test-SdkCandidateKeys $row @('operationCode','version','memberSlot','reason')) -or -not (Test-SdkCandidateLong $row.operationCode 1 2) -or -not $known.ContainsKey($row.operationCode) -or $known[$row.operationCode] -lt 1) { Reject-SdkCandidate }
+                      $version=$row.version
+                      if ($null -eq $version -or $version.GetType() -ne [object[]] -or $version.Count -ne 4 -or -not (Test-SdkCandidateLong $version[0] 10 10) -or -not (Test-SdkCandidateLong $version[1] 0 0) -or -not (Test-SdkCandidateLong $version[2] 0 999999) -or -not (Test-SdkCandidateLong $version[3] 0 99999)) { Reject-SdkCandidate }
+                      if (-not (Test-SdkCandidateOptionalLong $row.memberSlot 1 16)) { Reject-SdkCandidate }
+                      $stage=if ($row.operationCode -eq 1) { 1 } else { 6 }
+                      Assert-SdkCandidateReason $row.reason $stage
+                  }
+              } $report
               $eligible = $true
               if ($code -eq 0 -and ($report.sdkGatePassed -isnot [bool] -or -not $report.sdkGatePassed)) { $code = 1 }
             }
@@ -1605,7 +1673,7 @@ jobs:
       github.repository == 'ATLKR/OpenGeul' && github.repository_id == '1405493151' &&
       github.repository_owner == 'ATLKR' && github.actor == 'ATLKR' &&
       github.actor_id == '65988341' && github.triggering_actor == 'ATLKR' &&
-      github.run_attempt == 1 && github.event.repository.fork == false)
+      github.run_attempt == 1 && github.event.repository.fork == false && contains(github.event.head_commit.message, '[ime-finalization-compile]'))
     name: Original Suite IME finalization compile observation (${{ matrix.os }})
     strategy:
       fail-fast: false

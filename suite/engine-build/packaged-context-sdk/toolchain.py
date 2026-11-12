@@ -114,19 +114,36 @@ def sdk_members(version,arch):
     libraries=('windowsapp.lib','shell32.lib','ole32.lib','advapi32.lib','uuid.lib','kernel32.lib')
     return tuple('Include/'+version+'/'+p for p in headers)+tuple('Lib/'+version+'/um/'+arch+'/'+p for p in libraries)+('Lib/'+version+'/ucrt/'+arch+'/libucrt.lib',)
 
-def installed_sdk(root,arch):
+def installed_sdk(root,arch,*,observations=None,operation=None):
+    probe=None
+    if observations is not None:
+        keys={'operations','failures','failureCount','truncated'}
+        if type(observations) is not dict or set(observations)!=keys or type(observations['operations']) is not list or type(observations['failures']) is not list or type(observations['failureCount']) is not int or not 0<=observations['failureCount']<=2147483647 or type(observations['truncated']) is not bool:raise GateFailure(2)
+        if type(operation) is not int or operation not in (1,2) or [p.get('operationCode') for p in observations['operations']]!=list(range(1,operation)) or len(observations['failures'])>4:raise GateFailure(2)
+        probe={'operationCode':operation,'enumerationKnown':False,'candidateCount':None}
+        observations['operations'].append(probe)
     root=canonical(root,directory=True)
     versions=[]
     for p in canonical(root/'Include',directory=True).iterdir():
         if p.is_dir() and re.fullmatch(r'10\.0\.\d{4,6}\.\d{1,5}',p.name):versions.append(p.name)
+    if probe is not None:probe.update(enumerationKnown=True,candidateCount=len(versions))
     for ver in sorted(versions,key=lambda v:tuple(map(int,v.split('.'))),reverse=True):
+        slot=None
         try:
             rows=[]
-            for rel in sdk_members(ver,arch):
+            for slot,rel in enumerate(sdk_members(ver,arch),1):
                 b=read(root/rel)
                 rows.append({'slot':len(rows)+1,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
             return {'root':str(root),'version':ver,'files':rows}
-        except (OSError,GateFailure):continue
+        except (OSError,GateFailure) as error:
+            if observations is not None:
+                observations['failureCount']+=1
+                if len(observations['failures'])<4:
+                    from ci_entry import failure_observation
+                    observations['failures'].append({'operationCode':operation,'version':list(map(int,ver.split('.'))),
+                      'memberSlot':slot,'reason':failure_observation(error,1 if operation==1 else 6)})
+                else:observations['truncated']=True
+            continue
     raise GateFailure(12)
 
 def vs_metadata(raw):

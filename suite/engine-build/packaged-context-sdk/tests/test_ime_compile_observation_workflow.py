@@ -8,6 +8,11 @@ PIN='b98b555b646f8fd412057afb880e8b4c35262f9a'
 class CompileObservationWorkflowTests(unittest.TestCase):
  def setUp(self):
   self.w=yaml.safe_load((REPO/'.github/workflows/office-suite.yml').read_text());self.job=self.w['jobs'].get('ime-finalization-compile-observation');self.assertTrue(type(self.job)is dict,'Independent compile observation job must exist')
+ def selected(self,*,message='',**changes):
+  clause="contains(github.event.head_commit.message, '[ime-finalization-compile]')"
+  self.assertEqual(self.job['if'].count(clause),1)
+  present=type(message)is str and '[ime-finalization-compile]'in message.casefold()
+  return fixture.condition(self.job['if'].replace(clause,'true'if present else'false'),**changes)
  def step(self,id):
   rows=[s for s in self.job['steps']if s.get('id')==id];self.assertTrue(len(rows)==1);return rows[0]
  def allowed(self,text,*,cancelled=False,success=False,outcomes=None,outputs=None):
@@ -33,11 +38,11 @@ class CompileObservationWorkflowTests(unittest.TestCase):
   prefix="function global:python { [IO.File]::WriteAllText($env:OWNED_ARGV_FILE,(ConvertTo-Json -Compress -InputObject @($args))); $at=[Array]::IndexOf($args,'--output'); $out=$args[$at+1]; $null=New-Item -ItemType Directory -Path $out; [IO.File]::WriteAllBytes((Join-Path $out 'report.numeric.json'),[byte[]]::new([int]$env:OWNED_REPORT_BYTES)); $global:LASTEXITCODE=[int]$env:OWNED_COLLECTOR_EXIT }\n"
   return self.ps(get_item_prefix+prefix+run,root,extra=dict(OWNED_COLLECTOR_EXIT=str(code),OWNED_REPORT_BYTES=str(size)))
  def test_independent_same_exact_sdk_selector_two_hosts_and_fixed_budgets(self):
-  sdk=self.w['jobs']['packaged-context-sdk'];self.assertTrue(self.job['if']==sdk['if']and'needs'not in self.job)
+  sdk=self.w['jobs']['packaged-context-sdk'];self.assertTrue(self.job['if']==sdk['if'].rstrip()[:-1]+" && contains(github.event.head_commit.message, '[ime-finalization-compile]'))"and'needs'not in self.job)
   self.assertTrue(self.job['strategy']=={'fail-fast':False,'matrix':{'os':['windows-2025','windows-11-arm']}}and self.job['runs-on']=='${{ matrix.os }}'and self.job['timeout-minutes']==8)
   self.assertTrue(sdk['timeout-minutes']==6 and next(s for s in sdk['steps']if s.get('id')=='sdk-compile')['timeout-minutes']==4)
-  self.assertTrue(fixture.condition(self.job['if']))
-  for change in({'event_name':'workflow_dispatch'},{'event_name':'pull_request'},{'run_attempt':2},{'private':True},{'fork':True},{'actor':'other'},{'ref':'refs/heads/main'}):self.assertTrue(not fixture.condition(self.job['if'],**change))
+  self.assertTrue(self.selected(message='[ime-finalization-compile]'))
+  for change in({'event_name':'workflow_dispatch'},{'event_name':'pull_request'},{'run_attempt':2},{'private':True},{'fork':True},{'actor':'other'},{'ref':'refs/heads/main'}):self.assertTrue(not self.selected(message='[ime-finalization-compile]',**change))
  def test_two_exact_checkouts_keep_source_pin_and_do_not_persist_credentials(self):
   checkouts=[s for s in self.job['steps']if s.get('uses','').startswith('actions/checkout@')];self.assertTrue(len(checkouts)==2)
   self.assertTrue(checkouts[0]['with']=={'persist-credentials':False,'ref':'${{ github.sha }}','fetch-depth':1})
@@ -105,3 +110,16 @@ class CompileObservationWorkflowTests(unittest.TestCase):
     root=Path(t);code=self.observe(root,'windows-2025',get_item_prefix=shim)
     self.assertTrue(code==1 and not(root/'argv.json').exists())
     self.assertTrue('report_eligible=false'in(root/'github-output').read_text())
+
+ def test_commit_marker_is_opt_in_and_does_not_gate_the_sdk_job(self):
+  for message in(None,'','ordinary SDK observation','ime-finalization-compile','[ime-finalization-compile','[ime-finalization-compile-other]'):
+   with self.subTest(case=type(message).__name__):self.assertFalse(self.selected(message=message))
+  for message in('[ime-finalization-compile]','explicit [ime-finalization-compile] observation','[IME-FINALIZATION-COMPILE]'):
+   self.assertTrue(self.selected(message=message))
+  self.assertTrue(fixture.condition(self.w['jobs']['packaged-context-sdk']['if']))
+ def test_commit_marker_cannot_override_the_original_owner_ref_or_attempt_guards(self):
+  changes=({'repository':'OTHER/OpenGeul'},{'repository_id':'1'},{'repository_owner':'OTHER'},{'actor':'OTHER'},
+   {'actor_id':'1'},{'triggering_actor':'OTHER'},{'private':True},{'fork':True},{'event_name':'workflow_dispatch'},
+   {'event_name':'pull_request'},{'run_attempt':2},{'ref':'refs/heads/main'})
+  for index,change in enumerate(changes):
+   with self.subTest(case=index):self.assertFalse(self.selected(message='[ime-finalization-compile]',**change))

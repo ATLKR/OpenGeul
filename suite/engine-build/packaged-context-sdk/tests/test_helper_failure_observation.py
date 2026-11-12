@@ -34,7 +34,7 @@ def phase():
 class HelperFailureObservationTests(unittest.TestCase):
     def test_unobserved_private_report_keeps_every_helper_field_null(self):
         value=entry.public_report({},None,None,failure=5)
-        self.assertEqual(value['schemaVersion'],4)
+        self.assertEqual(value['schemaVersion'],5)
         for key in ('helperFailureCode','helperPhaseResults','helperFailureObservation'):
             self.assertIsNone(value[key])
         self.assertIsNone(value['nativeSdkCompiled']);self.assertFalse(value['sdkReportKnown'])
@@ -148,7 +148,7 @@ class HelperFailureObservationTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(fragment.encode()).hexdigest(),'4a502fc4e1de30691442e3cb2f923274052db4523d335c58c68ef5e7cb343dae')
         keys=re.search(r"\$keys = @\(([^\n]+)\)",script).group(1)
         self.assertEqual(set(re.findall(r"'([^']+)'",keys)),set(entry.public_report({},None,None)))
-        self.assertIn('$report.schemaVersion -ne 4 -or',script)
+        self.assertIn('$report.schemaVersion -ne 5 -or',script)
         self.assertNotIn('$report.schemaVersion -ne 3 -or',script)
 
     def test_actual_success_still_requires_every_existing_private_gate(self):

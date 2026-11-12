@@ -22,7 +22,7 @@ def empty_receipt():
       'originalHelperHandleKnown':False,'packagedHelperLauncherImplemented':False,'watchdogVerified':False,
       'synchronousOsCallPreemptionVerified':False,'osImplicitEffectsKnown':False,'frozenV2Preserved':False,
       'pure40TestsRerun':False,'lease6TestsRerun':False,'workRootCreated':False,'codeApprovalVerified':False,
-      'commandProcessorBinding':None,'phaseResults':[],'failureObservation':None}
+      'commandProcessorBinding':None,'phaseResults':[],'failureObservation':None,'sdkCandidateObservation':None}
 
 def _fresh_text(root,name,text):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,40}\.cmd',name):raise GateFailure(2)
@@ -109,7 +109,9 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
         name=_fresh_text(root,'vs-discovery.cmd',discovery_batch(locations['vswhere']))
         phase([locations['command'],'/d','/v:off','/c',name],15.)
         metadata=tools.vs_metadata(tools.read(root/'vswhere.json',256*1024))
-        vs=tools.installed_vs(metadata,architecture);sdk=tools.installed_sdk(locations['sdk'],architecture)
+        vs=tools.installed_vs(metadata,architecture)
+        result['sdkCandidateObservation']={'operations':[],'failures':[],'failureCount':0,'truncated':False}
+        sdk=tools.installed_sdk(locations['sdk'],architecture,observations=result['sdkCandidateObservation'],operation=1)
         for p in (vs['devcmd'],vs['cl'],vs['link'],sdk['root']):tools.cmd_path(p)
         result.update(stage=2,compiler=vs['records']['cl'],linker=vs['records']['link'],compilerVersion=vs['version'],
           installationVersion=vs['installationVersion'],devcmdSha256=vs['devcmdSha256'],sdkVersion=sdk['version'],sdkInputs=sdk['files'])
@@ -138,7 +140,7 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
         for index,(name,src) in enumerate(inputs.items()):
             if hashlib.sha256(tools.read(src,1024*1024)).hexdigest()!=hashes[index]['sha256'] or hashlib.sha256(tools.read(root/name,1024*1024)).hexdigest()!=hashes[index]['sha256']:raise GateFailure(3)
         after=(dict(cl=tools.pe(vs['cl'],machine),link=tools.pe(vs['link'],machine)),hashlib.sha256(tools.read(vs['devcmd'],1024*1024)).hexdigest(),command_lease.verify())
-        if after!=tools_before or tools.installed_sdk(locations['sdk'],architecture)!=sdk:raise GateFailure(3)
+        if after!=tools_before or tools.installed_sdk(locations['sdk'],architecture,observations=result['sdkCandidateObservation'],operation=2)!=sdk:raise GateFailure(3)
         code_admission.require_root(ROOT)
         if tools.verify_bundle(source_bundle)!=before:raise GateFailure(3)
         remaining();result.update(stage=7,frozenV2Preserved=True,sdkGatePassed=True)

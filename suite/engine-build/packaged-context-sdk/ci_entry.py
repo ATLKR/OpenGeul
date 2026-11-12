@@ -145,6 +145,34 @@ def validate_helper_failure_observation(value,stage):
     if value['sourceFramesTruncated'] and len(frames)!=8:raise CiFailure(4)
     return {**value,'sourceFrames':[dict(row) for row in frames]}
 
+def validate_sdk_candidate_observation(value,stage=None):
+    """Only a candidate's first blocked member is recorded; never an SDK inventory."""
+    if value is None:return None
+    if type(value) is not dict or set(value)!={'operations','failures','failureCount','truncated'}:raise CiFailure(4)
+    operations=value['operations'];failures=value['failures'];count=value['failureCount']
+    if type(operations) is not list or len(operations)>2 or type(failures) is not list or len(failures)>4 or not _integer(count,2147483647) or type(value['truncated']) is not bool:raise CiFailure(4)
+    if len(failures)!=min(4,count) or value['truncated']!=(count>len(failures)):raise CiFailure(4)
+    known={}
+    for index,row in enumerate(operations,1):
+        if type(row) is not dict or set(row)!={'operationCode','enumerationKnown','candidateCount'} or type(row['operationCode']) is not int or row['operationCode']!=index or type(row['enumerationKnown']) is not bool:raise CiFailure(4)
+        if row['enumerationKnown']:
+            if not _integer(row['candidateCount'],2147483647):raise CiFailure(4)
+            known[index]=row['candidateCount']
+        elif row['candidateCount'] is not None:raise CiFailure(4)
+        if stage is not None and (type(stage) is not int or stage<(1 if index==1 else 6)):raise CiFailure(4)
+    if count>sum(known.values()):raise CiFailure(4)
+    output=[]
+    for row in failures:
+        if type(row) is not dict or set(row)!={'operationCode','version','memberSlot','reason'}:raise CiFailure(4)
+        operation=row['operationCode'];version=row['version'];slot=row['memberSlot']
+        if type(operation) is not int or operation not in known or known[operation]<1:raise CiFailure(4)
+        if type(version) is not list or len(version)!=4 or any(type(v) is not int for v in version) or version[:2]!=[10,0] or not 0<=version[2]<=999999 or not 0<=version[3]<=99999:raise CiFailure(4)
+        if slot is not None and (type(slot) is not int or not 1<=slot<=16):raise CiFailure(4)
+        reason=validate_helper_failure_observation(row['reason'],1 if operation==1 else 6)
+        if reason is None:raise CiFailure(4)
+        output.append({'operationCode':operation,'version':list(version),'memberSlot':slot,'reason':reason})
+    return {'operations':[dict(row) for row in operations],'failures':output,'failureCount':count,'truncated':value['truncated']}
+
 def project_helper_phases(rows):
     """Returned records only. Unknown exit/identity sentinels become explicit null."""
     keys={'startedAt','deadline','finishedAt','completed','cleanupProved','forcedCleanup','rootExitObserved','jobEmptyObserved',
@@ -171,6 +199,7 @@ def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs
     if type(value) is not dict or set(value)-keys or value.get('kind')!='packaged-context-sdk-negative-gate' or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=1:raise CiFailure(4)
     if not _integer(value.get('stage'),7) or not _integer(value.get('failureCode'),31):raise CiFailure(4)
     validate_helper_failure_observation(value.get('failureObservation'),value['stage'])
+    validate_sdk_candidate_observation(value.get('sdkCandidateObservation'),value['stage'])
     for key,item in empty_receipt().items():
         if type(item) is bool and type(value.get(key)) is not bool:raise CiFailure(4)
     false=('actualPackageObservation','qualification','canService','originalHelperHandleKnown','packagedHelperLauncherImplemented',
@@ -230,15 +259,17 @@ def public_report(binding,outer,raw,*,failure=0,observation=None,command_binding
         validate_command_observation(command_binding)
         try:validate_command_observation(command_binding,require_closed=True);command_ok=True
         except BaseException:command_ok=False
-    helper_code=None;helper_phases=None;helper_observation=None
+    helper_code=None;helper_phases=None;helper_observation=None;sdk_candidates=None
     if raw is not None:
         helper_code=raw['failureCode']
         if not _integer(helper_code,31):raise CiFailure(4)
         helper_phases=project_helper_phases(raw['phaseResults'])
         helper_observation=validate_helper_failure_observation(raw.get('failureObservation'),raw['stage'])
-    return {'schemaVersion':4,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
+        sdk_candidates=validate_sdk_candidate_observation(raw.get('sdkCandidateObservation'),raw['stage'])
+    return {'schemaVersion':5,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
       'commandProcessorBinding':command_binding,
       'helperFailureCode':helper_code,'helperPhaseResults':helper_phases,'helperFailureObservation':helper_observation,
+      'helperSdkCandidateObservation':sdk_candidates,
       'sdkReportKnown':raw is not None,'sdkStage':None if raw is None else raw['stage'],
       'sdkGatePassed':bool(raw and outer and raw['sdkGatePassed'] and outer['completed'] and failure==0 and command_ok),
       'nativeSdkCompiled':None if raw is None else raw['nativeSdkCompiled'],
