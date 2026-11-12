@@ -10,14 +10,14 @@
   },
   "runtime": {
     "name": "LibreOffice",
-    "version": "26.8.1.1",
-    "url": "https://mirror.clarkson.edu/tdf/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi",
-    "distributionUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi",
-    "size": 360910848,
-    "sha256": "97c2173752325af1da3d8731f41c8e09a7c4ad491cf55d9b1069fadb5668e6d7",
-    "checksumUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi.sha256",
-    "sourceUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.1/libreoffice-26.8.1.1.tar.xz",
-    "sourceSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785"
+    "version": "26.8.2.2",
+    "url": "https://mirrors.iu13.net/tdf/libreoffice/stable/26.8.2/win/aarch64/LibreOffice_26.8.2_Win_aarch64.msi",
+    "distributionUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.2/win/aarch64/LibreOffice_26.8.2_Win_aarch64.msi",
+    "size": 361771008,
+    "sha256": "73e6a15f5b2b9e6a87ffad7fdaacd6e992a597b08c911ee7e3baddd15e29bcc7",
+    "checksumUrl": "https://download.documentfoundation.org/libreoffice/stable/26.8.2/win/aarch64/LibreOffice_26.8.2_Win_aarch64.msi.sha256",
+    "sourceUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz",
+    "sourceSha256": "f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7"
   },
   "hwp": {
     "version": "1.1.4",

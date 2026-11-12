@@ -52,8 +52,8 @@ class Arm64BaselineProbeTests(unittest.TestCase):
         self.assertEqual(self.selector,identity['lockPath'])
         self.assertEqual(first['runtime'],json.loads(self.raw)['runtime'])
         self.assertEqual('msi',identity['format'])
-        self.assertEqual(1618,identity['lockBytes'])
-        self.assertEqual('f58107858b83e29c7b98aea1dc41141a637caeba1f6e9a8e3b84395968c1b0c1',identity['lockSha256'])
+        self.assertEqual(1615,identity['lockBytes'])
+        self.assertEqual('69d813eba379f78d20d61becebd995050441fad22665950ee39cb0de4b0227f4',identity['lockSha256'])
 
     def test_wrong_live_external_or_aliased_selector_is_rejected(self):
         for selector in ('suite/config/runtime.arm64.lock.json',str(self.baseline),
@@ -61,6 +61,58 @@ class Arm64BaselineProbeTests(unittest.TestCase):
                          '../'+self.selector,Path(self.selector)):
             with self.subTest(selector=selector),self.assertRaises(ValueError):
                 self.load(selector)
+
+    def test_refreshed_baseline_keeps_the_publisher_asset_and_source_identity(self):
+        runtime = json.loads(self.raw)['runtime']
+        self.assertEqual(runtime['version'], '26.8.2.2')
+        self.assertEqual(runtime['size'], 361771008)
+        self.assertEqual(runtime['sha256'], '73e6a15f5b2b9e6a87ffad7fdaacd6e992a597b08c911ee7e3baddd15e29bcc7')
+        self.assertEqual(runtime['url'], 'https://mirrors.iu13.net/tdf/libreoffice/stable/26.8.2/win/aarch64/LibreOffice_26.8.2_Win_aarch64.msi')
+        self.assertEqual(runtime['sourceUrl'], 'https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz')
+        self.assertEqual(runtime['sourceSha256'], 'f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7')
+        changed = json.loads(self.raw)
+        changed['runtime'].update(version='26.8.1.1', size=360910848,
+            sha256='97c2173752325af1da3d8731f41c8e09a7c4ad491cf55d9b1069fadb5668e6d7')
+        with self.assertRaises(ValueError):
+            self.probe.validate_baseline(changed)
+
+    def test_actual_msi_version_query_is_readonly_exact_and_precedes_inventory(self):
+        inspect = getattr(self.probe, 'inspect_baseline_msi', None)
+        self.assertTrue(callable(inspect), 'Actual MSI ProductVersion guard is required before extraction')
+        expected_query = "SELECT `Value` FROM `Property` WHERE `Property` = 'ProductVersion'"
+        calls = []
+        class Database:
+            def __enter__(self): calls.append('enter'); return self
+            def __exit__(self, *args): calls.append('exit')
+            def _rows(self, query, fields):
+                calls.append('query')
+                self_outer.assertEqual(query, expected_query)
+                self_outer.assertEqual(fields, (('Value', False),))
+                if isinstance(self.rows, Exception): raise self.rows
+                return self.rows
+            def file_rows(self):
+                calls.append('files')
+                return [{'FileName': 'msvcp140.dll'}, {'FileName': 'unrelated.dat'}]
+            def media_rows(self): calls.append('media'); return [{'DiskId': 1}]
+        self_outer = self
+        database = Database()
+        database.rows = [{'Value': '26.8.2.2'}]
+        with patch.object(self.probe, 'WindowsMsiDatabase', return_value=database) as factory:
+            version, inventory = inspect(Path('public-vendor.msi'), '26.8.2.2')
+        factory.assert_called_once_with(Path('public-vendor.msi'))
+        self.assertEqual(calls, ['enter', 'query', 'files', 'media', 'exit'])
+        self.assertEqual(version, {'productVersion': '26.8.2.2', 'versionVerified': True,
+            'baselineOnly': True, 'suiteE2eVerified': False})
+        self.assertEqual(inventory, {'files': [{'FileName': 'msvcp140.dll'}], 'media': [{'DiskId': 1}]})
+        variants = ([], [{'Value': '26.8.1.1'}], [{'Value': '26.8.2'}],
+            [{'Value': '26.8.2.2'}, {'Value': '26.8.2.2'}], [{'Value': b'26.8.2.2'}],
+            [{'Value': '26.8.2.2', 'unexpected': 'synthetic'}], OSError(5, 'synthetic'))
+        for index, rows in enumerate(variants):
+            calls.clear(); database.rows = rows
+            with self.subTest(case=index), patch.object(self.probe, 'WindowsMsiDatabase', return_value=database):
+                with self.assertRaises((ValueError, OSError)):
+                    inspect(Path('public-vendor.msi'), '26.8.2.2')
+            self.assertEqual(calls, ['enter', 'query', 'exit'])
 
     def test_missing_directory_and_byte_drift_are_rejected(self):
         self.baseline.unlink()

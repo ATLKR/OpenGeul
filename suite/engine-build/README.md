@@ -1,9 +1,21 @@
 # Native ARM64 Firebird source-build candidate
 
-The official LibreOffice 26.8.1.1 Windows ARM64 MSI is a baseline. It has no
+The original LibreOffice 26.8.1.1 Windows ARM64 MSI is a historical baseline. It has no
 embedded Firebird driver. It cannot qualify the current Suite Base contract.
 This directory starts a source port; it does not establish a working native Base
 runtime or release qualification.
+
+The separate prerequisite probe now pins the official 26.8.2 ARM64 MSI, using a
+[publisher-listed mirror and SHA256](https://download.documentfoundation.org/libreoffice/stable/26.8.2/win/aarch64/LibreOffice_26.8.2_Win_aarch64.msi.mirrorlist).
+The complete 361,771,008-byte download matches that checksum. Its expected
+ProductVersion is 26.8.2.2, paired with the authenticated source release. The
+probe must read exactly that ProductVersion through the existing read-only
+Windows Installer API before inventory or administrative extraction. The input
+descriptor is not an observed MSI version; only `msi-version.json` records a
+successful native query. Linux checks and byte validation do not provide that
+Windows result or establish the new MSI's Firebird contents. This baseline
+remains separate from the qualified source-built Suite engine and does not
+grant GUI, Base, installation or release qualification.
 
 `source-build.json` pins the complete LibreOffice and Firebird source archives,
 the original LibreOffice Windows Firebird patches, and our two patches. Keep

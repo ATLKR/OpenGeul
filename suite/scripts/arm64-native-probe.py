@@ -22,12 +22,12 @@ from prepare import download_locked
 from msi_cab import WindowsMsiDatabase
 
 BASELINE_SELECTOR = 'suite/config/runtime.arm64-baseline.lock.json'
-BASELINE_BYTES = 1618
-BASELINE_SHA256 = 'f58107858b83e29c7b98aea1dc41141a637caeba1f6e9a8e3b84395968c1b0c1'
+BASELINE_BYTES = 1615
+BASELINE_SHA256 = '69d813eba379f78d20d61becebd995050441fad22665950ee39cb0de4b0227f4'
 BASELINE_ASSET = {
-    'name':'LibreOffice','version':'26.8.1.1',
-    'url':'https://mirror.clarkson.edu/tdf/libreoffice/stable/26.8.1/win/aarch64/LibreOffice_26.8.1_Win_aarch64.msi',
-    'size':360910848,'sha256':'97c2173752325af1da3d8731f41c8e09a7c4ad491cf55d9b1069fadb5668e6d7',
+    'name':'LibreOffice','version':'26.8.2.2',
+    'url':'https://mirrors.iu13.net/tdf/libreoffice/stable/26.8.2/win/aarch64/LibreOffice_26.8.2_Win_aarch64.msi',
+    'size':361771008,'sha256':'73e6a15f5b2b9e6a87ffad7fdaacd6e992a597b08c911ee7e3baddd15e29bcc7',
 }
 
 
@@ -41,6 +41,24 @@ def validate_baseline(lock):
         raise ValueError('Official baseline must not carry sourceBuild metadata')
     if any(runtime.get(key)!=value for key,value in BASELINE_ASSET.items()):
         raise ValueError('Official ARM64 MSI asset identity differs')
+
+
+def inspect_baseline_msi(msi, expected_version):
+    with WindowsMsiDatabase(msi) as database:
+        properties = database._rows(
+            "SELECT `Value` FROM `Property` WHERE `Property` = 'ProductVersion'",
+            (('Value', False),))
+        if (type(properties) is not list or len(properties) != 1
+                or type(properties[0]) is not dict or set(properties[0]) != {'Value'}
+                or type(properties[0]['Value']) is not str
+                or properties[0]['Value'] != expected_version):
+            raise ValueError('Official ARM64 MSI ProductVersion differs from its admitted lock')
+        version = {'productVersion': properties[0]['Value'], 'versionVerified': True,
+            'baselineOnly': True, 'suiteE2eVerified': False}
+        rows = database.file_rows()
+        inventory = {'files': [r for r in rows if any(x in str(r.get('FileName', '')).lower()
+            for x in ('vcruntime', 'msvcp140', 'concrt140'))], 'media': database.media_rows()}
+    return version, inventory
 
 
 def _unlinked_metadata(path, directory=False):
@@ -126,9 +144,9 @@ def main():
     if process.value!=0 or native.value!=0xaa64 or host['pythonMachine']!=0xaa64:
         raise RuntimeError('Probe must use native ARM64 Python on native ARM64 Windows')
     msi=download_locked(lock['runtime'],out/'upstream-arm64.msi')
-    with WindowsMsiDatabase(msi) as database:
-        rows=database.file_rows()
-        write(out/'native-crt-msi-rows.json',{'files':[r for r in rows if any(x in str(r.get('FileName','')).lower() for x in ('vcruntime','msvcp140','concrt140'))], 'media':database.media_rows()})
+    version,inventory=inspect_baseline_msi(msi,lock['runtime']['version'])
+    write(out/'msi-version.json',version)
+    write(out/'native-crt-msi-rows.json',inventory)
     image=out/'admin-image'
     command=['msiexec.exe','/a',str(msi),'/qn','/norestart','TARGETDIR='+str(image),'/L*v',str(out/'msi.log')]
     result=subprocess.run(command,timeout=300,check=False)
