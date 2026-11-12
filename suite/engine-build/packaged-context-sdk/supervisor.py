@@ -52,18 +52,27 @@ class Runner:
     MAX_ARGUMENTS=16
     def __init__(self,api,*,clock=time.monotonic,pause=time.sleep):
         self.api=api;self.clock=clock;self.pause=pause
-    def run(self,argv,cwd,environment,deadline):
+    def run(self,argv,cwd,environment,deadline,*,active_observation=None):
         start=self.clock();controller=None;job=None;failed=False;forced=False;clean=True
         r={'startedAt':start,'deadline':deadline,'finishedAt':start,'completed':False,
           'cleanupProved':False,'forcedCleanup':False,'rootExitObserved':False,'jobEmptyObserved':False,
           'identityRechecked':False,'exitCode':0,'pid':0,'creation':0,'failureCode':0,
           'cancelled':False,'handlesClosed':0}
+        # Separate diagnostic facts, never a completion/input authority. No API or
+        # clock reads are added. Exact plain dictionaries exclude writer callbacks.
+        sink=active_observation if type(active_observation) is dict and not active_observation else None
+        first_exit=None
+        def observe(**values):
+            if sink is not None:
+                try:sink.update(values)
+                except Exception:pass
         def call(name,*args,**kwargs):
             if self.clock()>=deadline-1:raise GateFailure(10)
             value=getattr(self.api,name)(*args,**kwargs)
             if self.clock()>=deadline-1:raise GateFailure(10)
             return value
         try:
+            observe(firstRootExitCodeBeforeCleanup=None,lastRootWaitBeforeCleanup=None,lastJobMemberCountBeforeCleanup=None)
             if not environment_valid(environment):raise GateFailure(4)
             if (type(argv) not in (list,tuple) or not argv or len(argv)>self.MAX_ARGUMENTS
                 or any(type(a) is not str or '\0' in a or len(a)>4096 for a in argv)
@@ -84,9 +93,14 @@ class Runner:
                 r['identityRechecked']=True
                 state,code=call('state',job.host)
                 if state not in (0,258) or (state==0 and code==259):raise GateFailure(7)
+                if type(state) is int and type(code) is int and 0<=code<=0xffffffff:
+                    observe(lastRootWaitBeforeCleanup=state)
+                    if state==0 and first_exit is None:
+                        first_exit=code;observe(firstRootExitCodeBeforeCleanup=code)
                 if state==258 and not call('member',job.host,job.job):raise GateFailure(6)
                 pids=call('census',job.job)
                 if type(pids) is not tuple or len(pids)>128 or any(type(p) is not int or not 0<p<=0xffffffff for p in pids) or len(set(pids))!=len(pids):raise GateFailure(7)
+                observe(lastJobMemberCountBeforeCleanup=len(pids))
                 if state==0:r.update(rootExitObserved=True,exitCode=code)
                 if state==0 and not pids:
                     r['jobEmptyObserved']=True

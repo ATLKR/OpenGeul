@@ -42,9 +42,10 @@ def success_fixture():
     command_binding={'systemDirectoryKnown':True,'wrpProtected':True,'protectionClassificationOnly':True,
       'signatureVerified':False,'linkCount':2,'handleIdentityStable':True,'freshPathStable':True,
       'bytesPeHashStable':True,'rechecks':2,'closed':True}
-    value={'schemaVersion':1,'kind':'packaged-context-sdk-negative-gate','stage':7,'failureCode':0,
+    value={'schemaVersion':2,'kind':'packaged-context-sdk-negative-gate','stage':7,'failureCode':0,
       'commandProcessorBinding':command_binding,
       'architectureCode':0x8664,'approvedCodeManifestSha256':'1'*64,'phaseResults':[],
+      'phaseActiveObservations':[{'firstRootExitCodeBeforeCleanup':0,'lastRootWaitBeforeCleanup':0,'lastJobMemberCountBeforeCleanup':0}for _ in range(5)],
       'compilerVersion':'14.44.35207','installationVersion':'17.14.19','sdkVersion':'10.0.26100.0',
       'startedAt':0.,'deadline':180.,'finishedAt':8.,'vswhereSha256':'2'*64,'devcmdSha256':'3'*64}
     for name in ('sdkGatePassed','actualWindowsExecuted','nativeSdkCompiled','nativeLinked','negativeSmokePassed','frozenV2Preserved','workRootCreated','codeApprovalVerified'):value[name]=True
@@ -111,8 +112,9 @@ class CiContracts(unittest.TestCase):
         self.assertIsNone(result['sdkStage']);self.assertFalse(result['qualification']);self.assertFalse(result['canService'])
     def test_success_without_actual_pe_coff_and_source_input_records_is_rejected(self):
         m=self.api()
-        value={'schemaVersion':1,'kind':'packaged-context-sdk-negative-gate','stage':7,'failureCode':0,
-          'architectureCode':0x8664,'approvedCodeManifestSha256':'1'*64,'phaseResults':[]}
+        value={'schemaVersion':2,'kind':'packaged-context-sdk-negative-gate','stage':7,'failureCode':0,
+          'architectureCode':0x8664,'approvedCodeManifestSha256':'1'*64,'phaseResults':[],
+      'phaseActiveObservations':[{'firstRootExitCodeBeforeCleanup':0,'lastRootWaitBeforeCleanup':0,'lastJobMemberCountBeforeCleanup':0}for _ in range(5)]}
         for name in ('sdkGatePassed','actualWindowsExecuted','nativeSdkCompiled','nativeLinked','negativeSmokePassed','frozenV2Preserved','workRootCreated','codeApprovalVerified'):value[name]=True
         for name in ('actualPackageObservation','qualification','canService','originalHelperHandleKnown','packagedHelperLauncherImplemented','watchdogVerified','synchronousOsCallPreemptionVerified','osImplicitEffectsKnown','pure40TestsRerun','lease6TestsRerun'):value[name]=False
         for index in range(5):

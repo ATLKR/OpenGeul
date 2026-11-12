@@ -58,7 +58,7 @@ class CommandLeaseWiringTests(unittest.TestCase):
         raw=fixtures.success_fixture();raw['commandProcessorBinding']=binding()
         outer={'completed':True,'cleanupProved':True,'forcedCleanup':False,'exitCode':0}
         report=ci_entry.public_report(ci_entry.require_context(fixtures.environment(),'x64'),outer,raw,command_binding=binding())
-        self.assertEqual(report['schemaVersion'],5);self.assertEqual(report['commandProcessorBinding'],binding())
+        self.assertEqual(report['schemaVersion'],6);self.assertEqual(report['commandProcessorBinding'],binding())
         self.assertTrue(report['sdkGatePassed']);self.assertFalse(report['qualification']);self.assertFalse(report['canService'])
         unknown=ci_entry.public_report(report['binding'],None,None)
         self.assertIsNone(unknown['commandProcessorBinding']);self.assertFalse(unknown['sdkGatePassed'])
@@ -88,7 +88,7 @@ class CommandLeaseWiringTests(unittest.TestCase):
             root=Path(td)
             class Runner:
                 def __init__(self,api):self.calls=0
-                def run(self,argv,cwd,environment,deadline):
+                def run(self,argv,cwd,environment,deadline,*,active_observation=None):
                     events.append(('run',deadline));self.calls+=1
                     if cancel:raise KeyboardInterrupt()
                     if self.calls==1:(root/'vswhere.json').write_bytes(b'[]')

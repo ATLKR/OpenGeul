@@ -190,13 +190,31 @@ def project_helper_phases(rows):
           'pid':row['pid'] or None,'creation':row['creation'] or None})
     return result
 
+def validate_phase_active_observations(rows,count):
+    """Ordinal-joined pre-cleanup facts only; no compilation/exit authority."""
+    keys={'firstRootExitCodeBeforeCleanup','lastRootWaitBeforeCleanup','lastJobMemberCountBeforeCleanup'}
+    if type(count) is not int or not 0<=count<=5:raise CiFailure(4)
+    if rows is None:return None
+    if type(rows) is not list or len(rows)!=count:raise CiFailure(4)
+    result=[]
+    for row in rows:
+        if row is None:result.append(None);continue
+        if type(row) is not dict or set(row)!=keys:raise CiFailure(4)
+        exit_code=row['firstRootExitCodeBeforeCleanup'];wait=row['lastRootWaitBeforeCleanup'];members=row['lastJobMemberCountBeforeCleanup']
+        if exit_code is not None and (not _integer(exit_code,0xffffffff) or exit_code==259):raise CiFailure(4)
+        if wait is not None and (type(wait) is not int or wait not in (0,258)):raise CiFailure(4)
+        if members is not None and not _integer(members,128):raise CiFailure(4)
+        if (exit_code is not None)!=(wait==0) or (members is not None and wait is None):raise CiFailure(4)
+        result.append(dict(row))
+    return result
+
 def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs=None):
     from run_sdk_gate import empty_receipt
     from toolchain import validate_command_observation
     keys=set(empty_receipt())|{'architectureCode','controller','commandProcessor','vswhereSha256','compiler','linker',
       'compilerVersion','installationVersion','devcmdSha256','sdkVersion','sdkInputs','compileInputs','portObject',
       'smokeObject','executable','startedAt','deadline','finishedAt','approvedCodeManifestSha256','cancelled'}
-    if type(value) is not dict or set(value)-keys or value.get('kind')!='packaged-context-sdk-negative-gate' or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=1:raise CiFailure(4)
+    if type(value) is not dict or set(value)-keys or value.get('kind')!='packaged-context-sdk-negative-gate' or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=2:raise CiFailure(4)
     if not _integer(value.get('stage'),7) or not _integer(value.get('failureCode'),31):raise CiFailure(4)
     validate_helper_failure_observation(value.get('failureObservation'),value['stage'])
     validate_sdk_candidate_observation(value.get('sdkCandidateObservation'),value['stage'])
@@ -225,6 +243,8 @@ def validate_sdk_report(value,architecture,manifest_sha,deadline,expected_inputs
     if any(k in value and (not _number(value[k]) or value[k]>deadline) for k in ('startedAt','deadline','finishedAt')):raise CiFailure(4)
     rows=value.get('phaseResults')
     if type(rows) is not list or len(rows)>5:raise CiFailure(4)
+    if 'phaseActiveObservations' not in value:raise CiFailure(4)
+    validate_phase_active_observations(value['phaseActiveObservations'],len(rows))
     rowkeys={'startedAt','deadline','finishedAt','completed','cleanupProved','forcedCleanup','rootExitObserved','jobEmptyObserved',
       'identityRechecked','exitCode','pid','creation','failureCode','cancelled','handlesClosed'}
     for row in rows:
@@ -259,17 +279,20 @@ def public_report(binding,outer,raw,*,failure=0,observation=None,command_binding
         validate_command_observation(command_binding)
         try:validate_command_observation(command_binding,require_closed=True);command_ok=True
         except BaseException:command_ok=False
-    helper_code=None;helper_phases=None;helper_observation=None;sdk_candidates=None
+    helper_code=None;helper_phases=None;helper_observation=None;sdk_candidates=None;active_observations=None
     if raw is not None:
         helper_code=raw['failureCode']
         if not _integer(helper_code,31):raise CiFailure(4)
         helper_phases=project_helper_phases(raw['phaseResults'])
+        if 'phaseActiveObservations' not in raw:raise CiFailure(4)
+        active_observations=validate_phase_active_observations(raw['phaseActiveObservations'],len(helper_phases))
         helper_observation=validate_helper_failure_observation(raw.get('failureObservation'),raw['stage'])
         sdk_candidates=validate_sdk_candidate_observation(raw.get('sdkCandidateObservation'),raw['stage'])
-    return {'schemaVersion':5,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
+    return {'schemaVersion':6,'kind':'packaged-context-sdk-ci','binding':binding,'failureCode':failure,'failureObservation':observation,
       'commandProcessorBinding':command_binding,
       'helperFailureCode':helper_code,'helperPhaseResults':helper_phases,'helperFailureObservation':helper_observation,
       'helperSdkCandidateObservation':sdk_candidates,
+      'helperPreCleanup':active_observations,
       'sdkReportKnown':raw is not None,'sdkStage':None if raw is None else raw['stage'],
       'sdkGatePassed':bool(raw and outer and raw['sdkGatePassed'] and outer['completed'] and failure==0 and command_ok),
       'nativeSdkCompiled':None if raw is None else raw['nativeSdkCompiled'],

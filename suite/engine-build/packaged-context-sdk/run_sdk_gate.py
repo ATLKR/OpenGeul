@@ -16,13 +16,13 @@ import toolchain as tools
 ROOT=Path(__file__).resolve().parent
 
 def empty_receipt():
-    return {'schemaVersion':1,'kind':'packaged-context-sdk-negative-gate','stage':0,'failureCode':0,
+    return {'schemaVersion':2,'kind':'packaged-context-sdk-negative-gate','stage':0,'failureCode':0,
       'sdkGatePassed':False,'actualWindowsExecuted':False,'nativeSdkCompiled':False,'nativeLinked':False,
       'negativeSmokePassed':False,'actualPackageObservation':False,'qualification':False,'canService':False,
       'originalHelperHandleKnown':False,'packagedHelperLauncherImplemented':False,'watchdogVerified':False,
       'synchronousOsCallPreemptionVerified':False,'osImplicitEffectsKnown':False,'frozenV2Preserved':False,
       'pure40TestsRerun':False,'lease6TestsRerun':False,'workRootCreated':False,'codeApprovalVerified':False,
-      'commandProcessorBinding':None,'phaseResults':[],'failureObservation':None,'sdkCandidateObservation':None}
+      'commandProcessorBinding':None,'phaseResults':[],'phaseActiveObservations':[],'failureObservation':None,'sdkCandidateObservation':None}
 
 def _fresh_text(root,name,text):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,40}\.cmd',name):raise GateFailure(2)
@@ -101,8 +101,16 @@ def execute(architecture,source_bundle,work_root,*,code_admission=None,outer_sta
         def phase(argv,seconds):
             end=phase_deadline(time.monotonic(),overall,seconds)
             command_lease.verify(deadline=end)
-            row=runner.run(argv,str(root),environment,end);result['phaseResults'].append(row)
+            observation={}
+            row=runner.run(argv,str(root),environment,end,active_observation=observation)
+            result['phaseResults'].append(row)
             result['actualWindowsExecuted']=True
+            try:
+                if result['phaseActiveObservations'] is not None:
+                    result['phaseActiveObservations'].append(None)
+                    from ci_entry import validate_phase_active_observations
+                    result['phaseActiveObservations'][-1]=validate_phase_active_observations([observation],1)[0]
+            except Exception:result['phaseActiveObservations']=None
             command_lease.verify(deadline=end)
             if not row['completed']:raise GateFailure(10 if row['failureCode']==10 else 13)
         require_fresh_outputs(root,('vswhere.json',))

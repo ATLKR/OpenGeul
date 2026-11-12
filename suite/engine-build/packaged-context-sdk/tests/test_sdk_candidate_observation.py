@@ -121,9 +121,9 @@ class SdkCandidatePacketTests(unittest.TestCase):
   end=next(i for i in range(start,len(lines))if lines[i].strip()=='} $report')
   block=textwrap.dedent('\n'.join(lines[start:end+1]))+'\n'
   self.assertEqual(hashlib.sha256(block.encode()).hexdigest(),'1ec7404c97d973ee7b800ce10585a595780218f406cb257af556c3cd371ef082')
-  self.assertIn("'helperSdkCandidateObservation'",script);self.assertIn('$report.schemaVersion -ne 5 -or',script)
+  self.assertIn("'helperSdkCandidateObservation'",script);self.assertIn('$report.schemaVersion -ne 6 -or',script)
  def test_unobserved_private_report_keeps_new_field_null_and_schema5(self):
-  report=entry.public_report({},None,None,failure=5);self.assertEqual(report['schemaVersion'],5)
+  report=entry.public_report({},None,None,failure=5);self.assertEqual(report['schemaVersion'],6)
   self.assertIsNone(report['helperSdkCandidateObservation']);self.assertIsNone(report['helperPhaseResults'])
  def test_raw_candidate_failure_does_not_change_original_success_conditions(self):
   raw=fixtures.success_fixture();raw['sdkCandidateObservation']=sample()
@@ -140,10 +140,12 @@ class SdkCandidatePacketTests(unittest.TestCase):
   diag['failures']=[copy.deepcopy(failure)for _ in range(4)]
   observed=copy.deepcopy(failure['reason']);observed.update(nativeCode=12,filesystemCode=None,observedLinkCount=None)
   raw.update(sdkGatePassed=False,stage=6,failureCode=12,failureObservation=observed,sdkCandidateObservation=diag)
+  raw['phaseActiveObservations']=[{'firstRootExitCodeBeforeCleanup':4294967295,'lastRootWaitBeforeCleanup':0,'lastJobMemberCountBeforeCleanup':128}for _ in range(5)]
   outer={'completed':False,'cleanupProved':True,'forcedCleanup':False,'exitCode':2}
   top=entry.failure_observation(entry.CiFailure(5),12);top.update(sourceFrames=[{'fileCode':6,'line':100000}for _ in range(8)],sourceLocationKnown=True,sourceFramesTruncated=True)
   report=entry.public_report(entry.require_context(fixtures.environment(),'x64'),outer,raw,failure=5,observation=top,command_binding=raw['commandProcessorBinding'])
   self.assertLessEqual(len(json.dumps(report,separators=(',',':')).encode()),8192)
+  self.assertLessEqual(len(json.dumps(raw,separators=(',',':')).encode()),16384)
   self.assertFalse(report['sdkGatePassed']);self.assertTrue(report['nativeSdkCompiled']);self.assertTrue(report['nativeLinked'])
   self.assertEqual(len(report['helperPhaseResults']),5);self.assertEqual(report['helperFailureCode'],12)
  def test_worst_shape_full_success_and_truncated_failures_stay_below8192(self):

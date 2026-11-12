@@ -34,7 +34,7 @@ def phase():
 class HelperFailureObservationTests(unittest.TestCase):
     def test_unobserved_private_report_keeps_every_helper_field_null(self):
         value=entry.public_report({},None,None,failure=5)
-        self.assertEqual(value['schemaVersion'],5)
+        self.assertEqual(value['schemaVersion'],6)
         for key in ('helperFailureCode','helperPhaseResults','helperFailureObservation'):
             self.assertIsNone(value[key])
         self.assertIsNone(value['nativeSdkCompiled']);self.assertFalse(value['sdkReportKnown'])
@@ -48,7 +48,7 @@ class HelperFailureObservationTests(unittest.TestCase):
         self.assertFalse(value['sdkGatePassed']);self.assertFalse(value['qualification'])
 
     def test_partial_returned_phase_preserves_unknown_exit_identity_and_late_finish(self):
-        raw=failed_raw();raw['phaseResults']=[phase()];before=copy.deepcopy(raw)
+        raw=failed_raw();raw['phaseResults']=[phase()];raw['phaseActiveObservations']=[None];before=copy.deepcopy(raw)
         value=entry.public_report({},None,raw,failure=5)
         result=value['helperPhaseResults'][0]
         self.assertIsNone(result['exitCode']);self.assertIsNone(result['pid']);self.assertIsNone(result['creation'])
@@ -58,7 +58,7 @@ class HelperFailureObservationTests(unittest.TestCase):
 
     def test_observed_nonzero_phase_identity_and_exit_zero_remain_observations(self):
         raw=failed_raw();row=phase();row.update(rootExitObserved=True,exitCode=0,pid=123,creation=456)
-        raw['phaseResults']=[row]
+        raw['phaseResults']=[row];raw['phaseActiveObservations']=[None]
         value=entry.public_report({},None,raw,failure=5)
         self.assertEqual(value['helperPhaseResults'][0]['exitCode'],0)
         self.assertEqual(value['helperPhaseResults'][0]['pid'],123)
@@ -91,7 +91,7 @@ class HelperFailureObservationTests(unittest.TestCase):
           {'deadline':32.},{'rootExitObserved':True,'pid':1,'creation':0}, {'pid':1,'creation':0}]
         for index,delta in enumerate(changes):
             with self.subTest(case=index):
-                raw=failed_raw();raw['phaseResults']=[{**phase(),**delta}]
+                raw=failed_raw();raw['phaseResults']=[{**phase(),**delta}];raw['phaseActiveObservations']=[None]
                 with self.assertRaises(entry.CiFailure):entry.public_report({},None,raw,failure=5)
         raw=failed_raw();raw['phaseResults']=[phase()]*6
         with self.assertRaises(entry.CiFailure):entry.public_report({},None,raw,failure=5)
@@ -148,7 +148,7 @@ class HelperFailureObservationTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(fragment.encode()).hexdigest(),'4a502fc4e1de30691442e3cb2f923274052db4523d335c58c68ef5e7cb343dae')
         keys=re.search(r"\$keys = @\(([^\n]+)\)",script).group(1)
         self.assertEqual(set(re.findall(r"'([^']+)'",keys)),set(entry.public_report({},None,None)))
-        self.assertIn('$report.schemaVersion -ne 5 -or',script)
+        self.assertIn('$report.schemaVersion -ne 6 -or',script)
         self.assertNotIn('$report.schemaVersion -ne 3 -or',script)
 
     def test_actual_success_still_requires_every_existing_private_gate(self):

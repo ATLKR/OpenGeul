@@ -62,3 +62,25 @@ Those records are historical failures, not success evidence for this correction.
 The new literal-layout tests use synthetic bytes only. Actual installed shared
 header availability and Windows compile/link/negative-smoke success still need
 the next owned diagnostic run; no servicing or product qualification is granted.
+
+Raw helper protocol2 and public protocol6 add an ordinal-joined pre-cleanup
+observation array. `helperPreCleanup` is null if diagnostic storage was unavailable;
+this is unknown, not a completed phase observation. An array has exactly as many entries as the unchanged
+15-field `helperPhaseResults`. Each entry is either null (diagnostic unavailable)
+or has exactly `firstRootExitCodeBeforeCleanup` (null or uint32 except259),
+`lastRootWaitBeforeCleanup` (null,0 or258), and
+`lastJobMemberCountBeforeCleanup` (null or0..128). Three null fields mean no
+validated active-loop sample. The loop uses its existing API results and clock
+reads; cleanup snapshots never fill these fields. A first root exit does not prove
+compiler creation, compilation, the cause of failure or the time of a child-side
+batch checkpoint. These observations never participate in the original success
+gate. Current readers reject old raw/public protocol labels and missing or
+misjoined new packets instead of relabelling historical results.
+
+The optional sink accepts only a fresh plain dictionary. A malformed/unavailable
+diagnostic packet becomes null without replacing the original command result or
+post-Runner lease check. Native stdio remains NUL and the NativeApi byte sequence,
+source13, private Job,30/180-second deadlines and cleanup reserve are unchanged.
+Batch checkpoints and compiler stdout capture are not implemented: child-written
+markers would be untrusted hints and CMD return-code equivalence has not been
+executed in this portable-only candidate. Actual Windows behavior remains pending.
