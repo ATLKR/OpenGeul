@@ -215,7 +215,9 @@ class AdvancedEditCases:
         self.advanced_owned(); edit(self.page,'EQUATION-BODY'); self.page.keyboard.press('Enter')
         self.page.keyboard.press('Control+m'); self.page.keyboard.press('m')
         self.advanced_eq_dialog('x^2 + {1} over {2}')
-        verify=lambda r,script:assert_equation(r,script,body=('EQUATION-BODY',),anchor=(1,0))
+        # The pinned rhwp 0.9 source/font metrics define this new insertion frame.
+        # Independent old/new derivations are fixed in test_equation_source_geometry.
+        verify=lambda r,script:assert_equation(r,script,body=('EQUATION-BODY',),anchor=(1,0),dimensions_hu=(2900,2367))
         self.advanced_check('inserted',lambda r:verify(r,'x^2 + {1} over {2}'),body_paragraphs=['EQUATION-BODY',''],population={'equations':1})
         self.undo(); self.advanced_check('property-undo',lambda r:assert_equation(r,'',body=('EQUATION-BODY',),anchor=(1,0),dimensions_hu=(1,1)))
         self.undo(); self.advanced_check('create-undo',lambda r:self.assertEqual(r['equations'],[]),population={})
