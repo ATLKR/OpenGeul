@@ -39,6 +39,110 @@ SUPPLEMENTAL_NOTICES = {
     },
 }
 
+# Exact reviewed omissions only. Additional third-party notices do not satisfy a
+# package's missing declared-license text or change its declaration/clearance.
+REVIEWED_SOURCE_NOTICES = {
+    ('cargo', 'r-efi'): {
+        '5.3.0': {
+            'license':'MIT OR Apache-2.0 OR LGPL-2.1-or-later',
+            'manifestSha256':'dba000c0173b09b1e3b69afa42a715b5ab64355e6502ce6d9d1767c7845cf402',
+            'sourcePath':'AUTHORS',
+            'sourceSha256':'ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7',
+            'noticeSha256':'ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7',
+            'packageLicenseText':True,
+            'sourceUrl':'https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS',
+            'packageProvenance':{
+                'archiveUrl':'https://crates.io/api/v1/crates/r-efi/5.3.0/download',
+                'archiveSha256':'69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f'}},
+        '6.0.0': {
+            'license':'MIT OR Apache-2.0 OR LGPL-2.1-or-later',
+            'manifestSha256':'a021f9fb0645cc5de5770cf7f41594c1deff4b388eca933b289752aa52666829',
+            'sourcePath':'AUTHORS',
+            'sourceSha256':'d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111',
+            'noticeSha256':'d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111',
+            'packageLicenseText':True,
+            'sourceUrl':'https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS',
+            'packageProvenance':{
+                'archiveUrl':'https://crates.io/api/v1/crates/r-efi/6.0.0/download',
+                'archiveSha256':'f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf'}},
+    },
+    ('npm', 'rolldown'): {'1.2.16': {
+        'license':'MIT',
+        'manifestSha256':'525884560d75c4eecb362453e6bbf92b1618d2261ddfbb1a806f164be0813f84',
+        'sourcePath':'THIRD-PARTY-LICENSE',
+        'sourceSha256':'a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c',
+        'noticeSha256':'a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c',
+        'packageLicenseText':False,
+        'sourceUrl':'https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz',
+        'packageProvenance':{
+            'archiveUrl':'https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz',
+            'archiveIntegrity':'sha512-bWvlMpFKiTfDKfnK7FC2MPgPeWCf/Kpwsq49ApdW+FQaBZb6O6dZ4MAPbPUjp7hYQrw/RobqCzn64BRrQecGHw==',
+            'archiveMember':'package/THIRD-PARTY-LICENSE'}}},
+    ('npm', 'stackback'): {'0.0.2': {
+        'license':'MIT',
+        'manifestSha256':'4d984909b27d37d2f1a379b9cda7292a6e3a133c076df166d740a17514ac6e60',
+        'sourcePath':'formatstack.js',
+        'sourceSha256':'3c1191bd7094a36098418e7d1606e2a49e7ee25b5ddee54b0b2514ea1a43b8a7',
+        'lineRange':[1,26],
+        'noticeSha256':'b154c4cabeeb587f5cc63a41d0551ae69504460762d189a72ae141558ec5d184',
+        'packageLicenseText':False,
+        'sourceUrl':'https://registry.npmjs.org/stackback/-/stackback-0.0.2.tgz',
+        'packageProvenance':{
+            'archiveUrl':'https://registry.npmjs.org/stackback/-/stackback-0.0.2.tgz',
+            'archiveIntegrity':'sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw==',
+            'archiveMember':'package/formatstack.js'}}},
+}
+
+
+def reviewed_file(location: Path, name: str, expected: str) -> bytes:
+    relative=Path(name)
+    if relative.is_absolute() or '..' in relative.parts or '\\' in name or ':' in name:
+        raise ValueError('Reviewed notice path must remain inside its package')
+    path=location/relative
+    for component in (path,*path.parents):
+        info=component.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0) & 0x400:
+            raise ValueError('Reviewed notice input must not use aliases')
+        if component==location:break
+    if not stat.S_ISREG(path.stat().st_mode) or not path.resolve().is_relative_to(location.resolve()):
+        raise ValueError('Reviewed notice input must be a regular package file')
+    with path.open('rb') as stream:data=stream.read(2_000_001)
+    if len(data)>2_000_000 or hashlib.sha256(data).hexdigest()!=expected:
+        raise ValueError('Reviewed notice source/manifest differs from the exact reviewed bytes')
+    data.decode('utf-8')
+    return data
+
+
+def collect_reviewed_notices(ecosystem: str, item: dict, location: Path, output: Path) -> list[dict]:
+    versions=REVIEWED_SOURCE_NOTICES.get((ecosystem,item['name']))
+    if versions is None:return []
+    pin=versions.get(item['version'])
+    if pin is None or item.get('license')!=pin['license']:
+        raise ValueError('Reviewed notice package version/license requires review')
+    manifest='Cargo.toml' if ecosystem=='cargo' else 'package.json'
+    reviewed_file(location,manifest,pin['manifestSha256'])
+    data=reviewed_file(location,pin['sourcePath'],pin['sourceSha256'])
+    line_range=pin.get('lineRange')
+    if line_range is not None:
+        lines=data.splitlines(keepends=True)
+        if (len(line_range)!=2 or any(type(n) is not int for n in line_range)
+                or line_range[0]!=1 or not 1<=line_range[1]<=len(lines)):
+            raise ValueError('Reviewed notice comment range is invalid')
+        selected=lines[:line_range[1]]
+        if not all(line.startswith(b'//') for line in selected):
+            raise ValueError('Reviewed notice range must contain only the leading license comment')
+        data=b''.join(selected)
+    if hashlib.sha256(data).hexdigest()!=pin['noticeSha256']:
+        raise ValueError('Reviewed notice output differs from the complete reviewed notice')
+    filename='reviewed/'+Path(pin['sourcePath']).name+'.txt'
+    destination=output/filename;destination.parent.mkdir(parents=True,exist_ok=True)
+    destination.write_bytes(data)
+    record={'sourcePath':pin['sourcePath'],'sourceSha256':pin['sourceSha256'],
+            'sha256':pin['noticeSha256'],'file':filename,'sourceUrl':pin['sourceUrl'],
+            'packageProvenance':pin['packageProvenance'],'packageLicenseText':pin['packageLicenseText']}
+    if line_range is not None:record['sourceLineRange']=list(line_range)
+    return [record]
+
 
 def collect_supplements(item: dict, location: Path, output: Path) -> list[dict]:
     pin=SUPPLEMENTAL_NOTICES.get(item['name'])
@@ -104,6 +208,10 @@ def collect_cargo(packages: list[dict], out: Path) -> list[dict]:
         if supplements:
             record['supplementalNotices']=supplements
             texts.extend(entry['file'] for entry in supplements)
+        reviewed=collect_reviewed_notices('cargo',item,location,out/ident)
+        if reviewed:
+            record['reviewedNotices']=reviewed
+            texts.extend(entry['file'] for entry in reviewed if entry['packageLicenseText'])
         if item['name'] in RUST_SKIA_NAMES:
             if item['version'] != RUST_SKIA_VERSION or item.get('license') != 'MIT':
                 raise ValueError('Shipped rust-skia version/license changed; review its exact notice before packaging')
@@ -142,9 +250,13 @@ def main():
         if not isinstance(name,str) or not isinstance(version,str): continue
         ident=re.sub(r'[^A-Za-z0-9._-]','_','npm-'+name+'-'+version)
         texts=collect(manifest.parent,out/ident)
-        inventory.append({'ecosystem':'npm','name':name,'version':version,'declaredLicense':item.get('license'),'texts':texts})
+        record={'ecosystem':'npm','name':name,'version':version,'declaredLicense':item.get('license'),'texts':texts}
+        additional=collect_reviewed_notices('npm',item,manifest.parent,out/ident)
+        if additional:record['additionalNotices']=additional
+        inventory.append(record)
     (out/'inventory.json').write_text(json.dumps({'status':'requires-human-review','packages':inventory},ensure_ascii=False,indent=2),encoding='utf-8')
     missing=sum(not x['texts'] for x in inventory)
     print(f'Collected {len(inventory)} dependency records; {missing} need missing-license-text review. This does not clear release licensing.')
+    print(f'Collected {sum(len(x.get("additionalNotices",[])) for x in inventory)} additional third-party notices; these do not fill a missing declared package license.')
 
 if __name__=='__main__': main()
