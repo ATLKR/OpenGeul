@@ -514,7 +514,12 @@ def _source_new_dotnet_pins(manifest: dict) -> list:
 
 
 def _source_new_x86_crt_pins(manifest):
-    from suite.payload import SOURCE_X86_COMPANION_CRT_PINS
+    try:
+        from suite.payload import SOURCE_X86_COMPANION_CRT_PINS
+    except ModuleNotFoundError as error:
+        if error.name not in ('suite','suite.payload'):
+            raise
+        from payload import SOURCE_X86_COMPANION_CRT_PINS
     expected=dict(condition='WNT_X86_64_MSC',sources=SOURCE_X86_COMPANION_CRT_PINS)
     if not _source_exact(manifest.get('windowsX86CompanionStaticRuntime'),expected):
         raise ValueError('New x86 static runtime source descriptor differs')
