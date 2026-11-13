@@ -267,12 +267,16 @@ def checkpoint_diagnostic(result, *, phase, saved_sha256, input_sha256, helper_s
         return value[:128] if isinstance(value,str) else value
     def paragraphs(rows):
         return [text(value) for value in rows[:8]]
+    def shape_size(row):
+        size=row.get('size') if type(row) is dict else None
+        return list(size) if type(size) in (list,tuple) and len(size)==2 and all(type(value) is int for value in size) else None
     population={key:len(result[key]) for key in
                 ('tables','fields','equations','notes','headers','footers','shapes')}
     record={'phase':phase,'savedSha256':saved_sha256,'inputSha256':input_sha256,
             'helperSha256':helper_sha256,'expectedCheckpoint':expected,
             'inspectionLimits':{'textCharacters':128,'paragraphsPerOwner':8,'tables':4,'cellsPerTable':16,'controlRows':8,'utf8Bytes':64*1024},
-            'observed':{'population':population,'pages':result['pages'][:4],
+            'observed':{'population':population,'shapeSizesHu':[shape_size(row) for row in result['shapes'][:8]],
+                'pages':result['pages'][:4],
                 'breaks':result['breaks'][:32],
                 'bodyParagraphs':{path:paragraphs(rows) for path,rows in result['paragraphs'].items()
                     if re.fullmatch(r's\d+/body',path)},
