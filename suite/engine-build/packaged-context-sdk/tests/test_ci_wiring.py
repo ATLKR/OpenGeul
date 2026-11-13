@@ -188,7 +188,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(uploads[0]['with']['path'],'.work/packaged-context-sdk-public/${{ matrix.os }}/report.numeric.json')
         self.assertEqual(uploads[1]['with']['path'].splitlines(),[
           '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/controller.numeric.json',
-          '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/batch-hints.numeric.json'])
+          '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/source-assertion.json'])
         for upload in uploads:
             self.assertEqual(upload['with']['retention-days'],1)
             self.assertEqual(upload['with']['if-no-files-found'],'error')

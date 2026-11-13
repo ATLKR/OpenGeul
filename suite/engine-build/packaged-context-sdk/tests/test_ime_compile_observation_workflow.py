@@ -86,23 +86,26 @@ class CompileObservationWorkflowTests(unittest.TestCase):
   self.assertTrue(u['with']['path']=='.work/ime-finalization-compile/report.numeric.json'and u['with']['retention-days']==1 and u['with']['if-no-files-found']=='error')
   self.assertTrue('permissions'not in self.job and not self.job.get('continue-on-error',False)and all(not s.get('continue-on-error',False)for s in self.job['steps']))
   expected={'.work/packaged-context-sdk-public/${{ matrix.os }}/report.numeric.json':'f2739c9168c824d91fae588b4c2b3163d14201ac8ac5f09df6778a83fb1461e7',
-    '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/controller.numeric.json\n.work/packaged-context-sdk-batch-public/${{ matrix.os }}/batch-hints.numeric.json\n':'ea16de6365ef4e3a45abd4c840b969ba7b9c8b54e2deb12e3a01499d9407e030'}
+    '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/controller.numeric.json\n.work/packaged-context-sdk-batch-public/${{ matrix.os }}/source-assertion.json\n':'ea16de6365ef4e3a45abd4c840b969ba7b9c8b54e2deb12e3a01499d9407e030'}
   sdk_uploads=[s for s in self.w['jobs']['packaged-context-sdk']['steps']if s.get('uses','').startswith('actions/upload-artifact@')]
   self.assertEqual(len(sdk_uploads),len(expected));self.assertEqual({s['with']['path']for s in sdk_uploads},set(expected))
   for upload in sdk_uploads:
    canonical=copy.deepcopy(upload)
    if upload['with']['path']!='.work/packaged-context-sdk-public/${{ matrix.os }}/report.numeric.json':
-    clause="contains(github.event.head_commit.message, '[sdk-batch-codes]')"
+    clause="contains(github.event.head_commit.message, '[sdk-assert]')"
     historical="contains(github.event.head_commit.message, '[sdk-batch-hints]')"
     self.assertEqual(canonical['if'].count(clause),1)
     self.assertNotIn(historical,canonical['if'])
     canonical['if']=canonical['if'].replace(clause,historical,1)
+    canonical['with']['path']=canonical['with']['path'].replace('source-assertion.json','batch-hints.numeric.json')
+    self.assertEqual(canonical['with']['name'],'source-assert-${{ matrix.os }}')
+    canonical['with']['name']='b-hints-${{ matrix.os }}'
    observed=hashlib.sha256(json.dumps(canonical,sort_keys=True,separators=(',',':')).encode()).hexdigest()
    self.assertEqual(observed,expected[upload['with']['path']])
  def test_sdk_artifact_separation_rejects_missing_duplicate_mixed_and_unknown_outputs(self):
   original=self.w
   try:
-   for mode in('missing-normal','duplicate-normal','mixed-path','unsafe-admission','unknown-output','legacy-b1-marker','duplicate-b2-marker'):
+   for mode in('missing-normal','duplicate-normal','mixed-path','unsafe-admission','unknown-output','legacy-b1-marker','legacy-b3-marker','duplicate-b2-marker'):
     self.w=copy.deepcopy(original);steps=self.w['jobs']['packaged-context-sdk']['steps']
     uploads=[s for s in steps if s.get('uses','').startswith('actions/upload-artifact@')]
     normal,batch=uploads
@@ -110,8 +113,9 @@ class CompileObservationWorkflowTests(unittest.TestCase):
     elif mode=='duplicate-normal':steps.append(copy.deepcopy(normal))
     elif mode=='mixed-path':batch['with']['path']=normal['with']['path']+'\n'+batch['with']['path']
     elif mode=='unsafe-admission':batch['if']=batch['if'].replace("== '1'","!= '2'")
-    elif mode=='legacy-b1-marker':batch['if']=batch['if'].replace('[sdk-batch-codes]','[sdk-batch-hints]')
-    elif mode=='duplicate-b2-marker':batch['if']+=" && contains(github.event.head_commit.message, '[sdk-batch-codes]')"
+    elif mode=='legacy-b1-marker':batch['if']=batch['if'].replace('[sdk-assert]','[sdk-batch-hints]')
+    elif mode=='legacy-b3-marker':batch['if']=batch['if'].replace('[sdk-assert]','[sdk-batch-codes]')
+    elif mode=='duplicate-b2-marker':batch['if']+=" && contains(github.event.head_commit.message, '[sdk-assert]')"
     else:
      unknown=copy.deepcopy(batch);unknown['with']['path']='.work/unreviewed/report.numeric.json';steps.append(unknown)
     with self.subTest(mode=mode),self.assertRaises(AssertionError):self.test_fixed_numeric_artifact_and_original_sdk_artifact_remain_separate()

@@ -86,19 +86,19 @@ Child-written markers in the separate opt-in path below are untrusted hints;
 actual CMD return-code equivalence and Windows behavior remain unverified.
 
 
-## Explicit B3 first-C2338 numeric detail
+## Explicit source-only B4 assertion observation
 
-The exact SDK branch opts in with `[sdk-batch-codes]`. This replaces the current
-B1 workflow route. B1 source2ac and B2 sourcebd2894, their approved manifests,
-strict readers and actual ZIPs remain immutable historical evidence. Historical
+The exact SDK branch opts in with `[sdk-assert]`. This replaces the current
+B3 workflow route. B1 source2ac, B2 sourcebd2894 and B3 source1090, their approved
+manifests, strict readers and actual ZIPs remain immutable historical evidence. Historical
 receipts are not relabelled or selected from their own version fields. Without
 the explicit marker the normal SDK
 execution, public protocol6 and original one-file artifact retain their behavior.
-B3 uses separate schema3 and `--instrumented-batch-codes`; its verifier is
-`--verify-batch-codes-only` with the same architecture/three expected source-pin
+B4 uses source-only kind/schema4 and `--source-assert`; its verifier is
+`--verify-source-assert-only` with the same architecture/three expected source-pin
 options. The verifier's separate five-field response remains schema1.
 
-B3 retains only two literal private leaves, `sdk-port.stdout` and `sdk-port.stderr`,
+B4 retains only two literal private leaves, `sdk-port.stdout` and `sdk-port.stderr`,
 for the first port compile at phase3. The parent exclusively precreates ordinary
 single-link files, records their original device/file IDs and closes both FDs
 before CMD starts. Only then may the original tool command append redirections.
@@ -109,7 +109,7 @@ not prove Windows redirection sharing or truncation behavior; the next actual
 run must observe it. A changed or unsupported identity is unavailable.
 
 After the original postlease/command result and proved root exit, empty Job,
-generation/cleanup and4handle closes, B3 may read the fixed pair within the same
+generation/cleanup and4handle closes, B4 may read the fixed pair within the same
 original overall deadline. Forced cleanup does not prevent reading when that
 retirement is proved. Each file is checked against its original dev/ino and
 stable path/open-handle/final metadata, including single-link/no-reparse guards.
@@ -121,12 +121,13 @@ are not made preemptible by before/after deadline checks.
 Only the existing pure C/D/LNK projector is reused, with the fixed four SDK source
 roles. Its AST differs only in function and FILES-symbol names. The old IME
 three-case/nine-pin collector and its PIPE/60-second capture path are untouched.
-B3 reads at most65536bytes per stream,128KiB total, decodes strict UTF8 and retains
+B4 reads at most65536bytes per stream,128KiB total, decodes strict UTF8 and retains
 at most32 numeric descriptors. The existing65536-character/512-line/4096-line-
 length parser limits remain. No chcp, VSLANG or warning-policy change is made.
 Read cap is not a disk-write quota. Raw files stay private, are never printed or
 included in artifacts, and may remain in the owned temporary root until runner
-cleanup. No paths, argv, environment, source text or error prose is published.
+cleanup. No paths, argv, environment, raw source files or full error streams are published.
+The source-only assertion record below is the sole bounded text exception.
 
 `firstC2338Detail` is null unless the published descriptors contain C2338. One
 numeric row then binds the first C2338's one-based `diagnosticOrdinal` and
@@ -143,6 +144,28 @@ ordinal/stream with slot/line/class0; cancellation keeps its original priority.
 This extra analysis reuses the already-read strings and adds no file I/O,
 Native API, phase, capture pair, SDK metadata collection or time allowance.
 
+`firstC2338SourceAssertion` is a source-only optional four-key record:
+`diagnosticOrdinal`, `streamCode`, `statusCode`, `text`. It binds the same first
+C2338. Only status1 carries the original one-line body after the recognized
+`C2338:` prefix, without truncation or substring redaction. Only printable ASCII0x20..0x7e is accepted, still bounded to512 UTF8 bytes.
+Empty2, oversize3, non-ASCII/control4, path/URL5, credential/secret/PEM
+pattern6 and optional-fault8 statuses have text=null; status9 drops only this
+body if the complete serialized packet would exceed8192 bytes. Rejected text,
+its substrings, hash or size are not published. The original numeric projection
+is independently revalidated and preserved on body-only failure. The independent
+reader rejects unsafe/tampered body packets rather than repairing them.
+
+This record is restricted to the admitted fixed compiler sources, authenticated
+SDK selection and freshly constructed finite environment. It does not enter
+Writer/Calc runtime IPC, open documents or collect other compiler diagnostics.
+Transitive installed headers/child output are not all authenticated public text;
+the record remains untrusted. Lexical screens are not privacy certification or
+proof that all possible credentials are absent. C++/WinRT and x64/ARM64 public
+type tokens are narrow slash exceptions; arbitrary paths/URLs are rejected.
+LF/CRLF line boundaries are handled explicitly so other controls cannot be
+silently removed by splitlines(). Original cancellation/primary/retirement and
+the overall deadline still dominate optional text analysis/publication.
+
 `scanComplete` means only that the projector scanned the stable bytes that were
 read. It does not prove complete compiler output, compiler creation, execution,
 termination history or object generation. After forced cleanup some output may
@@ -152,10 +175,12 @@ return hint never change `compilerInvocationProved`, `originalSdkGateExecuted`,
 report SHA stays null. COFF/link/negative checks and the intentional nonacceptance
 terminal retain their independent conditions.
 
-Only the two fixed B numeric JSON files are uploaded, each at most8192bytes.
-The independent reader requires exact B3 keys/types, source/run/attempt/approval
+Only controller.numeric.json and source-assertion.json are uploaded in the
+source-assert-* artifact, each at most8192bytes. The latter can contain the
+explicit untrusted assertion text and is not a numeric-only artifact.
+The independent reader requires exact source-only B4 keys/types, source/run/attempt/approval
 binding, actual controller-byte SHA and matching retired phase for every successful
 stream, including mixed success/unavailable packets. Missing/unknown fields,
 bool-as-int, wrong versions, aliases, stale identities and forged authority reject.
-Old B1/B2 and normal SDK schemas cannot pass as B3. Portable synthetic results are not
+Old B1/B2/B3 and normal SDK schemas cannot pass as B4. Portable synthetic results are not
 actual Windows, compiler, package-context or customer acceptance evidence.

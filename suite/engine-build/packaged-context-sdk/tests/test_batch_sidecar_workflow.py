@@ -13,7 +13,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[2]
-MARKER = '[sdk-batch-codes]'
+MARKER = '[sdk-assert]'
 NOT_ADMITTED, ADMITTED, CANCELLED = '0', '1', '2'
 
 
@@ -61,7 +61,7 @@ class BatchSidecarWorkflowTests(unittest.TestCase):
             found = [step for step in self.job['steps'] if step.get('run', '').strip() == 'exit 1']
         else:
             found = [step for step in self.job['steps']
-                     if step.get('id') == ('B' if name == 'sdk-batch-codes' else name)]
+                     if step.get('id') == ('B' if name == 'sdk-assert' else name)]
         self.assertEqual(len(found), 1, 'One explicit B workflow action is required')
         return found[0]
 
@@ -89,18 +89,18 @@ class BatchSidecarWorkflowTests(unittest.TestCase):
 
     def test_explicit_marker_selects_b_instead_of_default_sdk(self):
         normal = self.step('sdk-compile')
-        instrumented = self.step('sdk-batch-codes')
+        instrumented = self.step('sdk-assert')
         for message, expected in (('', False), ('ordinary source repair', False),
-                                  ('[ime-finalization-compile]', False), ('[sdk-batch-hints]', False),
-                                  ('[sdk-batch-codes-other]', False), ('[sdk-batch-codes', False),
-                                  ('sdk-batch-codes', False), (MARKER, True), (MARKER.upper(), True),
+                                  ('[ime-finalization-compile]', False), ('[sdk-batch-hints]', False), ('[sdk-batch-codes]', False),
+                                  ('[sdk-assert-other]', False), ('[sdk-assert', False),
+                                  ('sdk-assert', False), (MARKER, True), (MARKER.upper(), True),
                                   ('observe ' + MARKER + ' only', True)):
             with self.subTest(case=expected, messageRole=len(message)):
                 self.assertIs(selected(instrumented, message=message), expected)
                 self.assertIs(selected(normal, message=message), not expected)
 
     def test_cancelled_b_does_not_start_the_run_upload_or_terminal(self):
-        for name in ('sdk-batch-codes', 'sdk-batch-artifact', 'sdk-batch-terminal'):
+        for name in ('sdk-assert', 'sdk-batch-artifact', 'sdk-batch-terminal'):
             step = self.step(name)
             self.assertFalse(selected(step, message=MARKER, cancelled=True,
                                       prior_success=False, eligible=ADMITTED))
@@ -114,7 +114,8 @@ class BatchSidecarWorkflowTests(unittest.TestCase):
         paths = upload['with']['path'].splitlines()
         self.assertEqual(paths, [
             '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/controller.numeric.json',
-            '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/batch-hints.numeric.json'])
+            '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/source-assertion.json'])
+        self.assertEqual(upload['with']['name'], 'source-assert-${{ matrix.os }}')
         self.assertEqual(upload['with']['retention-days'], 1)
         self.assertEqual(upload['with']['if-no-files-found'], 'error')
         self.assertEqual(upload['uses'], 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02')
@@ -139,14 +140,14 @@ class BatchSidecarWorkflowTests(unittest.TestCase):
                                               prior_success=success, eligible=CANCELLED, outcome='failure'))
 
     def test_b_invokes_separate_admitted_controller_and_verifier_without_mode_inference(self):
-        step = self.step('sdk-batch-codes')
+        step = self.step('sdk-assert')
         run = step['run']
         self.assertEqual(step['timeout-minutes'], 4)
-        self.assertEqual(run.count('--instrumented-batch-codes'), 1)
-        self.assertEqual(run.count('--verify-batch-codes-only'), 1)
+        self.assertEqual(run.count('--source-assert'), 1)
+        self.assertEqual(run.count('--verify-source-assert-only'), 1)
         self.assertNotIn('--instrumented-batch-hints', run)
         self.assertNotIn('--verify-batch-sidecar-only', run)
-        self.assertLess(run.index('--instrumented-batch-codes'), run.index('--verify-batch-codes-only'))
+        self.assertLess(run.index('--source-assert'), run.index('--verify-source-assert-only'))
         for option in ('--architecture', '--expected-entry-sha256', '--expected-bootstrap-sha256',
                        '--expected-approved-manifest-sha256'):
             self.assertIn(option, run)
@@ -156,20 +157,20 @@ class BatchSidecarWorkflowTests(unittest.TestCase):
         self.assertRegex(run, r'exit \$c\s*$')
 
     def test_b_controller_exit_is_not_overwritten_by_the_verifier(self):
-        run = self.step('sdk-batch-codes')['run']
+        run = self.step('sdk-assert')['run']
         self.assertEqual(len(re.findall(r'\$c\s*=\s*\$LASTEXITCODE', run)), 1)
         self.assertIn('$z = $LASTEXITCODE', run)
-        self.assertLess(run.index('$c = $LASTEXITCODE'), run.index('--verify-batch-codes-only'))
-        tail = run[run.index('--verify-batch-codes-only'):]
+        self.assertLess(run.index('$c = $LASTEXITCODE'), run.index('--verify-source-assert-only'))
+        tail = run[run.index('--verify-source-assert-only'):]
         self.assertEqual(re.findall(r'\$c\s*=\s*([0-9]+)', tail), ['130'])
         self.assertIn("if($z-in$x){$ok='2';if($c-eq0){$c=130};throw}", tail)
 
     def test_b2_preserves_b1_run_except_two_exact_prefixes_and_external_pins(self):
-        run = self.step('sdk-batch-codes')['run']
-        self.assertEqual(run.count('--instrumented-batch-codes'), 1)
-        self.assertEqual(run.count('--verify-batch-codes-only'), 1)
-        canonical = run.replace('--instrumented-batch-codes', '--instrumented-batch-hints', 1)
-        canonical = canonical.replace('--verify-batch-codes-only', '--verify-batch-sidecar-only', 1)
+        run = self.step('sdk-assert')['run']
+        self.assertEqual(run.count('--source-assert'), 1)
+        self.assertEqual(run.count('--verify-source-assert-only'), 1)
+        canonical = run.replace('--source-assert', '--instrumented-batch-hints', 1)
+        canonical = canonical.replace('--verify-source-assert-only', '--verify-batch-sidecar-only', 1)
         pins = list(re.finditer(r"\$p='[0-9a-f]{64}','[0-9a-f]{64}','[0-9a-f]{64}'", canonical))
         self.assertEqual(len(pins), 1)
         start, end = pins[0].span()
@@ -222,7 +223,7 @@ class BatchSidecarWorkflowTests(unittest.TestCase):
             return record
 
     def test_actual_powershell_parser_accepts_the_whole_new_run(self):
-        run = self.step('sdk-batch-codes')['run']
+        run = self.step('sdk-assert')['run']
         body = "$t=$null;$e=$null;$null=[System.Management.Automation.Language.Parser]::ParseInput(" + \
             "'" + run.replace("'", "''") + "',[ref]$t,[ref]$e);@{errors=$e.Count}|ConvertTo-Json -Compress"
         self.assertEqual(self.powershell(body), {'errors': 0})
@@ -235,7 +236,7 @@ class BatchSidecarWorkflowTests(unittest.TestCase):
 
     def observe_verifier(self, payload, *, controller=2, verifier=0, output_fault=False,
                          actual_exit=False):
-        run = self.step('sdk-batch-codes')['run']
+        run = self.step('sdk-assert')['run']
         fragment = run.split('$c = $LASTEXITCODE;', 1)[1]
         self.assertTrue(fragment.endswith('exit $c\n'))
         fragment = fragment.removesuffix('exit $c\n')

@@ -302,8 +302,42 @@ def project_first_c2338_detail(stdout,stderr,projection,sdk_paths):
               line=int(line)if slot else 0,assertionClass=classes[0]if len(classes)==1 else 0)
     return None
 
+def project_source_assertion(stdout,stderr,projection):
+    """Source-only first assertion body; never a general error/console collector."""
+    from ci_entry import source_assertion_status
+    first=next(((index,row)for index,row in enumerate(projection['diagnostics'],1)
+      if row['kind']==1 and row['number']==2338),None)
+    if first is None:return None
+    ordinal,target=first;seen=0
+    value=dict(diagnosticOrdinal=ordinal,streamCode=target['streamCode'],statusCode=8,text=None)
+    # The unchanged numeric parser uses splitlines(). Do not bind a later LF row
+    # to its ordinal if any other line separator can change that row sequence.
+    if any(type(text)is str and re.search(r'[\v\f\x1c-\x1e\x85\u2028\u2029]|\r(?!\n)',text[:65536])for text in(stdout,stderr)):
+        value['statusCode']=4;return value
+    located=re.compile(r'^(.*?)\(([1-9][0-9]{0,6})(?:,[1-9][0-9]{0,6})?\)\s*:\s*([^:\r\n]{1,64}?)\s+(C|D|LNK)([0-9]{4})\s*:')
+    driver=re.compile(r'^(?:[^:()\r\n]{1,64}\s*:\s*)?([^:()\r\n]{1,64}?)\s+(C|D|LNK)([0-9]{4})\s*:')
+    for stream,text in enumerate((stdout,stderr),1):
+        if type(text)is not str:continue
+        lines=text[:65536].split('\n')
+        for index,row in enumerate(lines[:512]):
+            if index<len(lines)-1 and row.endswith('\r'):row=row[:-1]
+            if len(row)>4096:continue
+            match=located.match(row)
+            if match:_,_,_,kind,number=match.groups()
+            else:
+                match=driver.match(row)
+                if not match:continue
+                _,kind,number=match.groups()
+            seen+=1
+            if seen!=ordinal:continue
+            if stream!=target['streamCode']or kind!='C'or int(number)!=2338:return value
+            body=row[match.end():];status=source_assertion_status(body)
+            value.update(statusCode=status,text=body if status==1 else None)
+            return value
+    return value
+
 class PortCompilerCapture:
-    """B3 port-only private files; these observations have no compiler authority."""
+    """Source-only port private files; these observations have no compiler authority."""
     LEAVES=('sdk-port.stdout','sdk-port.stderr')
     def __init__(self,root,deadline,*,clock=time.monotonic):
         self.root=Path(root);self.deadline=deadline;self.clock=clock
@@ -320,9 +354,9 @@ class PortCompilerCapture:
         except Exception:self.sdk_paths={}
     def remaining(self):
         if self.clock()>=self.deadline:raise GateFailure(10)
-    def packet(self,statuses,counts=None,projection=None,detail=None):
+    def packet(self,statuses,counts=None,projection=None,detail=None,assertion=None):
         return dict(phaseCode=3,prepared=self.prepared,streamStatus=statuses,
-          streamBytes=[None,None]if counts is None else counts,projection=projection,firstC2338Detail=detail)
+          streamBytes=[None,None]if counts is None else counts,projection=projection,firstC2338Detail=detail,firstC2338SourceAssertion=assertion)
     def prepare(self):
         if self.attempted:return False
         self.attempted=True;pending=sys.exc_info()[1]
@@ -411,7 +445,10 @@ class PortCompilerCapture:
                     observed=project_first_c2338_detail(values[0],values[1],value,self.sdk_paths)
                     if observed is not None:detail=observed
                 except Exception:pass
-                self.remaining();return self.packet(statuses,counts,value,detail)
+                assertion=None if detail is None else dict(diagnosticOrdinal=detail['diagnosticOrdinal'],streamCode=detail['streamCode'],statusCode=8,text=None)
+                try:assertion=project_source_assertion(values[0],values[1],value)
+                except Exception:pass
+                self.remaining();return self.packet(statuses,counts,value,detail,assertion)
             return self.packet(statuses,counts)
         except BaseException as error:
             if isinstance(error,(KeyboardInterrupt,SystemExit)):
@@ -425,7 +462,7 @@ class BatchObservation:
         if type(machine) is not int or machine not in tools.MACHINES.values() or type(manifest) is not str or not re.fullmatch('[0-9a-f]{64}',manifest):raise GateFailure(2)
         self.root=Path(root);self.deadline=deadline;self.clock=clock;self.cancelled=False;self.reason=0;self.enabled={}
         self.capture=PortCompilerCapture(self.root,deadline,clock=clock)
-        self.value={'schemaVersion':3,'kind':'sdk-batch-compiler-private','mode':'instrumented-batch-codes',
+        self.value={'schemaVersion':4,'kind':'sdk-source-assert-private','mode':'source-assert',
           'architectureCode':machine,'approvedCodeManifestSha256':manifest,'expectedSourceInputsSha256':tools.SOURCE_INPUTS_SHA,
           'originalSdkGateExecuted':False,'acceptanceEligible':False,'qualification':False,'canService':False,
           'childWritable':True,'authority':False,'compilerInvocationProved':False,
@@ -511,7 +548,7 @@ def _batch_collect_preserving(tracker,phase,row):
 
 def empty_batch_receipt():
     value=empty_receipt()
-    value.update(schemaVersion=3,kind='sdk-batch-compiler-helper',mode='instrumented-batch-codes',
+    value.update(schemaVersion=4,kind='sdk-source-assert-helper',mode='source-assert',
       originalSdkGateExecuted=False,acceptanceEligible=False,sourceInputsVerified=False,batchObservation=None,batchUnavailableReasonCode=7)
     for old,new in (('sdkGatePassed','instrumentedChecksPassed'),('nativeSdkCompiled','instrumentedPortObjectVerified'),
       ('nativeLinked','instrumentedLinkVerified'),('negativeSmokePassed','instrumentedNegativeSmokePassed')):

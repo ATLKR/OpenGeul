@@ -15,25 +15,25 @@ import run_sdk_gate as gate
 import ci_entry as entry
 import test_ci_wiring as fixtures
 
-MODE='instrumented-batch-codes'
+MODE='source-assert'
 INPUTS='369bfbf3caaf51867e9dc5b330ad0f8206fa1c04e4f7378575c6922d055bbb04'
 FLAGS=dict(originalSdkGateExecuted=False,acceptanceEligible=False,qualification=False,canService=False)
 
 def binding():return entry.require_context(fixtures.environment(),'x64')
 def controller():
-    return dict(schemaVersion=3,kind='sdk-batch-compiler-controller',mode=MODE,binding=binding(),
+    return dict(schemaVersion=4,kind='sdk-source-assert-controller',mode=MODE,binding=binding(),
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,originalSdkReportSha256=None,
       instrumentedStage=3,failureCode=5,helperFailureCode=10,cancelled=False,instrumentedChecksPassed=False,
       sourceInputsVerified=True,envelopeKnown=True,envelopeCompleted=False,envelopeCleanupProved=True,
       envelopeForcedCleanup=False,envelopeExitCode=2,helperPhaseResults=[],helperPreCleanup=[],
       failureObservation=None,**FLAGS)
 def private():
-    return dict(schemaVersion=3,kind='sdk-batch-compiler-private',mode=MODE,architectureCode=0x8664,
+    return dict(schemaVersion=4,kind='sdk-source-assert-private',mode=MODE,architectureCode=0x8664,
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,
       canary=dict(statusCode=0,reasonCode=1,returns=None),phases=[],compilerDiagnostics=None,childWritable=True,
       authority=False,compilerInvocationProved=False,**FLAGS)
 def sidecar(raw):
-    return dict(schemaVersion=3,kind='sdk-batch-compiler-sidecar',mode=MODE,binding=binding(),
+    return dict(schemaVersion=4,kind='sdk-source-assert-sidecar',mode=MODE,binding=binding(),
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,originalSdkReportSha256=None,
       controllerReceiptSha256=hashlib.sha256(raw).hexdigest(),unavailableReasonCode=0,
       observation=private(),childWritable=True,authority=False,compilerInvocationProved=False,**FLAGS)
@@ -236,7 +236,7 @@ class InstrumentedDriverTests(unittest.TestCase):
             return wiring.CommandLeaseWiringTests().helper(**changes)
     def test_unavailable_canary_stays_instrumented_without_normal_success_label(self):
         events,lease,result=self.helper()
-        self.assertEqual(result['kind'],'sdk-batch-compiler-helper')
+        self.assertEqual(result['kind'],'sdk-source-assert-helper')
         self.assertEqual(result['mode'],MODE);self.assertFalse(result['originalSdkGateExecuted'])
         self.assertNotIn('sdkGatePassed',result);self.assertNotIn('nativeSdkCompiled',result)
         self.assertTrue(result['instrumentedChecksPassed']);self.assertFalse(result['qualification'])
@@ -304,18 +304,18 @@ class BatchPublicationTests(unittest.TestCase):
             root=Path(temporary);value=controller();self.assertTrue(publish(root,value,private(),deadline=10.,clock=lambda:1.))
             out=verify(root,binding(),'1'*64);self.assertTrue(out['admitted'])
             self.assertEqual(out['controllerSha256'],hashlib.sha256((root/'controller.numeric.json').read_bytes()).hexdigest())
-            self.assertEqual({p.name for p in root.iterdir()},{'controller.numeric.json','batch-hints.numeric.json'})
+            self.assertEqual({p.name for p in root.iterdir()},{'controller.numeric.json','source-assertion.json'})
     def test_corrupt_private_data_is_explicit_unavailable_not_completed_proof(self):
         publish=self.api('batch_publish');verify=self.api('verify_batch_files')
         with tempfile.TemporaryDirectory()as temporary:
             root=Path(temporary);self.assertTrue(publish(root,controller(),{'unproved':True},deadline=10.,clock=lambda:1.))
-            value=json.loads((root/'batch-hints.numeric.json').read_bytes());self.assertIsNone(value['observation'])
+            value=json.loads((root/'source-assertion.json').read_bytes());self.assertIsNone(value['observation'])
             self.assertEqual(value['unavailableReasonCode'],4);self.assertTrue(verify(root,binding(),'1'*64)['admitted'])
     def test_manual_missing_partial_duplicate_or_wrong_join_is_rejected(self):
         publish=self.api('batch_publish');verify=self.api('verify_batch_files')
         for mode in('missing','partial','duplicate','hash','bool'):
             with tempfile.TemporaryDirectory()as temporary:
-                root=Path(temporary);publish(root,controller(),private(),deadline=10.,clock=lambda:1.);p=root/'batch-hints.numeric.json';v=json.loads(p.read_bytes())
+                root=Path(temporary);publish(root,controller(),private(),deadline=10.,clock=lambda:1.);p=root/'source-assertion.json';v=json.loads(p.read_bytes())
                 if mode=='missing':p.unlink()
                 elif mode=='partial':p.write_bytes(b'{')
                 elif mode=='duplicate':p.write_bytes(b'{"schemaVersion":1,'+p.read_bytes()[1:])
@@ -374,7 +374,7 @@ class BatchBootstrapTests(unittest.TestCase):
         with mock.patch.object(launch,'sys',fake_sys),mock.patch.object(launch,'admit_code',return_value=object()),mock.patch.object(launch,'admit_batch_code',return_value=object(),create=True),mock.patch.object(launch.importlib,'import_module',return_value=fake):
             # Avoid preloaded gate-module rejection without reading environment.
             removed={k:sys.modules.pop(k)for k in('run_sdk_gate','supervisor','toolchain','owned_job_win32')if k in sys.modules}
-            try:code=launch.main(['--approved-manifest',str(ROOT/'approved-sdk-code.json'),'--expected-approved-manifest-sha256','1'*64,'--instrumented-batch-codes','--architecture','x64'])
+            try:code=launch.main(['--approved-manifest',str(ROOT/'approved-sdk-code.json'),'--expected-approved-manifest-sha256','1'*64,'--source-assert','--architecture','x64'])
             finally:sys.modules.update(removed)
         self.assertEqual(code,130);self.assertEqual(fake.main.call_count,0);self.assertEqual(fake.batch_main.call_count,1)
 
@@ -393,7 +393,7 @@ class BatchBootstrapTests(unittest.TestCase):
         fake_sys=__import__('types').SimpleNamespace(flags=__import__('types').SimpleNamespace(isolated=True),dont_write_bytecode=True,modules=sys.modules,path=[])
         for cancel in(KeyboardInterrupt(),SystemExit(130)):
             with mock.patch.object(launch,'sys',fake_sys),mock.patch.object(launch,'admit_batch_code',side_effect=cancel),mock.patch.object(launch.importlib,'import_module')as imported:
-                code=launch.main(['--approved-manifest',str(ROOT/'approved-sdk-code.json'),'--expected-approved-manifest-sha256','1'*64,'--instrumented-batch-codes'])
+                code=launch.main(['--approved-manifest',str(ROOT/'approved-sdk-code.json'),'--expected-approved-manifest-sha256','1'*64,'--source-assert'])
             self.assertEqual(code,130);self.assertEqual(imported.call_count,0)
     def test_batch_require_admission_preserves_cancel_and_exact_context_type(self):
         import approved_launch as launch
@@ -415,7 +415,7 @@ class BatchBootstrapTests(unittest.TestCase):
 
 def helper_receipt():
     value=fixtures.success_fixture()
-    value.update(schemaVersion=3,kind='sdk-batch-compiler-helper',mode=MODE,originalSdkGateExecuted=False,
+    value.update(schemaVersion=4,kind='sdk-source-assert-helper',mode=MODE,originalSdkGateExecuted=False,
       acceptanceEligible=False,sourceInputsVerified=True,batchObservation=None,batchUnavailableReasonCode=7)
     for old,new in(('sdkGatePassed','instrumentedChecksPassed'),('nativeSdkCompiled','instrumentedPortObjectVerified'),
       ('nativeLinked','instrumentedLinkVerified'),('negativeSmokePassed','instrumentedNegativeSmokePassed')):value[new]=value.pop(old)
@@ -572,12 +572,12 @@ class BatchControllerIntegrationTests(unittest.TestCase):
             reader=stack.enter_context(mock.patch.object(entry,'_read',wraps=entry._read));code=entry.batch_main([])
             public=repo/'.work/packaged-context-sdk-batch-public/windows-2025'
             names=sorted(p.name for p in public.iterdir())
-            packets=None if cancel or expired else(json.loads((public/'controller.numeric.json').read_bytes()),json.loads((public/'batch-hints.numeric.json').read_bytes()))
+            packets=None if cancel or expired else(json.loads((public/'controller.numeric.json').read_bytes()),json.loads((public/'source-assertion.json').read_bytes()))
             helper_reads=sum(Path(call.args[0]).name=='sdk-batch.numeric.json'for call in reader.call_args_list)
             return code,names,packets,lease.close_count,helper_reads
     def test_successful_instrumentation_publishes_only_separate_nonacceptance_pair(self):
         code,names,packets,closed,reads=self.run_controller()
-        self.assertEqual(code,0);self.assertEqual(names,['batch-hints.numeric.json','controller.numeric.json']);self.assertEqual(closed,1)
+        self.assertEqual(code,0);self.assertEqual(names,['controller.numeric.json','source-assertion.json']);self.assertEqual(closed,1)
         for packet in packets:
             self.assertFalse(packet['originalSdkGateExecuted']);self.assertFalse(packet['qualification']);self.assertFalse(packet['acceptanceEligible'])
             self.assertIsNone(packet['originalSdkReportSha256'])
@@ -612,8 +612,8 @@ class PortCompilerDiagnosticsTests(unittest.TestCase):
         return dict(completed=False,cleanupProved=True,forcedCleanup=True,rootExitObserved=True,
           jobEmptyObserved=True,identityRechecked=True,handlesClosed=4,cancelled=False,**changes)
     def test_new_profile_and_old_wire_cannot_be_confused(self):
-        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],3)
-        self.assertEqual(gate.empty_batch_receipt()['mode'],'instrumented-batch-codes')
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],4)
+        self.assertEqual(gate.empty_batch_receipt()['mode'],'source-assert')
         self.assertNotEqual(gate.empty_batch_receipt()['kind'],'sdk-batch-instrumented-helper')
     def test_pure_parser_ast_is_exact_except_function_and_fixed_files_symbol(self):
         import ast
@@ -703,7 +703,7 @@ class PortCompilerDiagnosticsTests(unittest.TestCase):
         rows[1].update(completed=False,forcedCleanup=True,exitCode=2,failureCode=10)
         c['helperPhaseResults']=entry.project_helper_phases(rows);c['helperPreCleanup']=[None,None]
         v=private();v['canary']=dict(statusCode=1,reasonCode=0,returns=[0,2,5]);v['phases']=[dict(phaseCode=3,enabled=True,statusCode=1,reasonCode=0,rows=[[1,0],[2,0],[3,0],[4,2]])]
-        v['compilerDiagnostics']=dict(phaseCode=3,prepared=True,streamStatus=[2,1],streamBytes=[40,0],firstC2338Detail=None,projection=dict(scanComplete=1,droppedCount=0,diagnostics=[dict(streamCode=1,severity=3,kind=1,number=1083,fileCode=2,line=7)]))
+        v['compilerDiagnostics']=dict(phaseCode=3,prepared=True,streamStatus=[2,1],streamBytes=[40,0],firstC2338Detail=None,firstC2338SourceAssertion=None,projection=dict(scanComplete=1,droppedCount=0,diagnostics=[dict(streamCode=1,severity=3,kind=1,number=1083,fileCode=2,line=7)]))
         return c,v
     def test_capture_packet_is_ordinal_retired_numeric_only_and_bounded(self):
         c,v=self.diagnostic_pair();entry.validate_batch_private(v,c,'1'*64)
@@ -774,7 +774,7 @@ class PortCompilerDiagnosticsTests(unittest.TestCase):
         d=v['compilerDiagnostics'];d.update(streamStatus=[2,2],streamBytes=[65536,65536],projection=dict(scanComplete=0,droppedCount=992,diagnostics=[dict(streamCode=2,severity=3,kind=3,number=9999,fileCode=4,line=9999999)]*32))
         with tempfile.TemporaryDirectory()as temp:
             self.assertTrue(entry.batch_publish(Path(temp),c,v,deadline=10.,clock=lambda:1.))
-            self.assertLessEqual((Path(temp)/'controller.numeric.json').stat().st_size,8192);self.assertLessEqual((Path(temp)/'batch-hints.numeric.json').stat().st_size,8192)
+            self.assertLessEqual((Path(temp)/'controller.numeric.json').stat().st_size,8192);self.assertLessEqual((Path(temp)/'source-assertion.json').stat().st_size,8192)
 
     def test_mixed_successful_stream_still_requires_exact_retired_phase(self):
         c,v=self.diagnostic_pair();v['phases'][0].update(statusCode=0,reasonCode=4,rows=None)
@@ -800,13 +800,14 @@ class FirstC2338DetailTests(unittest.TestCase):
         projection=gate.project_compiler_diagnostics(stdout,stderr,Path('C:/owned'))
         return gate.project_first_c2338_detail(stdout,stderr,projection,self.SDK)
     def pair(self):
-        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],3)
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],4)
         c,v=PortCompilerDiagnosticsTests().diagnostic_pair()
         v['compilerDiagnostics']['projection']['diagnostics'][0].update(number=2338,fileCode=0,line=0)
         v['compilerDiagnostics']['firstC2338Detail']=dict(diagnosticOrdinal=1,streamCode=1,sdkSlot=8,line=123,assertionClass=1)
+        v['compilerDiagnostics']['firstC2338SourceAssertion']=dict(diagnosticOrdinal=1,streamCode=1,statusCode=8,text=None)
         return c,v
     def test_schema_three_rejects_historical_b2_even_with_current_detail(self):
-        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],3)
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],4)
         c,v=self.pair()
         for packet in(c,v):
             packet['schemaVersion']=2
@@ -903,8 +904,145 @@ class FirstC2338DetailTests(unittest.TestCase):
         d=v['compilerDiagnostics'];d.update(streamStatus=[2,2],streamBytes=[65536,65536])
         d['projection']['diagnostics']=[dict(streamCode=1,severity=3,kind=1,number=2338 if i==31 else 1001,fileCode=0,line=0)for i in range(32)]
         d['projection'].update(scanComplete=0,droppedCount=992);d['firstC2338Detail'].update(diagnosticOrdinal=32,line=9999999,assertionClass=4)
+        d['firstC2338SourceAssertion']['diagnosticOrdinal']=32
         with tempfile.TemporaryDirectory()as temp:
             self.assertTrue(entry.batch_publish(Path(temp),c,v,deadline=10.,clock=lambda:1.))
-            self.assertLessEqual((Path(temp)/'batch-hints.numeric.json').stat().st_size,8192)
+            self.assertLessEqual((Path(temp)/'source-assertion.json').stat().st_size,8192)
+
+class SourceAssertionTests(unittest.TestCase):
+    """Only synthetic assertion strings; never runtime/user error collection."""
+    def status(self,text):
+        self.assertTrue(hasattr(entry,'source_assertion_status'),'Source-only text predicate required')
+        return entry.source_assertion_status(text)
+    def project(self,stdout,stderr=''):
+        self.assertTrue(hasattr(gate,'project_source_assertion'),'Source-only assertion projector required')
+        return gate.project_source_assertion(stdout,stderr,gate.project_compiler_diagnostics(stdout,stderr,Path('C:/owned')))
+    def pair(self):
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],4)
+        c,v=FirstC2338DetailTests().pair()
+        v['compilerDiagnostics']['firstC2338SourceAssertion']=dict(diagnosticOrdinal=1,streamCode=1,statusCode=1,text=' static_assert failed: synthetic public assertion')
+        return c,v
+    def test_source_only_kind_and_historical_schema_are_separate(self):
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],4)
+        self.assertEqual(gate.empty_batch_receipt()['kind'],'sdk-source-assert-helper')
+        self.assertEqual(gate.empty_batch_receipt()['mode'],'source-assert')
+        c,v=self.pair();c.update(schemaVersion=3,kind='sdk-batch-compiler-controller',mode='instrumented-batch-codes')
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_controller(c,binding(),'1'*64)
+    def test_exact_first_c2338_prefix_is_removed_without_changing_the_body(self):
+        text=' static_assert failed: a public invariant.'
+        value=self.project('error C1001: synthetic',r'C:\SDK\private-prefix.h(72): error C2338:'+text+'\nerror C2338: later')
+        self.assertEqual(value,dict(diagnosticOrdinal=2,streamCode=2,statusCode=1,text=text))
+        self.assertNotIn('private-prefix',value['text'])
+    def test_utf8_512_byte_boundary_is_not_character_count_or_truncation(self):
+        self.assertEqual(self.status('x '*256),1)
+        self.assertEqual(self.status('x'*513),3)
+        self.assertEqual(self.status('\u03a9'*256),4)
+        self.assertEqual(self.status('\u03a9'*257),4)
+        value=self.project('error C2338: '+'x'*513)
+        self.assertEqual(value['statusCode'],3);self.assertIsNone(value['text'])
+    def test_control_format_multiline_and_surrogate_text_fail_closed(self):
+        for code in(0,9,10,13,27,127,0x85,0x2028,0x2029,0x202e,0xd800):
+            with self.subTest(code=code):self.assertEqual(self.status('public'+chr(code)+'assertion'),4)
+    def test_non_crlf_line_controls_cannot_be_silently_split_from_the_body(self):
+        for code in(11,12,0x85,0x2028,0x2029):
+            value=self.project('error C2338: public'+chr(code)+'suffix')
+            with self.subTest(code=code):self.assertEqual(value['statusCode'],4);self.assertIsNone(value['text'])
+    def test_ambiguous_line_contract_cannot_attach_a_later_body_to_first_c2338(self):
+        for code in(11,12,13,28,29,30,0x85,0x2028,0x2029):
+            text='error C1000: synthetic'+chr(code)+'error C2338: first assertion\nerror C2338: second assertion'
+            numeric=gate.project_compiler_diagnostics(text,'',Path('C:/owned'));self.assertEqual(len(numeric['diagnostics']),3)
+            value=self.project(text)
+            with self.subTest(code=code):
+                self.assertEqual(value,dict(diagnosticOrdinal=2,streamCode=1,statusCode=4,text=None))
+            self.assertEqual([r['number']for r in numeric['diagnostics']],[1000,2338,2338])
+    def test_paths_urls_and_nonpublic_slash_tokens_fail_closed(self):
+        for text in(r'C:\owned\source.cpp','C:/owned/source.cpp','../header.h','/tmp/header.h','https://synthetic.invalid/a','www.synthetic.invalid','file.cpp','header.h','.env','data:,synthetic','foreign/type','xC++/WinRT','C++/WinRT/suffix','C++/WinRT.h','x64/ARM64.log','.C++/WinRT','C++/WinRT-debug'):
+            with self.subTest(case=text.startswith('C')):self.assertEqual(self.status(text),5)
+        for text in('Mismatched C++/WinRT headers.','Only native x64/ARM64 observers are supported','winrt::impl::is_class_v<T> must hold.','static_assert failed: public invariant.','C++/WinRT.','(C++/WinRT)'):
+            self.assertEqual(self.status(text),1)
+        self.assertEqual(self.status('한글.h'),4);self.assertEqual(self.status('Ω 조건이 필요합니다.'),4)
+    def test_secret_references_credentials_pem_and_opaque_tokens_are_not_published(self):
+        for text in('pass'+':/'+'/synthetic','Bearer synthetic','Basic synthetic','password=synthetic','api_key=synthetic','api key=synthetic','AccessKey=synthetic','-----BEGIN PRIVATE KEY-----','gh'+'p_'+'SYNTHETIC'*4,'a'*32):
+            self.assertEqual(self.status(text),6)
+    def test_rejected_body_preserves_all_original_numeric_codes(self):
+        for body in('https://synthetic.invalid/private','header.h','한글.h','.env','data:,synthetic'):
+            text='error C2338: '+body+'\nerror C1083: synthetic'
+            original=gate.project_compiler_diagnostics(text,'',Path('C:/owned'));value=self.project(text)
+            with self.subTest(case=len(body)):
+                self.assertEqual(value,dict(diagnosticOrdinal=1,streamCode=1,statusCode=4 if not body.isascii()else 5,text=None))
+                self.assertEqual([r['number']for r in original['diagnostics']],[2338,1083])
+    def test_optional_body_failure_preserves_c2338_projection_and_unknown_detail(self):
+        self.assertTrue(hasattr(gate,'project_source_assertion'),'Source-only assertion projector required')
+        with tempfile.TemporaryDirectory()as temp:
+            capture=gate.PortCompilerCapture(Path(temp),100.,clock=lambda:1.);self.assertTrue(capture.prepare())
+            (Path(temp)/'sdk-port.stdout').write_bytes(b'error C2338: synthetic')
+            with mock.patch.object(gate,'project_source_assertion',side_effect=MemoryError()):value=capture.observe(PortCompilerDiagnosticsTests().row())
+            self.assertEqual(value['projection']['diagnostics'][0]['number'],2338)
+            self.assertEqual(value['firstC2338SourceAssertion'],dict(diagnosticOrdinal=1,streamCode=1,statusCode=8,text=None))
+    def test_reader_replays_text_types_status_and_first_descriptor_binding(self):
+        c,v=self.pair();entry.validate_batch_private(v,c,'1'*64)
+        for key,bad in(('diagnosticOrdinal',2),('streamCode',2),('statusCode',True),('statusCode',2),('text','https://synthetic.invalid/a'),('text','header.h'),('text','한글.h'),('text','.env'),('text','data:,synthetic'),('text','x'*513),('extra',0)):
+            changed=copy.deepcopy(v);changed['compilerDiagnostics']['firstC2338SourceAssertion'][key]=bad
+            with self.subTest(field=key),self.assertRaises(entry.CiFailure):entry.validate_batch_private(changed,c,'1'*64)
+        changed=copy.deepcopy(v);del changed['compilerDiagnostics']['firstC2338SourceAssertion']
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(changed,c,'1'*64)
+    def test_source_flag_and_retirement_are_required_for_body_but_not_failure_codes(self):
+        c,v=self.pair();c['sourceInputsVerified']=False
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(v,c,'1'*64)
+        v['compilerDiagnostics']['firstC2338SourceAssertion'].update(statusCode=8,text=None)
+        entry.validate_batch_private(v,c,'1'*64)
+        c['helperPhaseResults'][1]['cleanupProved']=False
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(v,c,'1'*64)
+    def test_no_published_c2338_cannot_create_body(self):
+        self.assertIsNone(self.project('error C1083: synthetic'))
+        self.assertIsNone(self.project('error C1001: synthetic\n'*32+'error C2338: synthetic'))
+    def test_publisher_loses_only_unsafe_optional_body_not_valid_numeric_projection(self):
+        c,v=self.pair();v['compilerDiagnostics']['firstC2338SourceAssertion']['text']='https://synthetic.invalid/private'
+        with tempfile.TemporaryDirectory()as temp:
+            self.assertTrue(entry.batch_publish(Path(temp),c,v,deadline=10.,clock=lambda:1.))
+            data=(Path(temp)/'source-assertion.json').read_bytes();packet=json.loads(data)
+            self.assertIsNotNone(packet['observation']);observed=packet['observation']['compilerDiagnostics']
+            self.assertEqual(observed['projection'],v['compilerDiagnostics']['projection'])
+            self.assertEqual(observed['firstC2338SourceAssertion'],dict(diagnosticOrdinal=1,streamCode=1,statusCode=8,text=None))
+            self.assertNotIn(b'synthetic.invalid',data)
+    def test_full_wire_cap_drops_only_body_and_never_truncates_numeric_codes(self):
+        c,v=self.pair();encode=entry.json.dumps
+        def enlarged(value,*args,**kwargs):
+            result=encode(value,*args,**kwargs)
+            if(type(value)is dict and value.get('kind')=='sdk-source-assert-sidecar'
+              and value['observation']['compilerDiagnostics']['firstC2338SourceAssertion']['text']is not None):result+=' '*8192
+            return result
+        with tempfile.TemporaryDirectory()as temp,mock.patch.object(entry.json,'dumps',side_effect=enlarged):
+            self.assertTrue(entry.batch_publish(Path(temp),c,v,deadline=10.,clock=lambda:1.))
+            data=(Path(temp)/'source-assertion.json').read_bytes();self.assertLessEqual(len(data),8192)
+            observed=json.loads(data)['observation']['compilerDiagnostics']
+            self.assertEqual(observed['projection'],v['compilerDiagnostics']['projection'])
+            self.assertEqual(observed['firstC2338SourceAssertion'],dict(diagnosticOrdinal=1,streamCode=1,statusCode=9,text=None))
+    def test_body_cancellation_preserves_primary_or_original_cancel(self):
+        self.assertTrue(hasattr(gate,'project_source_assertion'),'Source-only assertion projector required')
+        for cancel in(KeyboardInterrupt(),SystemExit(130)):
+            with tempfile.TemporaryDirectory()as temp:
+                capture=gate.PortCompilerCapture(Path(temp),100.,clock=lambda:1.);self.assertTrue(capture.prepare())
+                (Path(temp)/'sdk-port.stdout').write_bytes(b'error C2338: synthetic')
+                primary=gate.GateFailure(10)
+                with mock.patch.object(gate,'project_source_assertion',side_effect=cancel):
+                    try:
+                        try:raise primary
+                        finally:capture.observe(PortCompilerDiagnosticsTests().row())
+                    except gate.GateFailure as observed:self.assertIs(observed,primary)
+                self.assertTrue(capture.cancelled)
+    def test_maximum_numeric_records_and_escaped_body_fit_without_code_loss(self):
+        c,v=self.pair();rows=fixtures.success_fixture()['phaseResults'];c['helperPhaseResults']=entry.project_helper_phases(rows);c['helperPreCleanup']=[None]*5
+        v['phases']=[dict(phaseCode=i,enabled=True,statusCode=1,reasonCode=0,rows=[[1,0],[2,0],[3,0],[4,4294967295]])for i in(3,4,5)]
+        d=v['compilerDiagnostics'];d.update(streamStatus=[2,2],streamBytes=[65536,65536]);d['projection'].update(scanComplete=0,droppedCount=992)
+        d['projection']['diagnostics']=[dict(streamCode=1,severity=3,kind=1,number=2338 if i==31 else 1001,fileCode=0,line=0)for i in range(32)]
+        d['firstC2338Detail'].update(diagnosticOrdinal=32,line=9999999,assertionClass=4)
+        d['firstC2338SourceAssertion']['diagnosticOrdinal']=32
+        d['firstC2338SourceAssertion'].update(diagnosticOrdinal=32,text='\"'*512)
+        with tempfile.TemporaryDirectory()as temp:
+            self.assertTrue(entry.batch_publish(Path(temp),c,v,deadline=10.,clock=lambda:1.))
+            data=(Path(temp)/'source-assertion.json').read_bytes();self.assertLessEqual(len(data),8192)
+            observed=json.loads(data)['observation']['compilerDiagnostics'];self.assertEqual(len(observed['projection']['diagnostics']),32)
+            self.assertEqual(observed['firstC2338SourceAssertion']['text'],'\"'*512)
 
 if __name__=='__main__':unittest.main()

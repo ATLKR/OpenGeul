@@ -381,7 +381,7 @@ def main(argv=None):
             else:failure=31
     return 0 if failure==0 else 1
 
-B_MODE='instrumented-batch-codes'
+B_MODE='source-assert'
 B_SOURCE_INPUTS='369bfbf3caaf51867e9dc5b330ad0f8206fa1c04e4f7378575c6922d055bbb04'
 B_FALSE=('originalSdkGateExecuted','acceptanceEligible','qualification','canService')
 B_COMMON={'schemaVersion','kind','mode','binding','approvedCodeManifestSha256','expectedSourceInputsSha256',
@@ -393,7 +393,7 @@ def _batch_retired(row):
       and type(row.get('handlesClosed')) is int and row['handlesClosed']==4)
 
 def _batch_common(value,kind,binding,manifest):
-    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=3
+    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=4
         or value.get('kind')!=kind or value.get('mode')!=B_MODE or value.get('binding')!=binding
         or type(value.get('binding')) is not dict or set(value['binding'])!=set(binding)
         or any(type(value['binding'][key]) is not type(item) for key,item in binding.items())
@@ -405,7 +405,7 @@ def validate_batch_controller(value,binding,manifest):
     keys=B_COMMON|{'instrumentedStage','failureCode','helperFailureCode','cancelled','instrumentedChecksPassed',
       'sourceInputsVerified','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup',
       'envelopeExitCode','helperPhaseResults','helperPreCleanup','failureObservation'}
-    _batch_common(value,'sdk-batch-compiler-controller',binding,manifest)
+    _batch_common(value,'sdk-source-assert-controller',binding,manifest)
     if set(value)!=keys:raise CiFailure(4)
     if not _integer(value['instrumentedStage'],7) or not _integer(value['failureCode'],31):raise CiFailure(4)
     if value['helperFailureCode'] is not None and not _integer(value['helperFailureCode'],31):raise CiFailure(4)
@@ -442,9 +442,23 @@ def validate_batch_controller(value,binding,manifest):
         adapted={**reason,'stageCode':1};validate_helper_failure_observation(adapted,1)
     return value
 
+def source_assertion_status(text):
+    """Closed source-only lexical screen, not a privacy/publicness certification."""
+    if type(text)is not str:return 8
+    if any(not 0x20<=ord(c)<=0x7e for c in text):return 4
+    try:size=len(text.encode('utf-8','strict'))
+    except UnicodeError:return 4
+    if size>512:return 3
+    if not text.strip(' '):return 2
+    if re.search(r'(?i)(?:pass:/{2}|-----\s*BEGIN|\b(?:bearer|basic|password|passwd|token|secret|authorization|api[ _-]?key|client[ _-]?secret|access[ _-]?key|connection[ _-]?string)\b|\bgh[pousr]_|github_pat_|\bsk-|\bxox[baprs]-|\bAKIA[A-Z0-9]{16}|[A-Za-z0-9_-]{32,})',text):return 6
+    lexical=re.sub(r"""(?<![\w.-])(?:C\+\+/WinRT|x64/ARM64)(?=$|[ ,;)\]}>!?'"]|\.(?![A-Za-z0-9_.-]))""",'',text)
+    lexical=re.sub(r'(?<![A-Za-z0-9_])static_assert failed:','',lexical)
+    if ('/'in lexical or '\\'in lexical or re.search(r'(?i)(?:\b[A-Za-z][A-Za-z0-9+.-]*:(?!:)|\bwww\.|\b[\w-]+(?:\.[\w-]+)*\.[^\W\d_][\w-]*\b|(?<![\w.])\.[\w-]+)',lexical)):return 5
+    return 1
+
 def validate_compiler_diagnostics(value,controller,canary):
     if value is None:return None
-    keys={'phaseCode','prepared','streamStatus','streamBytes','projection','firstC2338Detail'}
+    keys={'phaseCode','prepared','streamStatus','streamBytes','projection','firstC2338Detail','firstC2338SourceAssertion'}
     if type(value)is not dict or set(value)!=keys or type(value['phaseCode'])is not int or value['phaseCode']!=3 or type(value['prepared'])is not bool:raise CiFailure(4)
     rows=controller['helperPhaseResults']
     if rows is None or len(rows)<2:raise CiFailure(4)
@@ -462,7 +476,7 @@ def validate_compiler_diagnostics(value,controller,canary):
           or controller['cancelled']is not False or not _batch_retired(rows[1])or rows[1]['cancelled']is not False):raise CiFailure(4)
     projection=value['projection']
     if not all(status in(1,2)for status in statuses):
-        if projection is not None or value['firstC2338Detail']is not None:raise CiFailure(4)
+        if projection is not None or value['firstC2338Detail']is not None or value['firstC2338SourceAssertion']is not None:raise CiFailure(4)
         return value
     if type(projection)is not dict or set(projection)!={'scanComplete','droppedCount','diagnostics'}or not _integer(projection['scanComplete'],1)or not _integer(projection['droppedCount'],1024):raise CiFailure(4)
     diagnostics=projection['diagnostics']
@@ -482,13 +496,24 @@ def validate_compiler_diagnostics(value,controller,canary):
           or detail['diagnosticOrdinal']!=first[0]or detail['streamCode']!=first[1]['streamCode']
           or detail['sdkSlot']not in(0,8,9)or(detail['sdkSlot']!=0 and first[1]['fileCode']!=0)or not _integer(detail['line'],9999999)
           or(detail['sdkSlot']==0)!=(detail['line']==0)or not _integer(detail['assertionClass'],4)):raise CiFailure(4)
+    assertion=value['firstC2338SourceAssertion']
+    if first is None:
+        if assertion is not None:raise CiFailure(4)
+    else:
+        if (type(assertion)is not dict or set(assertion)!={'diagnosticOrdinal','streamCode','statusCode','text'}
+          or type(assertion['diagnosticOrdinal'])is not int or assertion['diagnosticOrdinal']!=first[0]
+          or type(assertion['streamCode'])is not int or assertion['streamCode']!=first[1]['streamCode']
+          or not _integer(assertion['statusCode'],9)or assertion['statusCode']==0):raise CiFailure(4)
+        if assertion['statusCode']==1:
+            if controller['sourceInputsVerified']is not True or source_assertion_status(assertion['text'])!=1:raise CiFailure(4)
+        elif assertion['text']is not None:raise CiFailure(4)
     return value
 
 def validate_batch_private(value,controller,manifest):
     keys={'schemaVersion','kind','mode','architectureCode','approvedCodeManifestSha256','expectedSourceInputsSha256',
       'childWritable','authority','compilerInvocationProved','canary','phases','compilerDiagnostics',*B_FALSE}
-    if (type(value) is not dict or set(value)!=keys or type(value['schemaVersion']) is not int or value['schemaVersion']!=3
-        or value['kind']!='sdk-batch-compiler-private' or value['mode']!=B_MODE or type(value['architectureCode']) is not int
+    if (type(value) is not dict or set(value)!=keys or type(value['schemaVersion']) is not int or value['schemaVersion']!=4
+        or value['kind']!='sdk-source-assert-private' or value['mode']!=B_MODE or type(value['architectureCode']) is not int
         or value['architectureCode']!=controller['binding']['architectureCode'] or value['approvedCodeManifestSha256']!=manifest
         or value['expectedSourceInputsSha256']!=B_SOURCE_INPUTS or value['childWritable'] is not True
         or value['authority'] is not False or value['compilerInvocationProved'] is not False
@@ -538,7 +563,7 @@ def _batch_json(raw):
 
 def validate_batch_sidecar(value,controller_raw,binding,manifest):
     controller=validate_batch_controller(_batch_json(controller_raw),binding,manifest)
-    _batch_common(value,'sdk-batch-compiler-sidecar',binding,manifest)
+    _batch_common(value,'sdk-source-assert-sidecar',binding,manifest)
     keys=B_COMMON|{'controllerReceiptSha256','unavailableReasonCode','observation','childWritable','authority','compilerInvocationProved'}
     if (set(value)!=keys or value['controllerReceiptSha256']!=hashlib.sha256(controller_raw).hexdigest()
         or not _integer(value['unavailableReasonCode'],8) or value['childWritable'] is not True
@@ -556,7 +581,7 @@ def _batch_remaining(deadline,clock):
 def _batch_write(path,data,*,deadline,clock=None):
     clock=time.monotonic if clock is None else clock
     _batch_remaining(deadline,clock)
-    if path.name not in ('controller.numeric.json','batch-hints.numeric.json') or type(data) is not bytes or not 0<len(data)<=8192:raise CiFailure(4)
+    if path.name not in ('controller.numeric.json','source-assertion.json') or type(data) is not bytes or not 0<len(data)<=8192:raise CiFailure(4)
     _regular(path.parent,True);_batch_remaining(deadline,clock);primary=None;stream=path.open('xb')
     try:
         _batch_remaining(deadline,clock)
@@ -572,6 +597,19 @@ def _batch_write(path,data,*,deadline,clock=None):
     if _read(path,8192)!=data:raise CiFailure(4)
     _batch_remaining(deadline,clock)
 
+def _source_assertion_unavailable(observation,status):
+    """Replace only optional text; every original numeric field is revalidated."""
+    if observation is None:return None
+    value=dict(observation);diagnostic=value.get('compilerDiagnostics')
+    if diagnostic is None:return value
+    diagnostic=dict(diagnostic);value['compilerDiagnostics']=diagnostic
+    projection=diagnostic.get('projection');first=None
+    if projection is not None:
+        first=next(((index,row)for index,row in enumerate(projection['diagnostics'],1)
+          if row['kind']==1 and row['number']==2338),None)
+    diagnostic['firstC2338SourceAssertion']=None if first is None else dict(diagnosticOrdinal=first[0],streamCode=first[1]['streamCode'],statusCode=status,text=None)
+    return value
+
 def batch_publish(public,controller,observation,*,deadline,clock=None):
     """Best-effort B publication; never replace an existing primary exception."""
     pending=sys.exc_info()[1];clock=time.monotonic if clock is None else clock
@@ -582,18 +620,30 @@ def batch_publish(public,controller,observation,*,deadline,clock=None):
         try:
             if observation is not None:validate_batch_private(observation,controller,manifest)
             reason=0 if observation is not None else 7
-        except Exception:observation=None;reason=4
+        except Exception:
+            try:
+                observation=_source_assertion_unavailable(observation,8)
+                validate_batch_private(observation,controller,manifest);reason=0
+            except Exception:observation=None;reason=4
         data=json.dumps(controller,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
         sidecar={key:controller[key] for key in B_COMMON if key!='kind'}
-        sidecar.update(kind='sdk-batch-compiler-sidecar',controllerReceiptSha256=hashlib.sha256(data).hexdigest(),
+        sidecar.update(kind='sdk-source-assert-sidecar',controllerReceiptSha256=hashlib.sha256(data).hexdigest(),
           unavailableReasonCode=reason,observation=observation,childWritable=True,authority=False,compilerInvocationProved=False)
         validate_batch_sidecar(sidecar,data,binding,manifest)
-        encoded=json.dumps(sidecar,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
+        try:encoded=json.dumps(sidecar,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
+        except Exception:
+            sidecar['observation']=_source_assertion_unavailable(sidecar['observation'],8)
+            validate_batch_sidecar(sidecar,data,binding,manifest)
+            encoded=json.dumps(sidecar,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
+        if len(encoded)>8192:
+            sidecar['observation']=_source_assertion_unavailable(sidecar['observation'],9)
+            validate_batch_sidecar(sidecar,data,binding,manifest)
+            encoded=json.dumps(sidecar,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
         if len(data)>8192 or len(encoded)>8192:raise CiFailure(4)
         _batch_remaining(deadline,clock)
         _batch_write(Path(public)/'controller.numeric.json',data,deadline=deadline,clock=clock)
         _batch_remaining(deadline,clock)
-        _batch_write(Path(public)/'batch-hints.numeric.json',encoded,deadline=deadline,clock=clock)
+        _batch_write(Path(public)/'source-assertion.json',encoded,deadline=deadline,clock=clock)
         return True
     except BaseException as error:
         if isinstance(error,(KeyboardInterrupt,SystemExit)):
@@ -605,15 +655,15 @@ def verify_batch_files(public,binding,manifest):
     root=_regular(public,True)
     if (root/'report.numeric.json').exists():raise CiFailure(4)
     controller_raw=_read(root/'controller.numeric.json',8192)
-    sidecar_raw=_read(root/'batch-hints.numeric.json',8192)
+    sidecar_raw=_read(root/'source-assertion.json',8192)
     validate_batch_sidecar(_batch_json(sidecar_raw),controller_raw,binding,manifest)
     return {'schemaVersion':1,'admitted':True,'controllerSha256':hashlib.sha256(controller_raw).hexdigest(),
       'sidecarSha256':hashlib.sha256(sidecar_raw).hexdigest(),'reasonCode':0}
 
 def validate_batch_helper(value,architecture,manifest,deadline,expected_inputs):
     """B-only structural adapter; its normal-shaped view is never published."""
-    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=3
-        or value.get('kind')!='sdk-batch-compiler-helper' or value.get('mode')!=B_MODE
+    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=4
+        or value.get('kind')!='sdk-source-assert-helper' or value.get('mode')!=B_MODE
         or value.get('originalSdkGateExecuted') is not False or value.get('acceptanceEligible') is not False
         or type(value.get('sourceInputsVerified')) is not bool or not _integer(value.get('batchUnavailableReasonCode'),8)):raise CiFailure(4)
     view=dict(value)
@@ -631,7 +681,7 @@ def validate_batch_helper(value,architecture,manifest,deadline,expected_inputs):
 def batch_controller(binding,outer,raw,manifest,*,failure=0,observation=None,cancelled=False):
     rows=None if raw is None else project_helper_phases(raw['phaseResults'])
     active=None if raw is None else validate_phase_active_observations(raw['phaseActiveObservations'],len(rows))
-    value={'schemaVersion':3,'kind':'sdk-batch-compiler-controller','mode':B_MODE,'binding':binding,
+    value={'schemaVersion':4,'kind':'sdk-source-assert-controller','mode':B_MODE,'binding':binding,
       'approvedCodeManifestSha256':manifest,'expectedSourceInputsSha256':B_SOURCE_INPUTS,'originalSdkReportSha256':None,
       **{key:False for key in B_FALSE},'instrumentedStage':0 if raw is None else raw['stage'],'failureCode':failure,
       'helperFailureCode':None if raw is None else raw['failureCode'],'cancelled':bool(cancelled or(raw and raw.get('cancelled'))),
@@ -714,7 +764,7 @@ def batch_main(argv=None):
         for name in ('temp','profile','appdata','local'):(envelope/name).mkdir()
         environment=child_environment(locations['system'],locations['programFiles'],locations['programFilesX86'],str(envelope))
         command=[sys.executable,'-I','-B',str(root/'approved_launch.py'),'--approved-manifest',str(root/'approved-sdk-code.json'),
-          '--expected-approved-manifest-sha256',args.expected_approved_manifest_sha256,'--instrumented-batch-codes','--architecture',args.architecture,
+          '--expected-approved-manifest-sha256',args.expected_approved_manifest_sha256,'--source-assert','--architecture',args.architecture,
           '--source-bundle',str(root/'frozen-v2'),'--work-root',str(work),'--output',str(work/'sdk-batch.numeric.json'),
           '--overall-start',repr(start),'--overall-deadline',repr(deadline)]
         if deadline-time.monotonic()<=1:raise CiFailure(10)
@@ -762,6 +812,6 @@ def _batch_unique(rows):
     return value
 
 if __name__=='__main__':
-    if sys.argv[1:2]==['--instrumented-batch-codes']:raise SystemExit(batch_main(sys.argv[2:]))
-    if sys.argv[1:2]==['--verify-batch-codes-only']:raise SystemExit(batch_verify_main(sys.argv[2:]))
+    if sys.argv[1:2]==['--source-assert']:raise SystemExit(batch_main(sys.argv[2:]))
+    if sys.argv[1:2]==['--verify-source-assert-only']:raise SystemExit(batch_verify_main(sys.argv[2:]))
     raise SystemExit(main())

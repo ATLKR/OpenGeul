@@ -1418,7 +1418,7 @@ jobs:
         ref: ${{ github.sha }}
     - name: Verify external pins and run only the bounded SDK negative gate
       id: sdk-compile
-      if: ${{ !contains(github.event.head_commit.message, '[sdk-batch-codes]') }}
+      if: ${{ !contains(github.event.head_commit.message, '[sdk-assert]') }}
       timeout-minutes: 4
       shell: pwsh
       run: |
@@ -1436,9 +1436,9 @@ jobs:
         }
         $machine = if ($architecture -ceq 'x64') { 0x8664 } else { 0xaa64 }
         $base = Join-Path (Get-Location).Path 'suite/engine-build/packaged-context-sdk'
-        $entryPin = '47d0f55e0e9d6c6036b5d9347b132cc3777d2da936c842c994304e5c8fd4ddbf'
-        $bootstrapPin = 'dd9004598494a637cc51d09924a89ec94108c36e140050f261598fef4a23ce1b'
-        $manifestPin = 'f4b6b2d7cf9d722e597291e017dd5b9c8a6b3857fcadf4d0e4f0fc484ec58973'
+        $entryPin = '1a6b274b34851359622adbd81cd2b5327487219b1c266b0e9024f48d0691a74e'
+        $bootstrapPin = '7c389ff855beabebfdaeb33153ff3024d0c07b8a1cb75d0c86f513f152ebfa37'
+        $manifestPin = 'b3e0a1ed2f15896761b3d58a0a74320b9c6bc29644b18c3a87d8a66262b44ab4'
         foreach ($item in @(@('ci_entry.py',$entryPin),@('approved_launch.py',$bootstrapPin),@('approved-sdk-code.json',$manifestPin))) {
         $file = Join-Path $base $item[0]
         $info = Get-Item -LiteralPath $file -Force
@@ -1682,21 +1682,21 @@ jobs:
         if-no-files-found: error
         compression-level: 6
     - id: B
-      if: contains(github.event.head_commit.message, '[sdk-batch-codes]') && !cancelled()
+      if: contains(github.event.head_commit.message, '[sdk-assert]') && !cancelled()
       timeout-minutes: 4
       shell: pwsh
       run: |
-        $ErrorActionPreference='Stop';$PSNativeCommandUseErrorActionPreference=$false;$c=1;$ok='0';try{;$a=switch -CaseSensitive($env:SDK_MATRIX_RUNNER){'windows-2025'{'x64'}'windows-11-arm'{'arm64'}default{throw}};$b=Join-Path $PWD 'suite/engine-build/packaged-context-sdk';$p='47d0f55e0e9d6c6036b5d9347b132cc3777d2da936c842c994304e5c8fd4ddbf','dd9004598494a637cc51d09924a89ec94108c36e140050f261598fef4a23ce1b','f4b6b2d7cf9d722e597291e017dd5b9c8a6b3857fcadf4d0e4f0fc484ec58973';$n='ci_entry.py','approved_launch.py','approved-sdk-code.json';for($i=0;$i-lt3;$i++){$f=Join-Path $b $n[$i];$o=gi -LP $f -Force;if($o.PSIsContainer-or($o.Attributes-band1024)-or$o.Length-lt1-or$o.Length-gt1MB-or(Get-FileHash -LP $f).Hash-ine$p[$i]){throw}};$py=(gci -Path "$env:RUNNER_TOOL_CACHE/Python/3.12.*/$a/python.exe" -File|Sort-Object FullName -Descending|select -First 1).FullName;if(!$py){throw};$q=@('--architecture',$a,'--expected-entry-sha256',$p[0],'--expected-bootstrap-sha256',$p[1],'--expected-approved-manifest-sha256',$p[2]);$e=Join-Path $b $n[0];& $py -I -B $e --instrumented-batch-codes @q 1>$null 2>$null;$c = $LASTEXITCODE;$x=130,3221225786,-1073741510;if($c-in$x){$ok='2'}else{;$v=& $py -I -B $e --verify-batch-codes-only @q 2>$null;$z = $LASTEXITCODE;if($z-in$x){$ok='2';if($c-eq0){$c=130};throw};if($z-ne0-or$v-isnot[string]-or$v.Length-gt512){throw};$r=$v|ConvertFrom-Json;if((($r.psobject.Properties.Name|Sort-Object)-join',')-cne'admitted,controllerSha256,reasonCode,schemaVersion,sidecarSha256'-or$r.schemaVersion-isnot[long]-or$r.schemaVersion-ne1-or$r.admitted-isnot[bool]-or$r.reasonCode-isnot[long]){throw};if($r.admitted){if($r.reasonCode-ne0){throw};foreach($h in @($r.controllerSha256,$r.sidecarSha256)){if($h-isnot[string]-or$h-cnotmatch'\A[0-9a-f]{64}\z'){throw}};$ok='1'}elseif($null-ne$r.controllerSha256-or$null-ne$r.sidecarSha256-or$r.reasonCode-lt1-or$r.reasonCode-gt8){throw};};}catch{};try{"s=$ok" >> $env:GITHUB_OUTPUT}catch{};exit $c
-    - if: always() && !cancelled() && contains(github.event.head_commit.message, '[sdk-batch-codes]') && steps.B.outputs.s == '1'
+        $ErrorActionPreference='Stop';$PSNativeCommandUseErrorActionPreference=$false;$c=1;$ok='0';try{;$a=switch -CaseSensitive($env:SDK_MATRIX_RUNNER){'windows-2025'{'x64'}'windows-11-arm'{'arm64'}default{throw}};$b=Join-Path $PWD 'suite/engine-build/packaged-context-sdk';$p='1a6b274b34851359622adbd81cd2b5327487219b1c266b0e9024f48d0691a74e','7c389ff855beabebfdaeb33153ff3024d0c07b8a1cb75d0c86f513f152ebfa37','b3e0a1ed2f15896761b3d58a0a74320b9c6bc29644b18c3a87d8a66262b44ab4';$n='ci_entry.py','approved_launch.py','approved-sdk-code.json';for($i=0;$i-lt3;$i++){$f=Join-Path $b $n[$i];$o=gi -LP $f -Force;if($o.PSIsContainer-or($o.Attributes-band1024)-or$o.Length-lt1-or$o.Length-gt1MB-or(Get-FileHash -LP $f).Hash-ine$p[$i]){throw}};$py=(gci -Path "$env:RUNNER_TOOL_CACHE/Python/3.12.*/$a/python.exe" -File|Sort-Object FullName -Descending|select -First 1).FullName;if(!$py){throw};$q=@('--architecture',$a,'--expected-entry-sha256',$p[0],'--expected-bootstrap-sha256',$p[1],'--expected-approved-manifest-sha256',$p[2]);$e=Join-Path $b $n[0];& $py -I -B $e --source-assert @q 1>$null 2>$null;$c = $LASTEXITCODE;$x=130,3221225786,-1073741510;if($c-in$x){$ok='2'}else{;$v=& $py -I -B $e --verify-source-assert-only @q 2>$null;$z = $LASTEXITCODE;if($z-in$x){$ok='2';if($c-eq0){$c=130};throw};if($z-ne0-or$v-isnot[string]-or$v.Length-gt512){throw};$r=$v|ConvertFrom-Json;if((($r.psobject.Properties.Name|Sort-Object)-join',')-cne'admitted,controllerSha256,reasonCode,schemaVersion,sidecarSha256'-or$r.schemaVersion-isnot[long]-or$r.schemaVersion-ne1-or$r.admitted-isnot[bool]-or$r.reasonCode-isnot[long]){throw};if($r.admitted){if($r.reasonCode-ne0){throw};foreach($h in @($r.controllerSha256,$r.sidecarSha256)){if($h-isnot[string]-or$h-cnotmatch'\A[0-9a-f]{64}\z'){throw}};$ok='1'}elseif($null-ne$r.controllerSha256-or$null-ne$r.sidecarSha256-or$r.reasonCode-lt1-or$r.reasonCode-gt8){throw};};}catch{};try{"s=$ok" >> $env:GITHUB_OUTPUT}catch{};exit $c
+    - if: always() && !cancelled() && contains(github.event.head_commit.message, '[sdk-assert]') && steps.B.outputs.s == '1'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: b-hints-${{ matrix.os }}
+        name: source-assert-${{ matrix.os }}
         path: |
           .work/packaged-context-sdk-batch-public/${{ matrix.os }}/controller.numeric.json
-          .work/packaged-context-sdk-batch-public/${{ matrix.os }}/batch-hints.numeric.json
+          .work/packaged-context-sdk-batch-public/${{ matrix.os }}/source-assertion.json
         retention-days: 1
         if-no-files-found: error
-    - if: always() && !cancelled() && contains(github.event.head_commit.message, '[sdk-batch-codes]') && steps.B.outcome=='success'
+    - if: always() && !cancelled() && contains(github.event.head_commit.message, '[sdk-assert]') && steps.B.outcome=='success'
       shell: pwsh
       run: exit 1
 
