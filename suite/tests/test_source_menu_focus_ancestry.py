@@ -66,6 +66,7 @@ class SourceFocusAncestryTests(unittest.TestCase):
                 return 0
             @property
             def CurrentBoundingRectangle(self):
+                if state.mode=='invalid-rect':return NS(left=90.0,top=60,right=150,bottom=80)
                 return NS(left=-1,top=-1,right=1,bottom=1) if state.mode=='outside' else NS(left=90,top=60,right=150,bottom=80)
             def GetRuntimeId(self):
                 if state.mode=='runtime-error':raise state.primary
@@ -120,6 +121,7 @@ class SourceFocusAncestryTests(unittest.TestCase):
         self.assertEqual([item for item in b.native.calls if type(item)is tuple and item[0]=='key'],
             [('key','ALT_F'),('key','DOWN'),('key','ESCAPE')])
         self.assertGreater(state.parent_reads,0)
+        self.assertNotIn('sourceFocusBoundsFailure',value['uiaInterop'])
         self.assertIs(m.require_native_menu_action(value,77,11,source_admission=self.prepared.admission),value)
 
 
@@ -148,6 +150,55 @@ class SourceFocusAncestryTests(unittest.TestCase):
                 with patch.object(selected.time,'monotonic',clock),self.assertRaises(AssertionError):
                     m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
                 self.assertEqual([item for item in b.native.calls if type(item)is tuple and item[0]=='key'],[('key','ALT_F')])
+
+    def test_popup_containment_failure_retains_only_observed_numeric_bounds(self):
+        m,api,process,record,clock,b,state=self.fixture('outside')
+        import native_menu_source_selection as selected
+        with patch.object(selected.time,'monotonic',clock),self.assertRaises(AssertionError):
+            m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+        value=record['nativeMenuActions'][-1]
+        failure=value['uiaInterop'].get('sourceFocusBoundsFailure')
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure,dict(sourceCode=38,guardSiteCode=1,depth=0,
+            focus=dict(pid=88,kindCode=50011,nativeHwnd=0,rectangle=[-1,-1,1,1]),
+            popup=dict(pid=88,hwnd=99,rectangle=[0,0,400,1000]),
+            entryFence=dict(childHwnd=56,childPid=88,childRootHwnd=11,childThreadId=9,
+                foreground=11,popupHwnd=99,popupThreadId=9,popupRectangle=[0,0,400,1000],ownerChain=[99,56]),
+            scope=dict(binding=dict(document=11,parent=55,child=56,officePid=88),
+                shellPid=77,shellCreationTime=100,officeCreationTime=200)))
+        self.assertFalse(value['success']);self.assertNotIn('inputVerified',value)
+        self.assertIsNone(b.probe._source_focus_proof);self.assertEqual(b.probe._source_focus_branch,0)
+        self.assertEqual([item for item in b.native.calls if type(item)is tuple and item[0]=='key'],[('key','ALT_F')])
+
+    def test_invalid_rectangle_rejection_does_not_claim_containment_observation(self):
+        m,api,process,record,clock,b,state=self.fixture('invalid-rect')
+        import native_menu_source_selection as selected
+        with patch.object(selected.time,'monotonic',clock),self.assertRaises(AssertionError):
+            m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+        value=record['nativeMenuActions'][-1]
+        self.assertNotIn('sourceFocusBoundsFailure',value['uiaInterop'])
+        self.assertFalse(value['success']);self.assertNotIn('inputVerified',value)
+        self.assertEqual([item for item in b.native.calls if type(item)is tuple and item[0]=='key'],[('key','ALT_F')])
+
+    def test_containment_recorder_failure_preserves_the_original_assertion_identity(self):
+        m,api,process,record,clock,b,state=self.fixture('outside')
+        original=[]
+        class RecorderFailure(Exception):
+            def __str__(self):raise AssertionError('No recorder exception text read')
+        class ThrowingSink(dict):
+            def __setitem__(self,key,value):
+                if key=='sourceFocusBoundsFailure':
+                    original.append(sys.exception())
+                    raise RecorderFailure()
+                return super().__setitem__(key,value)
+        b.probe.interop=ThrowingSink(b.probe.interop)
+        import native_menu_source_selection as selected
+        with patch.object(selected.time,'monotonic',clock),self.assertRaises(AssertionError) as caught:
+            m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+        self.assertEqual(len(original),1);self.assertIs(caught.exception,original[0])
+        self.assertNotIn('sourceFocusBoundsFailure',record['nativeMenuActions'][-1]['uiaInterop'])
+        self.assertFalse(record['nativeMenuActions'][-1]['success'])
+        self.assertEqual([item for item in b.native.calls if type(item)is tuple and item[0]=='key'],[('key','ALT_F')])
 
     def test_source_replay_requires_current_protocol_and_complete_closed_proof(self):
         m,value,process,record,clock,b,state=self.action()

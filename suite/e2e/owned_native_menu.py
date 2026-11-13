@@ -2182,7 +2182,21 @@ class NativeMenuProbe(NativeControlProbe):
                 rect=[getattr(box,key) for key in ('left','top','right','bottom')]
                 assert all(type(number) is int and -(1<<31)<=number<1<<31 for number in rect)
                 outer=popup['rectangle']
-                assert outer[0]<=rect[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<rect[3]<=outer[3]
+                try:
+                    assert outer[0]<=rect[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<rect[3]<=outer[3]
+                except AssertionError:
+                    try:
+                        self.interop['sourceFocusBoundsFailure']=dict(sourceCode=38,guardSiteCode=1,depth=depth,
+                            focus=dict(pid=pid,kindCode=kind,nativeHwnd=hwnd,rectangle=list(rect)),
+                            popup=dict(pid=popup['pid'],hwnd=popup['hwnd'],rectangle=list(outer)),
+                            entryFence=copy.deepcopy(before),
+                            scope=dict(binding={key:self._identity_scope['binding'][key]
+                                for key in ('document','parent','child','officePid')},
+                                shellPid=self._identity_scope['shellPid'],
+                                shellCreationTime=self._identity_scope['shellCreationTime'],
+                                officeCreationTime=self._identity_scope['officeCreationTime']))
+                    except BaseException:pass
+                    raise
                 row=dict(runtimeId=list(runtime),runtimeObservation=observation,pid=pid,kindCode=kind,nativeHwnd=hwnd,
                     visible=True,enabled=True,rectangle=rect)
                 unknown=True
