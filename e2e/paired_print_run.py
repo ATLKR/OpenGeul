@@ -33,10 +33,44 @@ _SOURCE_FUNCTIONS = {
 
 
 def _empty_failure():
-    return {'schemaVersion': 1, 'kind': 'paired-print-failure-numeric', 'completed': False,
+    return {'schemaVersion': 2, 'kind': 'paired-print-failure-numeric', 'completed': False,
         'qualification': False, 'errorCode': 0, 'exceptionCode': 0, 'stageCode': 0,
         'knownRole': 0, 'fontCode': 0, 'fileSizeKnown': False, 'fileSize': 0,
-        'linkCountKnown': False, 'linkCount': 0, 'frames': [], 'unknownFrames': 0, 'truncated': False}
+        'linkCountKnown': False, 'linkCount': 0, 'frames': [], 'unknownFrames': 0, 'truncated': False,
+        'censusObservation': None}
+
+
+def _project_census(value):
+    keys = {'schemaVersion','diagnosticOnly','acceptanceEligible','rootPid','originalRootCreationFileTime',
+        'sealed','requireLiveRoot','snapshotCount','knownCount','guardUnexpectedCount','rootSnapshotReachableCount','rows'}
+    if type(value) is not dict or set(value) != keys:
+        return None
+    if (type(value['schemaVersion']) is not int or value['schemaVersion'] != 1 or
+            value['diagnosticOnly'] is not True or value['acceptanceEligible'] is not False or
+            type(value['sealed']) is not bool or type(value['requireLiveRoot']) is not bool):
+        return None
+    for key, low, high in (('rootPid',1,0xffffffff), ('originalRootCreationFileTime',1,2**64-1),
+            ('snapshotCount',1,10000), ('knownCount',1,65), ('guardUnexpectedCount',1,64),
+            ('rootSnapshotReachableCount',0,64)):
+        if type(value[key]) is not int or not low <= value[key] <= high:
+            return None
+    rows = value['rows']
+    if (value['knownCount'] + value['guardUnexpectedCount'] > 65 or
+            value['rootSnapshotReachableCount'] > value['guardUnexpectedCount'] or
+            value['guardUnexpectedCount'] > value['snapshotCount'] or
+            type(rows) is not list or len(rows) != value['rootSnapshotReachableCount']):
+        return None
+    projected, previous = [], 0
+    for row in rows:
+        if type(row) is not dict or set(row) != {'pid','parentPid','executableRoleCode'}:
+            return None
+        if (type(row['pid']) is not int or not previous < row['pid'] <= 0xffffffff or row['pid'] == value['rootPid'] or
+                type(row['parentPid']) is not int or not 1 <= row['parentPid'] <= 0xffffffff or row['parentPid'] == row['pid'] or
+                type(row['executableRoleCode']) is not int or not 0 <= row['executableRoleCode'] <= 3):
+            return None
+        projected.append({key: row[key] for key in ('pid','parentPid','executableRoleCode')})
+        previous = row['pid']
+    return {**{key:value[key] for key in keys if key != 'rows'}, 'rows':projected}
 
 
 def project_failure(error):
@@ -78,6 +112,8 @@ def project_failure(error):
         if functions & ids:
             result['stageCode'] = stage
             break
+    try: result['censusObservation'] = _project_census(fields.get('pairedCensusObservation'))
+    except BaseException: pass  # The original numeric failure remains available.
     return result
 
 

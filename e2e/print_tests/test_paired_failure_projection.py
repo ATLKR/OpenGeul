@@ -138,5 +138,85 @@ class PairedFailureProjectionTests(unittest.TestCase):
         self.assertIs(type(caught), Rejected)
         self.assertEqual(caught.code, 20)
 
+    def census_record(self):
+        return {'schemaVersion': 1, 'diagnosticOnly': True, 'acceptanceEligible': False,
+            'rootPid': 1, 'originalRootCreationFileTime': 101, 'sealed': True, 'requireLiveRoot': True,
+            'snapshotCount': 5, 'knownCount': 4, 'guardUnexpectedCount': 1,
+            'rootSnapshotReachableCount': 1, 'rows': [{'pid': 5, 'parentPid': 1, 'executableRoleCode': 2}]}
+
+    def test_census_failure_v2_projects_only_the_closed_numeric_record(self):
+        error = Rejected(15); error.pairedRole = 1; error.pairedCensusObservation = self.census_record()
+        with mock.patch.object(Path, 'stat', side_effect=AssertionError()), \
+             mock.patch.object(Path, 'lstat', side_effect=AssertionError()), \
+             mock.patch.object(Path, 'open', side_effect=AssertionError()):
+            result = api.project_failure(error)
+        self.assertEqual(result['schemaVersion'], 2)
+        self.assertEqual(result['errorCode'], 15)
+        self.assertEqual(result['knownRole'], 1)
+        self.assertEqual(result.get('censusObservation'), self.census_record())
+        self.assertIsNot(result['censusObservation'], error.pairedCensusObservation)
+        self.assertFalse(result['qualification'])
+        self.assertEqual(set(result), {'schemaVersion','kind','completed','qualification','errorCode','exceptionCode',
+            'stageCode','knownRole','fontCode','fileSizeKnown','fileSize','linkCountKnown','linkCount','frames',
+            'unknownFrames','truncated','censusObservation'})
+
+    def test_malformed_census_metadata_cannot_escape_or_erase_original_numbers(self):
+        def duplicate(record):
+            record.update(rootSnapshotReachableCount=2,guardUnexpectedCount=2,
+                          rows=record['rows']*2)
+        changes = [lambda r:r.update(extra=1), lambda r:r.pop('sealed'), lambda r:r.update(knownCount=True),
+            lambda r:r.update(schemaVersion=True), lambda r:r.update(diagnosticOnly=False),
+            lambda r:r.update(acceptanceEligible=True), lambda r:r.update(rootPid=0),
+            lambda r:r.update(originalRootCreationFileTime=0), lambda r:r.update(sealed=1),
+            lambda r:r.update(requireLiveRoot=0), lambda r:r.update(snapshotCount=10001),
+            lambda r:r.update(knownCount=65), lambda r:r.update(guardUnexpectedCount=0),
+            lambda r:r.update(rootSnapshotReachableCount=2), lambda r:r['rows'][0].update(pid=True),
+            lambda r:r['rows'][0].update(pid=1), lambda r:r['rows'][0].update(parentPid=2**32),
+            lambda r:r['rows'][0].update(executableRoleCode=4), lambda r:r['rows'][0].update(executableRoleCode=True),
+            lambda r:r['rows'][0].update(executableName='SYNTHETIC-PRIVATE'), lambda r:r.update(rows=tuple(r['rows'])),
+            duplicate]
+        for index, change in enumerate(changes):
+            with self.subTest(mutation=index):
+                record=self.census_record();change(record);error=Rejected(15);error.pairedCensusObservation=record
+                result=api.project_failure(error)
+                self.assertEqual(result['schemaVersion'],2)
+                self.assertIsNone(result.get('censusObservation'))
+                self.assertEqual(result['errorCode'],15)
+                self.assertNotIn('SYNTHETIC',json.dumps(result))
+
+    def test_optional_census_projection_fault_keeps_original_failure(self):
+        for failure in (MemoryError(), KeyboardInterrupt(), SystemExit()):
+            with self.subTest(faultType=type(failure).__name__):
+                error=Rejected(15);error.pairedCensusObservation=self.census_record()
+                with mock.patch.object(api,'_project_census',side_effect=failure,create=True) as project:
+                    result=api.project_failure(error)
+                self.assertEqual(project.call_count,1)
+                self.assertEqual(result['errorCode'],15)
+                self.assertEqual(result['exceptionCode'],1)
+                self.assertIn('censusObservation',result)
+                self.assertIsNone(result['censusObservation'])
+
+    def test_maximum_census_failure_packet_stays_bounded_and_independent(self):
+        record=self.census_record();record.update(snapshotCount=10000,knownCount=1,guardUnexpectedCount=64,
+            rootSnapshotReachableCount=64,originalRootCreationFileTime=2**64-1,
+            rows=[{'pid':2**32-65+i,'parentPid':1,'executableRoleCode':3}for i in range(64)])
+        error=Rejected(15);error.pairedCensusObservation=record
+        result=api.project_failure(error)
+        self.assertEqual(result.get('censusObservation'),record)
+        result['frames']=[{'fileCode':9,'functionCode':102,'line':20000}for _ in range(12)]
+        self.assertLessEqual(len(json.dumps(result,sort_keys=True).encode('ascii')),8192)
+        record['rows'][0]['pid']=1
+        self.assertNotEqual(result['censusObservation'],record)
+
+    def test_failure_main_keeps_original_exit_and_new_closed_census_packet(self):
+        error=Rejected(15);error.pairedCensusObservation=self.census_record();output=io.StringIO()
+        with mock.patch.object(sys,'argv',self.main_args()),mock.patch.object(api,'run',side_effect=error), \
+             mock.patch.object(sys,'stdout',output):
+            self.assertEqual(api.main(),1)
+        result=json.loads(output.getvalue())
+        self.assertEqual(result['schemaVersion'],2)
+        self.assertEqual(result['errorCode'],15)
+        self.assertEqual(result.get('censusObservation'),self.census_record())
+
 
 if __name__ == '__main__': unittest.main()

@@ -87,6 +87,35 @@ def admit_current(value, *, expected_source, run_id, attempt, expected_upstream,
             'wasmSha256': wasm['artifacts']['rhwp_bg.wasm'], 'jsSha256': wasm['artifacts']['rhwp.js']}
 
 
+def _observe_census_failure(rows, parents, known, descendants, root_pid, creation,
+                            *, sealed, require_live_root):
+    """Already-read PID-chain hints only; no generation or ownership authority."""
+    reachable = {root_pid}
+    for _ in range(65):
+        expanded = reachable | {pid for pid, parent in parents.items() if parent in reachable}
+        if expanded == reachable:
+            break
+        reachable = expanded
+    else:
+        raise Rejected(15)
+    unexpected = descendants - known
+    selected = unexpected & reachable
+    roles = {'msedgewebview2.exe': 1, 'conhost.exe': 2, 'werfault.exe': 3}
+    observed = []
+    for row in rows:
+        pid = row['processId']
+        if pid not in selected:
+            continue
+        name = row.get('executableName')
+        role = roles.get(name.lower(), 0) if type(name) is str and len(name) <= 260 and name.isascii() else 0
+        observed.append({'pid': pid, 'parentPid': parents[pid], 'executableRoleCode': role})
+    return {'schemaVersion': 1, 'diagnosticOnly': True, 'acceptanceEligible': False,
+        'rootPid': root_pid, 'originalRootCreationFileTime': creation,
+        'sealed': sealed, 'requireLiveRoot': require_live_root, 'snapshotCount': len(rows),
+        'knownCount': len(known), 'guardUnexpectedCount': len(unexpected),
+        'rootSnapshotReachableCount': len(selected), 'rows': sorted(observed, key=lambda row: row['pid'])}
+
+
 class RetainedLease:
     """Original root plus a sealed known cohort; never all potential descendants.
 
@@ -184,7 +213,17 @@ class RetainedLease:
             if expanded == descendants:
                 break
             descendants = expanded
-        require(descendants <= known, 15)
+        try:
+            require(descendants <= known, 15)
+        except Rejected as error:
+            try:
+                error.pairedCensusObservation = _observe_census_failure(
+                    rows, parents, known, descendants, self.root_pid,
+                    self.handles[self.root_pid]['creation'], sealed=self.sealed,
+                    require_live_root=require_live_root)
+            except BaseException:
+                pass  # Optional observation cannot replace the original guard.
+            raise
         if require_live_root:
             for pid in known & set(parents):
                 require(self._state(pid) == 258, 15)
@@ -304,6 +343,13 @@ def invoke_print(printer, executable, fixture, case, folder, admit, oracle_error
                 if cleanup_error is None:
                     cleanup_error = error
     if cleanup_error is not None:
+        if primary is not None:
+            try:
+                observed = BaseException.__getattribute__(cleanup_error, '__dict__').get('pairedCensusObservation')
+                if type(observed) is dict and 'pairedCensusObservation' not in BaseException.__getattribute__(primary, '__dict__'):
+                    primary.pairedCensusObservation = observed
+            except BaseException:
+                pass  # Keep the original operation/cancellation and cleanup priority.
         raise primary if primary is not None else cleanup_error
     if primary is not None:
         if lease is None:

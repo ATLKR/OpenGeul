@@ -1,12 +1,15 @@
 """Real binder call-shape, synthetic Win32 kernel results, no OS processes."""
 import ast
 import ctypes
+import contextlib
+import json
 from ctypes import wintypes
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import sys
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 FILE = ROOT / 'paired_print_diagnostic.py'
@@ -163,6 +166,134 @@ class RetainedCohortTests(unittest.TestCase):
         self.stopped()
         self.focus.rows.append({'processId': 5, 'parentProcessId': 2, 'executableName': 'msedgewebview2.exe'})
         with self.assertRaises(api.Rejected): lease.wait_retired()
+
+    def test_unexpected_census_keeps_numeric_roles_and_original_rejection(self):
+        lease = self.lease()
+        self.focus.rows += [
+            {'processId': 5, 'parentProcessId': 1, 'executableName': 'msedgewebview2.exe'},
+            {'processId': 6, 'parentProcessId': 5, 'executableName': 'conhost.exe'},
+            {'processId': 7, 'parentProcessId': 3, 'executableName': 'werfault.exe'},
+            {'processId': 8, 'parentProcessId': 1, 'executableName': 'SYNTHETIC-PRIVATE-NAME'}]
+        opened = list(self.focus.kernel.opened)
+        with mock.patch.object(self.focus.process, 'processes', wraps=self.focus.process.processes) as snapshots:
+            lease.__exit__(None, None, None)
+        self.assertEqual(snapshots.call_count, 1)
+        error = lease.checkpoint_error
+        self.assertIs(type(error), api.Rejected)
+        self.assertEqual(error.code, 15)
+        record = getattr(error, 'pairedCensusObservation', None)
+        self.assertIs(type(record), dict)
+        self.assertEqual(record, {'schemaVersion': 1, 'diagnosticOnly': True, 'acceptanceEligible': False,
+            'rootPid': 1, 'originalRootCreationFileTime': 101, 'sealed': True, 'requireLiveRoot': True,
+            'snapshotCount': 8, 'knownCount': 4, 'guardUnexpectedCount': 4, 'rootSnapshotReachableCount': 4,
+            'rows': [{'pid': 5, 'parentPid': 1, 'executableRoleCode': 1},
+                     {'pid': 6, 'parentPid': 5, 'executableRoleCode': 2},
+                     {'pid': 7, 'parentPid': 3, 'executableRoleCode': 3},
+                     {'pid': 8, 'parentPid': 1, 'executableRoleCode': 0}]})
+        self.assertNotIn('SYNTHETIC', json.dumps(record))
+        self.assertEqual(self.focus.kernel.opened, opened)
+        self.assertEqual(set(lease.handles), {1, 2, 3, 4})
+        self.stopped()
+        with self.assertRaises(api.Rejected) as caught: lease.wait_retired()
+        self.assertIs(caught.exception, error)
+        lease.close()
+        self.assertEqual(sorted(self.focus.kernel.closed), [1002, 1003, 1004, 10002, 10003, 10004])
+
+    def test_known_seed_child_is_not_claimed_root_snapshot_reachable(self):
+        lease = self.lease()
+        self.focus.rows[1]['parentProcessId'] = 200
+        self.focus.rows.append({'processId': 5, 'parentProcessId': 2, 'executableName': 'conhost.exe'})
+        lease.__exit__(None, None, None)
+        record = getattr(lease.checkpoint_error, 'pairedCensusObservation', None)
+        self.assertIs(type(record), dict)
+        self.assertEqual(record['guardUnexpectedCount'], 1)
+        self.assertEqual(record['rootSnapshotReachableCount'], 0)
+        self.assertEqual(record['rows'], [])
+
+    def test_snapshot_name_enum_never_extracts_a_basename_or_coerces_objects(self):
+        class Opaque:
+            def __str__(self): raise AssertionError()
+            def __repr__(self): raise AssertionError()
+        for name in (None, 1, Opaque(), 'x'*261, 'C:/conhost.exe', 'conhost.exe ', 'wеrfault.exe', 'WerFаult.exe'):
+            with self.subTest(nameType=type(name).__name__):
+                self.focus = Focus();lease = self.lease()
+                self.focus.rows.append({'processId': 5, 'parentProcessId': 1, 'executableName': name})
+                lease.__exit__(None, None, None)
+                record = getattr(lease.checkpoint_error, 'pairedCensusObservation', None)
+                self.assertIs(type(record), dict)
+                self.assertEqual(record['rows'], [{'pid': 5, 'parentPid': 1, 'executableRoleCode': 0}])
+                self.assertEqual(set(record['rows'][0]), {'pid','parentPid','executableRoleCode'})
+                lease.close()
+
+    def test_exact_ascii_case_variants_keep_the_closed_executable_role(self):
+        for name, role in (('WerFault.exe', 3), ('wErFaUlT.eXe', 3), ('CONHOST.EXE', 2), ('MSEDGEWEBVIEW2.EXE', 1)):
+            with self.subTest(role=role):
+                self.focus = Focus();lease = self.lease()
+                self.focus.rows.append({'processId': 5, 'parentProcessId': 1, 'executableName': name})
+                lease.__exit__(None, None, None)
+                record = getattr(lease.checkpoint_error, 'pairedCensusObservation', None)
+                self.assertIs(type(record), dict)
+                self.assertEqual(record['rows'], [{'pid': 5, 'parentPid': 1, 'executableRoleCode': role}])
+                lease.close()
+
+    def test_shutdown_census_record_does_not_claim_a_new_live_generation(self):
+        lease = self.lease();lease.__exit__(None, None, None);self.stopped()
+        self.focus.rows.append({'processId': 5, 'parentProcessId': 2, 'executableName': 'conhost.exe'})
+        opened = list(self.focus.kernel.opened)
+        with self.assertRaises(api.Rejected) as caught: lease.wait_retired()
+        record = getattr(caught.exception, 'pairedCensusObservation', None)
+        self.assertIs(type(record), dict)
+        self.assertEqual(caught.exception.code, 15)
+        self.assertTrue(record['sealed']);self.assertFalse(record['requireLiveRoot'])
+        self.assertEqual(record['originalRootCreationFileTime'], 101)
+        self.assertEqual((record['guardUnexpectedCount'], record['rootSnapshotReachableCount']), (1, 0))
+        self.assertNotIn('rootLiveState', record)
+        self.assertEqual(self.focus.kernel.opened, opened)
+
+    def test_census_observation_fault_cannot_replace_original_guard(self):
+        for failure in (MemoryError(), KeyboardInterrupt(), SystemExit()):
+            with self.subTest(faultType=type(failure).__name__):
+                self.focus = Focus()
+                lease = self.lease()
+                self.focus.rows.append({'processId': 5, 'parentProcessId': 1, 'executableName': 'conhost.exe'})
+                original = api.require; captured = []
+                def guard(condition, code=1):
+                    try: return original(condition, code)
+                    except api.Rejected as error:
+                        if code == 15: captured.append(error)
+                        raise
+                with mock.patch.object(api, '_observe_census_failure', side_effect=failure, create=True) as observe, \
+                     mock.patch.object(api, 'require', guard):
+                    lease.__exit__(None, None, None)
+                self.assertEqual(observe.call_count, 1)
+                self.assertEqual(len(captured), 1)
+                self.assertIs(lease.checkpoint_error, captured[0])
+                self.assertEqual(captured[0].code, 15)
+                self.stopped()
+                with self.assertRaises(api.Rejected) as caught: lease.wait_retired()
+                self.assertIs(caught.exception, captured[0])
+                lease.close()
+
+    def test_census_failure_keeps_existing_operation_primary_and_blocks_next_role(self):
+        lease = self.lease(); primary = ValueError(); roles = []
+        self.focus.rows.append({'processId': 5, 'parentProcessId': 1, 'executableName': 'conhost.exe'})
+        def printer(*args, admission):
+            observed = admission(self.session, args[3])
+            with contextlib.ExitStack() as stack:
+                stack.callback(self.stopped)
+                stack.push(observed)
+                raise primary
+        with self.assertRaises(ValueError) as caught:
+            for role in (1, 2):
+                roles.append(role)
+                api.invoke_print(printer, Path('editor'), Path('fixture'), {}, Path('fresh'),
+                                 lambda session, folder: lease, lambda error: error is primary)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(roles, [1])
+        self.assertIs(type(lease.checkpoint_error), api.Rejected)
+        self.assertIs(getattr(primary, 'pairedCensusObservation', None),
+                      getattr(lease.checkpoint_error, 'pairedCensusObservation', object()))
+        self.assertTrue(lease.closed)
 
     def test_incomplete_census_exception_is_not_erased(self):
         lease = self.lease()
