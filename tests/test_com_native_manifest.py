@@ -13,8 +13,8 @@ sys.path.insert(0, str(ROOT/'scripts'))
 import com_source_contract as contract
 import prepare_native_tests
 
-NEW_PINS = ('3e5a95c7b4b81b208d56844b252f3d1f50077a4ab28f38ec3746b0b51b8541b0',
-            '54781eabb14ad85dbc06d4929b7b6ed00219e4030840e9cfbc8d76aa5ae0e4ca')
+NEW_PINS = ('5edcc9bd774878379521fefd9a1e7b509aa7571a478858550ef61b5d5afc186d',
+            '80350e8f958a063ddd13731bb3defd059e3144a252a016bbb699ead22190a12a')
 OLD_PINS = ('839947cf430e2c3587c235a4ef8980195be1c78f9f8ef68e9f60f9968a1e01c6',
             '8895d687ba3eae0602f2003e0078420b5a844c19f090162b7f4e5315ad262b6c',
             '8fbbc05a985091264101cf14fc4d01563eacef548fd9f7f02e68993e8aebc5e3',
@@ -53,8 +53,8 @@ class ComNativeManifestTests(unittest.TestCase):
                 contract.validate(record,prepared,native,config)
 
     def test_original_and_com_patched_prefix_digests_are_unchanged_and_required(self):
-        self.assertEqual(contract.REFERENCE['originalFiles']['Cargo.toml'],'17d3f9d347d3d5c1011e3299ac85f640d9f31e854e442c4696f55da85809700b')
-        self.assertEqual(contract.REFERENCE['patchedFiles']['Cargo.toml'],'769745d72376286c03413925eff943af5014db3467e21798d9fc886044d02405')
+        self.assertEqual(contract.REFERENCE['originalFiles']['Cargo.toml'],'f9b27a36d6feb82f66e456489398b6406b48e6ebbe1c8d2dc4c7f960edb5c505')
+        self.assertEqual(contract.REFERENCE['patchedFiles']['Cargo.toml'],'85c77e9e642870b1c12d8d5c20866d5b35eb6d11fdf95fd4beaf3f9399942291')
         record,prepared,native,config=materials();prepared[contract.CORE+'/Cargo.toml']=NEW_PINS[0]
         for key in ('originalFiles','patchedFiles'):
             bad=copy.deepcopy(record);bad['ledger'][key]['Cargo.toml']='0'*64

@@ -1,0 +1,7 @@
+--with-product-name=OpenGeul Office
+--with-vendor=ATLKR
+--enable-release-build
+--with-branding=@OPENGEUL_BRANDING_DIRECTORY@
+--with-lang=en-US ko
+--disable-online-update
+--without-fonts

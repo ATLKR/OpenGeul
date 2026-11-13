@@ -299,7 +299,7 @@ def _run_jobs(binding, backend, *, env=None, allow_pr=False):
         require(isinstance(run,dict) and type(run.get('id')) is int and str(run['id'])==run_id
                 and type(run.get('run_attempt')) is int and run['run_attempt']==attempt
                 and run.get('repository',{}).get('full_name')==REPOSITORY and run['repository'].get('private') is False
-                and run.get('path')=='.github/workflows/msix.yml' and run.get('event') in ('push','pull_request','workflow_dispatch')
+                and run.get('path')=='.github/workflows/msix.yml' and run.get('event') in ('push','pull_request','workflow_dispatch','schedule')
                 and (run.get('status')=='in_progress' and run.get('conclusion') is None
                      or run.get('status')=='completed' and run.get('conclusion')=='success'),
                 '실제 Source GitHub 실행·시도·workflow·결과가 다릅니다')

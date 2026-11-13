@@ -1,0 +1,83 @@
+{
+  "archive": "libreoffice-26.8.1.1.tar.xz",
+  "archiveBytes": 302435508,
+  "archiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+  "members": [
+    {
+      "member": "libreoffice-26.8.1.1/embedserv/Library_emser.mk",
+      "bytes": 1586,
+      "sha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef",
+      "fixture": "embedserv/Library_emser.mk",
+      "fixtureBytes": 1586,
+      "fixtureSha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/extensions/Library_oleautobridge.mk",
+      "bytes": 1639,
+      "sha256": "815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8",
+      "fixture": "extensions/Library_oleautobridge.mk",
+      "fixtureBytes": 1639,
+      "fixtureSha256": "815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/winaccessibility/Library_uacccom.mk",
+      "bytes": 2200,
+      "sha256": "d5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062",
+      "fixture": "winaccessibility/Library_uacccom.mk",
+      "fixtureBytes": 2200,
+      "fixtureSha256": "d5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/winaccessibility/Library_winaccessibility.mk",
+      "bytes": 2478,
+      "sha256": "0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4",
+      "fixture": "winaccessibility/Library_winaccessibility.mk",
+      "fixtureBytes": 2478,
+      "fixtureSha256": "0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/winaccessibility/WinResTarget_uacccom.mk",
+      "bytes": 803,
+      "sha256": "9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00",
+      "fixture": "winaccessibility/WinResTarget_uacccom.mk",
+      "fixtureBytes": 803,
+      "fixtureSha256": "9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/WinResTarget.mk",
+      "bytes": 4182,
+      "sha256": "54b0b90ebe3c0e5b569fcb43f2e4c53126f61918e46b026bd37c13026c0e8f70",
+      "fixture": "solenv/gbuild/WinResTarget.mk",
+      "fixtureBytes": 4182,
+      "fixtureSha256": "54b0b90ebe3c0e5b569fcb43f2e4c53126f61918e46b026bd37c13026c0e8f70"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_class.mk",
+      "bytes": 29428,
+      "sha256": "e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada",
+      "physicalLfRanges": [
+        [
+          588,
+          622
+        ]
+      ],
+      "fixture": "msc-resource-argv.mk",
+      "fixtureBytes": 847,
+      "fixtureSha256": "a571f30f65a40488a57161c3f7ace9f5db9d21232e82e19fdbe3143327015a2d"
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/LinkTarget.mk",
+      "bytes": 111066,
+      "sha256": "075c6497a70d1775374d552dad585aa01fb3eece14482f38386acb8900e3b1b8",
+      "physicalLfRanges": [
+        [
+          1131,
+          1135
+        ]
+      ],
+      "fixture": "linktarget-defs.mk",
+      "fixtureBytes": 195,
+      "fixtureSha256": "68b9d1012f43976817e89ae1b8d1d08f95f495ba7b2b48ef8d4df89c92f1c289"
+    }
+  ]
+}

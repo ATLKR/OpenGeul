@@ -1,11 +1,13 @@
-# Tauri 출처 판별 보안 수정
+# Tauri 출처·채널 보안 수정
 
-HOP 0.4.5와 rhwp 0.8.7의 고정 소스는 유지하면서 데스크톱의 Tauri를 **2.10.3에서 2.11.1로** 올립니다. [공식 권고 GHSA-7gmj-67g7-phm9](https://github.com/advisories/GHSA-7gmj-67g7-phm9)는 2.0.0~2.11.0을 영향 범위로, 2.11.1을 첫 수정 버전으로 명시합니다. Windows와 Android에서 등록한 로컬 프로토콜과 이름이 같은 공격자 도메인을 로컬 IPC 출처로 잘못 분류하는 문제입니다. OpenGeul에서 실제 공격 경로가 재현됐다는 의미는 아닙니다.
+현재 후보는 HOP 0.5.3 / rhwp 0.9.0을 고정하고 Rust Tauri **2.12.5**, tauri-runtime-wry **2.12.3**을 사용합니다. 두 crate의 버전 번호가 같다고 가정하지 않습니다. 이전 Tauri 2.11.1의 출처 혼동 수정만으로 최신 후보가 안전하다고 판단하지 않습니다.
 
-`scripts/prepare_upstream.py`가 데스크톱 선언을 `tauri = "=2.11.1"`에 해당하는 정확한 버전으로 변환하고, `overlay/desktop-cargo.lock.toml`을 생성된 `Cargo.lock`에 적용합니다. 잠금 입력에는 업스트림 패키지 버전 0.4.5가 들어 있으며 준비할 때 제품 버전으로 바꿉니다. 수정 버전과 잠금 파일이 일치하지 않으면 준비가 실패합니다. 잠금 오버레이도 기존 구성 요소 증명의 helper 해시에 포함됩니다.
+[GHSA-7gmj-67g7-phm9](https://github.com/advisories/GHSA-7gmj-67g7-phm9)는 Windows/Android의 공격자 도메인을 로컬 IPC 출처로 오인하는 문제를 2.11.1에서 수정했습니다. 별도의 [GHSA-w28w-mhc8-qvjv](https://github.com/tauri-apps/tauri/security/advisories/GHSA-w28w-mhc8-qvjv)는 2.11.5까지의 채널 fetch ACL 우회를 다루며 2.11.6 이상이 필요합니다. OpenGeul 자체에서 공격을 재현했다는 의미는 아닙니다.
 
-함께 필요한 Tauri 계열은 build/codegen/macros **2.6.1**, runtime/runtime-wry **2.11.1**, utils **2.9.1**로 잠갔습니다. Cargo의 전체 의존성 갱신을 수행하지 않았으며, Tauri 지정 갱신에서 선택된 관련 없는 patch 변경은 기존 값으로 되돌렸습니다. 실제 선택 결과는 잠금 파일의 버전과 레지스트리 체크섬으로 재현합니다. 이후 의존성 수정도 잠금 파일 갱신과 검증을 함께 수행해야 합니다.
+`prepare_upstream.py`는 선언을 `tauri = "=2.12.5"`로 정확히 고정하고, HOP 0.5.3의 패키지 버전만 제품 버전으로 바꾼 잠금을 적용합니다. `native_activation.py`는 공식 원본 체크섬을 검증한 2.12.5/2.12.3 source vendor에 기존 Store restart 보호와 WinRT 대화상자 활성화 변경을 적용합니다. 프로세스 실행으로 돌아가는 대체 경로는 추가하지 않습니다. 원래 shim의 Windows 0.61과 새 runtime의 0.62 계열은 정확한 버전·레지스트리 체크섬으로 구분하고 두 family를 증명합니다.
 
-준비 회귀는 생성된 실제 선언과 잠금을 읽어 알려진 취약 버전이 남아 있지 않은지, 선언이 선택 버전에 정확히 고정됐는지, 제품 버전이 유지되는지를 검사합니다. 기존 2.10.3에서 실패한 뒤 보안 오버레이 적용 후 통과했습니다. Windows의 줄바꿈 변환을 모사한 기존 선언 일치 검사도 유지합니다.
+`native_source_contract.py`의 고정 inventory는 실제 공식 원문 166개, 검토한 수정 5개와 shim 5개를 producer/consumer 양쪽에서 확인합니다. 새 Tauri 채널 코드는 WebView별 순차 payload ID를 사용하며 무작위 ID라고 설명하지 않습니다. 소유 WebView에 한정한 fetch, 일회 소비, 종료 정리와 stale instance 거부는 이 다운스트림 패치에서 변경하지 않았습니다. 원문과 패치 결과의 drift는 실패해야 합니다.
 
-Rust 1.93.1의 실제 `cargo metadata --locked --filter-platform x86_64-pc-windows-msvc` 해석과 제품 정책 테스트 287개가 통과했습니다. Linux에서 실제 데스크톱의 Windows 타깃 `cargo check`도 실행했으나 `ring`의 C 빌드가 MSVC 도구 `lib.exe` 부재로 중단됐습니다. 이 검사는 Windows 앱 빌드 성공으로 표시하지 않습니다. 후보 릴리스는 실제 Windows 빌드와 패키지 검증을 통과한 새 바이너리로 별도 자격을 얻어야 합니다.
+직접 활성화 회귀 13개, source contract 전송 회귀 12개와 실제 공식 원문 provision/capture/validate는 로컬에서 확인했습니다. Cargo 잠금 해석은 소스와 ABI를 사용하는 실제 Windows 실행을 대체하지 않습니다. 이전 2.11.1 검증 수치와 과거 Windows 산출물을 새 2.12.5 후보의 성공 증거로 재사용하지 않습니다. npm API/CLI는 HOP의 기존 2.10.1 잠금을 유지하므로 Tauri 도구 전체를 최신화했다는 주장을 하지 않습니다.
+
+전체 의존성 선택과 남은 수용 게이트는 [2026-11-12 후보 기록](DEPENDENCY_UPDATE_2026-11-12.md)에 정리합니다. 실제 Windows 빌드·메뉴·단축키·포커스·접근성·저장/재열기·패키지 검증을 통과한 동일 commit의 새 바이너리로 최종 자격을 판단해야 합니다.

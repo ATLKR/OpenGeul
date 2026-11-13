@@ -28,7 +28,7 @@ curl --fail --location --proto '=https' --tlsv1.2 https://github.com/wasm-bindge
 printf '%s  %s\n' '278a8d668085821f4d1a637bd864f1713f872b0ae3a118c77562a308c0abfe8d' '.work/tooling/wasm-pack.tar.gz' | sha256sum --check
 tar -xzf .work/tooling/wasm-pack.tar.gz -C .work/tooling
 wasmpack="$root/.work/tooling/wasm-pack-v0.14.0-x86_64-unknown-linux-musl/wasm-pack"
-"$wasmpack" build .work/hop/third_party/rhwp --target web --release --no-opt --out-dir "$root/.work/rebuilt-wasm" -- --locked
+"$wasmpack" build .work/hop/third_party/rhwp --target web --release --no-opt --out-dir "$root/.work/rebuilt-wasm" -- --locked --no-default-features --features console_error_panic_hook,wasm-api
 cp .work/hop/third_party/rhwp/LICENSE .work/rebuilt-wasm/LICENSE
 python scripts/wasm_artifacts.py capture .work/rebuilt-wasm
 python scripts/wasm_artifacts.py install .work/rebuilt-wasm .work/hop

@@ -1,0 +1,238 @@
+"""Synthetic pinned containers over the real normal ARM fixture; no desktop."""
+import copy
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+import zipfile
+
+from suite.tests import test_calc_dispatch_integration as calc_fixture
+from suite.tests.test_payload import pe
+
+ROOT=Path(__file__).resolve().parents[2]
+FAMILY='writer-server-observer-diagnostic'
+CORE='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+
+
+def load(name,path):
+    spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module);return module
+
+
+def sha(raw):return hashlib.sha256(raw).hexdigest()
+
+
+class WriterStageTests(unittest.TestCase):
+    def setUp(self):
+        path=ROOT/'suite/scripts/stage-writer-server-observer.py'
+        self.assertTrue(path.is_file(),'Writer consumer stage is missing')
+        self.m=load('writer_stage_contract',path)
+        self.old=calc_fixture.ArtifactTests();self.old.setUp();self.addCleanup(self.old.doCleanups)
+        self.base=self.old.f.root;self.output=self.base.parent/'writer-output'
+        self.archive=self.base.parent/'OpenGeul-Office-engine-arm64-writer-server-observer.zip'
+        self.receipt=self.base.parent/'writer-server-observer-source-build-receipt.json'
+        self.artifact=self.base.parent/'github-artifact.zip'
+        self.source_lock=self.base.parent/'source-lock.json';self.lock_file=self.base.parent/'writer-input.json'
+        package=ROOT/'suite/engine-build/writer-server-observer-diagnostic'
+        self.assertTrue(package.is_dir(),'Writer source package is missing from this checkout')
+        self.source_lock.write_bytes((package/'source-lock.json').read_bytes());self.source=json.loads(self.source_lock.read_bytes())
+        self.entries=dict(self.old.entries);self.entries.pop(self.old.m.MARKER)
+        binaries=[]
+        for path in ('program/UAccCOM.dll','program/winaccessibility.dll'):
+            self.entries[path]=pe(0xaa64,dll=True)
+            binaries.append(dict(path=path,bytes=len(self.entries[path]),sha256=sha(self.entries[path]),machine=0xaa64))
+        self.marker=dict(schemaVersion=1,family=FAMILY,kind=FAMILY,sourceCommit='b'*40,sourceTree='d'*40,coreCommit=CORE,
+            sourceLockSha256=sha(self.source_lock.read_bytes()),patchSha256=self.source['patch']['sha256'],wireSchema=self.source['wireSchema'],
+            descriptorSchemaVersion=1,mappingBytes=131328,ipcVersion=1,sinkAbiVersion=2,requiredRebuiltLibraries=['UAccCOM','winaccessibility'],
+            binaries=binaries,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+        self.hooks=dict(schemaVersion=1,kind=self.source['kind'],passed=True,target='windows-arm64',coreCommit=CORE,
+            lockSha256=self.marker['sourceLockSha256'],patch=self.source['patch'],wireSchema=self.source['wireSchema'],
+            sources=self.source['sources'],payloads=self.source['payloads'],dependencies=self.source['dependencies'],
+            ipcVersion=1,sinkAbiVersion=2,mappingBytes=131328,descriptorSchemaVersion=1,requiredRebuiltLibraries=['UAccCOM','winaccessibility'],
+            fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
+        self.pack()
+
+    def pack(self):
+        raw=json.dumps(self.marker).encode()
+        self.entries['writer-server-observer-diagnostic.json']=raw
+        self.entries['program/opengeul-writer-server-observer-diagnostic.json']=raw
+        with zipfile.ZipFile(self.archive,'w') as zipped:
+            for name,data in self.entries.items():zipped.writestr(name,data)
+        self.proof=dict(schemaVersion=1,kind='native-office-engine-writer-server-observer-diagnostic',phase='Full',architecture='arm64',stage='complete',
+            status='native-engine-writer-server-observer-diagnostic-built',passed=True,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False,
+            sourceCommit='b'*40,sourceTree='d'*40,sourceRun=123,runAttempt=1,sourceLockSha256=self.marker['sourceLockSha256'],
+            sourcePin=dict(coreCommit=CORE),host=dict(isWindows=True,processMachine=0,nativeMachine=0xaa64),
+            writerServerObserverSourceHooks=self.hooks,writerServerObserverRuntime=self.marker,
+            artifact=dict(path='producer-owned',size=self.archive.stat().st_size,sha256=sha(self.archive.read_bytes())))
+        self.receipt.write_text(json.dumps(self.proof))
+        self.repack_outer()
+
+    def repack_outer(self):
+        with zipfile.ZipFile(self.artifact,'w') as zipped:
+            zipped.write(self.archive,self.archive.name);zipped.write(self.receipt,self.receipt.name)
+        self.lock=dict(schemaVersion=1,kind='writer-server-observer-diagnostic-input',architecture='arm64',repository='ATLKR/OpenGeul',repositoryId=1405493151,
+            sourceCommit='b'*40,sourceTree='d'*40,runId=123,runAttempt=1,artifactId=456,artifactSha256=sha(self.artifact.read_bytes()),artifactSize=self.artifact.stat().st_size,
+            sourceLockSha256=self.marker['sourceLockSha256'],coreCommit=CORE,patchSha256=self.source['patch']['sha256'],wireSchemaSha256=self.source['wireSchema']['sha256'])
+        self.lock_file.write_text(json.dumps(self.lock))
+
+    def repack_entries(self,entries):
+        with zipfile.ZipFile(self.archive,'w') as zipped:
+            for name,data in entries.items():zipped.writestr(name,data)
+        self.proof['artifact'].update(size=self.archive.stat().st_size,sha256=sha(self.archive.read_bytes()))
+        self.receipt.write_text(json.dumps(self.proof));self.repack_outer()
+
+    def stage(self,**options):
+        args=dict(baseline=self.base,artifact=self.artifact,archive=self.archive,receipt=self.receipt,source_lock=self.source_lock,
+            diagnostic_lock=self.lock_file,output=self.output,expected_suite_source_commit='a'*40)
+        return self.m.stage(**{**args,**options})
+
+    def require(self,**options):
+        args=dict(output=self.output,baseline=self.base,artifact=self.artifact,diagnostic_lock=self.lock_file,source_lock=self.source_lock,
+            expected_suite_source_commit='a'*40)
+        return self.m.require_writer_observer_stage(**{**args,**options})
+
+    def test_real_staging_preserves_normal_baseline_and_never_has_normal_inventory(self):
+        before=self.m.payload._scan(self.base)
+        self.stage();ready=self.require()
+        self.assertEqual(before,self.m.payload._scan(self.base))
+        for name,record in before.items():
+            if not name.startswith('Office/') and name!='suite-inventory.json':
+                self.assertEqual(record['sha256'],sha((self.output/name).read_bytes()),name)
+        self.assertEqual(self.source_lock.read_bytes(),(self.output/'writer-server-observer-source-lock.json').read_bytes())
+        self.assertEqual(self.receipt.read_bytes(),(self.output/'writer-server-observer-source-build-receipt.json').read_bytes())
+        for path in ('writer-server-observer-diagnostic.json','program/opengeul-writer-server-observer-diagnostic.json'):
+            self.assertEqual(self.entries[path],(self.output/'Office'/path).read_bytes())
+        self.assertEqual(ready['sourceTree'],'d'*40);self.assertEqual(ready['mappingBytes'],131328)
+        self.assertFalse(ready['acceptanceEligible']);self.assertFalse(ready['fullEngineQualified']);self.assertFalse(ready['guiVerified'])
+        with self.assertRaisesRegex(ValueError,'Writer observer diagnostic'):
+            self.m.payload.verify_payload(self.output,json.loads((self.output/'suite-inventory.json').read_bytes()))
+
+    def test_unpinned_or_changed_outer_inner_receipt_and_lock_are_rejected(self):
+        for target in (self.artifact,self.archive,self.receipt,self.source_lock):
+            with self.subTest(name=target.name):
+                original=target.read_bytes();target.write_bytes(original+b'changed')
+                try:
+                    with self.assertRaises(ValueError):self.stage()
+                    self.assertFalse(self.output.exists())
+                finally:target.write_bytes(original)
+
+    def test_one_dll_overlay_other_architecture_calc_mix_and_tree_mismatch_are_rejected(self):
+        original=copy.deepcopy(self.entries)
+        for kind in ('overlay','foreign','calc','tree'):
+            with self.subTest(kind=kind):
+                self.entries=copy.deepcopy(original)
+                if kind=='overlay':self.entries['program/UAccCOM.dll']=self.entries['program/UAccCOM.dll'][:-1]+bytes([self.entries['program/UAccCOM.dll'][-1]^1])
+                elif kind=='foreign':self.entries['program/UAccCOM.dll']=pe(0x8664,dll=True)
+                elif kind=='calc':self.entries['program/opengeul-calc-dispatch-diagnostic.json']=b'{}'
+                else:self.marker['sourceTree']='e'*40
+                self.pack()
+                with self.assertRaises(ValueError):self.stage()
+                self.assertFalse(self.output.exists());self.marker['sourceTree']='d'*40
+
+    def test_interruption_has_root_marker_before_executable_extraction(self):
+        with patch.object(self.m,'_extract_runtime',side_effect=RuntimeError('synthetic extraction stop')):
+            with self.assertRaises(RuntimeError):self.stage()
+        self.assertTrue((self.output/'writer-server-observer-diagnostic.json').is_file())
+        self.assertFalse(json.loads((self.output/'writer-server-observer-diagnostic.json').read_bytes())['stageComplete'])
+        with self.assertRaises(ValueError):self.m.payload.verify_payload(self.output,{})
+
+    def test_require_detects_output_binary_or_baseline_change_and_keeps_original_check_exception(self):
+        self.stage();binary=self.output/'Office/program/UAccCOM.dll';original=binary.read_bytes();binary.write_bytes(original+b'overlay')
+        with self.assertRaises(ValueError):self.require()
+        binary.write_bytes(original)
+        class Expired(Exception):pass
+        error=Expired()
+        def check():raise error
+        with self.assertRaises(Expired) as caught:self.require(check=check)
+        self.assertIs(caught.exception,error)
+
+    def test_qualification_host_source_and_abi_flags_cannot_self_authorize(self):
+        original=copy.deepcopy(self.proof)
+        for kind in ('qualified','gui','host','hook-abi','tree'):
+            with self.subTest(kind=kind):
+                self.proof=copy.deepcopy(original)
+                if kind=='qualified':self.proof['fullEngineQualified']=True
+                elif kind=='gui':self.proof['guiVerified']=True
+                elif kind=='host':self.proof['host']['nativeMachine']=0x8664
+                elif kind=='hook-abi':self.proof['writerServerObserverSourceHooks']['sinkAbiVersion']=1
+                else:self.proof['sourceTree']='e'*40
+                self.receipt.write_text(json.dumps(self.proof));self.repack_outer()
+                with self.assertRaises(ValueError):self.stage()
+                self.assertFalse(self.output.exists())
+
+    def test_marker_case_alias_traversal_and_file_directory_collision_are_rejected(self):
+        original=copy.deepcopy(self.entries)
+        for kind in ('alias','traversal','collision'):
+            with self.subTest(kind=kind):
+                entries=copy.deepcopy(original)
+                if kind=='alias':entries['PROGRAM/OPENGEUL-WRITER-SERVER-OBSERVER-DIAGNOSTIC.JSON']=entries.pop('program/opengeul-writer-server-observer-diagnostic.json')
+                elif kind=='traversal':entries['../outside.json']=b'{}'
+                else:entries['program']=b'collision'
+                self.repack_entries(entries)
+                with self.assertRaises(ValueError):self.stage()
+                self.assertFalse(self.output.exists())
+
+    def test_root_marker_precedes_even_baseline_executable_copy(self):
+        def stop(*args,**kwargs):
+            self.assertTrue((self.output/'writer-server-observer-diagnostic.json').is_file())
+            self.assertFalse((self.output/'OpenGeul.Office.exe').exists())
+            raise RuntimeError('synthetic baseline copy stop')
+        with patch.object(self.m.shutil,'copytree',side_effect=stop):
+            with self.assertRaises(RuntimeError):self.stage()
+        self.assertFalse(json.loads((self.output/'writer-server-observer-diagnostic.json').read_bytes())['stageComplete'])
+
+    def test_fresh_outputs_and_mixed_baseline_are_rejected_without_relabeling(self):
+        for output in (self.base,self.base/'nested',self.base.parent):
+            with self.subTest(output_kind=output.name):
+                with self.assertRaises(ValueError):self.stage(output=output)
+        self.old.f.write('calc-dispatch-diagnostic.json',b'{}')
+        with self.assertRaises(ValueError):self.stage()
+        self.assertFalse(self.output.exists())
+
+    def test_marker_removal_or_shell_worker_hwp_delta_cannot_make_a_normal_copy(self):
+        self.stage()
+        for name in ('worker/session.py','HWP/OpenGeul.exe','OpenGeul.Office.exe'):
+            with self.subTest(name=name):
+                path=self.output/name;raw=path.read_bytes();path.write_bytes(raw+b'changed')
+                with self.assertRaises(ValueError):self.require()
+                path.write_bytes(raw)
+        (self.output/'writer-server-observer-diagnostic.json').unlink()
+        (self.output/'Office/program/opengeul-writer-server-observer-diagnostic.json').unlink()
+        with self.assertRaises((ValueError,OSError)):self.require()
+        with self.assertRaises(ValueError):self.m.payload.verify_payload(self.output,json.loads((self.output/'suite-inventory.json').read_bytes()))
+
+    def test_same_length_matching_hash_executable_renamed_dll_is_not_native_dll_proof(self):
+        entries=copy.deepcopy(self.entries);data=pe(0xaa64,dll=False)
+        entries['program/UAccCOM.dll']=data
+        self.marker['binaries'][0].update(bytes=len(data),sha256=sha(data))
+        raw=json.dumps(self.marker).encode();entries['writer-server-observer-diagnostic.json']=raw;entries['program/opengeul-writer-server-observer-diagnostic.json']=raw
+        self.proof['writerServerObserverRuntime']=self.marker
+        self.repack_entries(entries)
+        with self.assertRaises(ValueError):self.stage()
+
+    def test_original_preparation_check_can_stop_after_root_marker_without_renewal(self):
+        class Expired(Exception):pass
+        error=Expired()
+        def check():
+            if (self.output/'writer-server-observer-diagnostic.json').exists():raise error
+        with self.assertRaises(Expired) as caught:self.stage(check=check)
+        self.assertIs(caught.exception,error)
+        self.assertTrue((self.output/'writer-server-observer-diagnostic.json').is_file())
+        self.assertFalse((self.output/'Office/program/soffice.bin').exists())
+
+    def test_resealing_self_inventory_cannot_replace_authenticated_office_engine_or_configuration(self):
+        self.stage();original_inventory=(self.output/'suite-inventory.json').read_bytes()
+        overlay=json.loads((self.output/'writer-server-observer-diagnostic.json').read_bytes())
+        for name in ('program/soffice.bin','share/registry/main.xcd','opengeul-branding.json'):
+            with self.subTest(name=name):
+                target=self.output/'Office'/name;raw=target.read_bytes();target.write_bytes(raw+b'changed')
+                resealed=self.m._diagnostic_inventory(self.output,overlay,None)
+                (self.output/'suite-inventory.json').write_text(json.dumps(resealed))
+                try:
+                    with self.assertRaises(ValueError):self.require()
+                finally:target.write_bytes(raw);(self.output/'suite-inventory.json').write_bytes(original_inventory)
+
+
+if __name__=='__main__':unittest.main()

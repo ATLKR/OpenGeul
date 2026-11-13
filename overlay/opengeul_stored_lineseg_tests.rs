@@ -69,6 +69,45 @@ fn authored_positive_body_and_cell_rows_survive_hwp_hwpx_hwp() {
 }
 
 #[test]
+fn shared_hwp_projection_preserves_owned_fallback_and_rejects_runtime_rows() {
+    for case in 0..7 {
+        let mut core=DocumentCore::from_bytes(&persistence_owned_hwpx_input()).expect("public source-line HWPX import");
+        let original=tuples(fields(core.document())[0]);assert!(!original.is_empty());
+        let p=&mut core.document_mut().sections[0].paragraphs[2];
+        assert_eq!(p.source_line_seg_vertical_pos.as_ref().expect("parser-owned positive source").len(),p.serializable_line_segs().len());
+        match case {
+            0=>{},
+            1=>{let mut fill=p.line_segs[0].clone();fill.vertical_pos=999999;p.line_segs.push(fill);p.layout_only_fill_lines=1;},
+            2=>p.source_line_seg_vertical_pos=None,
+            3=>p.source_line_seg_vertical_pos=Some(Vec::new()),
+            4=>{p.line_segs[0].tag|=LineSeg::TAG_EMPTY_SEGMENT;p.line_segs[0].line_height=0;p.line_segs[0].text_height=0;},
+            5=>p.invalidate_layout_inputs(),
+            _=>p.line_segs[0].text_start=p.char_count+1000,
+        }
+        let mut fallback=tuples(p);
+        if let Some(positions)=&p.source_line_seg_vertical_pos {
+            for (row,source) in fallback.iter_mut().zip(positions) {row[1]=*source as i64;}
+        }
+        let live=format!("{:?}",core.document());
+        if case==6 {
+            // c909 HWP keeps an all-outside original cache as its deliberate
+            // loss-avoidance fallback. HWPX must instead omit that same cache.
+            // Keep both format-specific policies; no general axis exception.
+            let xml=core.export_hwpx_native().expect("out-of-axis HWPX export");
+            let xml_readback=rhwp::parse_document(&xml).expect("out-of-axis HWPX readback");
+            assert!(fields(&xml_readback)[0].line_segs.is_empty(),"HWPX still rejects the out-of-axis source cache");
+        }
+        let bytes=core.export_hwp_with_adapter().expect("public HWP source-line export");
+        let after=rhwp::parse_document(&bytes).expect("actual HWP source-line readback");
+        assert!(after.hwpx_origin_keeps_source_lines(),"the actual HWP output binds the source-line lineage boundary");
+        if case<=1 {assert_eq!(tuples(fields(&after)[0]),original,"only the parser-owned serializable prefix crosses the shared HWP boundary");}
+        else if case==6 {assert_eq!(tuples(fields(&after)[0]),fallback,"all nine original source row fields survive the intentional HWP fallback");}
+        else {assert!(fields(&after)[0].line_segs.is_empty(),"invalid or unowned runtime partition cannot become stored HWP evidence");}
+        assert_eq!(format!("{:?}",core.document()),live,"shared cache projection changes only the serializer's clone");
+    }
+}
+
+#[test]
 fn imported_hwpx_stored_flags_coordinates_and_layout_survive_repeated_save() {
     let original=rhwp::parse_document(&authored()).expect("HWP");
     let first=rhwp::serializer::serialize_hwpx(&original).expect("first HWPX");
@@ -198,19 +237,104 @@ fn owner_text_state(p: &Paragraph) -> (String,Vec<u32>,Vec<(u32,u32)>,usize) {
     (p.text.clone(),p.char_offsets.clone(),p.char_shapes.iter().map(|s|(s.start_pos,s.char_shape_id)).collect(),p.controls.len())
 }
 
+fn assert_recomputed_picture_partition(p: &Paragraph) {
+    assert!(p.source_line_seg_vertical_pos.is_none(),"fresh rows cannot claim their replaced source owner");
+    assert!(!p.stored_text_partition_is_dirty(),"actual full reflow publishes a current text/control partition");
+    assert_eq!(p.hwpx_axis_shift,0,"newly computed rows use the current HWP paragraph axis");
+    assert!(!p.line_segs.is_empty());
+    assert_eq!(p.layout_only_fill_lines,0);
+    assert_eq!(p.layout_space_metrics.len(),p.line_segs.len(),"the same fill publishes every row's metrics");
+    for (row,(start,_)) in p.line_segs.iter().zip(&p.layout_space_metrics) {
+        assert_eq!(row.text_start,*start);
+        assert!(row.text_start<=p.char_count);
+        assert!(row.line_height>0&&row.text_height>0&&row.baseline_distance>0);
+        assert_eq!(row.tag&LineSeg::TAG_EMPTY_SEGMENT,0);
+        assert_ne!(row.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY,0,"fresh runtime rows are not imported cache evidence");
+    }
+}
+
 #[test]
-fn public_tac_preserves_existing_dirty_partition_until_recomputed() {
+fn public_tac_recomputes_dirty_partition_and_publishes_fresh_owned_metrics() {
     let mut core=owner_picture_core();let index=owner_picture_index(&core.document().sections[0].paragraphs[0]);
     let before=owner_text_state(&core.document().sections[0].paragraphs[0]);
-    core.document_mut().sections[0].paragraphs[0].invalidate_layout_inputs();
+    let p=&mut core.document_mut().sections[0].paragraphs[0];
+    p.line_segs[0].line_height=1;p.line_segs[0].text_height=1;p.line_segs[0].baseline_distance=1;
+    p.invalidate_layout_inputs();
     core.set_picture_properties_native(0,0,index,r#"{"treatAsChar":true}"#).expect("public dirty TAC");
     let after=&core.document().sections[0].paragraphs[0];
-    assert!(after.stored_text_partition_is_dirty(),"geometry-only publication cannot certify an already invalid text partition");
+    assert_recomputed_picture_partition(after);
+    assert!(after.line_segs.iter().any(|row|row.line_height>=5669&&row.text_height>=5669),"actual inline picture height replaces stale one-unit metrics");
     assert_eq!(owner_text_state(after),before,"text/control-slot structure stays unchanged");
     let saved=rhwp::parse_document(&core.export_hwpx_native().expect("dirty owner save")).expect("dirty owner readback");
-    assert!(saved.sections[0].paragraphs[0].line_segs.is_empty(),"consumer must recompute an invalid cache");
+    assert!(saved.sections[0].paragraphs[0].line_segs.is_empty(),"fresh bit31 rows without an imported owner remain runtime-only");
     assert_eq!(saved.sections[0].paragraphs[0].text,before.0);
     assert!(core.render_page_svg_native(0).expect("dirty owner render").contains("<image"));
+}
+
+#[test]
+fn public_text_free_body_tac_publishes_recomputed_rows_before_save() {
+    let mut core=owner_picture_core();let index=owner_picture_index(&core.document().sections[0].paragraphs[0]);
+    // The local migration is geometry-only, but the public BODY setter then
+    // performs real reflow after the TAC change. Numeric evidence is retained
+    // separately from the original cb80 one-RED observation.
+    let p=&mut core.document_mut().sections[0].paragraphs[0];
+    p.text.clear();p.char_offsets.clear();p.invalidate_layout_inputs();
+    assert!(p.stored_text_partition_is_dirty());assert!(p.layout_space_metrics.is_empty());
+    let before=owner_text_state(p);
+    core.set_picture_properties_native(0,0,index,r#"{"treatAsChar":true}"#).expect("public text-free body TAC");
+    let after=&core.document().sections[0].paragraphs[0];
+    assert_recomputed_picture_partition(after);
+    assert_eq!(tuples(after),vec![[0,0,5669,5669,4819,600,0,42520,2147876864]],"the actual frame publishes all nine new row fields");
+    assert_eq!(owner_text_state(after),before);assert!(!after.layout_object_projection);assert!(!after.layout_float_band);
+    let saved=rhwp::parse_document(&core.export_hwpx_native().expect("text-free body save")).expect("text-free body readback");
+    assert!(saved.sections[0].paragraphs[0].line_segs.is_empty(),"fresh bit31 frame rows remain runtime-only");
+}
+
+#[test]
+fn public_text_free_header_footer_tac_keeps_dirty_without_reflow_publication() {
+    for is_header in [true,false] {
+        let mut author=owner_picture_core();author.create_header_footer_native(0,is_header,0).expect("public text-free header/footer");
+        let body_picture=owner_picture_index(&author.document().sections[0].paragraphs[0]);
+        let picture=author.document().sections[0].paragraphs[0].controls[body_picture].clone();
+        // create_header_footer_native intentionally starts with no saved rows.
+        // Author one sized source row from the independent owned body template.
+        let mut source_row=author.document().sections[0].paragraphs[0].serializable_line_segs()[0].clone();
+        source_row.tag=0x80060000;source_row.vertical_pos=5555;
+        let paragraphs=author.document_mut().sections[0].paragraphs.iter_mut().flat_map(|p|p.controls.iter_mut()).find_map(|c|match c {
+            Control::Header(h) if is_header=>Some(&mut h.paragraphs),
+            Control::Footer(f) if !is_header=>Some(&mut f.paragraphs),
+            _=>None,
+        }).expect("owned text-free HF model");
+        let p=&mut paragraphs[0];p.controls.push(picture);p.ctrl_data_records.push(None);p.char_count+=8;
+        p.line_segs=vec![source_row];
+        let input=author.export_hwp_native().expect("authored stored HF cache");
+        let mut core=DocumentCore::from_bytes(&input).expect("actual parser-owned HF import");
+        let address=owner_hf_address(core.document(),is_header);let (pi,ci,inner,picture)=address;
+        let p=match &mut core.document_mut().sections[0].paragraphs[pi].controls[ci] {
+            Control::Header(h)=>&mut h.paragraphs[inner],Control::Footer(f)=>&mut f.paragraphs[inner],
+            _=>panic!("actual imported HF paragraph"),
+        };
+        assert_eq!(p.source_line_seg_vertical_pos.as_ref().expect("parser-observed sized source owner").len(),1);
+        // Explicit dirty adversarial input. Clear bit31 so allSynthetic cannot
+        // hide a lost dirty-state guard. The original source owner must also go.
+        p.text.clear();p.char_offsets.clear();p.line_segs[0].tag&=!LineSeg::TAG_IMPLEMENTATION_PROPERTY;p.invalidate_layout_inputs();
+        let before=owner_text_state(p);let axis=p.hwpx_axis_shift;let mut expected=tuples(p);
+        assert_eq!(expected.len(),1);assert_eq!(expected[0][8]&i64::from(LineSeg::TAG_IMPLEMENTATION_PROPERTY),0);
+        expected[0][2]=5669;expected[0][3]=5669;expected[0][4]=4819;
+        core.set_header_footer_picture_properties_native(0,pi,ci,inner,picture,r#"{"treatAsChar":true}"#).expect("public HF geometry-only TAC");
+        let after=owner_hf_paragraph(core.document(),address);
+        assert!(after.stored_text_partition_is_dirty());assert!(after.source_line_seg_vertical_pos.is_none());
+        assert!(after.layout_space_metrics.is_empty());assert!(!after.layout_object_projection);assert!(!after.layout_float_band);
+        assert_eq!(after.layout_only_fill_lines,0);assert_eq!(after.hwpx_axis_shift,axis);
+        assert_eq!(tuples(after),expected,"only three geometry fields change; no fresh partition is published");
+        assert_eq!(owner_text_state(after),before);
+        let props:serde_json::Value=serde_json::from_str(&core.get_header_footer_picture_properties_native(0,pi,ci,inner,picture).expect("actual HF property readback")).expect("HF property JSON");
+        assert_eq!(props["treatAsChar"],true);
+        let live=format!("{:?}",core.document());let bytes=core.export_hwpx_native().expect("dirty HF save");
+        let saved=rhwp::parse_document(&bytes).expect("dirty HF readback");
+        assert!(owner_hf_paragraph(&saved,owner_hf_address(&saved,is_header)).line_segs.is_empty(),"dirty low-bit31 rows must be omitted even though allSynthetic is false");
+        assert!(format!("{:?}",core.document())==live,"persistence cannot certify or alter the open dirty input");
+    }
 }
 
 #[test]
@@ -231,30 +355,49 @@ fn public_tac_never_promotes_renderer_only_suffix_to_stored_rows() {
     assert!(core.render_page_svg_native(0).expect("projection owner render").contains("<image"));
 }
 
-#[test]
-fn public_hwpx_tac_keeps_nonzero_source_text_axis_and_leading_slots() {
+fn owner_hwpx_tac_axis_input(marker:&[u8])->Vec<u8> {
     let mut author=owner_picture_core();author.insert_text_native(0,0,0,"AXIS-OWNED-1234567890").expect("public axis text");
     let mut doc=rhwp::parse_document(&author.export_hwp_native().expect("axis authored HWP")).expect("axis stored source");
     doc.sections[0].raw_stream=None;
     let p=&mut doc.sections[0].paragraphs[0];
     let mut second=p.line_segs[0].clone();second.text_start=p.char_offsets[8];second.vertical_pos+=1600;second.tag&=!LineSeg::TAG_IMPLEMENTATION_PROPERTY;
     p.line_segs[0].tag&=!LineSeg::TAG_IMPLEMENTATION_PROPERTY;p.line_segs.push(second);
-    let bytes=rhwp::serializer::serialize_hwpx(&doc).expect("actual leading-slot HWPX input");
+    let marker_path=rhwp::model::document::HWP5_ORIGIN_HWPX_MARKER_PATH;
+    doc.hwpx_aux_entries.retain(|(path,_)|path!=marker_path);
+    doc.hwpx_aux_entries.push((marker_path.to_string(),marker.to_vec()));
+    rhwp::serializer::serialize_hwpx(&doc).expect("explicit source-axis HWPX input")
+}
+
+fn assert_public_hwpx_tac_recomputes_source_axis(marker:&[u8],legacy:bool) {
+    let bytes=owner_hwpx_tac_axis_input(marker);
     let mut core=DocumentCore::from_bytes(&bytes).expect("public leading-slot HWPX import");
+    assert_eq!(core.document().hwpx_aux_entry(rhwp::model::document::HWP5_ORIGIN_HWPX_MARKER_PATH),Some(marker));
     let before=&core.document().sections[0].paragraphs[0];let shift=before.hwpx_axis_shift;
-    assert!(shift>0,"real HWPX parser supplies the leading secPr/colPr source axis");
+    if legacy {assert!(shift>0,"legacy marker source keeps the real leading secPr/colPr correction");}
+    else {assert_eq!(shift,0,"paragraph-UTF16 marker source already includes the leading slots");}
     let starts:Vec<_>=before.line_segs.iter().map(|s|s.text_start).collect();assert!(starts.iter().any(|s|*s>0));
     let projected:Vec<_>=starts.iter().map(|s|before.line_seg_text_start_of(*s)).collect();
+    if legacy {assert!(starts.iter().zip(&projected).any(|(raw,paragraph)|raw!=paragraph));}
+    else {assert_eq!(starts,projected);}
     let text_state=owner_text_state(before);let index=owner_picture_index(before);
     core.set_picture_properties_native(0,0,index,r#"{"treatAsChar":true}"#).expect("public HWPX axis TAC");
-    let after=&core.document().sections[0].paragraphs[0];assert_eq!(after.hwpx_axis_shift,shift);
-    assert_eq!(after.line_segs.iter().map(|s|s.text_start).collect::<Vec<_>>(),starts);
-    assert_eq!(starts.iter().map(|s|after.line_seg_text_start_of(*s)).collect::<Vec<_>>(),projected);
+    let after=&core.document().sections[0].paragraphs[0];assert_recomputed_picture_partition(after);
+    assert!(after.line_segs.iter().all(|row|after.line_seg_text_start_of(row.text_start)==row.text_start));
     assert_eq!(owner_text_state(after),text_state);
     let saved=rhwp::parse_document(&core.export_hwpx_native().expect("source-axis save")).expect("source-axis readback");
     assert_eq!(saved.sections[0].paragraphs[0].text,text_state.0);
-    assert_eq!(saved.sections[0].paragraphs[0].line_segs.iter().map(|s|s.text_start).collect::<Vec<_>>(),starts,"unchanged HWPX text axis survives public save");
+    assert!(saved.sections[0].paragraphs[0].line_segs.is_empty(),"fresh computed rows cannot masquerade as either imported source axis");
     assert!(core.render_page_svg_native(0).expect("source-axis render").contains("<image"));
+}
+
+#[test]
+fn public_legacy_hwpx_tac_recomputes_nonzero_source_axis_without_reusing_it() {
+    assert_public_hwpx_tac_recomputes_source_axis(b"1",true);
+}
+
+#[test]
+fn public_paragraph_utf16_hwpx_tac_recomputes_zero_shift_source_axis() {
+    assert_public_hwpx_tac_recomputes_source_axis(b"2:paragraph-utf16",false);
 }
 
 fn owner_hf_address(doc: &Document,is_header:bool)->(usize,usize,usize,usize) {
@@ -283,7 +426,7 @@ fn owner_hf_paragraph(doc:&Document,address:(usize,usize,usize,usize))->&Paragra
 }
 
 #[test]
-fn public_imported_tac_header_footer_text_reverse_invalidates_stored_origin() {
+fn public_imported_tac_header_footer_text_reverse_publishes_fresh_partition() {
     for is_header in [true,false] {
         let mut author=owner_picture_core();author.create_header_footer_native(0,is_header,0).expect("public header/footer");
         author.insert_text_in_header_footer_native(0,is_header,0,0,0,"OWNED-HF-TEXT").expect("public HF text");
@@ -313,7 +456,7 @@ fn public_imported_tac_header_footer_text_reverse_invalidates_stored_origin() {
         let text=before.text.clone();let (pi,ci,inner,picture)=address;
         core.set_header_footer_picture_properties_native(0,pi,ci,inner,picture,r#"{"treatAsChar":false}"#).expect("public imported HF TAC reverse");
         let after=owner_hf_paragraph(core.document(),address);
-        assert!(after.source_line_seg_vertical_pos.is_none());assert!(after.stored_text_partition_is_dirty(),"early-return HF geometry cannot certify its old rows");assert_eq!(after.text,text);
+        assert_recomputed_picture_partition(after);assert_eq!(after.text,text);
         let props:serde_json::Value=serde_json::from_str(&core.get_header_footer_picture_properties_native(0,pi,ci,inner,picture).expect("public HF property readback")).expect("public HF JSON");
         assert_eq!(props["treatAsChar"],false);
         let saved=rhwp::parse_document(&core.export_hwpx_native().expect("public HF save")).expect("public HF saved readback");
@@ -442,16 +585,21 @@ fn persistence_causal_marker_hwpx_input() -> Vec<u8> {
     bytes
 }
 
-fn persistence_assert_raw_row_diffs(a:&Document,b:&Document,count:usize) {
+fn persistence_assert_raw_row_diffs(a:&Document,b:&Document,owners:&[(usize,usize,&str)]) {
     use rhwp::serializer::hwpx::roundtrip::IrDifference;
     let raw=diff_documents(a,b);
-    assert_eq!(raw.differences.len(),count,"exact original raw live-to-saved field IR cause: {raw:?}");
+    assert_eq!(raw.differences.len(),owners.len(),"exact number of edited runtime partitions");
+    let mut actual_owners=std::collections::BTreeSet::new();
     for difference in &raw.differences {
         match difference {
-            IrDifference::ParagraphLinesegs{detail,..}=>assert_eq!(detail,"count: expected=1 actual=0","only the original derived row count differs"),
-            _=>panic!("unexpected non-row original IR difference: {difference:?}"),
+            IrDifference::ParagraphLinesegs{section,paragraph,path,detail}=>{
+                assert_eq!(detail,"count: expected=1 actual=0","only each identified runtime row is omitted");
+                assert!(actual_owners.insert((*section,*paragraph,path.as_str())),"no duplicate owner cause");
+            },
+            _=>panic!("unexpected non-row persistence difference"),
         }
     }
+    assert_eq!(actual_owners,owners.iter().copied().collect(),"every raw omission belongs to the exact edited owner");
 }
 
 #[test]
@@ -463,7 +611,7 @@ fn public_three_field_hwpx_save_has_exact_raw_cause_and_strict_persistence_ident
     let live_before=format!("{:?}",core.document());
     let bytes=core.export_hwpx_native().expect("actual edited HWPX save");
     let actual=DocumentCore::from_bytes(&bytes).expect("public saved HWPX readback");
-    persistence_assert_raw_row_diffs(core.document(),actual.document(),3);
+    persistence_assert_raw_row_diffs(core.document(),actual.document(),&[(0,2,""),(0,3,""),(0,4,"/ctrl[0]tbl.cell[3].p[0]")]);
     let expected=rhwp::serializer::hwpx::roundtrip::hwpx_persistence_document(core.document());
     assert!(diff_documents(&expected,&rhwp::serializer::hwpx::roundtrip::hwpx_persistence_document(actual.document())).is_empty(),"unchanged strict comparator checks the independent expected persistence model");
     assert_eq!(format!("{:?}",core.document()),live_before,"save verification cannot mutate the open live document or source axes");
@@ -471,18 +619,34 @@ fn public_three_field_hwpx_save_has_exact_raw_cause_and_strict_persistence_ident
 }
 
 #[test]
-fn public_single_field_hwpx_save_has_exact_raw_cause_and_preserves_imported_siblings() {
+fn public_field_and_ordinary_cell_hwpx_save_have_exact_two_owner_causes() {
     let mut core=DocumentCore::from_bytes(&persistence_causal_marker_hwpx_input()).expect("public owned HWPX import");
+    let siblings:Vec<_>=[1,2].iter().map(|&i|{let p=fields(core.document())[i];(tuples(p),owner_text_state(p))}).collect();
     core.delete_text_in_cell_native(0,4,0,0,0,0,"CELL-R0-C0".chars().count()).expect("public session cell clear");
     core.insert_text_in_cell_native(0,4,0,0,0,0,"SESSION-CELL").expect("public session cell text with unchanged style");
     core.set_field_value_by_name_at("CUSTOMER",0,"SESSION-FIELD").expect("public live session field edit");
     let before=format!("{:?}",core.document());let bytes=core.export_hwpx_native().expect("session snapshot save");
     let actual=DocumentCore::from_bytes(&bytes).expect("saved session readback");
-    persistence_assert_raw_row_diffs(core.document(),actual.document(),1);
+    persistence_assert_raw_row_diffs(core.document(),actual.document(),&[(0,2,""),(0,4,"/ctrl[0]tbl.cell[0].p[0]")]);
     let expected=rhwp::serializer::hwpx::roundtrip::hwpx_persistence_document(core.document());
     assert!(diff_documents(&expected,&rhwp::serializer::hwpx::roundtrip::hwpx_persistence_document(actual.document())).is_empty());
     for i in [1,2] {assert_eq!(tuples(fields(core.document())[i]),tuples(fields(&expected)[i]),"untouched imported positive sibling preserves all nine fields");}
+    for (saved,(rows,state)) in [1,2].iter().map(|&i|fields(actual.document())[i]).zip(&siblings) {
+        assert_eq!(tuples(saved),*rows,"independent saved sibling preserves all nine stored fields");
+        assert_eq!(owner_text_state(saved),*state,"independent saved sibling text/control/format metadata is unchanged");
+    }
     assert_eq!(format!("{:?}",core.document()),before,"live session remains open and byte-for-byte unchanged");
+}
+
+#[test]
+fn public_single_field_only_hwpx_save_has_one_exact_owner_cause() {
+    let mut core=DocumentCore::from_bytes(&persistence_causal_marker_hwpx_input()).expect("public single-field HWPX import");
+    core.set_field_value_by_name_at("CUSTOMER",0,"SESSION-FIELD").expect("one public field edit");
+    let live=format!("{:?}",core.document());let bytes=core.export_hwpx_native().expect("single-field save");
+    let actual=DocumentCore::from_bytes(&bytes).expect("single-field readback");
+    persistence_assert_raw_row_diffs(core.document(),actual.document(),&[(0,2,"")]);
+    assert!(persistence_canonical_diff(core.document(),actual.document()).is_empty());
+    assert_eq!(format!("{:?}",core.document()),live);
 }
 
 
@@ -580,7 +744,7 @@ fn persistence_rewrite_hwpx_part(bytes:&[u8],part:&str,change:impl FnOnce(String
     let mut archive=zip::ZipArchive::new(Cursor::new(bytes)).expect("actual owned output ZIP");
     let mut writer=rhwp::serializer::hwpx::writer::HwpxZipWriter::new();let mut change=Some(change);let mut changed=0;
     for i in 0..archive.len() {
-        let mut file=archive.by_index(i).expect("original output ZIP member");let name=file.name().to_string();let mut raw=Vec::new();file.read_to_end(&mut raw).expect("CRC checked output bytes");
+        let mut file=archive.by_index(i).expect("original output ZIP member");let name=file.name().expect("valid owned output member name").into_owned();let mut raw=Vec::new();file.read_to_end(&mut raw).expect("CRC checked output bytes");
         if name==part {raw=change.take().expect("single selected output member")(String::from_utf8(raw).expect("owned XML")).into_bytes();changed+=1;}
         if name=="mimetype" {writer.write_stored(&name,&raw).expect("required stored mimetype");}else{writer.write_deflated(&name,&raw).expect("owned package member");}
     }

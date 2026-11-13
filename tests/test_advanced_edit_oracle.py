@@ -78,6 +78,56 @@ class AdvancedOracleTests(unittest.TestCase):
             oracle.checkpoint_diagnostic(result,phase='edited',saved_sha256='1'*64,
                 input_sha256={},helper_sha256={},expected={'body_paragraphs':['가'*100000]})
 
+    def test_checkpoint_shape_sizes_do_not_teach_the_textbox_expectation(self):
+        import advanced_edit_oracle as oracle
+        result=inspect('owned-textbox');result['shapes'][0]['size']=[1,2]
+        expected={'population':{'shapes':1}}
+        record=oracle.checkpoint_diagnostic(result,phase='properties',saved_sha256='1'*64,
+            input_sha256={},helper_sha256={},expected=expected)
+        self.assertEqual(record['observed'].get('shapeSizesHu'),[[1,2]])
+        self.assertEqual(expected,{'population':{'shapes':1}})
+        self.assertEqual(record['expectedCheckpoint'],expected)
+        self.assertEqual(result['shapes'][0]['size'],[1,2])
+        with self.assertRaises(ValueError):
+            assert_textbox(result,count=1,text=result['shapes'][0]['text'])
+
+    def test_checkpoint_selects_only_eight_shape_sizes_and_marks_bad_types_unknown(self):
+        import advanced_edit_oracle as oracle
+        class Opaque:
+            def __str__(self):raise AssertionError('No shape text conversion')
+            def __repr__(self):raise AssertionError('No shape text representation')
+        result=inspect('owned-blank')
+        result['shapes']=[{'size':size,'text':Opaque()} for size in
+            ([1,2],(3,4),[True,5],[1.0,2],['1',2],[1],[1,2,3],None)]
+        result['shapes'].append(Opaque())
+        record=oracle.checkpoint_diagnostic(result,phase='properties',saved_sha256='1'*64,
+            input_sha256={},helper_sha256={},expected={})
+        self.assertEqual(record['observed'].get('shapeSizesHu'),[[1,2],[3,4],None,None,None,None,None,None])
+        self.assertLessEqual(len(json.dumps(record,ensure_ascii=False,indent=2).encode('utf-8')),64*1024)
+
+    def test_unknown_checkpoint_shape_size_preserves_the_oracle_primary(self):
+        import advanced_edit_oracle as oracle
+        result=inspect('owned-textbox');primary=TypeError()
+        class InvalidSize:
+            def __iter__(self):raise primary
+        result['shapes'][0]['size']=InvalidSize()
+        record=oracle.checkpoint_diagnostic(result,phase='properties',saved_sha256='1'*64,
+            input_sha256={},helper_sha256={},expected={})
+        self.assertEqual(record['observed'].get('shapeSizesHu'),[None])
+        with self.assertRaises(TypeError) as caught:
+            assert_textbox(result,count=1,text=result['shapes'][0]['text'])
+        self.assertIs(caught.exception,primary)
+
+    def test_shape_size_metadata_keeps_the_existing_64_kib_cap(self):
+        import advanced_edit_oracle as oracle
+        result=inspect('owned-blank')
+        result['shapes']=[{'size':[10**4095,10**4095]} for _ in range(8)]
+        record=oracle.checkpoint_diagnostic(result,phase='properties',saved_sha256='1'*64,
+            input_sha256={},helper_sha256={},expected={})
+        self.assertIn('summaryOmitted',record['observed'])
+        self.assertEqual(record['observed']['population']['shapes'],8)
+        self.assertLessEqual(len(json.dumps(record,ensure_ascii=False,indent=2).encode('utf-8')),64*1024)
+
     def test_owned_package_provenance_is_immutable(self):
         provenance=json.loads((FIX/'provenance.json').read_text())
         for name,sha in provenance['generated'].items():

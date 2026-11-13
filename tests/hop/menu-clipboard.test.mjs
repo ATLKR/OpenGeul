@@ -11,6 +11,7 @@ await native.default({module_or_path:readFileSync(resolve(hop,'apps/studio-host/
 const {WasmBridge}=await upstream('core/wasm-bridge.ts');
 const {EventBus}=await upstream('core/event-bus.ts');
 const {InputHandler}=await upstream('engine/input-handler.ts');
+const {ImeNavigationGuard}=await upstream('engine/ime-navigation-guard.ts');
 const {CursorState}=await upstream('engine/cursor.ts');
 const {CommandHistory}=await upstream('engine/history.ts');
 const {InsertTextCommand}=await upstream('engine/command.ts');
@@ -35,7 +36,7 @@ function harness(t,text='MARKER|KEEP|') {
     active:true,editMode:'edit',wasm,cursor,history,eventBus,
     viewportManager:{getZoom:()=>1},selectionRenderer:renderer,caret:renderer,
     fieldMarker:renderer,caretLayoutReveal:{requestFor:noop,clear:noop},
-    deferredPaginationRunner:{cancel:noop},_cellBlockLetterImeGuard:{reset:noop},
+    deferredPaginationRunner:{cancel:noop},_cellBlockLetterImeGuard:{reset:noop},_imeNavigationGuard:new ImeNavigationGuard(),
     _compositionFragment:null,rawTextMutationEffects:{reset:noop},
     textarea:{value:'',focus:noop,remove:noop,addEventListener:(type,fn)=>{if(type==='paste')listeners.add(fn);},removeEventListener:(type,fn)=>listeners.delete(fn)},
     container:{removeEventListener:noop},stopTextSelectionDragAutoScroll:noop,
@@ -56,10 +57,11 @@ function harness(t,text='MARKER|KEEP|') {
 }
 
 function browser(t,h,{command=false,clipboard,decode=Promise.resolve()}={}) {
-  const originals=new Map(['navigator','document','DataTransfer','ClipboardEvent','Image','FileReader','requestAnimationFrame'].map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]));
+  const originals=new Map(['navigator','document','window','DataTransfer','ClipboardEvent','Image','FileReader','requestAnimationFrame'].map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]));
   const defaultClipboard={async read(){return [{types:['text/plain'],getType:async()=>new Blob(['MARKER'],{type:'text/plain'})}];}};
   Object.defineProperty(globalThis,'navigator',{configurable:true,value:{clipboard:clipboard??defaultClipboard}});
-  globalThis.document={removeEventListener(){},execCommand(name){assert.equal(name,'paste');return typeof command==='function'?command():command;}};
+  globalThis.window=new EventTarget();
+  globalThis.document={querySelector:()=>null,removeEventListener(){},execCommand(name){assert.equal(name,'paste');return typeof command==='function'?command():command;}};
   globalThis.DataTransfer=class {
     values=new Map();items=[];
     constructor(){this.items.add=file=>this.items.push({kind:'file',type:file.type,getAsFile:()=>file});}

@@ -1,0 +1,9 @@
+{
+  "archive": "libreoffice-26.8.1.1.tar.xz",
+  "archiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+  "upstreamCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1",
+  "member": "libreoffice-26.8.1.1/external/python3/ExternalProject_python3.mk",
+  "fixture": "ExternalProject_python3.mk",
+  "bytes": 10931,
+  "sha256": "b31e4d779484a4d153155b025daf8b03678e1984abde4fe5c6c038ccb7d43445"
+}

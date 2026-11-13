@@ -15,7 +15,7 @@ class WasmArtifactsTests(unittest.TestCase):
         self.folder = Path(self.temp.name)/'wasm'; self.folder.mkdir()
         for name in wasm.FILES: (self.folder/name).write_bytes(b'content')
         (self.folder/'rhwp_bg.wasm').write_bytes(b'\0asm\1\0\0\0')
-        (self.folder/'package.json').write_text(json.dumps({'version':'0.8.7'}))
+        (self.folder/'package.json').write_text(json.dumps({'version':'0.9.0'}))
     def test_capture_rejects_non_wasm_binary(self):
         (self.folder/'rhwp_bg.wasm').write_bytes(b'not wasm')
         with self.assertRaises(ValueError): wasm.capture(self.folder)
@@ -27,6 +27,27 @@ class WasmArtifactsTests(unittest.TestCase):
         record=json.loads((self.folder/'OPEN_GEUL_WASM.json').read_text());record['namespaceHelper']='0'*64
         (self.folder/'OPEN_GEUL_WASM.json').write_text(json.dumps(record))
         with self.assertRaisesRegex(ValueError,'source mismatch'):wasm.install(self.folder,Path(self.temp.name)/'absent')
+    def test_capture_records_the_upstream_hop_feature_selection(self):
+        wasm.capture(self.folder)
+        record = json.loads((self.folder/'OPEN_GEUL_WASM.json').read_text())
+        self.assertEqual(record['generator'], 'wasm-pack 0.14.0 --target web --release --no-opt '
+                         '--no-default-features --features console_error_panic_hook,wasm-api')
+        command = (ROOT/'scripts/build-wasm.sh').read_text()
+        self.assertIn(' -- --locked --no-default-features --features console_error_panic_hook,wasm-api', command)
+
+    def test_featureless_receipt_is_rejected_before_any_install_write(self):
+        wasm.capture(self.folder)
+        record = json.loads((self.folder/'OPEN_GEUL_WASM.json').read_text())
+        record['generator'] = 'wasm-pack 0.14.0 --target web --release --no-opt'
+        (self.folder/'OPEN_GEUL_WASM.json').write_text(json.dumps(record))
+        target = Path(self.temp.name)/'source'
+        vendor = target/'apps/studio-host/vendor/rhwp-core'
+        vendor.mkdir(parents=True)
+        (vendor/'PROVENANCE.json').write_text('{}')
+        (vendor/'rhwp.js').write_text('original runtime')
+        with self.assertRaisesRegex(ValueError, 'generator'):
+            wasm.install(self.folder, target)
+        self.assertEqual((vendor/'rhwp.js').read_text(), 'original runtime')
     def test_all_payload_hashes_checked_before_overwrite(self):
         wasm.capture(self.folder)
         source=Path(self.temp.name)/'hop';target=source/'apps/studio-host/vendor/rhwp-core';target.mkdir(parents=True)

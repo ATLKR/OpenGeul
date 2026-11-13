@@ -1,0 +1,84 @@
+{
+  "kind": "original-calc-formula-inputline-failure-subset",
+  "runId": 39018638813,
+  "originalReplySha256": "6e1c770fc80cc112973ad99e0d6f3bcf395309e3a05d632afac5abf6d350f07c",
+  "root": {
+    "indexPath": [],
+    "parentIndexPath": [],
+    "role": 49,
+    "childCount": 7
+  },
+  "observedNodeCount": 667,
+  "failedNode": {
+    "indexPath": [
+      1,
+      2,
+      7,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "parentIndexPath": [
+      1,
+      2,
+      7,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "observedParentMatchesExpected": false,
+    "expectedIndexInParent": 0,
+    "description": {
+      "knownIndexPaths": [],
+      "errors": [],
+      "indexInParent": -1,
+      "role": 61,
+      "name": "입력줄",
+      "nameTruncated": false,
+      "rectangle": [
+        249,
+        189,
+        937,
+        206
+      ]
+    },
+    "observedIndexInParent": -1
+  },
+  "expectedParent": {
+    "knownIndexPaths": [
+      [
+        1,
+        2,
+        7,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "errors": [],
+    "role": 40,
+    "name": "",
+    "nameTruncated": false,
+    "rectangle": [
+      243,
+      187,
+      943,
+      208
+    ]
+  },
+  "actualParent": null,
+  "partialOriginalTree": true
+}

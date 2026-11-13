@@ -1,7 +1,7 @@
 {
-  "hop": {"repository": "https://github.com/golbin/hop.git", "version": "0.4.5", "commit": "34bd15c97e0851627cb7f055042c5340198aeb7f"},
-  "rhwp": {"repository": "https://github.com/edwardkim/rhwp.git", "version": "0.8.7", "commit": "1a76570e833917d15817415a53c09ad61ab3203f"},
+  "hop": {"repository": "https://github.com/golbin/hop.git", "version": "0.5.3", "commit": "c298160120c9ffbfca7e72f13dc2e7060ddff7fe"},
+  "rhwp": {"repository": "https://github.com/edwardkim/rhwp.git", "version": "0.9.0", "commit": "c9095c5f67632e6721e800ccc7fb43ea49d26682"},
   "rust": "1.93.1",
   "node": "24",
-  "pnpm": "10.33.0"
+  "pnpm": "10.34.9"
 }

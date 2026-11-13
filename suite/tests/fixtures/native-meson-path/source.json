@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "scope": "Exact authenticated upstream source fixtures for HarfBuzz Meson path-boundary adapter replays; no native runtime qualification.",
+  "archive": "libreoffice-26.8.1.1.tar.xz",
+  "archiveBytes": 302435508,
+  "archiveSha256": "296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785",
+  "sourceAuthenticated": true,
+  "producer": {
+    "commit": "ba9280eb0fa2c5b427c4457bac6f73cb3339ee6d",
+    "tree": "4ace8f657708b5e466afa9b750469e1064bf2bc9",
+    "providedByParent": true
+  },
+  "sourceAuthenticationProvenance": {
+    "frozenManifest": "work/native23-meson-path-diagnosis/sourcepins.json",
+    "frozenManifestSha256": "e42a5e3f5c27c4f6f8076d82b35d1affdc0766b260ed16db6ca2298253dee559",
+    "archiveAuthenticated": true,
+    "memberBytesAndSha256MatchedFrozenManifest": true,
+    "fixturesAreCompleteOriginalMembers": true
+  },
+  "members": [
+    {
+      "member": "libreoffice-26.8.1.1/external/harfbuzz/ExternalProject_harfbuzz.mk",
+      "bytes": 3074,
+      "sha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+      "physicalLfLines": 74,
+      "fixture": "ExternalProject_harfbuzz.mk",
+      "fixtureBytes": 3074,
+      "fixtureSha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+      "completeOriginal": true,
+      "relevantPhysicalLfRanges": [
+        [
+          22,
+          44
+        ],
+        [
+          46,
+          71
+        ]
+      ],
+      "purpose": "Complete HarfBuzz Meson setup and compile recipe, including every option and cross-file definition."
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/ExternalProject.mk",
+      "bytes": 9705,
+      "sha256": "e82523e2048f88b30a08e0752223112dfe3493a0f9b8b61c1310e0612ec31792",
+      "physicalLfLines": 238,
+      "fixture": "ExternalProject.mk",
+      "fixtureBytes": 9705,
+      "fixtureSha256": "e82523e2048f88b30a08e0752223112dfe3493a0f9b8b61c1310e0612ec31792",
+      "completeOriginal": true,
+      "relevantPhysicalLfRanges": [
+        [
+          217,
+          236
+        ]
+      ],
+      "purpose": "Complete ExternalProject definitions, including gb_ExternalProject_run and its shell wrapper."
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_defs.mk",
+      "bytes": 10340,
+      "sha256": "c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14",
+      "physicalLfLines": 350,
+      "fixture": "com_MSC_defs.mk",
+      "fixtureBytes": 10340,
+      "fixtureSha256": "c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14",
+      "completeOriginal": true,
+      "relevantPhysicalLfRanges": [
+        [
+          20,
+          38
+        ]
+      ],
+      "purpose": "Complete MSC definitions, including configured CC/CXX bindings to gb_CC/gb_CXX."
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/platform/com_MSC_class.mk",
+      "bytes": 29428,
+      "sha256": "e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada",
+      "physicalLfLines": 741,
+      "fixture": "com_MSC_class.mk",
+      "fixtureBytes": 29428,
+      "fixtureSha256": "e51a5e8469dadbee611142443f6056a43e0f0d194bae75f16428e45449fd9ada",
+      "completeOriginal": true,
+      "relevantPhysicalLfRanges": [
+        [
+          734,
+          739
+        ]
+      ],
+      "purpose": "Complete MSC class definitions, including native Python precommand PATH replacement."
+    },
+    {
+      "member": "libreoffice-26.8.1.1/RepositoryExternal.mk",
+      "bytes": 95738,
+      "sha256": "58c20c7f412e0dfee06bcb719cf3a1d378d1e43a08c861656a8123de5b67ad6f",
+      "physicalLfLines": 4634,
+      "fixture": "RepositoryExternal.mk",
+      "fixtureBytes": 95738,
+      "fixtureSha256": "58c20c7f412e0dfee06bcb719cf3a1d378d1e43a08c861656a8123de5b67ad6f",
+      "completeOriginal": true,
+      "relevantPhysicalLfRanges": [
+        [
+          4255,
+          4285
+        ]
+      ],
+      "purpose": "Complete external registrations, including internal Python executable, precommand, and dependencies."
+    },
+    {
+      "member": "libreoffice-26.8.1.1/solenv/gbuild/ExternalExecutable.mk",
+      "bytes": 7985,
+      "sha256": "47980d9c97de1ed1efc44571806a6688694499abf1ee2da3729293e369c50b2d",
+      "physicalLfLines": 220,
+      "fixture": "ExternalExecutable.mk",
+      "fixtureBytes": 7985,
+      "fixtureSha256": "47980d9c97de1ed1efc44571806a6688694499abf1ee2da3729293e369c50b2d",
+      "completeOriginal": true,
+      "relevantPhysicalLfRanges": [
+        [
+          100,
+          147
+        ],
+        [
+          179,
+          217
+        ]
+      ],
+      "purpose": "Complete ExternalExecutable command composition and dependency definitions."
+    }
+  ],
+  "meson": {
+    "version": "1.8.3",
+    "archive": "meson-1.8.3.tar.gz",
+    "archiveUrl": "https://files.pythonhosted.org/packages/source/m/meson/meson-1.8.3.tar.gz",
+    "archiveBytes": 2335924,
+    "archiveSha256": "f118aa910fc0a137cc2dd0122232dbf82153d9a12fb5b0f5bb64896f6a157abf",
+    "archivePinSource": "libreoffice-26.8.1.1/download.lst:500",
+    "sourceAuthenticated": true,
+    "member": "meson-1.8.3/mesonbuild/utils/universal.py",
+    "bytes": 86653,
+    "sha256": "7d63c80919327229465a4425fdc6c57128b8793ead2707634aeb05423eeda40c",
+    "physicalLfLines": 2439,
+    "fixture": "universal.py",
+    "fixtureBytes": 86653,
+    "fixtureSha256": "7d63c80919327229465a4425fdc6c57128b8793ead2707634aeb05423eeda40c",
+    "completeOriginal": true,
+    "windowsBranchPhysicalLfRange": [
+      1147,
+      1211
+    ],
+    "windowsSplitArgsPhysicalLfRange": [
+      1178,
+      1211
+    ],
+    "windowsWhitespacePhysicalLfLine": 1153,
+    "adapterReplayContract": "Tests may select the exact Windows split_args function from this authenticated module AST and supply its original _whitespace and typing alias T. Such a replay is adapter-only; it does not execute native Windows Python, Meson, Ninja, or MSVC."
+  },
+  "qualification": {
+    "adapterReplayExecuted": false,
+    "realCygwinMeasured": false,
+    "nativeWindowsPythonExecuted": false,
+    "nativeMesonExecuted": false,
+    "nativeNinjaExecuted": false,
+    "msvcExecuted": false,
+    "harfbuzzSetupSucceeded": false,
+    "harfbuzzCompileSucceeded": false,
+    "nativeEngineQualified": false,
+    "basePersistenceVerified": false,
+    "officeSuiteE2EQualified": false,
+    "publicationQualified": false,
+    "releasePublished": false
+  }
+}

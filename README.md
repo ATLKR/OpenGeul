@@ -5,6 +5,10 @@ HWP/HWPX 문서를 내 PC에서 열고 편집하는 무료 Windows 앱입니다.
 [웹사이트와 사용 안내](https://opengeul.allenlim.net) ·
 [개발판과 검증 파일](https://github.com/ATLKR/OpenGeul/releases)
 
+HWP와 Office 문서를 한 제품군으로 다루는 **OpenGeul Office Suite**는 별도 개발
+경로에서 구현합니다. 구성·빌드·검증 범위는 [Suite 개발 안내](suite/README.md)를
+참고하세요. 아래 Store·정규 배포 안내는 기존 HWP 제품을 설명합니다.
+
 [![Microsoft Store 공개 버전](https://opengeul.allenlim.net/assets/store-version.svg)](https://apps.microsoft.com/detail/9PJH0T3PHRMF)
 
 배지는 확인된 Store 공개 버전을 표시합니다. 아래 설명은 개발 소스 기준이며 Store 공개판과

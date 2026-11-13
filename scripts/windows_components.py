@@ -42,7 +42,11 @@ from wasm_artifacts import FILES as WASM_FILES
 from windows_arch import SUPPORTED_ARCHITECTURES, component_artifact_name, require_architecture, target_triple
 
 CAPS = {'editor': 64*1024*1024, 'cli': 32*1024*1024}
+# The individual decoded CLI bound is independent of the joined raw payload.
 MAX_PAYLOAD = 96*1024*1024
+# Explicit local restoration budget; compressed transport/dist caps stay separate.
+# MakeAppx verification retains a second raw payload: up to 2*128 MiB, plus metadata.
+MAX_COMBINED_RESTORED_PAYLOAD = 128*1024*1024
 CLI_RUNTIME = 'Tools/rhwp.exe'
 CLI_GZIP = 'payload/'+CLI_RUNTIME+'.gz'
 BLOCK = 1024*1024
@@ -99,7 +103,7 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FI
     'apps/studio-host/src/command/commands/file.ts', 'apps/studio-host/src/opengeul-font-resources.ts',
     'apps/studio-host/src/command/commands/edit.ts',
     'apps/studio-host/src/host/toolbar-labels.ts',
-    'third_party/rhwp/Cargo.toml', 'third_party/rhwp/Cargo.lock',
+    'third_party/rhwp/Cargo.toml', 'third_party/rhwp/Cargo.lock', 'third_party/rhwp/build.rs',
     'third_party/rhwp/vendor/svg2pdf/Cargo.toml', 'third_party/rhwp/vendor/svg2pdf/RHWP_PATCHES.md',
     'third_party/rhwp/src/renderer/pdf.rs', 'third_party/rhwp/src/cli/outputs/pdf.rs',
     'third_party/rhwp/src/parser/hwpx/header.rs',
@@ -112,7 +116,7 @@ SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FI
     'third_party/rhwp/rhwp-studio/src/ui/history-dialog.ts',
 }))
 NATIVE_FILES = tuple('third_party/rhwp/tests/'+name+'.rs' for name in TARGETS)
-CORE_TREES = ('third_party/rhwp/src', 'third_party/rhwp/vendor/svg2pdf/src')
+CORE_TREES = ('third_party/rhwp/src', 'third_party/rhwp/crates', 'third_party/rhwp/vendor')
 SOURCE_TREE_CAP = 64*1024*1024
 
 
@@ -183,6 +187,46 @@ def encoded(value: dict, *, compact: bool = False) -> bytes:
     if len(data) > MAX_METADATA:
         raise ValueError('Component metadata exceeds cap')
     return data
+
+
+
+def _payload_inventory(path: Path, expected: dict) -> dict:
+    """Read the sole editor inventory through one bounded, identity-checked handle."""
+    regular(path); before = _kind(path)
+    if before.st_nlink != 1:
+        raise ValueError('Editor payload inventory must not have hardlink aliases')
+    with path.open('rb') as stream:
+        opened = os.fstat(stream.fileno())
+        if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1):
+            raise ValueError('Editor payload inventory identity changed')
+        data = stream.read(MAX_METADATA+1)
+        after_handle = os.fstat(stream.fileno())
+    after = _kind(path)
+    if (len(data) > MAX_METADATA or not data or
+            any((item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_nlink) !=
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, 1)
+                for item in (opened, after_handle, after))):
+        raise ValueError('Editor payload inventory changed or exceeds cap')
+    if len(data) != expected['size'] or hashlib.sha256(data).hexdigest() != expected['sha256']:
+        raise ValueError('Editor payload inventory size/hash mismatch')
+    try:
+        value = json.loads(data.decode('utf-8'), object_pairs_hook=_pairs)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError('Invalid editor payload inventory JSON') from error
+    if not isinstance(value, dict) or not value or len(value) > MAX_FILES:
+        raise ValueError('Invalid editor payload inventory')
+    aliases = set()
+    for name, record in value.items():
+        safe_name(name)
+        if not name.startswith('payload/') or name.casefold() in aliases:
+            raise ValueError('Editor payload inventory path/alias mismatch')
+        aliases.add(name.casefold())
+        if (not isinstance(record, dict) or set(record) != {'size', 'sha256'}
+                or type(record['size']) is not int or record['size'] < 0
+                or not isinstance(record['sha256'], str) or not SHA.fullmatch(record['sha256'])):
+            raise ValueError('Invalid editor payload inventory record')
+    return value
 
 
 def identity(env=None) -> dict:
@@ -403,7 +447,7 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
             or wasm.get('upstream') != config['upstream']
             or wasm.get('namespaceHelper') != config['helpers']['overlay/hwpx_namespaces.rs']
             or wasm.get('namespacePatcher') != config['helpers']['scripts/patch_namespaces.py']
-            or wasm.get('generator') != 'wasm-pack 0.14.0 --target web --release --no-opt'):
+            or wasm.get('generator') != 'wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api'):
         raise ValueError('Invalid WASM source ledger')
     _hashes(wasm.get('artifacts'), set(WASM_FILES))
 
@@ -576,18 +620,24 @@ def capture(role: str, payload: Path, source: Path, out: Path, *, env=None, arch
     files, _ = tree(payload, MAX_PAYLOAD if role == 'cli' else CAPS[role]); validate_payload(payload, role, files, architecture)
     parity, contract = source_contract(source, config)
     transport = {'payload/'+name: value for name, value in files.items()}
-    compressed = None
+    compressed = None; payload_inventory = None
     if role == 'editor':
+        payload_inventory = encoded(transport, compact=True)
+        transport = {'payload-inventory.json': {'size': len(payload_inventory),
+            'sha256': hashlib.sha256(payload_inventory).hexdigest()}}
         transport['source-parity.json'] = {'size': len(parity), 'sha256': hashlib.sha256(parity).hexdigest()}
     else:
         compressed = _compress_cli(payload/CLI_RUNTIME, files[CLI_RUNTIME])
         transport = {CLI_GZIP: {'size': len(compressed), 'sha256': hashlib.sha256(compressed).hexdigest()}}
-    value = {'formatVersion': 2 if role == 'cli' else 1, **current, **config, 'role': role, 'target': target_triple(architecture),
+    value = {'formatVersion': 2, **current, **config, 'role': role, 'target': target_triple(architecture),
              'features': FEATURES[role], 'source': contract, 'files': transport}
     if role == 'cli':
         value['runtime'] = {'path': CLI_RUNTIME, **files[CLI_RUNTIME]}
     metadata = encoded(value, compact=True)
-    if sum(item['size'] for item in transport.values())+len(metadata) > CAPS[role]:
+    total = sum(item['size'] for item in transport.values())+len(metadata)
+    if role == 'editor':
+        total += sum(item['size'] for item in files.values())
+    if total > CAPS[role]:
         raise ValueError('Component exceeds total transport cap')
     out.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix='.opengeul-component-', dir=out.parent))
@@ -596,6 +646,7 @@ def capture(role: str, payload: Path, source: Path, out: Path, *, env=None, arch
             for name, record in files.items():
                 _copy(payload/name, stage/'payload'/name, record)
             (stage/'source-parity.json').write_bytes(parity)
+            (stage/'payload-inventory.json').write_bytes(payload_inventory)
         else:
             path = stage/CLI_GZIP
             path.parent.mkdir(parents=True)
@@ -618,7 +669,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
     if role == 'cli':
         expected_keys.add('runtime')
     attempt = value.get('runAttempt')
-    if (set(value) != expected_keys or type(value.get('formatVersion')) is not int or value.get('formatVersion') != (2 if role == 'cli' else 1) or value.get('role') != role
+    if (set(value) != expected_keys or type(value.get('formatVersion')) is not int or value.get('formatVersion') != 2 or value.get('role') != role
             or value.get('target') != target_triple(architecture) or value.get('features') != FEATURES[role]
             or any(value.get(k) != v for k, v in current.items() if k != 'runAttempt')
             or not isinstance(attempt, str) or not re.fullmatch(r'[1-9][0-9]*', attempt)
@@ -636,10 +687,15 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
                 or type(record['size']) is not int or record['size'] < 0
                 or not isinstance(record['sha256'], str) or not SHA.fullmatch(record['sha256'])):
             raise ValueError('Invalid component inventory record')
+    if role == 'editor':
+        if set(inventory) != {'source-parity.json', 'payload-inventory.json'}:
+            raise ValueError('Editor component metadata inventory mismatch')
+        payload_inventory = _payload_inventory(folder/'payload-inventory.json', inventory['payload-inventory.json'])
+        inventory = {**inventory, **payload_inventory}
     content = {name: record for name, record in actual.items() if name != 'provenance.json'}
     if content != inventory:
         raise ValueError('Component file inventory mismatch')
-    metadata = {'source-parity.json'} if role == 'editor' else set()
+    metadata = {'source-parity.json', 'payload-inventory.json'} if role == 'editor' else set()
     if any(not n.startswith('payload/') and n not in metadata for n in content):
         raise ValueError('Unexpected component file')
     if not metadata <= set(content):
@@ -703,7 +759,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
     for name in TARGETS:
         if contract['preparedFiles']['third_party/rhwp/tests/'+name+'.rs'] != native['targets'][name]:
             raise ValueError('Prepared native test source contract mismatch')
-    return value
+    return {**value, 'files': inventory}
 
 
 def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None, architecture: str = 'x64') -> None:
@@ -723,7 +779,7 @@ def combine(editor: Path, cli: Path, payload: Path, source: Path, *, env=None, a
         raise ValueError('Prepared source ledger hash mismatch')
     validate_ledger(parity, contract, config)
     editor_size = sum(record['size'] for name, record in records['editor']['files'].items() if name.startswith('payload/'))
-    if editor_size+records['cli']['runtime']['size'] > MAX_PAYLOAD:
+    if editor_size+records['cli']['runtime']['size'] > MAX_COMBINED_RESTORED_PAYLOAD:
         raise ValueError('Combined restored payload exceeds size cap')
     receipt = {'formatVersion': 1, **current,
                'sourceContractSha256': hashlib.sha256(encoded(contract)).hexdigest(),

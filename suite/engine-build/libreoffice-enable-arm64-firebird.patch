@@ -1,0 +1,10 @@
+--- configure.ac
++++ configure.ac
+@@ -1093,7 +1093,6 @@
+         build_skia=yes
+         enable_gpgmepp=no
+         enable_coinmp=no
+-        enable_firebird_sdbc=no
+     fi
+     ;;
+ 

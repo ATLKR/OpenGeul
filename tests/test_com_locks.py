@@ -11,13 +11,13 @@ sys.path.insert(0, str(ROOT/'scripts'))
 import native_activation
 
 REGISTRY = 'registry+https://github.com/rust-lang/crates.io-index'
-ORIGINAL_CLI_IDENTITIES = 'cdb25b14eb14d50a2170e625c1b3392498f6f3527eaa9254844fb69edd3809dd'
-ORIGINAL_DESKTOP_IDENTITIES = '418d6499bddcaae65293b68853d4bf7861f31685f988b1d8733135052a355add'
-ORIGINAL_CLI_EDGES = '03181bebe0e4d98dd07b83ed3d683da2104c7abc4ad7741b311de0002f03b9a0'
-ORIGINAL_DESKTOP_EDGES = '5e88b1890a10025207b8556473ff2bbc57e1eeb168c59ffe1b70d32caadd5c08'
+ORIGINAL_CLI_IDENTITIES = 'd06b23f4ee1dfe173aedbe954fdf35abafd39d4321b1507da0cee1bb7e9d32ac'
+ORIGINAL_DESKTOP_IDENTITIES = '6a0461d5ba6d87f11162c3a27437bb2468f9197b658c0b12edba2b54420898a6'
+ORIGINAL_CLI_EDGES = '85980c95458587c00c022bf3005078694610bb279aaf9d344428f7a1562cb96b'
+ORIGINAL_DESKTOP_EDGES = '87171be0ccf5771bf53211fd1ac45b9f62e33f8a87eec9f30d0a2bca981fa662'
 ORIGINAL_RHWP_EDGES = {
-    'desktop-cargo.lock.toml': '82754cb2996be764118b5b7e8b84fadd2101f4eb44b262796a605f9d08356ecd',
-    'cli-cargo.lock.toml': '961bdbf6c218222ab55dac52964220c297cf4737d88479241b70a03f2364e873',
+    'desktop-cargo.lock.toml': '26a5efebbae3523dab5b3ae201035271b1081925ad5813faee984bd15baad9f7',
+    'cli-cargo.lock.toml': 'cc9bff5bfb52a6faecf2447cde496f84c4e4f467c5399538d33be9fda317d98b',
 }
 NEW_WINDOWS = {
     ('windows', '0.61.3'): '9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893',
@@ -70,8 +70,10 @@ class ComLocksTests(unittest.TestCase):
             with self.subTest(lock=name):
                 _, packages = self.read(name)
                 root = resolve(packages, 'rhwp')
-                self.assertEqual(root['version'], '0.8.7')
-                selected = [edge for edge in root['dependencies'] if edge.split(' ')[0] in ('windows', 'windows-core')]
+                self.assertEqual(root['version'], '0.9.0')
+                selected = [edge for edge in root['dependencies']
+                            if (resolve(packages, edge)['name'], resolve(packages, edge)['version'])
+                            in {('windows', '0.61.3'), ('windows-core', '0.61.2')}]
                 self.assertEqual(len(selected), 2, '원 CLI 루트의 두 native Windows 의존성 연결이 필요합니다')
                 actual = {(resolve(packages, edge)['name'], resolve(packages, edge)['version']) for edge in selected}
                 self.assertEqual(actual, {('windows', '0.61.3'), ('windows-core', '0.61.2')})
@@ -81,17 +83,17 @@ class ComLocksTests(unittest.TestCase):
 
     def test_desktop_keeps_all_original_package_versions_and_checksum_identities(self):
         text, packages = self.read('desktop-cargo.lock.toml')
-        self.assertEqual(len(packages), 729)
+        self.assertEqual(len(packages), 769)
         self.assertEqual(identities(packages), ORIGINAL_DESKTOP_IDENTITIES)
-        self.assertEqual(resolve(packages, 'hop-desktop')['version'], '0.4.5')
+        self.assertEqual(resolve(packages, 'hop-desktop')['version'], '0.5.3')
         self.assertEqual(native_activation.validate_lock(text), text)
 
-    def test_cli_adds_only_nine_reviewed_windows_packages_and_keeps_all_original_408(self):
+    def test_cli_adds_only_nine_reviewed_windows_packages_and_keeps_all_original_420(self):
         _, packages = self.read('cli-cargo.lock.toml')
         additions = [p for p in packages if (p['name'], p['version']) in NEW_WINDOWS]
         original = [p for p in packages if (p['name'], p['version']) not in NEW_WINDOWS]
         self.assertEqual(len(additions), len(NEW_WINDOWS))
-        self.assertEqual(len(original), 408)
+        self.assertEqual(len(original), 420)
         self.assertEqual(identities(original), ORIGINAL_CLI_IDENTITIES)
         for package in additions:
             self.assertEqual(package['source'], REGISTRY)
@@ -110,7 +112,7 @@ class ComLocksTests(unittest.TestCase):
         _, packages = self.read('desktop-cargo.lock.toml')
         self.assertEqual(dependency_edges(packages, packages), ORIGINAL_DESKTOP_EDGES,
                          '기존 패키지 버전 외에 기존 패키지가 선택한 의존성 버전도 보존해야 합니다')
-        self.assertIn('heck 0.4.1', resolve(packages, 'snafu-derive 0.9.0')['dependencies'])
+        self.assertIn('heck 0.5.0', resolve(packages, 'snafu-derive 0.9.0')['dependencies'])
 
     def test_every_unaffected_cli_dependency_edge_is_preserved_after_version_qualification(self):
         _, packages = self.read('cli-cargo.lock.toml')

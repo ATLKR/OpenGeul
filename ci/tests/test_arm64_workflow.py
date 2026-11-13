@@ -1,6 +1,7 @@
 """ARM native 검사와 기존 x64 검사를 같은 릴리스 필수 조건으로 연결한다."""
 from pathlib import Path
 import hashlib
+import copy
 import json
 import sys
 import unittest
@@ -72,6 +73,25 @@ class Arm64WorkflowTests(unittest.TestCase):
                          'scripts/release_pair.py assemble --x64 package --arm64 package-arm64 --wack-x64 wack-x64 --wack-arm64 wack-arm64 --output release-output',
                          '--package-directory release-output'):
             self.assertIn(required,commands)
+    def _without_paired_print_addendum(self,steps):
+        # Reviewed workflow postimage 14d48954ba0592509c7cc3f3bbf5faadc7b7078d83bf639f7f1a9279e3a4e7d3.
+        # Remove only its exact three-step tail and two additive outcome IDs.
+        # The original complete-step hashes below remain unchanged.
+        self.assertGreaterEqual(len(steps),3)
+        tail=steps[-3:]
+        self.assertEqual([step.get('id') for step in tail],
+            ['paired-print','paired-print-admit','paired-print-evidence'])
+        encoded=json.dumps(tail,sort_keys=True,separators=(',',':')).encode()
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(),
+            '47408af91825e308e4b961dc06616d83df22e1652551f31e051d568af9e603e8')
+        retained=[dict(step) for step in steps[:-3]]
+        for name,identifier in (('독립 PDF 검사·기본 프린터·합성 문서 준비','print-inputs'),
+                ('실제 Windows 대화상자로 인쇄하고 스풀러·렌더링 PDF 검사','normal-print')):
+            matches=[step for step in retained if step.get('name')==name]
+            self.assertEqual(len(matches),1)
+            self.assertEqual(matches[0].pop('id',None),identifier)
+        return retained
+
     def test_original_native_and_print_steps_cases_and_artifacts_remain_exact(self):
         # c689fa5 원본 전체 단계. matrix OS만 실제 ARM 표시명으로 정규화한다.
         original={'native-e2e':'bf842e5d0cc3a3b4e537fabd0a3b2648769d9429bbe62883bcd0f89999b4dcb9',
@@ -110,7 +130,10 @@ class Arm64WorkflowTests(unittest.TestCase):
                                    '--fixtures inputs/e2e-fixtures --receipt evidence/native-advanced-inputs.json',
                         }])
                     retained=[]
-                    for step in job['steps']:
+                    source_steps=job['steps']
+                    if name=='virtual-print' and suffix=='':
+                        source_steps=self._without_paired_print_addendum(source_steps)
+                    for step in source_steps:
                         if step.get('name') in additions:continue
                         step=dict(step)
                         if name=='native-e2e' and step.get('name')=='시험 도구 설치와 실제 제품 파일 신원 확인':
@@ -123,6 +146,35 @@ class Arm64WorkflowTests(unittest.TestCase):
                     self.assertEqual(job['permissions'],{'contents':'read','actions':'read'})
                     self.assertEqual(str(job['timeout-minutes']),'40' if name=='native-e2e' else '30')
                     self.assertNotIn('continue-on-error',job)
+                    if name=='virtual-print' and suffix=='':
+                        for case in range(8):
+                            with self.subTest(rejectedPairedMutation=case):
+                                damaged=copy.deepcopy(job['steps'])
+                                if case==0:damaged[-3]['if']='always()'
+                                elif case==1:damaged[-2]['run']='python ci/evidence.py'
+                                elif case==2:damaged[-1]['with']['path']='bounded-evidence/'
+                                elif case==3:damaged[-3],damaged[-2]=damaged[-2],damaged[-3]
+                                elif case==4:damaged.append(copy.deepcopy(damaged[-1]))
+                                elif case==5:next(s for s in damaged if s.get('id')=='print-inputs').pop('id')
+                                elif case==6:next(s for s in damaged if s.get('id')=='normal-print')['id']='other-print'
+                                else:damaged[-3]['continue-on-error']=True
+                                with self.assertRaises(AssertionError):self._without_paired_print_addendum(damaged)
+                        for case in range(5):
+                            with self.subTest(protectedOriginalMutation=case):
+                                damaged=copy.deepcopy(job['steps'])
+                                normal=next(s for s in damaged if s.get('id')=='normal-print')
+                                if case==0:normal['run']+=' --skip'
+                                elif case==1:normal['if']='always()'
+                                elif case==2:normal['continue-on-error']=True
+                                elif case==3:
+                                    artifact=next(s for s in damaged if s.get('with',{}).get('name','').startswith('virtual-print-'))
+                                    artifact['with']['path']='paired-print-evidence/'
+                                else:damaged.insert(0,{'name':'unknown-original-step','run':'echo fixed'})
+                                original_steps=[step for step in self._without_paired_print_addendum(damaged)
+                                    if step.get('name') not in additions]
+                                encoded=json.dumps(bind(original_steps),sort_keys=True,separators=(',',':')).encode()
+                                self.assertNotEqual(hashlib.sha256(encoded).hexdigest(),expected)
+
     def test_build_commands_are_native_target_explicit_without_changing_feature_graph(self):
         text=(ROOT/'scripts/build-msix.ps1').read_text()
         self.assertIn('$env:RUSTUP_TOOLCHAIN = "$($lock.rust)-$target"',text)

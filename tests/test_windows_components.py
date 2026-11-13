@@ -35,11 +35,16 @@ import picture_line_segment_owner
 import virtual_picture_layout_admission
 import hwpx_persistence_verification
 
+FOCUS_SOURCES = (
+    'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/picture-props-dialog.ts',
+)
+
 FONT_SOURCE_PINS = {
-    'apps/studio-host/src/main.ts': 'bb08b3373291803ae5ced45b0cba839fccece11256b1ca7e7cf305b6f5cfa89f',
-    'apps/studio-host/src/ui/toolbar.ts': '203dc4cff5d4ce851466f4efb5107d2b138e0b95d4478ee1a2a93a5049bf62fe',
-    'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
-    'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+    'apps/studio-host/src/main.ts': '2c5c4ffc4e42ad6234e798cf8a95a877c61b41a4c771e54713d34ea65d263208',
+    'apps/studio-host/src/ui/toolbar.ts': '8fc3134d76935de08acd987335d5ef879d5e40558e8f55a3e861fefcb753559c',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler-keyboard.ts': '40e871f95d00415c289a1730c86222660ad32027229813531d6c1f2ae90beb87',
+    'third_party/rhwp/rhwp-studio/src/engine/input-handler.ts': '224be1c8a887ae3d054b5bbf7530d930ec78298424bef732904b5d49a668aef2',
 }
 
 HELPER = ROOT/'scripts/windows_components.py'
@@ -74,18 +79,23 @@ class WindowsComponentsTests(unittest.TestCase):
         helpers = self.helper().configured()['helpers']
         self.assertTrue(name in helpers, 'Native advanced input stager must be included in component helpers')
         self.assertEqual(helpers[name], digest(ROOT/name))
-        self.assertEqual(len(helpers), 102)
+        self.assertEqual(len(helpers), 105)
+        for frontend_helper in ('scripts/frontend_dependencies.py', 'overlay/frontend-pnpm-lock.txt'):
+            self.assertEqual(helpers[frontend_helper], digest(ROOT/frontend_helper))
+        budget_helper = 'scripts/normal_distribution_budget.py'
+        self.assertEqual(helpers[budget_helper], digest(ROOT/budget_helper))
 
     def test_equation_dialog_focus_actual_frontend_source_is_explicit(self):
-        name = 'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts'
-        self.assertIn(name, self.helper().SOURCE_FILES)
-        self.assertEqual(equation_dialog_focus.SOURCE_FILES, (name,))
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
+        self.assertTrue(set(FOCUS_SOURCES) <= set(self.helper().SOURCE_FILES))
         config = self.helper().configured()
         self.assertEqual(config['helpers'][equation_dialog_focus.HELPER], digest(ROOT/equation_dialog_focus.HELPER))
         source = self.source()
         _, contract = self.helper().source_contract(source, config)
-        self.assertEqual(contract['preparedFiles'][name], digest(source/name))
-        self.assertEqual(contract['equationDialogFocus']['afterSha256'][name], digest(source/name))
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            with self.subTest(sourceCode=source_code):
+                self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+                self.assertEqual(contract['equationDialogFocus']['afterSha256'][name], digest(source/name))
 
     def test_equation_dialog_focus_missing_proof_cannot_publish_component(self):
         source = self.source()
@@ -97,70 +107,82 @@ class WindowsComponentsTests(unittest.TestCase):
             self.helper().source_contract(source, self.helper().configured())
 
     def test_equation_dialog_focus_capture_rejects_forged_proof_and_actual_source_drift(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         source = self.source(); c = self.helper(); payload = self.payload('editor')
-        name, = equation_dialog_focus.SOURCE_FILES
-        path = source/name; raw = path.read_bytes()
+        raw = {name:(source/name).read_bytes() for name in FOCUS_SOURCES}
         ledger_path = source/'.opengeul-overlay.json'; original = json.loads(ledger_path.read_bytes())
-        for i, change in enumerate(('helper', 'before', 'after', 'extra-proof', 'missing-source', 'source-drift', 'coherent-legacy')):
-            path.write_bytes(raw); ledger = copy.deepcopy(original); proof = ledger['equationDialogFocus']
-            if change == 'helper': proof['helperSha256'] = '0'*64
-            elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
-            elif change == 'extra-proof': proof['optional'] = True
-            elif change == 'missing-source': path.unlink()
-            else:
-                path.write_bytes(b'owned former equation dialog focus source\n')
-                if change == 'coherent-legacy': proof['afterSha256'][name] = digest(path)
-            write_json(ledger_path, ledger)
-            out = self.root/('invalid-equation-focus-'+str(i))
-            with self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
-                c.capture('editor', payload, source, out, env=self.env)
-            self.assertFalse(out.exists())
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            for i, change in enumerate(('helper', 'before', 'after', 'missing-before', 'missing-after', 'extra-proof', 'missing-source', 'source-drift', 'coherent-legacy')):
+                for restored, data in raw.items():(source/restored).write_bytes(data)
+                path = source/name; ledger = copy.deepcopy(original); proof = ledger['equationDialogFocus']
+                if change == 'helper': proof['helperSha256'] = '0'*64
+                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                elif change in ('missing-before', 'missing-after'): proof[change.removeprefix('missing-')+'Sha256'].pop(name)
+                elif change == 'extra-proof': proof['optional'] = True
+                elif change == 'missing-source': path.unlink()
+                else:
+                    path.write_bytes(b'owned former dialog focus source\n')
+                    if change == 'coherent-legacy': proof['afterSha256'][name] = digest(path)
+                write_json(ledger_path, ledger)
+                out = self.root/('invalid-equation-focus-'+str(source_code)+'-'+str(i))
+                with self.subTest(sourceCode=source_code, change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                    c.capture('editor', payload, source, out, env=self.env)
+                self.assertFalse(out.exists())
 
     def test_equation_dialog_focus_reobserves_actual_frontend_after_core_capture(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         source = self.source(); c = self.helper(); actual_tree = c.tree
-        name, = equation_dialog_focus.SOURCE_FILES
-        def changed_frontend(folder, cap):
-            if folder == source/'third_party/rhwp/src':
-                path = source/name; path.write_bytes(path.read_bytes()+b'// changed during actual source capture\n')
-            return actual_tree(folder, cap)
-        out = self.root/'changed-equation-focus-source'
-        with patch.object(c, 'tree', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
-            c.capture('editor', self.payload('editor'), source, out, env=self.env)
-        self.assertFalse(out.exists())
+        payload = self.payload('editor')
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            path = source/name; raw = path.read_bytes()
+            def changed_frontend(folder, cap):
+                if folder == source/'third_party/rhwp/src':
+                    path.write_bytes(path.read_bytes()+b'// changed during actual source capture\n')
+                return actual_tree(folder, cap)
+            out = self.root/('changed-equation-focus-source-'+str(source_code))
+            with self.subTest(sourceCode=source_code), patch.object(c, 'tree', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+            path.write_bytes(raw)
 
     def test_equation_dialog_focus_reobserves_actual_frontend_after_vendor_validation(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         source = self.source(); c = self.helper(); actual_read = c.read_json
-        name, = equation_dialog_focus.SOURCE_FILES
+        payload = self.payload('editor')
         provenance = source/'apps/studio-host/vendor/rhwp-core/PROVENANCE.json'
-        def changed_frontend(path):
-            value = actual_read(path)
-            if path == provenance:
-                current = source/name
-                current.write_bytes(current.read_bytes()+b'// changed during final vendor validation\n')
-            return value
-        out = self.root/'changed-equation-focus-final-source'
-        with patch.object(c, 'read_json', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
-            c.capture('editor', self.payload('editor'), source, out, env=self.env)
-        self.assertFalse(out.exists())
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            current = source/name; raw = current.read_bytes()
+            def changed_frontend(path):
+                value = actual_read(path)
+                if path == provenance:
+                    current.write_bytes(current.read_bytes()+b'// changed during final vendor validation\n')
+                return value
+            out = self.root/('changed-equation-focus-final-source-'+str(source_code))
+            with self.subTest(sourceCode=source_code), patch.object(c, 'read_json', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+            current.write_bytes(raw)
 
     def test_matching_component_pair_requires_equation_focus_fixed_proof_and_observation(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         folders = self.pair()
         original = {role:json.loads((folder/'provenance.json').read_bytes()) for role, folder in folders.items()}
-        name, = equation_dialog_focus.SOURCE_FILES
-        for change in ('missing-proof', 'missing-source', 'helper', 'before', 'after', 'observed-hash', 'coherent-legacy', 'extra-proof'):
-            for role, folder in folders.items():
-                value = copy.deepcopy(original[role]); source = value['source']; proof = source['equationDialogFocus']
-                if change == 'missing-proof': source.pop('equationDialogFocus')
-                elif change == 'missing-source': source['preparedFiles'].pop(name)
-                elif change == 'helper': proof['helperSha256'] = '0'*64
-                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
-                elif change == 'observed-hash': source['preparedFiles'][name] = '0'*64
-                elif change == 'extra-proof': proof['optional'] = True
-                else:
-                    legacy = equation_dialog_focus.INPUT_SOURCE_SHA256[name]
-                    proof['afterSha256'][name] = source['preparedFiles'][name] = legacy
-                write_json(folder/'provenance.json', value)
-            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            for change in ('missing-proof', 'missing-source', 'helper', 'before', 'after', 'missing-before', 'missing-after', 'observed-hash', 'coherent-legacy', 'extra-proof'):
+                for role, folder in folders.items():
+                    value = copy.deepcopy(original[role]); source = value['source']; proof = source['equationDialogFocus']
+                    if change == 'missing-proof': source.pop('equationDialogFocus')
+                    elif change == 'missing-source': source['preparedFiles'].pop(name)
+                    elif change == 'helper': proof['helperSha256'] = '0'*64
+                    elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                    elif change in ('missing-before', 'missing-after'): proof[change.removeprefix('missing-')+'Sha256'].pop(name)
+                    elif change == 'observed-hash': source['preparedFiles'][name] = '0'*64
+                    elif change == 'extra-proof': proof['optional'] = True
+                    else:
+                        legacy = equation_dialog_focus.INPUT_SOURCE_SHA256[name]
+                        proof['afterSha256'][name] = source['preparedFiles'][name] = legacy
+                    write_json(folder/'provenance.json', value)
+                with self.subTest(sourceCode=source_code, change=change): self.assert_rejected_without_outputs(folders)
 
     def test_rehashed_public_ledger_cannot_omit_or_replace_equation_focus_proof(self):
         folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
@@ -353,12 +375,24 @@ class WindowsComponentsTests(unittest.TestCase):
             'third_party/rhwp/src/model/identity/walk.rs',
             'third_party/rhwp/src/model/identity.rs',
             'third_party/rhwp/src/serializer/hwpx/field.rs',
+            'third_party/rhwp/src/serializer/line_cache.rs',
+            'third_party/rhwp/src/document_core/commands/object_ops/picture_inline_migration.rs',
+            'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs',
+            'third_party/rhwp/src/serializer/hwpx_lineage_lines.rs',
+            'third_party/rhwp/src/serializer/cfb_writer.rs',
+            'third_party/rhwp/src/model/document.rs',
         )
         self.assertEqual(hwpx_persistence_verification.SOURCE_FILES, expected)
         readonly = {
             'third_party/rhwp/src/serializer/hwpx/section.rs',
             'third_party/rhwp/src/model/identity/walk.rs',
             'third_party/rhwp/src/model/identity.rs',
+            'third_party/rhwp/src/serializer/line_cache.rs',
+            'third_party/rhwp/src/document_core/commands/object_ops/picture_inline_migration.rs',
+            'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs',
+            'third_party/rhwp/src/serializer/hwpx_lineage_lines.rs',
+            'third_party/rhwp/src/serializer/cfb_writer.rs',
+            'third_party/rhwp/src/model/document.rs',
         }
         self.assertEqual({name for name in expected
                           if hwpx_persistence_verification.INPUT_SOURCE_SHA256[name]
@@ -760,9 +794,9 @@ class WindowsComponentsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Native integration test is not correctly registered'):
             c.source_contract(source, c.configured())
 
-    def test_stored_line_origin_three_compiled_sources_and_public_proof_are_mandatory(self):
+    def test_stored_line_origin_four_compiled_sources_and_public_proof_are_mandatory(self):
         source = self.source(); c = self.helper()
-        self.assertEqual(len(stored_lineseg_origin.SOURCE_FILES), 3)
+        self.assertEqual(len(stored_lineseg_origin.SOURCE_FILES), 4)
         self.assertTrue(set(stored_lineseg_origin.SOURCE_FILES) <= set(c.SOURCE_FILES))
         _, contract = c.source_contract(source, c.configured())
         for name in stored_lineseg_origin.SOURCE_FILES:
@@ -1079,7 +1113,7 @@ class WindowsComponentsTests(unittest.TestCase):
             path = source/name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('synthetic prepared source: '+name+'\n', encoding='utf-8')
-        for directory in ('third_party/rhwp/src', 'third_party/rhwp/vendor/svg2pdf/src'):
+        for directory in c.CORE_TREES:
             path = source/directory/'owned-synthetic.rs'
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('// owned bounded source fixture\n')
@@ -1089,7 +1123,7 @@ class WindowsComponentsTests(unittest.TestCase):
         for folder, name in ((source, 'hop'), (core, 'rhwp')):
             subprocess.run(['git', 'init', '-q', str(folder)], check=True)
             (folder/'.git/HEAD').write_text(lock[name]['commit']+'\n')
-        original = '[package]\nname = "rhwp"\nversion = "0.8.7"\nautotests = false\n'
+        original = '[package]\nname = "rhwp"\nversion = "0.9.0"\nautotests = false\n'
         (core/'Cargo.toml').write_text(original, encoding='utf-8')
         for upstream, local in c.COPIED_OVERLAYS.items():
             if upstream.startswith('third_party/rhwp/src/opengeul_com_worker/'):continue
@@ -1112,7 +1146,7 @@ class WindowsComponentsTests(unittest.TestCase):
         for name in wasm_artifacts.FILES:
             (vendor/name).write_bytes(b'synthetic owned WASM fixture')
         (vendor/'rhwp_bg.wasm').write_bytes(b'\0asm\1\0\0\0')
-        (vendor/'package.json').write_text('{"version":"0.8.7"}')
+        (vendor/'package.json').write_text('{"version":"0.9.0"}')
         wasm_artifacts.capture(vendor)
         wasm = json.loads((vendor/'OPEN_GEUL_WASM.json').read_text())
         write_json(vendor/'PROVENANCE.json', {'originalUpstream': {}, 'opengeulRebuild': wasm})
@@ -1251,15 +1285,15 @@ class WindowsComponentsTests(unittest.TestCase):
                   'hwpxPersistenceVerification': persistence_proof,
                   'asyncClipboardGuard': {
                       'beforeSha256': {
-                          'input-handler-keyboard.ts': '1076739c3742d73329e91cb3cdf2f638f03fcb21e7df0aa6a326963bf231b87c',
-                          'input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+                          'input-handler-keyboard.ts': '40e871f95d00415c289a1730c86222660ad32027229813531d6c1f2ae90beb87',
+                          'input-handler.ts': '224be1c8a887ae3d054b5bbf7530d930ec78298424bef732904b5d49a668aef2',
                       },
                       'afterSha256': {name: digest(engine/name) for name in clipboard_files},
                   },
                   'imageInsertionGuard': {
                       'beforeSha256': {
-                          'command/commands/insert.ts': '29e9c3d98e26a8c7b44cd59af8a31872abf4e618ae37d15e3049178cc5226364',
-                          'engine/input-handler.ts': '9bbba9420b2a8d4c3630a1797976bf9e65b9b1b4a67c608f305e1f5a873c31ce',
+                          'command/commands/insert.ts': '0b1a9719438faa78a20958aef48809ee965f6d7d10ba784221a29601f86614be',
+                          'engine/input-handler.ts': '224be1c8a887ae3d054b5bbf7530d930ec78298424bef732904b5d49a668aef2',
                       },
                       'afterSha256': {'command/commands/insert.ts': digest(insert),
                                       'engine/input-handler.ts': digest(engine/'input-handler.ts')},
@@ -1289,7 +1323,7 @@ class WindowsComponentsTests(unittest.TestCase):
         """소유한 작은 원본 fixture만 대체하고 실제 source policy는 그대로 실행한다."""
         native = source/'apps/desktop/src-tauri'
         config = self.helper().configured()
-        original = '[package]\nname="hop-desktop"\nversion="'+config['product']['version']+'"\n[dependencies]\ntauri = { version = "=2.11.1", features = [] }\nopen = "5"\n[patch.crates-io]\n'
+        original = '[package]\nname="hop-desktop"\nversion="'+config['product']['version']+'"\n[dependencies]\ntauri = { version = "=2.12.5", features = [] }\nopen = "5"\n[patch.crates-io]\n'
         (native/'Cargo.toml').write_text(native_activation.desktop_manifest(original), encoding='utf-8')
         lock = (ROOT/'overlay/desktop-cargo.lock.toml').read_text(encoding='utf-8')
         lock = buildkit.replace_once(lock, 'name = "hop-desktop"\nversion = "'+config['upstream']['hop']['version']+'"',
@@ -1297,7 +1331,7 @@ class WindowsComponentsTests(unittest.TestCase):
         (native/'Cargo.lock').write_text(lock, encoding='utf-8', newline='\n')
         references = {}
         for directory, actual in native_source_contract.REFERENCE.items():
-            changed = ('Cargo.toml', 'src/app.rs', 'src/process.rs') if directory == 'tauri-2.11.1' else ('Cargo.toml', 'src/dialog/windows.rs')
+            changed = ('Cargo.toml', 'src/app.rs', 'src/process.rs') if directory == 'tauri-2.12.5' else ('Cargo.toml', 'src/dialog/windows.rs')
             original_files = {name: ('owned original '+directory+'/'+name+'\n').encode()
                               for name in (*changed, 'LICENSE')}
             prepared_files = {name: (b'owned prepared '+content if name in changed else content)
@@ -1383,6 +1417,13 @@ class WindowsComponentsTests(unittest.TestCase):
         return self.helper().combine(folders['editor'], folders['cli'], self.root/'combined',
                                      self.root/'package-source', env=self.env if env is None else env, **options)
 
+    def rewrite_editor_payload_inventory(self, folder, inventory, provenance=None):
+        sidecar = folder/'payload-inventory.json'
+        write_json(sidecar, inventory)
+        value = provenance if provenance is not None else json.loads((folder/'provenance.json').read_bytes())
+        value['files']['payload-inventory.json'] = {'size': sidecar.stat().st_size, 'sha256': digest(sidecar)}
+        write_json(folder/'provenance.json', value)
+
     def assert_rejected_without_outputs(self, folders, match=None, env=None, architecture='x64'):
         with self.assertRaisesRegex(ValueError, match or '.'):
             self.combine(folders, env, architecture)
@@ -1417,7 +1458,7 @@ class WindowsComponentsTests(unittest.TestCase):
         for role in folders:
             record = json.loads((folders[role]/'provenance.json').read_text())
             self.assertEqual(record['target'], 'aarch64-pc-windows-msvc')
-            self.assertEqual(record['formatVersion'], 2 if role == 'cli' else 1)
+            self.assertEqual(record['formatVersion'], 2)
             self.assertEqual(record['helpers']['scripts/windows_arch.py'], digest(ROOT/'scripts/windows_arch.py'))
             self.assertEqual(receipt['components'][role]['artifactName'],
                              'opengeul-'+role+'-component-arm64-'+self.env['GITHUB_RUN_ID'])
@@ -1477,17 +1518,23 @@ class WindowsComponentsTests(unittest.TestCase):
             path = folders[role]/'payload'/(name+'.gz' if role == 'cli' else name)
             provenance = folders[role]/'provenance.json'
             original_data = path.read_bytes(); original = json.loads(provenance.read_text())
+            editor_inventory = json.loads((folders[role]/'payload-inventory.json').read_bytes()) if role == 'editor' else None
             for machine in (0x8664, 0xA641):
                 raw = pe(machine)
                 path.write_bytes(gzip.compress(raw, mtime=0) if role == 'cli' else raw)
                 changed = copy.deepcopy(original)
-                changed['files']['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                changed_files = changed['files'] if role == 'cli' else copy.deepcopy(editor_inventory)
+                changed_files['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                if role == 'editor':
+                    self.rewrite_editor_payload_inventory(folders[role], changed_files, changed)
                 if role == 'cli':
                     changed['runtime'] = {'path': name, 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
                 write_json(provenance, changed)
                 with self.subTest(role=role, name=name, machine=machine), patch.object(self.helper().tempfile, 'mkdtemp', side_effect=AssertionError('Native PE validation must precede staging')):
                     self.assert_rejected_without_outputs(folders, 'arm64', architecture='arm64')
-            path.write_bytes(original_data); write_json(provenance, original)
+            path.write_bytes(original_data)
+            if role == 'editor': self.rewrite_editor_payload_inventory(folders[role], editor_inventory, original)
+            else: write_json(provenance, original)
 
     def test_x64_editor_and_arm64_cli_cannot_join_for_either_expected_architecture(self):
         c = self.helper(); source = self.source()
@@ -1514,7 +1561,7 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertEqual((self.root/'package-source/.opengeul-overlay.json').read_bytes(),
                          (self.root/'hop/.opengeul-overlay.json').read_bytes())
         self.assertEqual(set(p.name for p in folders['editor'].iterdir()),
-                         {'payload', 'provenance.json', 'source-parity.json'})
+                         {'payload', 'provenance.json', 'source-parity.json', 'payload-inventory.json'})
         self.assertEqual(set(p.name for p in folders['cli'].iterdir()), {'payload', 'provenance.json'})
         receipt_path = self.root/'package-source/.opengeul-windows-components.json'
         self.assertTrue(receipt_path.is_file(), 'Verified producer/runtime receipt must survive transport cleanup')
@@ -1653,7 +1700,7 @@ class WindowsComponentsTests(unittest.TestCase):
 
     def test_unlisted_native_vendor_source_cannot_enter_a_component(self):
         source = self.source()
-        extra = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.11.1/src/unreviewed.rs'
+        extra = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.12.5/src/unreviewed.rs'
         extra.parent.mkdir(parents=True, exist_ok=True)
         extra.write_text('// unreviewed compiler source\n')
         with self.assertRaises(ValueError):
@@ -1668,7 +1715,7 @@ class WindowsComponentsTests(unittest.TestCase):
             self.assertIn('overlay/native-open/README.md', record['helpers'])
         self.assertEqual(records[0]['source']['nativeActivation'], records[1]['source']['nativeActivation'])
         native = records[0]['source']['nativeActivation']['ledger']
-        self.assertEqual(set(native['crates']), {'tauri-2.11.1','tauri-runtime-wry-2.11.1'})
+        self.assertEqual(set(native['crates']), {'tauri-2.12.5','tauri-runtime-wry-2.12.3'})
         self.assertEqual(set(native['shimFiles']), {'Cargo.toml','LICENSE.txt','README.md','src/activation.rs','src/lib.rs'})
 
     def test_consumer_rejects_missing_native_proof_even_when_both_records_agree(self):
@@ -1701,14 +1748,14 @@ class WindowsComponentsTests(unittest.TestCase):
 
     def test_actual_vendor_mutation_and_rehashed_ledger_cannot_authorize_new_source(self):
         source = self.source()
-        path = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.11.1/src/process.rs'
+        path = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.12.5/src/process.rs'
         path.write_bytes(path.read_bytes()+b'// changed compiler input\n')
         payload = self.payload('editor')
         with self.assertRaisesRegex(ValueError, 'compiler source inventory'):
             self.helper().capture('editor', payload, source, self.root/'tampered-vendor', env=self.env)
         ledger_path = source/native_source_contract.LEDGER_PATH
         ledger = json.loads(ledger_path.read_bytes())
-        ledger['crates']['tauri-2.11.1']['preparedFiles']['src/process.rs'] = digest(path)
+        ledger['crates']['tauri-2.12.5']['preparedFiles']['src/process.rs'] = digest(path)
         ledger_path.write_bytes(native_source_contract.ledger_bytes(ledger))
         with self.assertRaisesRegex(ValueError, 'prepared source inventory'):
             self.helper().capture('editor', payload, source, self.root/'rehash-vendor', env=self.env)
@@ -1720,7 +1767,7 @@ class WindowsComponentsTests(unittest.TestCase):
         path = source/native_source_contract.LEDGER_PATH
         original = json.loads(path.read_bytes())
         for index, change in enumerate(('archive','version','original','prepared','outside')):
-            altered = copy.deepcopy(original);crate = altered['crates']['tauri-2.11.1']
+            altered = copy.deepcopy(original);crate = altered['crates']['tauri-2.12.5']
             if change == 'archive':crate['archiveSha256'] = '0'*64
             elif change == 'version':crate['version'] = '2.11.0'
             elif change == 'original':crate['originalFiles']['src/app.rs'] = '0'*64
@@ -1734,7 +1781,7 @@ class WindowsComponentsTests(unittest.TestCase):
 
     def test_vendor_symlink_and_unlisted_empty_directory_fail_before_staging(self):
         source = self.source();payload = self.payload('cli')
-        directory = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.11.1'
+        directory = source/'apps/desktop/src-tauri/opengeul-native/tauri-2.12.5'
         extra = directory/'unlisted-empty';extra.mkdir()
         with self.assertRaisesRegex(ValueError, 'source directory'):
             self.helper().capture('cli', payload, source, self.root/'extra-directory', env=self.env)
@@ -1754,7 +1801,7 @@ class WindowsComponentsTests(unittest.TestCase):
         for change in ('archive','origin','prepared','shim','manifest','lock','patch','raw-ledger'):
             for role,folder in folders.items():
                 record = copy.deepcopy(originals[role]);source = record['source'];ledger = source['nativeActivation']['ledger']
-                crate = ledger['crates']['tauri-2.11.1']
+                crate = ledger['crates']['tauri-2.12.5']
                 if change == 'archive':crate['archiveSha256'] = '0'*64
                 elif change == 'origin':crate['originalFiles']['src/app.rs'] = '0'*64
                 elif change == 'prepared':crate['preparedFiles']['src/app.rs'] = '0'*64
@@ -1879,7 +1926,7 @@ class WindowsComponentsTests(unittest.TestCase):
                                 'sha256': hashlib.sha256(raw).hexdigest()}
         write_json(provenance, value)
 
-    def test_cli_gzip_capture_is_deterministic_and_editor_format_stays_one(self):
+    def test_cli_gzip_capture_is_deterministic_and_editor_inventory_uses_format_two(self):
         folders = self.pair()
         out = self.root/'second-cli'
         self.helper().capture('cli', self.root/'cli-payload', self.root/'hop', out, env=self.env)
@@ -1887,7 +1934,7 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertEqual((folders['cli']/path).read_bytes(), (out/path).read_bytes())
         self.assertEqual((folders['cli']/'provenance.json').read_bytes(), (out/'provenance.json').read_bytes())
         self.assertEqual((out/path).read_bytes()[3:8], b'\0'*5, 'No filename flag or timestamp may enter transport')
-        self.assertEqual(json.loads((folders['editor']/'provenance.json').read_text())['formatVersion'], 1)
+        self.assertEqual(json.loads((folders['editor']/'provenance.json').read_text())['formatVersion'], 2)
 
     def test_large_editor_inventory_captures_all_fields_within_unchanged_metadata_cap(self):
         c=self.helper();source=self.source();payload=self.payload('editor')
@@ -1903,19 +1950,133 @@ class WindowsComponentsTests(unittest.TestCase):
         compact=(json.dumps(expected,sort_keys=True,separators=(',',':'))+'\n').encode()
         self.assertGreater(len(pretty),c.MAX_METADATA);self.assertLess(len(compact),c.MAX_METADATA)
         out=self.root/'large-editor';c.capture('editor',payload,source,out,env=self.env)
-        self.assertEqual((out/'provenance.json').read_bytes(),compact)
+        wire=c.read_json(out/'provenance.json')
+        self.assertEqual(set(wire['files']), {'source-parity.json', 'payload-inventory.json'})
+        expected['files']['payload-inventory.json']=wire['files']['payload-inventory.json']
+        self.assertEqual((out/'provenance.json').read_bytes(),c.encoded(wire,compact=True))
         actual=c.validate_component(out,'editor',c.identity(self.env),c.configured())
-        self.assertEqual(actual,expected);self.assertEqual(len(actual['files']),len(inventory)+1)
-        self.assertEqual(actual['formatVersion'],1)
+        self.assertEqual(actual,expected);self.assertEqual(len(actual['files']),len(inventory)+2)
+        self.assertEqual(actual['formatVersion'],2)
         self.assertEqual((out/'source-parity.json').read_bytes(),(baseline/'source-parity.json').read_bytes())
         cli=self.root/'matching-cli';c.capture('cli',self.payload('cli'),source,cli,env=self.env)
         self.assertEqual(c.read_json(cli/'provenance.json')['formatVersion'],2)
         self.assertEqual(c.read_json(cli/'provenance.json')['source'],actual['source'])
         c.combine(out,cli,self.root/'combined',self.root/'package-source',env=self.env)
-        combined,_=c.tree(self.root/'combined',c.MAX_PAYLOAD)
+        combined,_=c.tree(self.root/'combined',c.MAX_COMBINED_RESTORED_PAYLOAD)
         self.assertEqual(combined,{**inventory,c.CLI_RUNTIME:{'size':len(pe()),'sha256':hashlib.sha256(pe()).hexdigest()}})
         self.assertEqual(c.read_json(self.root/'package-source/.opengeul-windows-components.json')['sourceContractSha256'],
             hashlib.sha256((json.dumps(actual['source'],indent=2,sort_keys=True)+'\n').encode()).hexdigest())
+
+    def test_editor_inventory_sidecar_rejects_hash_drift_and_coherent_invalid_content(self):
+        c = self.helper(); folders = self.pair(); folder = folders['editor']
+        sidecar = folder/'payload-inventory.json'; original = sidecar.read_bytes()
+        provenance = json.loads((folder/'provenance.json').read_bytes())
+        inventory = json.loads(original)
+        invalid = [b'{}', b'[]', b'\xff', b'{"payload/OpenGeul.exe":{},"payload/OpenGeul.exe":{}}']
+        for name in ('../escape', 'payload/CON.txt', 'payload/OpenGeul.exe/../other',
+                     'source-parity.json', 'payload/opengeul.exe'):
+            changed = copy.deepcopy(inventory); changed[name] = changed['payload/OpenGeul.exe']
+            invalid.append(json.dumps(changed).encode())
+        missing = copy.deepcopy(inventory); missing.pop('payload/OpenGeul.exe'); invalid.append(json.dumps(missing).encode())
+        extra = copy.deepcopy(inventory); extra['payload/extra.txt'] = {'size': 1, 'sha256': '0'*64}; invalid.append(json.dumps(extra).encode())
+        bad_record = copy.deepcopy(inventory); bad_record['payload/OpenGeul.exe']['extra'] = 1; invalid.append(json.dumps(bad_record).encode())
+        for size in (256.0, True, -1, '256'):
+            bad_record = copy.deepcopy(inventory); bad_record['payload/OpenGeul.exe']['size'] = size
+            invalid.append(json.dumps(bad_record).encode())
+        invalid.extend((b' '* (c.MAX_METADATA+1), original+b'\n'))
+        for index, data in enumerate(invalid):
+            sidecar.write_bytes(data); value = copy.deepcopy(provenance)
+            # The final case keeps the old digest to prove the raw byte binding.
+            if index != len(invalid)-1:
+                value['files']['payload-inventory.json'] = {'size': len(data), 'sha256': digest(sidecar)}
+            write_json(folder/'provenance.json', value)
+            with self.subTest(index=index), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Invalid sidecar must precede staging')):
+                self.assert_rejected_without_outputs(folders)
+        sidecar.write_bytes(original); write_json(folder/'provenance.json', provenance)
+
+    def test_editor_inventory_sidecar_missing_or_alias_cannot_stage(self):
+        c = self.helper(); folders = self.pair(); sidecar = folders['editor']/'payload-inventory.json'
+        original = sidecar.read_bytes(); sidecar.unlink()
+        with self.assertRaises((ValueError, FileNotFoundError)):
+            self.combine(folders)
+        self.assertFalse((self.root/'combined').exists()); self.assertFalse((self.root/'package-source').exists())
+        alias = self.root/'inventory-alias.json'; alias.write_bytes(original)
+        checked_aliases = 0
+        for kind in ('symlink', 'hardlink'):
+            if sidecar.exists() or sidecar.is_symlink(): sidecar.unlink()
+            try:
+                if kind == 'symlink': sidecar.symlink_to(alias)
+                else: os.link(alias, sidecar)
+            except (OSError, NotImplementedError):
+                continue
+            checked_aliases += 1
+            with self.subTest(kind=kind), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Aliases must precede staging')):
+                self.assert_rejected_without_outputs(folders, 'symlink|hardlink|regular')
+        if sidecar.exists() or sidecar.is_symlink(): sidecar.unlink()
+        sidecar.write_bytes(original)
+        self.assertGreater(checked_aliases, 0, 'At least one real link alias must be exercised')
+
+    def test_editor_inventory_reparse_attribute_cannot_stage(self):
+        c = self.helper(); folders = self.pair(); sidecar = folders['editor']/'payload-inventory.json'
+        original_lstat = Path.lstat
+        class ReparseStat:
+            st_file_attributes = 0x400
+            def __init__(self, info): self.info = info
+            def __getattr__(self, name): return getattr(self.info, name)
+        def reparse(path):
+            info = original_lstat(path)
+            return ReparseStat(info) if path == sidecar else info
+        with patch.object(Path, 'lstat', reparse), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Reparse points must precede staging')):
+            self.assert_rejected_without_outputs(folders, 'reparse')
+
+    def test_editor_inventory_identity_swap_with_identical_bytes_is_rejected(self):
+        c = self.helper(); folders = self.pair(); sidecar = folders['editor']/'payload-inventory.json'
+        value = json.loads((folders['editor']/'provenance.json').read_bytes())
+        substitute = self.root/'replacement-inventory.json'; substitute.write_bytes(sidecar.read_bytes())
+        original_open = Path.open
+        def swap(path, *args, **kwargs):
+            if path == sidecar:
+                os.replace(substitute, sidecar)
+            return original_open(path, *args, **kwargs)
+        with patch.object(Path, 'open', swap), self.assertRaisesRegex(ValueError, 'identity changed'):
+            c._payload_inventory(sidecar, value['files']['payload-inventory.json'])
+
+    def test_editor_inventory_changed_after_tree_observation_is_rejected(self):
+        c = self.helper(); folders = self.pair(); original = c._payload_inventory
+        def change_then_read(path, expected):
+            path.write_bytes(path.read_bytes()+b'\n')
+            return original(path, expected)
+        with patch.object(c, '_payload_inventory', change_then_read), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Changed inventory must precede staging')):
+            self.assert_rejected_without_outputs(folders, 'size/hash')
+
+    def test_large_runtime_source_and_notice_inventories_fit_separate_unchanged_caps(self):
+        c = self.helper(); source = self.source(); payload = self.payload('editor')
+        core = source/'third_party/rhwp/vendor/metadata-closure'; core.mkdir(parents=True)
+        for index in range(3205):
+            (core/f'actual-runtime-source-{index:04}.rs').write_text('// synthetic runtime source\n')
+        notices = payload/'Notices/Dependencies'; notices.mkdir()
+        for index in range(1736):
+            (notices/f'cargo-runtime-{index:04}-LICENSE.txt').write_text('Synthetic upstream license notice.\n')
+        files, _ = c.tree(payload, c.CAPS['editor'])
+        _, contract = c.source_contract(source, c.configured())
+        former = {**c.configured(), 'source': contract,
+                  'files': {'payload/'+name: item for name, item in files.items()}}
+        former_bytes = (json.dumps(former, sort_keys=True, separators=(',', ':'))+'\n').encode()
+        self.assertGreater(len(former_bytes), c.MAX_METADATA)
+        out = self.root/'large-runtime-source-and-notices'
+        c.capture('editor', payload, source, out, env=self.env)
+        self.assertEqual(c.MAX_METADATA, 512*1024)
+        self.assertLessEqual((out/'provenance.json').stat().st_size, c.MAX_METADATA)
+        self.assertLessEqual((out/'payload-inventory.json').stat().st_size, c.MAX_METADATA)
+        value = c.validate_component(out, 'editor', c.identity(self.env), c.configured())
+        self.assertEqual(value['source'], contract)
+        self.assertEqual({name.removeprefix('payload/'): item for name, item in value['files'].items()
+                          if name.startswith('payload/')}, files)
+        cli = self.root/'large-source-matching-cli'
+        c.capture('cli', self.payload('cli'), source, cli, env=self.env)
+        c.combine(out, cli, self.root/'combined', self.root/'package-source', env=self.env)
+        restored, _ = c.tree(self.root/'combined', c.MAX_COMBINED_RESTORED_PAYLOAD)
+        self.assertEqual({name: item for name, item in restored.items() if not name.startswith('Tools/')}, files)
 
     def test_compact_encoding_preserves_default_source_contract_bytes_and_hash(self):
         c=self.helper();source=self.source();_,contract=c.source_contract(source,c.configured())
@@ -1988,8 +2149,41 @@ class WindowsComponentsTests(unittest.TestCase):
         folders = self.pair_from_source(source)
         editor = json.loads((folders['editor']/'provenance.json').read_text())
         editor_size = sum(v['size'] for n, v in editor['files'].items() if n.startswith('payload/'))
-        with patch.object(c, 'MAX_PAYLOAD', editor_size+255), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Combined cap must precede staging')):
+        with patch.object(c, 'MAX_COMBINED_RESTORED_PAYLOAD', editor_size+255), patch.object(c.tempfile, 'mkdtemp', side_effect=AssertionError('Combined cap must precede staging')):
             self.assert_rejected_without_outputs(folders, 'combined|cap')
+
+    def test_combined_restored_budget_is_separate_from_cli_and_transport_limits(self):
+        c = self.helper()
+        self.assertEqual(c.MAX_PAYLOAD, 96*1024*1024)
+        self.assertEqual(c.MAX_COMBINED_RESTORED_PAYLOAD, 128*1024*1024)
+        self.assertEqual(c.CAPS, {'editor': 64*1024*1024, 'cli': 32*1024*1024})
+
+    def test_combined_restored_boundary_accepts_exact_limit_for_both_architectures(self):
+        c = self.helper(); original_root = self.root
+        for architecture in ('x64', 'arm64'):
+            with self.subTest(architecture=architecture):
+                self.root = original_root/architecture; self.root.mkdir()
+                folders = self.pair(architecture)
+                editor = c.validate_component(folders['editor'], 'editor', c.identity(self.env),
+                                              c.configured(), architecture=architecture)
+                size = sum(v['size'] for n, v in editor['files'].items() if n.startswith('payload/'))+len(pe())
+                with patch.object(c, 'MAX_COMBINED_RESTORED_PAYLOAD', size-1), patch.object(
+                        c.tempfile, 'mkdtemp', side_effect=AssertionError('Combined cap must precede staging')):
+                    self.assert_rejected_without_outputs(folders, 'combined|cap', architecture=architecture)
+                with patch.object(c, 'MAX_COMBINED_RESTORED_PAYLOAD', size):
+                    self.combine(folders, architecture=architecture)
+                actual, _ = c.tree(self.root/'combined', size)
+                self.assertEqual(sum(v['size'] for v in actual.values()), size)
+                self.assertEqual((self.root/'combined/Tools/rhwp.exe').read_bytes(),
+                                 pe(windows_arch.machine_for(architecture)))
+        self.root = original_root
+
+    def test_larger_combined_budget_cannot_admit_cli_over_its_own_limit(self):
+        c = self.helper(); folders = self.pair()
+        with patch.object(c, 'MAX_PAYLOAD', len(pe())-1), patch.object(
+                c, 'MAX_COMBINED_RESTORED_PAYLOAD', 128*1024*1024), patch.object(
+                c.tempfile, 'mkdtemp', side_effect=AssertionError('CLI cap must precede staging')):
+            self.assert_rejected_without_outputs(folders, 'runtime|cap')
 
     def test_capture_rechecks_cli_input_size_and_hash_after_inventory(self):
         c = self.helper()
@@ -2083,12 +2277,33 @@ class WindowsComponentsTests(unittest.TestCase):
     def test_unlisted_core_source_changes_break_cross_worker_parity(self):
         c = self.helper()
         source = self.source()
-        folders = {role: self.root/(role+'-component') for role in ('editor', 'cli')}
-        c.capture('editor', self.payload('editor'), source, folders['editor'], env=self.env)
-        path = source/'third_party/rhwp/src/owned-synthetic.rs'
-        path.write_text('// different source for the CLI\n')
-        c.capture('cli', self.payload('cli'), source, folders['cli'], env=self.env)
-        self.assert_rejected_without_outputs(folders, 'source parity')
+        paths = ('third_party/rhwp/src/owned-synthetic.rs',
+                 'third_party/rhwp/crates/rhwp-contracts/src/owned-synthetic.rs',
+                 'third_party/rhwp/vendor/rhwp-pdf-import-backend/src/owned-synthetic.rs')
+        payloads = {role: self.payload(role) for role in ('editor', 'cli')}
+        for i, name in enumerate(paths):
+            with self.subTest(path=name):
+                path = source/name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'original source\n')
+                folders = {role: self.root/(role+'-source-'+str(i)) for role in ('editor', 'cli')}
+                c.capture('editor', payloads['editor'], source, folders['editor'], env=self.env)
+                path.write_bytes(b'Original source\n')  # Exactly one changed byte.
+                c.capture('cli', payloads['cli'], source, folders['cli'], env=self.env)
+                output = self.root/('combined-source-'+str(i))
+                restored = self.root/('package-source-'+str(i))
+                with self.assertRaisesRegex(ValueError, 'source parity'):
+                    c.combine(folders['editor'], folders['cli'], output, restored, env=self.env)
+                self.assertFalse(output.exists())
+                self.assertFalse(restored.exists())
+
+    def test_rhwp_build_script_is_an_explicit_compiler_input(self):
+        c = self.helper()
+        self.assertIn('third_party/rhwp/build.rs', c.SOURCE_FILES)
+        source = self.source()
+        _, contract = c.source_contract(source, c.configured())
+        self.assertEqual(contract['preparedFiles']['third_party/rhwp/build.rs'],
+                         digest(source/'third_party/rhwp/build.rs'))
 
     def test_recomputed_inventory_cannot_authorize_wrong_machine_exe_or_dll(self):
         folders = self.pair()
@@ -2098,16 +2313,20 @@ class WindowsComponentsTests(unittest.TestCase):
                 path.write_bytes(gzip.compress(pe(0x14c), mtime=0) if role == 'cli' else pe(0x14c))
                 provenance = folders[role]/'provenance.json'
                 value = json.loads(provenance.read_text())
-                value['files']['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                inventory = value['files'] if role == 'cli' else json.loads((folders[role]/'payload-inventory.json').read_bytes())
+                inventory['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
                 if role == 'cli':
                     value['runtime'] = {'path': name, 'size': 256, 'sha256': hashlib.sha256(pe(0x14c)).hexdigest()}
-                write_json(provenance, value)
+                if role == 'editor': self.rewrite_editor_payload_inventory(folders[role], inventory, value)
+                else: write_json(provenance, value)
                 self.assert_rejected_without_outputs(folders, 'x64')
                 path.write_bytes(gzip.compress(pe(), mtime=0) if role == 'cli' else pe())
-                value['files']['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
+                inventory = value['files'] if role == 'cli' else json.loads((folders[role]/'payload-inventory.json').read_bytes())
+                inventory['payload/'+name+('.gz' if role == 'cli' else '')] = {'size': path.stat().st_size, 'sha256': digest(path)}
                 if role == 'cli':
                     value['runtime']['sha256'] = hashlib.sha256(pe()).hexdigest()
-                write_json(provenance, value)
+                if role == 'editor': self.rewrite_editor_payload_inventory(folders[role], inventory, value)
+                else: write_json(provenance, value)
 
     def test_local_helper_and_wasm_bindings_are_enforced_even_if_both_records_match(self):
         folders = self.pair()
@@ -2635,13 +2854,15 @@ class WindowsComponentsTests(unittest.TestCase):
         folders = self.pair()
         provenance = folders['editor']/'provenance.json'
         original = json.loads(provenance.read_text())
+        editor_inventory = json.loads((folders['editor']/'payload-inventory.json').read_bytes())
         for name in ('payload/opengeul.exe', 'payload/CON.dll', 'payload/COM¹.dll',
                      'payload/COM².dll', 'payload/LPT³.dll', 'payload/bad:name.dll',
                      'payload/bad\\name.dll', 'payload/trailing .dll '):
             with self.subTest(inventoryName=name):
                 value = copy.deepcopy(original)
-                value['files'][name] = value['files']['payload/OpenGeul.exe']
-                write_json(provenance, value)
+                changed = copy.deepcopy(editor_inventory)
+                changed[name] = changed['payload/OpenGeul.exe']
+                self.rewrite_editor_payload_inventory(folders['editor'], changed, value)
                 self.assert_rejected_without_outputs(folders, 'inventory|path')
         source = self.root/'hop'
         payload = self.root/'editor-payload'

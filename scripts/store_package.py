@@ -20,6 +20,7 @@ from buildkit import manifest, package_version, validate_identity
 from releasekit import REPOSITORY, release_allowed, release_tag, verify_msix
 from windows_arch import require_architecture
 from windows_components import _ancestors
+from normal_distribution_budget import ARCH_LIMIT as SOURCE_ARCH_LIMIT, PAIR_LIMIT as SOURCE_PAIR_LIMIT
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'e2e'))
 from prepare_payload import PACKAGING_ONLY, inventory, prepare, safe_name, stream_hash, verify_checksums
 
@@ -27,8 +28,7 @@ STORE_IDENTITY = {'name': '57904TaewonLiodLim.OpenGeul',
                   'publisher': 'CN=D7EE05D6-C091-4FB1-BAF9-DA4E6852DA97',
                   'displayName': 'Allen Taewon Lim'}
 STORE_APP_ID = '9PJH0T3PHRMF'
-SOURCE_ARCH_LIMIT = 96 * 1024 * 1024
-SOURCE_PAIR_LIMIT = 2 * SOURCE_ARCH_LIMIT
+LEGACY_STORE_SOURCE_LIMIT = 96 * 1024 * 1024
 STORE_LIMIT = 96 * 1024 * 1024
 LEGACY_REQUIRED_JOBS = {'preflight', 'wasm', 'windows-editor', 'windows-cli', 'build', 'release', 'msix-install',
                  'native-e2e (windows-2022)', 'native-e2e (windows-2025)',
@@ -108,7 +108,7 @@ def _verify_source_release(directory, version):
             or provenance.get('sha256') != verify_msix(packages[0])['sha256']):
         raise ValueError('Source release artifacts do not match the authorized build')
     if sum(path.stat().st_size for path in directory.iterdir()) > SOURCE_ARCH_LIMIT:
-        raise ValueError('Source release exceeds the 96 MiB package limit')
+        raise ValueError('Source release exceeds the normal architecture package budget')
     return provenance
 
 
@@ -247,7 +247,7 @@ def _release_assets(tag, release):
             raise ValueError('Release asset name must be a safe basename')
         names.add(asset['name'])
     if sum(asset['size'] for asset in assets) > SOURCE_PAIR_LIMIT:
-        raise ValueError('Source release exceeds the fixed 192 MiB dual package limit')
+        raise ValueError('Source release exceeds the normal dual package budget')
     return assets
 
 
@@ -371,7 +371,7 @@ def build(tag, makeappx, output):
     if _dual_source(provenance):
         _build_pair(source, payload, output, makeappx, release, provenance)
         return
-    if sum(path.stat().st_size for path in source.iterdir()) > SOURCE_ARCH_LIMIT:
+    if sum(path.stat().st_size for path in source.iterdir()) > LEGACY_STORE_SOURCE_LIMIT:
         raise ValueError('Historical x64 source release exceeds the 96 MiB package limit')
     validated = prepare(source, payload)
     original = source / validated['msix']

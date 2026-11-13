@@ -9,9 +9,13 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import urllib.error
 import urllib.request
 from policy import require_public, select_mode
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+from normal_distribution_budget import ARCH_LIMIT
 
 REPO = 'ATLKR/OpenGeul'
 GATES = ('preflight', 'wasm', 'windows-editor', 'windows-cli', 'browser-e2e', 'build',
@@ -21,7 +25,8 @@ GATES = ('preflight', 'wasm', 'windows-editor', 'windows-cli', 'browser-e2e', 'b
 TRANSPORT = ('opengeul-wasm', 'opengeul-browser-inputs', 'opengeul-e2e-inputs', 'opengeul-windows-x64',
              'opengeul-editor-component', 'opengeul-cli-component', 'opengeul-e2e-inputs-arm64',
              'opengeul-windows-arm64', 'opengeul-editor-component-arm64', 'opengeul-cli-component-arm64', 'opengeul-native-signed-arm64')
-LIMITS = dict(zip(TRANSPORT, (32, 64, 16, 96, 64, 32, 16, 96, 64, 32, 96)))
+LIMITS = dict(zip(TRANSPORT, (32, 64, 16, ARCH_LIMIT // (1024 * 1024), 64, 32,
+                              16, ARCH_LIMIT // (1024 * 1024), 64, 32, 96)))
 PACKAGES = frozenset({'opengeul-windows-x64', 'opengeul-windows-arm64'})
 SHA = re.compile(r'[0-9a-f]{40}\Z')
 

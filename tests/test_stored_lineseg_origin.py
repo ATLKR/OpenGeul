@@ -40,7 +40,8 @@ class StoredLineSegOriginPolicyTests(unittest.TestCase):
         body=(ROOT/'scripts/build-msix.ps1').read_text()
         self.assertIn('cargo test --locked --target $target --test opengeul_stored_lineseg_origin --features native-skia',body)
 
-    def test_exact_three_source_proof_and_owned_helper(self):
+    def test_exact_four_source_proof_and_owned_helper(self):
+        self.assertEqual(len(origin.SOURCE_FILES), 4)
         proof,helpers=self.applied()
         self.assertEqual(set(proof), {'beforeSha256','afterSha256','helperSha256'})
         self.assertEqual(proof['beforeSha256'],self.before)

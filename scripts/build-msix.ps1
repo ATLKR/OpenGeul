@@ -190,7 +190,7 @@ try {
         cargo build --locked --target $target --example opengeul-structured-fixtures
         $structuredGenerator = Join-Path $editorTarget "$target/debug/examples/opengeul-structured-fixtures.exe"
         $structuredSha = (Get-FileHash $structuredGenerator -Algorithm SHA256).Hash.ToLowerInvariant()
-        python -m pip install Pillow==12.3.0
+        python -m pip install Pillow==13.0.0
         python (Join-Path $root 'e2e/structured_cli_mcp/stage_structured.py') generate --generator-exe $structuredGenerator --expected-generator-sha256 $structuredSha --prepared-source $source --architecture $Architecture --out (Join-Path $root '.work/structured-fixtures')
     } finally { Pop-Location }
     }
