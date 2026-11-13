@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+import sys
 
 BASE=Path(__file__).resolve().parents[2]
 
@@ -104,6 +106,83 @@ class Phase(unittest.TestCase):
         self.assertEqual(api.calls,['launch'])
         self.assertFalse(result['originalChildExitObserved']);self.assertFalse(result['cleanupComplete'])
         self.assertGreater(result['pendingRetainedCount'],0)
+
+
+class AtomicFailureExit(unittest.TestCase):
+    @staticmethod
+    def raised(path,line,error):
+        try:
+            exec(compile('\n'*(line-1)+'raise error\n',str(path),'exec'),{'error':error})
+        except BaseException as captured:
+            return captured
+        raise AssertionError('Synthetic raise did not execute')
+
+    def test_atomic_source_coordinate_is_closed_numeric_without_formatting_arguments(self):
+        m=module();formatted=[]
+        class Argument:
+            def __str__(self):formatted.append(1);raise AssertionError()
+            def __repr__(self):formatted.append(2);raise AssertionError()
+        error=self.raised(BASE/'suite/e2e/native_compiler_tools.py',61,AssertionError(Argument()))
+        value=m.atomic_failure_exit(error)
+        self.assertEqual(value,0x5A000000|(1<<20)|(3<<16)|61)
+        self.assertEqual(formatted,[])
+        self.assertIs(type(value),int)
+        self.assertTrue(0<value<0x80000000)
+
+    def test_only_exact_source_paths_and_supported_builtin_exceptions_are_encoded(self):
+        m=module()
+        for path,error in ((BASE/'suite/e2e/other.py',AssertionError()),
+                (BASE/'suite/e2e/native_compiler_tools.py.extra',AssertionError()),
+                (BASE/'suite/e2e/native_compiler_tools.py',KeyboardInterrupt())):
+            with self.subTest(case=int(path.name.endswith('.extra'))):
+                self.assertEqual(m.atomic_failure_exit(self.raised(path,61,error)),3)
+        self.assertEqual(m.atomic_failure_exit(None),3)
+
+    def test_deepest_allowlisted_frame_and_line_cap_are_used(self):
+        m=module();inner=self.raised(BASE/'suite/e2e/native_compiler_tools.py',61,ValueError())
+        error=self.raised(BASE/'suite/e2e/ascii_message_preparation.py',337,inner)
+        self.assertEqual(m.atomic_failure_exit(error),0x5A000000|(5<<20)|(3<<16)|61)
+        for line in (20001,65536):
+            self.assertEqual(m.atomic_failure_exit(self.raised(BASE/'suite/e2e/native_compiler_tools.py',line,AssertionError())),3)
+
+    def test_traceback_cap_refuses_partial_source_identity(self):
+        m=module()
+        code='def recur(n):\n if n: return recur(n-1)\n raise AssertionError()\nrecur(70)\n'
+        try:exec(compile(code,str(BASE/'suite/e2e/native_compiler_tools.py'),'exec'),{})
+        except AssertionError as error:self.assertEqual(m.atomic_failure_exit(error),3)
+
+    def test_projection_never_reads_or_copies_an_ambient_environment_mapping(self):
+        m=module();reads=[]
+        class Unreadable:
+            def reject(self,*args,**kwargs):reads.append(1);raise AssertionError()
+            __getitem__=get=__iter__=keys=items=values=copy=__len__=reject
+        error=self.raised(BASE/'suite/e2e/native_compiler_tools.py',61,AssertionError())
+        # Replace the object itself; patch.dict would first copy the old mapping.
+        with patch.object(m.os,'environ',Unreadable()):value=m.atomic_failure_exit(error)
+        self.assertEqual(value,0x5A000000|(1<<20)|(3<<16)|61)
+        self.assertEqual(reads,[])
+
+    def test_atomic_child_encodes_failure_but_observe_keeps_its_original_exit_contract(self):
+        m=module()
+        def fail(*args,**kwargs):
+            raise self.raised(BASE/'suite/e2e/native_compiler_tools.py',61,AssertionError())
+        with patch.dict(sys.modules,{'ascii_message_preparation':SimpleNamespace(prepare_observer=fail),
+                'writer_server_observer_runner':SimpleNamespace(main=fail)}):
+            atomic=m.child(['atomic','--work','/synthetic/work','--descriptor','/synthetic/descriptor.json'])
+            self.assertEqual(atomic,0x5A000000|(1<<20)|(3<<16)|61)
+            self.assertEqual(m.child(['observe']),3)
+        self.assertEqual(m.child(['unsupported']),3)
+
+    def test_encoded_child_failure_preserves_original_retirement_and_failure_result(self):
+        m=module();api=Api();code=0x5A000000|(1<<20)|(3<<16)|61
+        api.state=lambda handle:(0,code)
+        result=m.run_phase(api=api,runtime=SimpleNamespace(host_python=Path('/synthetic/python.exe'),helper_script=Path('/synthetic/phase.py')),
+            child_arguments=['atomic'],seconds=6,read_value=lambda key:'/synthetic',
+            environment_builder=lambda *args:{'SystemRoot':'/synthetic'},descriptor_factory=lambda *args:SimpleNamespace(nonce=71),pause=lambda value:None)
+        self.assertFalse(result['passed']);self.assertTrue(result['originalChildExitObserved'])
+        self.assertEqual(result['originalChildExitCode'],code)
+        self.assertTrue(result['ownedJobEmpty']);self.assertTrue(result['cleanupComplete'])
+        self.assertFalse(result['forcedDisposalRequested']);self.assertFalse(result['originalEngineRetirementAuthority'])
 
 
 if __name__=='__main__':unittest.main()

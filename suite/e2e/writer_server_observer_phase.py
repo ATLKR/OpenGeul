@@ -151,6 +151,41 @@ def _save(path,value):
     with os.fdopen(fd,'w',encoding='ascii') as stream:json.dump(value,stream,separators=(',',':'),sort_keys=True)
 
 
+def atomic_failure_exit(error):
+    """Report only a builtin kind and deepest fixed-source coordinate.
+
+    This is a nonzero child status, not a compiler/native error code or an
+    engine-retirement witness. No exception arguments, locals, messages, log
+    files or environment values are inspected. Unknown/truncated traces retain
+    the original generic failure status. Bits: 0x5A, kind4, file4, line16.
+    """
+    kinds={AssertionError:1,OSError:2,FileNotFoundError:3,PermissionError:4,
+        ValueError:5,TypeError:6,RuntimeError:7,TimeoutError:8,ImportError:9,
+        ModuleNotFoundError:10,OverflowError:11,UnicodeDecodeError:12}
+    kind=kinds.get(type(error))
+    if kind is None:return 3
+    try:
+        root=Path(__file__).resolve().parent
+        sources={str(root/'writer_server_observer_phase.py'):1,
+            str(root/'ascii_message_preparation.py'):2,
+            str(root/'native_compiler_tools.py'):3,
+            str(root/'native_suite_architecture.py'):4,
+            str(root.parent/'worker/native_windows.py'):5}
+        frame=BaseException.__getattribute__(error,'__traceback__')
+        deepest=None;seen=0
+        while frame is not None and seen<64:
+            file=sources.get(frame.tb_frame.f_code.co_filename)
+            if file is not None:
+                line=frame.tb_lineno
+                if type(line) is not int or not 1<=line<=20000:return 3
+                deepest=(file,line)
+            frame=frame.tb_next;seen+=1
+        if frame is not None or deepest is None:return 3
+        file,line=deepest
+        return 0x5A000000|(kind<<20)|(file<<16)|line
+    except BaseException:return 3
+
+
 def child(arguments):
     # This entry is only invoked by the parent wrapper's creation-owned NUL
     # launch, with the named-key fresh environment. It performs no host copy.
@@ -165,7 +200,8 @@ def child(arguments):
             from writer_server_observer_runner import main
             return main(arguments[1:])
         return 3
-    except BaseException:return 3
+    except BaseException as error:
+        return atomic_failure_exit(error) if arguments and arguments[0]=='atomic' else 3
 
 
 def main(arguments=None):
