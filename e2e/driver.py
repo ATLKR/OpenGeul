@@ -415,7 +415,7 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
             try:
                 for index in range(1, 21):
                     mouse.move(coords=(round(start[0]+(target[0]-start[0])*index/20),
-                                       round(start[1]+(target[1]-start[1])*index/20)), duration=.025)
+                                       round(start[1]+(target[1]-start[1])*index/20)))
             finally:
                 mouse.release(coords=target)
             diagnostic['actualPhysicalDrag'] = True
