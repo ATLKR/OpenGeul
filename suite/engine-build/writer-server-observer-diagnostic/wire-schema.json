@@ -1,0 +1,341 @@
+{
+  "schemaVersion": 1,
+  "family": "writer-server-observer-diagnostic",
+  "environment": "OPENGEUL_WRITER_SERVER_OBSERVER",
+  "ipcVersion": 1,
+  "sinkAbiVersion": 2,
+  "pointerBytes": 8,
+  "targets": [
+    "windows-x64",
+    "windows-arm64"
+  ],
+  "magic": 1465077553,
+  "mappingBytes": 131328,
+  "capacity": 2048,
+  "maxDepth": 32,
+  "identity": {
+    "bytes": 128,
+    "alignment": 8,
+    "offsets": {
+      "magic": 0,
+      "version": 4,
+      "bytes": 8,
+      "capacity": 12,
+      "controllerPid": 16,
+      "ownerPid": 20,
+      "ownerTid": 24,
+      "reserved0": 28,
+      "controllerBirth": 32,
+      "nonce": 40,
+      "ownerBirth": 48,
+      "ownerHwnd": 56,
+      "startQpc": 64,
+      "deadlineQpc": 72,
+      "qpcFrequency": 80,
+      "cutoffQpc": 88,
+      "namespaceCode": 96,
+      "reserved1": 100,
+      "reserved2": 104
+    }
+  },
+  "control": {
+    "bytes": 128,
+    "alignment": 8,
+    "offsets": {
+      "admission": 0,
+      "captureGate": 4,
+      "reservedCount": 8,
+      "committedCount": 12,
+      "dropped": 16,
+      "overflow": 20,
+      "incomplete": 24,
+      "sessionState": 28,
+      "rootState": 32,
+      "setupObserved": 36,
+      "rootBoundObserved": 40,
+      "rejected": 44,
+      "expired": 48,
+      "cleanupErrors": 52,
+      "nextScopeOrdinal": 56,
+      "nextThreadOrdinal": 64,
+      "lastStatus": 68,
+      "setupReadyQpc": 72,
+      "rootReadyQpc": 80,
+      "reserved": 88
+    }
+  },
+  "row": {
+    "bytes": 64,
+    "alignment": 8,
+    "offsets": {
+      "commit": 0,
+      "kind": 4,
+      "phase": 8,
+      "datum": 12,
+      "scopeOrdinal": 16,
+      "parentScopeOrdinal": 24,
+      "qpc": 32,
+      "depth": 40,
+      "threadOrdinal": 44,
+      "eventOrdinal": 48,
+      "reserved0": 52,
+      "reserved1": 56
+    }
+  },
+  "mappingOffsets": {
+    "identity": 0,
+    "control": 128,
+    "rows": 256
+  },
+  "namespaceCode": 1,
+  "admission": {
+    "Prepared": 0,
+    "Arming": 1,
+    "Armed": 2,
+    "Closed": 3
+  },
+  "sessionState": {
+    "Uninitialized": 0,
+    "Initializing": 1,
+    "Ready": 2,
+    "Failed": 3
+  },
+  "rootState": {
+    "Unbound": 0,
+    "Claimed": 1,
+    "Ready": 2,
+    "Invalid": 3
+  },
+  "kind": {
+    "Control": 0,
+    "Route": 1,
+    "Getter": 2,
+    "Focus": 3
+  },
+  "phase": {
+    "None": 0,
+    "LockAcquired": 1,
+    "Branch": 2,
+    "TagWritten": 3,
+    "OutputComplete": 4,
+    "Return": 5,
+    "Assignment": 6,
+    "ParentCallBefore": 7,
+    "ParentCallAfter": 8,
+    "ApiReturn": 9,
+    "Enter": 10,
+    "Leave": 11
+  },
+  "status": {
+    "Unknown": 0,
+    "SessionReady": 1,
+    "RootReady": 2,
+    "Failed": 3,
+    "NoEvent": 4
+  },
+  "commit": "row.commit==row.eventOrdinal==reservationIndex+1; commit acquire read before/after copy; scan all reserved slots, preserving holes and later commits",
+  "captureGate": {
+    "closedBit": 2147483648,
+    "activeMask": 2147483647
+  },
+  "privateHeader": "never exported by numeric decoder",
+  "numericRowFields": [
+    "kind",
+    "phase",
+    "datum",
+    "scopeOrdinal",
+    "parentScopeOrdinal",
+    "qpc",
+    "depth",
+    "threadOrdinal",
+    "eventOrdinal"
+  ],
+  "wholeOriginalIntervalCovered": false,
+  "originalClientInvocationAttribution": "Unknown",
+  "normalAcceptance": false,
+  "fullEngineQualified": false,
+  "descriptor": {
+    "grammar": "1:<controllerPid canonical decimal>:<controllerBirth canonical decimal>:<nonce 16 lowercase hex>:131328:OpenGeulWriterServerObserver",
+    "maxCharacters": 128,
+    "nonceNonzero": true,
+    "fieldsExcluded": [
+      "S",
+      "D",
+      "frequency",
+      "ownerPid",
+      "ownerBirth",
+      "ownerHwnd",
+      "ownerTid"
+    ],
+    "mappingName": "Local\\OpenGeulWriterServerObserver-<controllerPid>-<nonce16hex>",
+    "namespace": "OpenGeulWriterServerObserver"
+  },
+  "sinkRequest": {
+    "bytes": 80,
+    "alignment": 8,
+    "offsets": {
+      "bytes": 0,
+      "abiVersion": 4,
+      "action": 8,
+      "kind": 12,
+      "manager": 16,
+      "peer": 24,
+      "hwnd": 32,
+      "scopeOrdinal": 40,
+      "qpcSample": 48,
+      "phase": 56,
+      "datum": 60,
+      "reserved0": 64,
+      "reserved1": 68,
+      "reserved2": 72
+    }
+  },
+  "sinkReply": {
+    "bytes": 32,
+    "alignment": 8,
+    "offsets": {
+      "bytes": 0,
+      "abiVersion": 4,
+      "status": 8,
+      "flags": 12,
+      "scopeOrdinal": 16,
+      "reserved": 24
+    }
+  },
+  "validEventTuples": [
+    {
+      "kind": 1,
+      "phases": {
+        "9": [
+          1,
+          2,
+          3
+        ],
+        "10": [
+          0
+        ],
+        "11": [
+          0
+        ]
+      }
+    },
+    {
+      "kind": 2,
+      "phases": {
+        "1": [
+          0
+        ],
+        "2": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "3": [
+          1,
+          2
+        ],
+        "4": [
+          1,
+          2
+        ],
+        "5": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "10": [
+          0
+        ],
+        "11": [
+          0
+        ]
+      }
+    },
+    {
+      "kind": 3,
+      "phases": {
+        "5": [
+          0,
+          1,
+          3
+        ],
+        "6": [
+          2,
+          3
+        ],
+        "7": [
+          1,
+          2,
+          3
+        ],
+        "8": [
+          1,
+          2,
+          3
+        ],
+        "10": [
+          1,
+          2,
+          3
+        ],
+        "11": [
+          0
+        ]
+      }
+    }
+  ],
+  "datumMeanings": {
+    "getterBranch": {
+      "Destroyed": 1,
+      "NullOutput": 2,
+      "NoFocus": 3,
+      "FocusLookupMissing": 4,
+      "Dispatch": 5,
+      "CaughtException": 6
+    },
+    "output": {
+      "Empty": 1,
+      "Dispatch": 2
+    },
+    "return": {
+      "Success": 0,
+      "False": 1,
+      "InvalidArgument": 2,
+      "Fail": 3
+    },
+    "focusArgument": {
+      "Self": 1,
+      "NoFocus": 2,
+      "OtherChild": 3
+    },
+    "focusForwardBranch": {
+      "SelfForwarded": 1,
+      "NoFocusForwarded": 2,
+      "OtherChildForwarded": 3
+    },
+    "routeApiReturn": {
+      "Positive": 1,
+      "Zero": 2,
+      "Negative": 3
+    }
+  },
+  "controlPublication": {
+    "nextScopeOrdinal": "reserved0 in IPCv1; native scope ordinal counter stays module private",
+    "nextThreadOrdinal": "reserved0 in IPCv1; native numeric thread ordinal counter stays module private",
+    "setup": "setupReadyQpc assigned once before setupObserved=1 and sessionState=Ready2 release stores; native Ready private state release is later",
+    "root": "rootReadyQpc assigned after private Claimed->Ready CAS success, before rootBoundObserved=1; rootState public monotone mirror may advance to Invalid3; incomplete Invalidated bit disqualifies current complete root",
+    "lastStatus": "atomic enum Unknown0/SessionReady1/RootReady2/Failed3/NoEvent4; latest callback status, not client invocation attribution",
+    "rows": "only kind1/2/3 events; Setup/Root counters/QPC in Control, no kind0 event rows",
+    "qpc": "startQpc<=setupReadyQpc<=rootReadyQpc<=eventQpc<cutoffQpc when corresponding observed flags/committed rows exist; private bound QPC is immutable and published with Root Ready, rejecting a pre-bind source sample even if delivery is later; deadline-start in(5*frequency,30*frequency], cutoff=deadline-5*frequency; publication scheduling gaps and whole-interval Unknown remain"
+  },
+  "ordinalDomains": {
+    "scopeOrdinal": "1..Capacity2048; bounded module-private CAS counter allocated after active admission, before row reservation; at cap Enter rejects and releases active, never wraps",
+    "threadOrdinal": "1..Capacity2048; bounded module-private CAS counter for TLS recorder owner; never raw TID",
+    "parentScopeOrdinal": "0 for depth1, otherwise1..Capacity2048 admitted parent token; partial snapshots may lack its Enter row",
+    "eventOrdinal": "exact reservationIndex+1 in1..Capacity2048"
+  }
+}

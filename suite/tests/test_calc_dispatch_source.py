@@ -334,7 +334,8 @@ $mode.receipt
     phase=$Phase;mutexSymbols=[bool]$MutexSymbols;deadline=$DeadlineUtc;
     work=$WorkDirectory;output=$OutputDirectory;sourceLock=$SourceLockPath}|ConvertTo-Json -Depth 5 -Compress
 ''')
-        result = json.loads(self.ps(f"$env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC='2050-01-01T00:00:00Z'\n"
+        result = json.loads(self.ps(f"$env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD='false';$env:OPENGEUL_CALC_DISPATCH_BUILD='false'\n"
+                                    f"$env:OPENGEUL_ENGINE_BUILD_DEADLINE_UTC='2050-01-01T00:00:00Z'\n"
                                     f"Push-Location {quote(self.root)}\ntry {{\n{command}\n}} finally {{Pop-Location}}"))
         self.assertEqual('Full', result['phase'])
         self.assertTrue(result['mutexSymbols'])
@@ -347,6 +348,9 @@ $mode.receipt
         self.assertEqual('source-build-receipt.json', result['mode']['receipt'])
         self.assertTrue(result['mode']['fullEngineQualified'])
         self.assertTrue(result['mode']['acceptanceEligible'])
+        for writer,calc in [('true','true'),('unknown','false'),('false','unknown'),('','false')]:
+            self.ps(f"$env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD={quote(writer)};$env:OPENGEUL_CALC_DISPATCH_BUILD={quote(calc)};"
+                    f"$rejected=$false;try{{\n{command}\n}}catch{{$rejected=$true}};if(-not $rejected){{throw 'Unknown/mixed workflow mode admitted'}}")
 
     def test_workflow_uploads_normal_inputs_and_keeps_diagnostics_in_their_own_family(self):
         import re
@@ -358,16 +362,27 @@ $mode.receipt
         def condition(step):
             raw = re.findall(r'(?m)^        if: \$\{\{ (.+) \}\}$', step)
             self.assertEqual(1, len(raw))
-            return raw[0].replace('env.OPENGEUL_CALC_DISPATCH_BUILD', '$env:OPENGEUL_CALC_DISPATCH_BUILD').replace('!=', '-cne').replace('==', '-ceq')
+            return raw[0].replace('env.OPENGEUL_CALC_DISPATCH_BUILD', '$env:OPENGEUL_CALC_DISPATCH_BUILD').replace('env.OPENGEUL_WRITER_SERVER_OBSERVER_BUILD', '$env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD').replace('&&','-and').replace('!=', '-cne').replace('==', '-ceq')
         result = json.loads(self.ps(f"""
+$env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD='false'
 $env:OPENGEUL_CALC_DISPATCH_BUILD={quote(configured[0])}
 $configuredNormal=[bool]({condition(normal)});$configuredDiagnostic=[bool]({condition(diagnostic)})
 $env:OPENGEUL_CALC_DISPATCH_BUILD='true'
+$explicitDiagnosticNormal=[bool]({condition(normal)});$explicitDiagnostic=[bool]({condition(diagnostic)})
+$env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD='true';$env:OPENGEUL_CALC_DISPATCH_BUILD='false'
+$writerNormal=[bool]({condition(normal)});$writerCalc=[bool]({condition(diagnostic)})
+$env:OPENGEUL_CALC_DISPATCH_BUILD='true'
+$mixedNormal=[bool]({condition(normal)});$mixedCalc=[bool]({condition(diagnostic)})
+$env:OPENGEUL_WRITER_SERVER_OBSERVER_BUILD='unknown';$env:OPENGEUL_CALC_DISPATCH_BUILD='false'
 [ordered]@{{configuredNormal=$configuredNormal;configuredDiagnostic=$configuredDiagnostic;
-    explicitDiagnosticNormal=[bool]({condition(normal)});explicitDiagnostic=[bool]({condition(diagnostic)})}}|ConvertTo-Json -Compress
+    explicitDiagnosticNormal=$explicitDiagnosticNormal;explicitDiagnostic=$explicitDiagnostic;
+    writerNormal=$writerNormal;writerCalc=$writerCalc;mixedNormal=$mixedNormal;mixedCalc=$mixedCalc;
+    unknownNormal=[bool]({condition(normal)});unknownCalc=[bool]({condition(diagnostic)})}}|ConvertTo-Json -Compress
 """))
         self.assertEqual({'configuredNormal': True, 'configuredDiagnostic': False,
-                          'explicitDiagnosticNormal': False, 'explicitDiagnostic': True}, result)
+                          'explicitDiagnosticNormal': False, 'explicitDiagnostic': True,
+                          'writerNormal':False,'writerCalc':False,'mixedNormal':False,'mixedCalc':False,
+                          'unknownNormal':False,'unknownCalc':False}, result)
         def paths(step):
             return re.findall(r'(?m)^            (\S+)\s*$', step)
         self.assertEqual(['.work/native-engine-evidence/OpenGeul-Office-engine-arm64.zip',

@@ -9,7 +9,8 @@ param(
     [string]$DeadlineUtc='',
     [switch]$MutexSymbols,
     [switch]$CalcDispatchDiagnostic,
-    [ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64'
+    [ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',
+    [switch]$WriterServerObserverDiagnostic
 )
 $ErrorActionPreference='Stop'
 
@@ -97,7 +98,12 @@ function Get-NativeEngineTarget {
     return ConvertFrom-NativeEngineTargetPolicy ([IO.File]::ReadAllBytes($path)) $manifest.nativeTargets $Architecture
 }
 
-function Get-NativeEngineBuildMode([ValidateSet('Firebird','Full')][string]$Phase,[switch]$CalcDispatchDiagnostic,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+function Get-NativeEngineBuildMode([ValidateSet('Firebird','Full')][string]$Phase,[switch]$CalcDispatchDiagnostic,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[switch]$WriterServerObserverDiagnostic) {
+    if($WriterServerObserverDiagnostic) {
+        if($Architecture -cne 'arm64' -or $Phase -cne 'Full' -or $CalcDispatchDiagnostic) {throw 'Writer observer diagnostics require isolated ARM64 Full mode.'}
+        return [ordered]@{kind='native-office-engine-writer-server-observer-diagnostic';archive='OpenGeul-Office-engine-arm64-writer-server-observer.zip';
+            receipt='writer-server-observer-source-build-receipt.json';status='native-engine-writer-server-observer-diagnostic-built';fullEngineQualified=$false;acceptanceEligible=$false}
+    }
     $target=Get-NativeEngineTarget $Architecture
     if($Architecture -ceq 'x64' -and ($Phase -ine 'Full' -or $CalcDispatchDiagnostic)) {throw 'x64 supports normal Full only.'}
     if($CalcDispatchDiagnostic) {
@@ -120,6 +126,161 @@ function Write-CalcDispatchRuntimeMarker([string]$RuntimeRoot,[string]$SourceCom
         sourceCommit=$SourceCommit;coreCommit=$SourceReceipt.coreCommit;sourceLockSha256=$SourceReceipt.lockSha256}
     $raw=[Text.UTF8Encoding]::new($false).GetBytes(($marker|ConvertTo-Json -Compress))
     Write-NewIdentityBytes $path $raw
+}
+
+function Assert-WriterServerObserverOwnerPush([Collections.IDictionary]$Context,$Event,$Binding) {
+    $ref='refs/heads/work/opengeul-office-native-writer-observer-9dea'
+    $expected=@{GITHUB_ACTIONS='true';RUNNER_ENVIRONMENT='github-hosted';RUNNER_OS='Windows';RUNNER_ARCH='ARM64';GITHUB_REPOSITORY='ATLKR/OpenGeul';GITHUB_REPOSITORY_OWNER='ATLKR';GITHUB_EVENT_NAME='push';GITHUB_JOB='native-firebird-and-office';GITHUB_REF=$ref;GITHUB_WORKFLOW_REF=('ATLKR/OpenGeul/.github/workflows/office-native-engine.yml@'+$ref);GITHUB_RUN_ATTEMPT='1';GITHUB_ACTOR='ATLKR';GITHUB_ACTOR_ID='65988341';OPENGEUL_WRITER_SERVER_OBSERVER_BUILD='true';OPENGEUL_CALC_DISPATCH_BUILD='false'}
+    foreach($key in $expected.Keys) {if($Context[$key] -isnot [string] -or $Context[$key] -cne $expected[$key]) {throw 'Writer diagnostic owner-push context differs.'}}
+    $sha=$Context.GITHUB_SHA
+    if($Context.GITHUB_WORKFLOW_SHA -isnot [string] -or $Context.GITHUB_RUN_ID -isnot [string] -or
+       $Binding.sourceCommit -isnot [string] -or $sha -isnot [string] -or $sha -cnotmatch '^[0-9a-f]{40}$' -or $sha -ceq ('0'*40) -or $Context.GITHUB_WORKFLOW_SHA -cne $sha -or
+       $Context.GITHUB_RUN_ID -cnotmatch '^[1-9][0-9]{0,19}$' -or $Binding.sourceCommit -cne $sha -or
+       $Binding.sourceTree -isnot [string] -or $Binding.sourceTree -cnotmatch '^[0-9a-f]{40}$' -or $Binding.sourceTree -ceq ('0'*40) -or
+       ($Binding.sourceRun -isnot [long] -and $Binding.sourceRun -isnot [int]) -or $Binding.sourceRun -le 0 -or
+       $Binding.sourceRun.ToString() -cne $Context.GITHUB_RUN_ID -or ($Binding.runAttempt -isnot [long] -and $Binding.runAttempt -isnot [int]) -or $Binding.runAttempt -ne 1) {throw 'Writer diagnostic actual source binding differs.'}
+    if($Event.repository.full_name -isnot [string] -or $Event.sender.login -isnot [string] -or $Event.sender.type -isnot [string] -or
+       $Event.ref -isnot [string] -or $Event.after -isnot [string] -or $Event.repository.full_name -cne 'ATLKR/OpenGeul' -or $Event.repository.private -isnot [bool] -or $Event.repository.private -or
+       ($Event.repository.id -isnot [int] -and $Event.repository.id -isnot [long]) -or $Event.repository.id -ne 1405493151 -or
+       $Event.sender.login -cne 'ATLKR' -or ($Event.sender.id -isnot [int] -and $Event.sender.id -isnot [long]) -or $Event.sender.id -ne 65988341 -or $Event.sender.type -cne 'User' -or
+       $Event.ref -cne $ref -or $Event.deleted -isnot [bool] -or $Event.deleted -or $Event.after -cne $sha) {throw 'Writer diagnostic owner push event differs.'}
+}
+
+function Assert-WriterServerObserverEnvironment($Binding) {
+    $context=@{}
+    foreach($key in @('GITHUB_ACTIONS','RUNNER_ENVIRONMENT','RUNNER_OS','RUNNER_ARCH','GITHUB_REPOSITORY','GITHUB_REPOSITORY_OWNER','GITHUB_EVENT_NAME','GITHUB_JOB','GITHUB_REF','GITHUB_WORKFLOW_REF','GITHUB_RUN_ATTEMPT','GITHUB_ACTOR','GITHUB_ACTOR_ID','GITHUB_SHA','GITHUB_WORKFLOW_SHA','GITHUB_RUN_ID','OPENGEUL_WRITER_SERVER_OBSERVER_BUILD','OPENGEUL_CALC_DISPATCH_BUILD')) {$context[$key]=[Environment]::GetEnvironmentVariable($key)}
+    $overrides=@{}
+    foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_symbols','debug','dbglevel','enable_optimized','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS','CL','_CL_','LINK','_LINK_','OPENGEUL_WRITER_SERVER_OBSERVER')) {$overrides[$key]=[Environment]::GetEnvironmentVariable($key)}
+    if($overrides.OPENGEUL_WRITER_SERVER_OBSERVER) {throw 'Writer capture cannot arm during its source build.'}
+    $overrides.Remove('OPENGEUL_WRITER_SERVER_OBSERVER');Assert-MutexSymbolsOverrides $overrides
+    $path=[Environment]::GetEnvironmentVariable('GITHUB_EVENT_PATH')
+    if(-not $path -or -not [IO.Path]::IsPathFullyQualified($path)) {throw 'Writer diagnostic event path is absent.'}
+    Assert-UnlinkedPath $path;$item=Get-Item -LiteralPath $path
+    if($item.PSIsContainer -or $item.Length -gt 262144) {throw 'Writer diagnostic event exceeds bound.'}
+    Assert-WriterServerObserverOwnerPush $context (Get-Content -LiteralPath $path -Raw|ConvertFrom-Json) $Binding
+}
+
+# JSON integer fields must never accept PowerShell boolean/array coercion.
+# Shared only by this dedicated diagnostic source/marker boundary.
+function Assert-WriterServerObserverScalarTypes($Value,[switch]$RuntimeMarker) {
+    $strings=@('kind','coreCommit')
+    $integers=@('schemaVersion','ipcVersion','sinkAbiVersion','descriptorSchemaVersion','mappingBytes')
+    $booleans=@('fullEngineQualified','acceptanceEligible','guiVerified')
+    if($RuntimeMarker) {
+        $strings+=@('family','sourceCommit','sourceTree','sourceLockSha256','patchSha256')
+        $integers+=@('sourceRun','runAttempt')
+    } else {
+        $strings+=@('target','lockSha256');$booleans+=@('passed')
+    }
+    foreach($field in $strings) {if($Value.$field -isnot [string]) {throw 'Writer diagnostic string scalar differs.'}}
+    foreach($field in $integers) {if($Value.$field -isnot [int] -and $Value.$field -isnot [long]) {throw 'Writer diagnostic integer scalar differs.'}}
+    foreach($field in $booleans) {if($Value.$field -isnot [bool]) {throw 'Writer diagnostic boolean scalar differs.'}}
+    if($Value.requiredRebuiltLibraries -isnot [array] -or $Value.requiredRebuiltLibraries.Rank -ne 1 -or $Value.requiredRebuiltLibraries.Count -ne 2 -or
+       $Value.requiredRebuiltLibraries[0] -isnot [string] -or $Value.requiredRebuiltLibraries[1] -isnot [string]) {throw 'Writer diagnostic library array differs.'}
+    $descriptors=if($RuntimeMarker){@('wireSchema')}else{@('wireSchema','patch')}
+    foreach($field in $descriptors) {
+        $pin=$Value.$field
+        if($pin.path -isnot [string] -or $pin.sha256 -isnot [string] -or ($pin.bytes -isnot [int] -and $pin.bytes -isnot [long])) {throw 'Writer diagnostic descriptor scalar differs.'}
+    }
+    if($RuntimeMarker) {
+        if($Value.binaries -isnot [array] -or $Value.binaries.Rank -ne 1 -or $Value.binaries.Count -ne 2) {throw 'Writer diagnostic binary array differs.'}
+        foreach($row in $Value.binaries) {
+            if($row.path -isnot [string] -or $row.sha256 -isnot [string] -or
+               ($row.bytes -isnot [int] -and $row.bytes -isnot [long]) -or ($row.machine -isnot [int] -and $row.machine -isnot [long])) {throw 'Writer diagnostic binary scalar differs.'}
+        }
+    }
+}
+
+function Install-WriterServerObserverSource([string]$SourceRoot,[string]$Repo,[string]$Python,[string]$EvidenceDirectory,$Pin) {
+    if($Pin.coreCommit -isnot [string] -or $Pin.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276') {throw 'Writer observer requires the exact source9dea input.'}
+    $package=Join-Path $Repo 'suite/engine-build/writer-server-observer-diagnostic'
+    foreach($name in @('source-lock.json','source.patch','wire-schema.json')) {
+        Copy-Item -LiteralPath (Join-Path $package $name) -Destination (Join-Path $EvidenceDirectory ('writer-server-observer-'+$name)) -ErrorAction Stop
+    }
+    $result=Invoke-LoggedCommand $Python @((Join-Path $package 'install.py'),'--source-root',$SourceRoot,'--target','windows-arm64','--core-commit',$Pin.coreCommit) $Repo (Join-Path $EvidenceDirectory 'writer-server-observer-source-hooks') -NativeEnvironment
+    $proof=Get-Content -LiteralPath $result.stdout -Raw|ConvertFrom-Json
+    $lock=Get-Content -LiteralPath (Join-Path $package 'source-lock.json') -Raw|ConvertFrom-Json
+    Assert-WriterServerObserverScalarTypes $proof
+    if($proof.passed -isnot [bool] -or -not $proof.passed -or $proof.schemaVersion -ne 1 -or $proof.kind -cne 'writer-server-observer-diagnostic-source' -or
+       $proof.coreCommit -cne $Pin.coreCommit -or $proof.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or $proof.target -cne 'windows-arm64' -or
+       $proof.fullEngineQualified -isnot [bool] -or $proof.fullEngineQualified -or $proof.acceptanceEligible -isnot [bool] -or $proof.acceptanceEligible -or
+       $proof.guiVerified -isnot [bool] -or $proof.guiVerified -or $proof.ipcVersion -ne 1 -or $proof.sinkAbiVersion -ne 2 -or
+       $proof.mappingBytes -ne 131328 -or $proof.descriptorSchemaVersion -ne 1 -or
+       ($proof.requiredRebuiltLibraries -join '/') -cne 'UAccCOM/winaccessibility' -or
+       $proof.lockSha256 -cne (Get-FileHash -LiteralPath (Join-Path $package 'source-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()) {throw 'Writer diagnostic source receipt differs.'}
+    foreach($key in @('patch','wireSchema')) {
+        if($proof.$key.path -cne $lock.$key.path -or $proof.$key.bytes -ne $lock.$key.bytes -or $proof.$key.sha256 -cne $lock.$key.sha256) {throw 'Writer diagnostic source descriptor differs.'}
+    }
+    if(@($lock.sources).Count -ne 5 -or @($lock.payloads).Count -ne 8 -or ($lock.requiredRebuiltLibraries -join '/') -cne 'UAccCOM/winaccessibility') {throw 'Writer diagnostic requires both source DLL builds.'}
+    foreach($pinRow in @($lock.sources)) {
+        $file=Join-Path $SourceRoot $pinRow.path;Assert-UnlinkedPath $file
+        if((Get-Item -LiteralPath $file).Length -ne $pinRow.after.bytes -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pinRow.after.sha256) {throw 'Writer diagnostic source output differs.'}
+    }
+    foreach($pinRow in @($lock.payloads)) {
+        $file=Join-Path $SourceRoot $pinRow.path;Assert-UnlinkedPath $file
+        if((Get-Item -LiteralPath $file).Length -ne $pinRow.bytes -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $pinRow.sha256) {throw 'Writer diagnostic header output differs.'}
+    }
+    return $proof
+}
+
+function Assert-WriterServerObserverRuntime([string]$RuntimeRoot,$Marker) {
+    Assert-WriterServerObserverScalarTypes $Marker -RuntimeMarker
+    if($Marker.kind -cne 'writer-server-observer-diagnostic' -or $Marker.schemaVersion -ne 1 -or $Marker.family -cne 'writer-server-observer-diagnostic' -or $Marker.ipcVersion -ne 1 -or $Marker.sinkAbiVersion -ne 2 -or
+       $Marker.descriptorSchemaVersion -ne 1 -or $Marker.mappingBytes -ne 131328 -or ($Marker.requiredRebuiltLibraries -join '/') -cne 'UAccCOM/winaccessibility' -or
+       ($Marker.sourceRun -isnot [long] -and $Marker.sourceRun -isnot [int]) -or $Marker.sourceRun -le 0 -or
+       ($Marker.runAttempt -isnot [long] -and $Marker.runAttempt -isnot [int]) -or $Marker.runAttempt -ne 1 -or
+       $Marker.sourceCommit -ceq ('0'*40) -or $Marker.sourceTree -ceq ('0'*40) -or
+       $Marker.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $Marker.sourceTree -cnotmatch '^[0-9a-f]{40}$' -or $Marker.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or
+       $Marker.sourceLockSha256 -cnotmatch '^[0-9a-f]{64}$' -or $Marker.patchSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $Marker.wireSchema.path -cne 'wire-schema.json' -or $Marker.wireSchema.bytes -le 0 -or $Marker.wireSchema.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $Marker.fullEngineQualified -isnot [bool] -or $Marker.fullEngineQualified -or
+       $Marker.acceptanceEligible -isnot [bool] -or $Marker.acceptanceEligible -or $Marker.guiVerified -isnot [bool] -or $Marker.guiVerified -or
+       @($Marker.binaries).Count -ne 2 -or ($Marker.binaries.path -join '/') -cne 'program/UAccCOM.dll/program/winaccessibility.dll') {throw 'Writer diagnostic runtime family differs.'}
+    foreach($row in $Marker.binaries) {
+        if($row.bytes -le 0 -or $row.sha256 -cnotmatch '^[0-9a-f]{64}$' -or $row.machine -ne 0xaa64) {throw 'Writer diagnostic DLL descriptor differs.'}
+        $file=Join-Path $RuntimeRoot $row.path;Assert-UnlinkedPath $file
+        if((Get-Item -LiteralPath $file).Length -ne $row.bytes -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $row.sha256) {throw 'Writer diagnostic DLL pair changed.'}
+    }
+}
+
+function Write-WriterServerObserverRuntimeMarker([string]$RuntimeRoot,$Binding,$SourceReceipt) {
+    Assert-WriterServerObserverScalarTypes $SourceReceipt
+    if($Binding.sourceCommit -isnot [string] -or $Binding.sourceTree -isnot [string]) {throw 'Writer diagnostic marker source identity scalar differs.'}
+    if(($Binding.sourceRun -isnot [long] -and $Binding.sourceRun -isnot [int]) -or $Binding.sourceRun -le 0 -or
+       ($Binding.runAttempt -isnot [long] -and $Binding.runAttempt -isnot [int]) -or $Binding.runAttempt -ne 1 -or
+       $Binding.sourceCommit -ceq ('0'*40) -or $Binding.sourceTree -ceq ('0'*40) -or $Binding.sourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $Binding.sourceTree -cnotmatch '^[0-9a-f]{40}$' -or
+       $SourceReceipt.passed -isnot [bool] -or -not $SourceReceipt.passed -or $SourceReceipt.schemaVersion -ne 1 -or $SourceReceipt.target -cne 'windows-arm64' -or
+       $SourceReceipt.kind -cne 'writer-server-observer-diagnostic-source' -or $SourceReceipt.lockSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+       $SourceReceipt.coreCommit -cne '9dea406ab7695df6325b11b0e19fdca8db4b7276' -or $SourceReceipt.ipcVersion -ne 1 -or $SourceReceipt.sinkAbiVersion -ne 2 -or
+       ($SourceReceipt.requiredRebuiltLibraries -join '/') -cne 'UAccCOM/winaccessibility' -or
+       $SourceReceipt.fullEngineQualified -isnot [bool] -or $SourceReceipt.fullEngineQualified -or $SourceReceipt.acceptanceEligible -isnot [bool] -or $SourceReceipt.acceptanceEligible -or
+       $SourceReceipt.guiVerified -isnot [bool] -or $SourceReceipt.guiVerified) {throw 'Writer diagnostic marker source differs.'}
+    $lockPath=Join-Path $PSScriptRoot '../engine-build/writer-server-observer-diagnostic/source-lock.json'
+    Assert-UnlinkedPath $lockPath
+    $lock=Get-Content -LiteralPath $lockPath -Raw|ConvertFrom-Json
+    if($SourceReceipt.lockSha256 -cne (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant() -or
+       $SourceReceipt.mappingBytes -ne 131328 -or $SourceReceipt.descriptorSchemaVersion -ne 1) {throw 'Writer diagnostic marker closure differs.'}
+    foreach($key in @('patch','wireSchema')) {
+        if($SourceReceipt.$key.path -cne $lock.$key.path -or $SourceReceipt.$key.bytes -ne $lock.$key.bytes -or $SourceReceipt.$key.sha256 -cne $lock.$key.sha256) {throw 'Writer diagnostic marker descriptor differs.'}
+    }
+    $binaries=@()
+    foreach($name in @('UAccCOM.dll','winaccessibility.dll')) {
+        $matches=@(Get-ChildItem -LiteralPath (Join-Path $RuntimeRoot 'program') -File|Where-Object {$_.Name -ieq $name})
+        if($matches.Count -ne 1) {throw 'Writer diagnostic requires exactly both fresh DLLs.'}
+        $pe=Get-ProductPeIdentity $matches[0].FullName
+        if($pe.role -cne 'nativeArm64') {throw 'Writer diagnostic DLL is not native ARM64.'}
+        $binaries+=,[ordered]@{path=('program/'+$name);bytes=$pe.size;sha256=$pe.sha256;machine=$pe.machine}
+    }
+    $marker=[ordered]@{schemaVersion=1;family='writer-server-observer-diagnostic';kind='writer-server-observer-diagnostic';sourceCommit=$Binding.sourceCommit;sourceTree=$Binding.sourceTree;sourceRun=$Binding.sourceRun;runAttempt=$Binding.runAttempt;
+        coreCommit=$SourceReceipt.coreCommit;sourceLockSha256=$SourceReceipt.lockSha256;patchSha256=$SourceReceipt.patch.sha256;wireSchema=$SourceReceipt.wireSchema;
+        descriptorSchemaVersion=1;mappingBytes=131328;ipcVersion=1;sinkAbiVersion=2;requiredRebuiltLibraries=@('UAccCOM','winaccessibility');binaries=$binaries;
+        fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false}
+    Assert-WriterServerObserverRuntime $RuntimeRoot $marker
+    $raw=[Text.UTF8Encoding]::new($false,$true).GetBytes(($marker|ConvertTo-Json -Depth 8)+"`n")
+    if(@(Get-ChildItem -LiteralPath $RuntimeRoot|Where-Object {$_.Name -ieq 'writer-server-observer-diagnostic.json'}).Count -or
+       @(Get-ChildItem -LiteralPath (Join-Path $RuntimeRoot 'program')|Where-Object {$_.Name -ieq 'opengeul-writer-server-observer-diagnostic.json'}).Count) {throw 'Preserve existing Writer diagnostic markers.'}
+    foreach($relative in @('writer-server-observer-diagnostic.json','program/opengeul-writer-server-observer-diagnostic.json')) {Write-NewIdentityBytes (Join-Path $RuntimeRoot $relative) $raw}
+    return $marker
 }
 
 function New-NativeBuildBudget([string]$DeadlineUtc='',[ValidateRange(0.000001,330)][double]$MaximumMinutes=330) {
@@ -2755,12 +2916,13 @@ function Assert-NativeX64Qualification($Receipt,[string]$RuntimeRoot,[string]$So
     }
 }
 
-function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols,[switch]$CalcDispatchDiagnostic,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64') {
+function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]$OutputDirectory,[string]$SourceLockPath,[int]$Jobs,[string]$JdkHome='',[string]$AntHome='',[string]$DeadlineUtc='',[switch]$MutexSymbols,[switch]$CalcDispatchDiagnostic,[ValidateSet('arm64','x64',IgnoreCase=$false)][string]$Architecture='arm64',[switch]$WriterServerObserverDiagnostic) {
     $nativeTarget=Get-NativeEngineTarget $Architecture
     $nativeRole=if($Architecture -ceq 'arm64'){'nativeArm64'}else{'nativeX64'}
     if($Architecture -ceq 'x64' -and ($Phase -ine 'Full' -or $MutexSymbols -or $CalcDispatchDiagnostic)) {throw 'x64 supports normal Full only.'}
-    if($Phase -ieq 'Full' -and -not $CalcDispatchDiagnostic) {Assert-NativeEngineEnvironment $Architecture}
-    $mode=Get-NativeEngineBuildMode $Phase -CalcDispatchDiagnostic:$CalcDispatchDiagnostic -Architecture $Architecture
+    $mode=Get-NativeEngineBuildMode $Phase -CalcDispatchDiagnostic:$CalcDispatchDiagnostic -Architecture $Architecture -WriterServerObserverDiagnostic:$WriterServerObserverDiagnostic
+    if($WriterServerObserverDiagnostic -and $MutexSymbols) {throw 'Writer observer cannot mix plugin-symbol mode.'}
+    if($Phase -ieq 'Full' -and -not $CalcDispatchDiagnostic -and -not $WriterServerObserverDiagnostic) {Assert-NativeEngineEnvironment $Architecture}
     if($MutexSymbols -and $Phase -cne 'Full') {throw 'Plugin symbols require the full native source build.'}
     if($MutexSymbols) {Assert-MutexSymbolsEnvironment}
     $paths=New-BuildDirectories $WorkDirectory $OutputDirectory
@@ -2778,6 +2940,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.stage='bind-actual-source-run';Assert-NativeBuildTimeRemaining
         $binding=Get-SourceRunBinding $repo (Join-Path $PSScriptRoot 'build-native-engine.ps1') (Join-Path $repo 'suite/engine-build/source-build.json') $evidence
         foreach($key in $binding.Keys) {$receipt[$key]=$binding[$key]}
+        if($WriterServerObserverDiagnostic) {Assert-WriterServerObserverEnvironment $binding}
         if($Architecture -ceq 'x64') {$receipt.workflowBinding=[ordered]@{workflow=$nativeTarget.workflow;workflowRef=$env:GITHUB_WORKFLOW_REF;ref=$env:GITHUB_REF;job=$env:GITHUB_JOB;sourceRun=$receipt.sourceRun;runAttempt=$receipt.runAttempt;sourceCommit=$receipt.sourceCommit;sourceTree=$receipt.sourceTree}}
         if(-not $SourceLockPath) {$SourceLockPath=Join-Path $repo 'suite/engine-build/source-input.lock.json'}
         $pin=Get-SourcePin $SourceLockPath;$receipt.sourcePin=$pin
@@ -2886,6 +3049,14 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
             Confirm-FileIdentity (Join-Path $source $dotnetPin.path) $dotnetPin.afterSize SHA256 $dotnetPin.afterSha256|Out-Null
         }
         Assert-WinAccFocusSourcePatchReceipt $receipt.winAccFocusOrderSourcePatch $manifest.winAccFocusOrder $pin.coreCommit $sourceEvidence
+        if($WriterServerObserverDiagnostic) {
+            # The normal arm64Full recipe already installed/validated winAccFocusOrder once.
+            # Its receipt remains pre-overlay evidence; the observer records the final bytes separately.
+            $receipt.stage='install-authenticated-writer-server-observer-diagnostic';Assert-NativeBuildTimeRemaining
+            $receipt.writerServerObserverSourceHooks=Install-WriterServerObserverSource $source $repo $python $evidence $pin
+            $receipt.sourceLockSha256=$receipt.writerServerObserverSourceHooks.lockSha256
+            $receipt.diagnosticFamily='writer-server-observer-diagnostic'
+        }
         if($CalcDispatchDiagnostic) {
             $receipt.stage='install-authenticated-calc-dispatch-diagnostic';Assert-NativeBuildTimeRemaining
             $diagnostic=Join-Path $repo 'suite/engine-build/calc-dispatch-diagnostic'
@@ -3111,6 +3282,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 Assert-NativeBuildTimeRemaining
             }
             if($CalcDispatchDiagnostic) {Write-CalcDispatchRuntimeMarker $instdir $receipt.sourceCommit $receipt.calcDispatchSourceHooks}
+            if($WriterServerObserverDiagnostic) {$receipt.writerServerObserverRuntime=Write-WriterServerObserverRuntimeMarker $instdir $binding $receipt.writerServerObserverSourceHooks}
             if($Architecture -ceq 'x64') {
                 if((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configurationSha256 -or
                    (Get-FileHash -LiteralPath (Join-Path $source 'autogen.input') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $receipt.configureArgumentsSha256) {throw 'Native configuration changed during compilation.'}
@@ -3125,7 +3297,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
                 }
                 Assert-NativeX64Qualification $receipt $instdir $sourceEvidence $evidence
             }
-            $receipt.stage=if($CalcDispatchDiagnostic){'package-calc-dispatch-diagnostic'}else{'package-qualified-source-build'};Assert-NativeBuildTimeRemaining
+            $receipt.stage=if($WriterServerObserverDiagnostic){'package-writer-server-observer-diagnostic'}elseif($CalcDispatchDiagnostic){'package-calc-dispatch-diagnostic'}else{'package-qualified-source-build'};Assert-NativeBuildTimeRemaining
             $zip=Join-Path $evidence $mode.archive
             if(Test-Path $zip) {throw 'Engine artifact already exists.'}
             Write-NativeEngineArchive $instdir $zip $evidence
@@ -3139,7 +3311,7 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
         $receipt.passed=$true;$receipt.stage='complete'
     } catch {
         $receipt.passed=$false;$receipt.fullEngineQualified=$false;$receipt.acceptanceEligible=$false;$receipt.status='failed';$receipt.error=$_.Exception.ToString()
-        if($Architecture -ceq 'x64' -and $zip -and (Test-Path -LiteralPath $zip)) {Remove-Item -LiteralPath $zip -ErrorAction Stop}
+        if(($Architecture -ceq 'x64' -or $WriterServerObserverDiagnostic) -and $zip -and (Test-Path -LiteralPath $zip)) {Remove-Item -LiteralPath $zip -ErrorAction Stop}
         throw
     }
     finally {
@@ -3183,5 +3355,5 @@ function Invoke-NativeEngineBuild([string]$Phase,[string]$WorkDirectory,[string]
 }
 
 if($MyInvocation.InvocationName -ne '.') {
-    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc -MutexSymbols:$MutexSymbols -CalcDispatchDiagnostic:$CalcDispatchDiagnostic -Architecture $Architecture
+    Invoke-NativeEngineBuild $Phase $WorkDirectory $OutputDirectory $SourceLockPath $Jobs $JdkHome $AntHome $DeadlineUtc -MutexSymbols:$MutexSymbols -CalcDispatchDiagnostic:$CalcDispatchDiagnostic -Architecture $Architecture -WriterServerObserverDiagnostic:$WriterServerObserverDiagnostic
 }
