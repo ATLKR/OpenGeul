@@ -18,7 +18,7 @@ H, U32, B, U16 = C.c_void_p, C.c_uint32, C.c_int32, C.c_uint16
 SIZE, I64 = C.c_size_t, C.c_int64
 PTR_MAX = (1 << (C.sizeof(H) * 8)) - 1
 _ENV_KEYS = frozenset(name.casefold() for name in (
-    'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE',
+    'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData',
     'PATH', 'PYTHONHOME', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE', 'PYTHONIOENCODING',
     'UNO_PATH', 'URE_BOOTSTRAP', 'OPENGEUL_WRITER_SERVER_OBSERVER'))
 

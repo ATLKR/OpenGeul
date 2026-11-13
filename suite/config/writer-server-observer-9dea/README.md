@@ -30,3 +30,10 @@ ARM64 output DLL, unchanged source/tool bytes and natural compiler Job closure
 within the original 30 seconds. Other callers retain component-based discovery.
 This capability policy does not establish why the earlier filtered discovery
 output failed its length check or qualify a runtime or GUI result.
+
+Only the atomic compiler child additionally receives the named `ProgramData`
+machine-folder value required by Setup Configuration COM. It must be an existing
+absolute directory without command expansion, parent traversal or linked/reparse
+ancestors. The native environment encoder admits that one additional fixed name;
+the observation helper still uses its original five-key bootstrap and restricted
+PATH. No environment values are published by this diagnostic.

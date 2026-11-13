@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import stat
 import sys
 import time
 
@@ -151,6 +152,29 @@ def _save(path,value):
     with os.fdopen(fd,'w',encoding='ascii') as stream:json.dump(value,stream,separators=(',',':'),sort_keys=True)
 
 
+def build_atomic_environment(read_value,runtime,descriptor):
+    """Add one validated machine-folder key needed by Setup Configuration COM.
+
+    The observation helper retains its original fresh environment. Neither the
+    ambient PATH nor any other ambient key is copied into this compiler child.
+    """
+    from writer_server_observer_msaa import build_host_environment
+    result=build_host_environment(read_value,runtime,descriptor)
+    try:
+        value=read_value('ProgramData')
+        if (type(value) is not str or not 0<len(value)<=32767 or
+                any(char in value for char in '\0\r\n"%;!&|<>^')):raise ValueError()
+        path=Path(value)
+        if not path.is_absolute() or '..' in path.parts:raise ValueError()
+        for part in reversed((path,*path.parents)):
+            info=part.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0)&1024:raise ValueError()
+        if not stat.S_ISDIR(info.st_mode):raise ValueError()
+        result['ProgramData']=str(path.resolve(strict=True))
+    except Exception:raise ValueError() from None
+    return result
+
+
 def atomic_failure_exit(error):
     """Report only a builtin kind and deepest fixed-source coordinate.
 
@@ -221,9 +245,10 @@ def main(arguments=None):
             Path(parsed.office_program))
         child_arguments=parsed.child_arguments[1:] if parsed.child_arguments[:1]==['--'] else parsed.child_arguments
         if not child_arguments or child_arguments[0] not in ('atomic','observe'):raise ValueError()
+        environment_builder=build_atomic_environment if child_arguments[0]=='atomic' else build_host_environment
         receipt=run_phase(api=NativeApi(),runtime=runtime,child_arguments=child_arguments,
             seconds=int(parsed.seconds),read_value=lambda key:os.environ.get(key),
-            environment_builder=build_host_environment,descriptor_factory=Descriptor)
+            environment_builder=environment_builder,descriptor_factory=Descriptor)
     except BaseException:receipt['errorCode']=1
     if report is not None:
         try:_save(report,receipt)
