@@ -223,6 +223,25 @@ class RequestPush(unittest.TestCase):
             write=m.os.write
             with mock.patch.object(m.os,'write',lambda fd,raw:write(fd,raw[:2])),self.assertRaises(m.Rejected):m.write_phase_output(target,900)
 
+    def test_phase_output_requests_native_binary_mode(self):
+        m=module();native_binary=getattr(m.os,'O_BINARY',0);sentinel=1<<29
+        self.assertEqual(native_binary&sentinel,0)
+        real_open=m.os.open;opened=[]
+        def open_binary(path,flags,*args,**kwargs):
+            opened.append(flags)
+            forwarded=flags&~sentinel
+            if flags&sentinel:forwarded|=native_binary
+            return real_open(path,forwarded,*args,**kwargs)
+        with tempfile.TemporaryDirectory()as directory:
+            path=Path(directory)/'output';path.touch();admitted=True
+            with mock.patch.object(m.os,'O_BINARY',sentinel,create=True),mock.patch.object(m.os,'open',open_binary):
+                try:m.write_phase_output(path,900)
+                except m.Rejected:admitted=False
+            # Assert outside the helper's rejection boundary. Restore the real
+            # Windows binary bit when forwarding the synthetic portable flag.
+            self.assertEqual(len(opened),1);self.assertTrue(opened[0]&sentinel)
+            self.assertTrue(admitted);self.assertEqual(path.read_bytes(),b'phase_seconds=900\n')
+
     def test_admit_entry_both_routes_emit_only_fully_validated_phase(self):
         m=module()
         class Poison(dict):

@@ -221,7 +221,7 @@ def write_phase_output(path,phase):
         before=_regular(path)
         if before.st_nlink!=1 or before.st_size!=0:raise Rejected()
         identity=lambda row:(row.st_dev,row.st_ino,row.st_mode,row.st_nlink,row.st_size)
-        fd=os.open(path,os.O_WRONLY|os.O_APPEND|getattr(os,'O_NOFOLLOW',0))
+        fd=os.open(path,os.O_WRONLY|os.O_APPEND|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0))
         try:
             if identity(os.fstat(fd))!=identity(before):raise Rejected()
             raw=('phase_seconds='+str(phase)+'\n').encode('ascii')
