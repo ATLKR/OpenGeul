@@ -15,25 +15,25 @@ import run_sdk_gate as gate
 import ci_entry as entry
 import test_ci_wiring as fixtures
 
-MODE='instrumented-batch-hints'
+MODE='instrumented-batch-codes'
 INPUTS='369bfbf3caaf51867e9dc5b330ad0f8206fa1c04e4f7378575c6922d055bbb04'
 FLAGS=dict(originalSdkGateExecuted=False,acceptanceEligible=False,qualification=False,canService=False)
 
 def binding():return entry.require_context(fixtures.environment(),'x64')
 def controller():
-    return dict(schemaVersion=1,kind='sdk-batch-instrumented-controller',mode=MODE,binding=binding(),
+    return dict(schemaVersion=2,kind='sdk-batch-compiler-controller',mode=MODE,binding=binding(),
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,originalSdkReportSha256=None,
       instrumentedStage=3,failureCode=5,helperFailureCode=10,cancelled=False,instrumentedChecksPassed=False,
       sourceInputsVerified=True,envelopeKnown=True,envelopeCompleted=False,envelopeCleanupProved=True,
       envelopeForcedCleanup=False,envelopeExitCode=2,helperPhaseResults=[],helperPreCleanup=[],
       failureObservation=None,**FLAGS)
 def private():
-    return dict(schemaVersion=1,kind='sdk-batch-hints-private',mode=MODE,architectureCode=0x8664,
+    return dict(schemaVersion=2,kind='sdk-batch-compiler-private',mode=MODE,architectureCode=0x8664,
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,
-      canary=dict(statusCode=0,reasonCode=1,returns=None),phases=[],childWritable=True,
+      canary=dict(statusCode=0,reasonCode=1,returns=None),phases=[],compilerDiagnostics=None,childWritable=True,
       authority=False,compilerInvocationProved=False,**FLAGS)
 def sidecar(raw):
-    return dict(schemaVersion=1,kind='sdk-batch-hints-sidecar',mode=MODE,binding=binding(),
+    return dict(schemaVersion=2,kind='sdk-batch-compiler-sidecar',mode=MODE,binding=binding(),
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,originalSdkReportSha256=None,
       controllerReceiptSha256=hashlib.sha256(raw).hexdigest(),unavailableReasonCode=0,
       observation=private(),childWritable=True,authority=False,compilerInvocationProved=False,**FLAGS)
@@ -236,7 +236,7 @@ class InstrumentedDriverTests(unittest.TestCase):
             return wiring.CommandLeaseWiringTests().helper(**changes)
     def test_unavailable_canary_stays_instrumented_without_normal_success_label(self):
         events,lease,result=self.helper()
-        self.assertEqual(result['kind'],'sdk-batch-instrumented-helper')
+        self.assertEqual(result['kind'],'sdk-batch-compiler-helper')
         self.assertEqual(result['mode'],MODE);self.assertFalse(result['originalSdkGateExecuted'])
         self.assertNotIn('sdkGatePassed',result);self.assertNotIn('nativeSdkCompiled',result)
         self.assertTrue(result['instrumentedChecksPassed']);self.assertFalse(result['qualification'])
@@ -276,7 +276,7 @@ class InstrumentedDriverTests(unittest.TestCase):
         for cancel in(KeyboardInterrupt(),SystemExit(130)):
             class Tracker:
                 cancelled=False;reason=0
-                def __init__(self,*args,**kwargs):pass
+                def __init__(self,*args,**kwargs):self.capture=__import__('types').SimpleNamespace(cleanup_unknown=False)
                 def template(self,original,phase):return original
                 def collect(self,phase,row):pass
                 @property
@@ -286,7 +286,7 @@ class InstrumentedDriverTests(unittest.TestCase):
             with mock.patch.object(gate,'BatchObservation',Tracker),mock.patch.object(wiring.Lease,'close',close):
                 try:events,lease,result=self.helper()
                 except BaseException:self.fail('Diagnostic finalization must pass through owned cleanup')
-            self.assertEqual(len(closes),1);self.assertTrue(result['cancelled']);self.assertIsNone(result['batchObservation'])
+            self.assertEqual(len(closes),1);self.assertEqual(len([e for e in events if e[0]=='run']),5);self.assertTrue(result['cancelled']);self.assertIsNone(result['batchObservation'])
 
     def test_explicit_runner_cancellation_stops_all_five_phases_even_with_exit1(self):
         for phase in range(1,6):
@@ -374,7 +374,7 @@ class BatchBootstrapTests(unittest.TestCase):
         with mock.patch.object(launch,'sys',fake_sys),mock.patch.object(launch,'admit_code',return_value=object()),mock.patch.object(launch,'admit_batch_code',return_value=object(),create=True),mock.patch.object(launch.importlib,'import_module',return_value=fake):
             # Avoid preloaded gate-module rejection without reading environment.
             removed={k:sys.modules.pop(k)for k in('run_sdk_gate','supervisor','toolchain','owned_job_win32')if k in sys.modules}
-            try:code=launch.main(['--approved-manifest',str(ROOT/'approved-sdk-code.json'),'--expected-approved-manifest-sha256','1'*64,'--instrumented-batch-hints','--architecture','x64'])
+            try:code=launch.main(['--approved-manifest',str(ROOT/'approved-sdk-code.json'),'--expected-approved-manifest-sha256','1'*64,'--instrumented-batch-codes','--architecture','x64'])
             finally:sys.modules.update(removed)
         self.assertEqual(code,130);self.assertEqual(fake.main.call_count,0);self.assertEqual(fake.batch_main.call_count,1)
 
@@ -393,7 +393,7 @@ class BatchBootstrapTests(unittest.TestCase):
         fake_sys=__import__('types').SimpleNamespace(flags=__import__('types').SimpleNamespace(isolated=True),dont_write_bytecode=True,modules=sys.modules,path=[])
         for cancel in(KeyboardInterrupt(),SystemExit(130)):
             with mock.patch.object(launch,'sys',fake_sys),mock.patch.object(launch,'admit_batch_code',side_effect=cancel),mock.patch.object(launch.importlib,'import_module')as imported:
-                code=launch.main(['--approved-manifest',str(ROOT/'approved-sdk-code.json'),'--expected-approved-manifest-sha256','1'*64,'--instrumented-batch-hints'])
+                code=launch.main(['--approved-manifest',str(ROOT/'approved-sdk-code.json'),'--expected-approved-manifest-sha256','1'*64,'--instrumented-batch-codes'])
             self.assertEqual(code,130);self.assertEqual(imported.call_count,0)
     def test_batch_require_admission_preserves_cancel_and_exact_context_type(self):
         import approved_launch as launch
@@ -415,7 +415,7 @@ class BatchBootstrapTests(unittest.TestCase):
 
 def helper_receipt():
     value=fixtures.success_fixture()
-    value.update(schemaVersion=1,kind='sdk-batch-instrumented-helper',mode=MODE,originalSdkGateExecuted=False,
+    value.update(schemaVersion=2,kind='sdk-batch-compiler-helper',mode=MODE,originalSdkGateExecuted=False,
       acceptanceEligible=False,sourceInputsVerified=True,batchObservation=None,batchUnavailableReasonCode=7)
     for old,new in(('sdkGatePassed','instrumentedChecksPassed'),('nativeSdkCompiled','instrumentedPortObjectVerified'),
       ('nativeLinked','instrumentedLinkVerified'),('negativeSmokePassed','instrumentedNegativeSmokePassed')):value[new]=value.pop(old)
@@ -603,5 +603,192 @@ class BatchControllerIntegrationTests(unittest.TestCase):
             with self.subTest(field=uncertain):
                 code,names,packets,closed,reads=self.run_controller(cancel=True,cancel_code=1,uncertain=uncertain)
                 self.assertEqual(code,130);self.assertEqual(names,[]);self.assertIsNone(packets);self.assertEqual(closed,1);self.assertEqual(reads,0)
+
+class PortCompilerDiagnosticsTests(unittest.TestCase):
+    def capture(self,root,*,now=None):
+        self.assertTrue(hasattr(gate,'PortCompilerCapture'),'B2 fixed port capture required')
+        return gate.PortCompilerCapture(Path(root),100.,clock=(lambda:1.)if now is None else now)
+    def row(self,**changes):
+        return dict(completed=False,cleanupProved=True,forcedCleanup=True,rootExitObserved=True,
+          jobEmptyObserved=True,identityRechecked=True,handlesClosed=4,cancelled=False,**changes)
+    def test_new_profile_and_old_wire_cannot_be_confused(self):
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],2)
+        self.assertEqual(gate.empty_batch_receipt()['mode'],'instrumented-batch-codes')
+        self.assertNotEqual(gate.empty_batch_receipt()['kind'],'sdk-batch-instrumented-helper')
+    def test_pure_parser_ast_is_exact_except_function_and_fixed_files_symbol(self):
+        import ast
+        self.assertTrue(hasattr(gate,'project_compiler_diagnostics'),'Pure parser required')
+        source=ROOT.parents[2]/'suite/scripts/ime-finalization-compiler-observation/observe-ime-finalization-compile.py'
+        original=next(n for n in ast.parse(source.read_bytes()).body if isinstance(n,ast.FunctionDef)and n.name=='project_diagnostics')
+        actual=next(n for n in ast.parse((ROOT/'run_sdk_gate.py').read_bytes()).body if isinstance(n,ast.FunctionDef)and n.name=='project_compiler_diagnostics')
+        actual.name=original.name
+        for node in ast.walk(actual):
+            if isinstance(node,ast.Name)and node.id=='SDK_COMPILER_FILES':node.id='FILES'
+        self.assertEqual(ast.dump(actual,include_attributes=False),ast.dump(original,include_attributes=False))
+        self.assertEqual(gate.SDK_COMPILER_FILES,('context_observer.hpp','context_observer_windows.cpp','sdk_smoke.hpp','windows_sdk_smoke.cpp'))
+    def test_parser_limits_and_unknown_roles_remain_numeric(self):
+        self.assertTrue(hasattr(gate,'project_compiler_diagnostics'),'Pure parser required')
+        value=gate.project_compiler_diagnostics('context_observer_windows.cpp(7): fatal error C1083: synthetic\nforeign.cpp(8): error C2222: synthetic','cl : command line error D9002: synthetic',Path('C:/owned'))
+        self.assertEqual(value['diagnostics'],[dict(streamCode=1,severity=3,kind=1,number=1083,fileCode=2,line=7),dict(streamCode=1,severity=2,kind=1,number=2222,fileCode=0,line=0),dict(streamCode=2,severity=2,kind=2,number=9002,fileCode=0,line=0)])
+        value=gate.project_compiler_diagnostics(('error C1001: synthetic\n'*40),'x'*65537,Path('C:/owned'))
+        self.assertEqual(len(value['diagnostics']),32);self.assertEqual(value['droppedCount'],8);self.assertEqual(value['scanComplete'],0)
+    def test_precreate_is_exclusive_fixed_pair_and_all_fds_are_closed(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=self.capture(temp);self.assertTrue(capture.prepare())
+            self.assertEqual(sorted(p.name for p in Path(temp).iterdir()),['sdk-port.stderr','sdk-port.stdout'])
+            # An empty ordinary file is distinguishable from no output file.
+            result=capture.observe(self.row());self.assertEqual(result['streamStatus'],[1,1]);self.assertEqual(result['streamBytes'],[0,0])
+            self.assertEqual(result['projection']['diagnostics'],[])
+            for name in('sdk-port.stdout','sdk-port.stderr'):
+                with(Path(temp)/name).open('ab')as stream:stream.write(b'x')
+    def test_preexisting_file_is_preserved_and_capture_stays_unavailable(self):
+        with tempfile.TemporaryDirectory()as temp:
+            p=Path(temp)/'sdk-port.stdout';p.write_bytes(b'synthetic-preserved')
+            capture=self.capture(temp);self.assertFalse(capture.prepare());self.assertEqual(p.read_bytes(),b'synthetic-preserved')
+            self.assertNotIn('1>',capture.redirect('"C:\\VS\\cl.exe" /c fixed.cpp'))
+    def test_redirect_only_appends_two_literal_leaves_after_successful_prepare(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=self.capture(temp);self.assertTrue(capture.prepare());command='"C:\\VS\\cl.exe" /c fixed.cpp'
+            self.assertEqual(capture.redirect(command),command+' 1>"sdk-port.stdout" 2>"sdk-port.stderr"')
+    def test_original_file_id_swap_is_unavailable(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=self.capture(temp);self.assertTrue(capture.prepare())
+            p=Path(temp)/'sdk-port.stdout';p.rename(Path(temp)/'retained-original');p.write_bytes(b'error C1001: synthetic')
+            value=capture.observe(self.row());self.assertEqual(value['streamStatus'][0],6);self.assertIsNone(value['projection'])
+    def test_missing_oversize_utf8_alias_and_changed_links_are_distinct(self):
+        for kind,status in(('missing',3),('oversize',4),('encoding',5),('symlink',6),('hardlink',6)):
+            with self.subTest(kind=kind),tempfile.TemporaryDirectory()as temp:
+                capture=self.capture(temp);self.assertTrue(capture.prepare());p=Path(temp)/'sdk-port.stdout'
+                if kind=='missing':p.unlink()
+                elif kind=='oversize':p.write_bytes(b'x'*65537)
+                elif kind=='encoding':p.write_bytes(b'\xff')
+                elif kind=='symlink':p.rename(Path(temp)/'original');p.symlink_to(Path(temp)/'original')
+                else:__import__('os').link(p,Path(temp)/'extra-link')
+                value=capture.observe(self.row());self.assertEqual(value['streamStatus'][0],status);self.assertIsNone(value['projection'])
+    def test_uncertain_retirement_or_cancel_does_not_open_capture(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=self.capture(temp);self.assertTrue(capture.prepare())
+            for key in('cleanupProved','rootExitObserved','jobEmptyObserved','identityRechecked'):
+                row=self.row();row[key]=False
+                with mock.patch.object(gate.os,'open',side_effect=AssertionError('No read'))as opened:
+                    value=capture.observe(row)
+                self.assertEqual(opened.call_count,0);self.assertEqual(value['streamStatus'],[7,7])
+            row=self.row();row['cancelled']=True
+            with mock.patch.object(gate.os,'open')as opened:capture.observe(row)
+            self.assertEqual(opened.call_count,0)
+    def test_deadline_prevents_prepare_and_new_read(self):
+        with tempfile.TemporaryDirectory()as temp:
+            now=[100.];capture=self.capture(temp,now=lambda:now[0]);self.assertFalse(capture.prepare());self.assertEqual(list(Path(temp).iterdir()),[])
+            now[0]=1.;capture=self.capture(temp,now=lambda:now[0]);self.assertTrue(capture.prepare());now[0]=100.
+            with mock.patch.object(gate.os,'open')as opened:value=capture.observe(self.row())
+            self.assertEqual(opened.call_count,0);self.assertEqual(value['streamStatus'],[8,8])
+    def test_capture_cancellation_preserves_pending_primary_and_stops_second_read(self):
+        for cancel in(KeyboardInterrupt(),SystemExit(130)):
+            with tempfile.TemporaryDirectory()as temp:
+                capture=self.capture(temp);self.assertTrue(capture.prepare());primary=gate.GateFailure(10)
+                with mock.patch.object(gate.os,'open',side_effect=cancel)as opened:
+                    try:
+                        try:raise primary
+                        finally:capture.observe(self.row())
+                    except gate.GateFailure as observed:self.assertIs(observed,primary)
+                self.assertEqual(opened.call_count,1);self.assertTrue(capture.cancelled)
+    def test_public_reader_requires_new_capture_key_and_rejects_old_wire(self):
+        value=private();value.pop('compilerDiagnostics',None)
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(value,controller(),'1'*64)
+        old=controller();old.update(schemaVersion=1,kind='sdk-batch-instrumented-controller',mode='instrumented-batch-hints')
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_controller(old,binding(),'1'*64)
+
+    def diagnostic_pair(self):
+        c=controller();rows=fixtures.success_fixture()['phaseResults'][:2]
+        rows[1].update(completed=False,forcedCleanup=True,exitCode=2,failureCode=10)
+        c['helperPhaseResults']=entry.project_helper_phases(rows);c['helperPreCleanup']=[None,None]
+        v=private();v['canary']=dict(statusCode=1,reasonCode=0,returns=[0,2,5]);v['phases']=[dict(phaseCode=3,enabled=True,statusCode=1,reasonCode=0,rows=[[1,0],[2,0],[3,0],[4,2]])]
+        v['compilerDiagnostics']=dict(phaseCode=3,prepared=True,streamStatus=[2,1],streamBytes=[40,0],projection=dict(scanComplete=1,droppedCount=0,diagnostics=[dict(streamCode=1,severity=3,kind=1,number=1083,fileCode=2,line=7)]))
+        return c,v
+    def test_capture_packet_is_ordinal_retired_numeric_only_and_bounded(self):
+        c,v=self.diagnostic_pair();entry.validate_batch_private(v,c,'1'*64)
+        cases=[]
+        for key,value in(('phaseCode',4),('prepared',1),('streamStatus',[True,1]),('streamBytes',[65537,0]),('projection',{'raw':'SYNTHETIC'}),('rawOutput','SYNTHETIC')):
+            changed=copy.deepcopy(v);changed['compilerDiagnostics'][key]=value;cases.append(changed)
+        for field,value in(('scanComplete',True),('droppedCount',True),('diagnostics',[v['compilerDiagnostics']['projection']['diagnostics'][0]]*33)):
+            changed=copy.deepcopy(v);changed['compilerDiagnostics']['projection'][field]=value;cases.append(changed)
+        changed=copy.deepcopy(v);changed['compilerDiagnostics']['projection']['diagnostics'][0].update(fileCode=0,line=7);cases.append(changed)
+        for changed in cases:
+            with self.assertRaises(entry.CiFailure):entry.validate_batch_private(changed,c,'1'*64)
+        for key in('cleanupProved','rootExitObserved','jobEmptyObserved','identityRechecked'):
+            changed=copy.deepcopy(c);changed['helperPhaseResults'][1][key]=False
+            with self.assertRaises(entry.CiFailure):entry.validate_batch_private(v,changed,'1'*64)
+    def test_unavailable_and_empty_are_not_synthesized_into_success(self):
+        c,v=self.diagnostic_pair();d=v['compilerDiagnostics'];d.update(streamStatus=[1,3],streamBytes=[0,None],projection=None)
+        entry.validate_batch_private(v,c,'1'*64)
+        changed=copy.deepcopy(v);changed['compilerDiagnostics']['projection']=dict(scanComplete=1,droppedCount=0,diagnostics=[])
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(changed,c,'1'*64)
+        changed=copy.deepcopy(v);changed['compilerDiagnostics']['prepared']=False
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(changed,c,'1'*64)
+
+    def test_precreate_descriptors_are_closed_before_return(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=self.capture(temp);opened=[];closed=[];real_open=gate.os.open;real_close=gate.os.close
+            def open_owned(*args,**kwargs):
+                fd=real_open(*args,**kwargs);opened.append(fd);return fd
+            def close_owned(fd):closed.append(fd);return real_close(fd)
+            with mock.patch.object(gate.os,'open',side_effect=open_owned),mock.patch.object(gate.os,'close',side_effect=close_owned):self.assertTrue(capture.prepare())
+            self.assertEqual(closed,opened);self.assertEqual(len(opened),2)
+            for fd in opened:
+                with self.assertRaises(OSError):gate.os.fstat(fd)
+    def test_read_close_uncertainty_stops_before_second_file(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=self.capture(temp);self.assertTrue(capture.prepare());real_close=gate.os.close
+            def close(fd):real_close(fd);raise PermissionError()
+            with mock.patch.object(gate.os,'close',side_effect=close)as closed:value=capture.observe(self.row())
+            self.assertEqual(closed.call_count,1);self.assertTrue(capture.cleanup_unknown);self.assertIsNone(value['projection'])
+    def test_precreate_close_uncertainty_cannot_return_an_executable_template(self):
+        with tempfile.TemporaryDirectory()as temp:
+            tracker=gate.BatchObservation(Path(temp),0x8664,'1'*64,100.,clock=lambda:1.);tracker.value['canary']=dict(statusCode=1,reasonCode=0,returns=[0,2,5])
+            real_close=gate.os.close
+            def close(fd):real_close(fd);raise PermissionError()
+            base='@echo off\ncall "C:\\VS\\dev.cmd"\nif errorlevel 1 exit /b %errorlevel%\n"C:\\VS\\cl.exe" /c fixed.cpp\nexit /b %errorlevel%\n'
+            with mock.patch.object(gate.os,'close',side_effect=close):
+                with self.assertRaises(gate.GateFailure):tracker.template(base,3)
+    def test_port_only_template_and_collection_match_actual_adapter(self):
+        with tempfile.TemporaryDirectory()as temp:
+            tracker=gate.BatchObservation(Path(temp),0x8664,'1'*64,100.,clock=lambda:1.);tracker.value['canary']=dict(statusCode=1,reasonCode=0,returns=[0,2,5])
+            base='@echo off\ncall "C:\\VS\\dev.cmd"\nif errorlevel 1 exit /b %errorlevel%\n"C:\\VS\\cl.exe" /c fixed.cpp\nexit /b %errorlevel%\n'
+            text=tracker.template(base,3);self.assertEqual(text.count('1>"sdk-port.stdout"'),1)
+            (Path(temp)/'sdk-port.stdout').write_bytes(b'context_observer_windows.cpp(7): fatal error C1083: synthetic')
+            with mock.patch.object(gate.tools,'read',return_value=b'1 0\r\n2 0\r\n3 0\r\n4 2\r\n'):tracker.collect(3,self.row())
+            self.assertEqual(tracker.value['compilerDiagnostics']['projection']['diagnostics'][0]['number'],1083)
+            self.assertNotIn('1>"sdk-port.stdout"',tracker.template(base,4));self.assertNotIn('1>"sdk-port.stdout"',tracker.template(base,5))
+    def test_capture_swap_between_path_and_handle_is_unavailable(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=self.capture(temp);self.assertTrue(capture.prepare());real_open=gate.os.open;seen=[]
+            def swap(path,*args,**kwargs):
+                if Path(path).name=='sdk-port.stdout'and not seen:
+                    seen.append(1);Path(path).rename(Path(temp)/'original');Path(path).write_bytes(b'error C1001: synthetic')
+                return real_open(path,*args,**kwargs)
+            with mock.patch.object(gate.os,'open',side_effect=swap):value=capture.observe(self.row())
+            self.assertEqual(value['streamStatus'][0],6);self.assertIsNone(value['projection'])
+    def test_worst_bounded_numeric_packet_stays_inside_existing_public_cap(self):
+        c,v=self.diagnostic_pair();rows=fixtures.success_fixture()['phaseResults'];c['helperPhaseResults']=entry.project_helper_phases(rows);c['helperPreCleanup']=[None]*5
+        v['phases']=[dict(phaseCode=i,enabled=True,statusCode=1,reasonCode=0,rows=[[1,0],[2,0],[3,0],[4,4294967295]])for i in(3,4,5)]
+        d=v['compilerDiagnostics'];d.update(streamStatus=[2,2],streamBytes=[65536,65536],projection=dict(scanComplete=0,droppedCount=992,diagnostics=[dict(streamCode=2,severity=3,kind=3,number=9999,fileCode=4,line=9999999)]*32))
+        with tempfile.TemporaryDirectory()as temp:
+            self.assertTrue(entry.batch_publish(Path(temp),c,v,deadline=10.,clock=lambda:1.))
+            self.assertLessEqual((Path(temp)/'controller.numeric.json').stat().st_size,8192);self.assertLessEqual((Path(temp)/'batch-hints.numeric.json').stat().st_size,8192)
+
+    def test_mixed_successful_stream_still_requires_exact_retired_phase(self):
+        c,v=self.diagnostic_pair();v['phases'][0].update(statusCode=0,reasonCode=4,rows=None)
+        v['compilerDiagnostics'].update(streamStatus=[2,3],streamBytes=[40,None],projection=None)
+        entry.validate_batch_private(v,c,'1'*64)
+        for key,bad in(('cleanupProved',False),('rootExitObserved',False),('jobEmptyObserved',False),('identityRechecked',False),('handlesClosed',3),('cancelled',True)):
+            changed=copy.deepcopy(c);changed['helperPhaseResults'][1][key]=bad
+            with self.subTest(field=key),self.assertRaises(entry.CiFailure):entry.validate_batch_private(v,changed,'1'*64)
+    def test_mixed_empty_read_requires_verified_canary_and_outer_context(self):
+        c,v=self.diagnostic_pair();v['compilerDiagnostics'].update(streamStatus=[1,5],streamBytes=[0,None],projection=None)
+        canary=v['canary'];packet=v['compilerDiagnostics']
+        for key,bad in(('envelopeKnown',False),('envelopeCleanupProved',False),('cancelled',True)):
+            changed={**c,key:bad}
+            with self.assertRaises(entry.CiFailure):entry.validate_compiler_diagnostics(packet,changed,canary)
+        with self.assertRaises(entry.CiFailure):entry.validate_compiler_diagnostics(packet,c,dict(statusCode=0,reasonCode=1,returns=None))
 
 if __name__=='__main__':unittest.main()

@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import math
+import ntpath
+import stat
 import os
 from pathlib import Path,PureWindowsPath
 import re
@@ -242,16 +244,146 @@ def batch_compile_template(original,phase):
     value=lines[:1]+_batch_mark(1)+lines[1:2]+_batch_mark(2)+lines[2:-2]+_batch_mark(3)+lines[-2:-1]+_batch_mark(4)+lines[-1:]+_batch_marker(leaf)
     return '\n'.join(value)+'\n'
 
+SDK_COMPILER_FILES=('context_observer.hpp','context_observer_windows.cpp','sdk_smoke.hpp','windows_sdk_smoke.cpp')
+
+def project_compiler_diagnostics(stdout,stderr,root):
+    files={ntpath.normcase(str(root/name)):index for index,name in enumerate(SDK_COMPILER_FILES,1)}
+    files.update({name:index for index,name in enumerate(SDK_COMPILER_FILES,1)})
+    located=re.compile(r'^(.*?)\(([1-9][0-9]{0,6})(?:,[1-9][0-9]{0,6})?\)\s*:\s*([^:\r\n]{1,64}?)\s+(C|D|LNK)([0-9]{4})\s*:')
+    driver=re.compile(r'^(?:[^:()\r\n]{1,64}\s*:\s*)?([^:()\r\n]{1,64}?)\s+(C|D|LNK)([0-9]{4})\s*:')
+    kinds={'C':1,'D':2,'LNK':3};severities={'warning':1,'error':2,'fatal error':3,'command line warning':1,'command line error':2}
+    value=dict(scanComplete=1,droppedCount=0,diagnostics=[])
+    for stream,text in enumerate((stdout,stderr),1):
+        if type(text)is not str:value['scanComplete']=0;continue
+        if len(text)>65536:value['scanComplete']=0
+        rows=text[:65536].splitlines()
+        if len(rows)>512:value['scanComplete']=0
+        for row in rows[:512]:
+            if len(row)>4096:value['scanComplete']=0;continue
+            match=located.match(row)
+            if match:
+                path,line,severity,kind,number=match.groups();code=files.get(ntpath.normcase(path.strip()),0);line=int(line)if code else 0
+            else:
+                match=driver.match(row)
+                if not match:continue
+                severity,kind,number=match.groups();code=line=0
+            descriptor=dict(streamCode=stream,severity=severities.get(severity.strip().lower(),0),kind=kinds[kind],number=int(number),fileCode=code,line=line)
+            if len(value['diagnostics'])<32:value['diagnostics'].append(descriptor)
+            else:value['droppedCount']+=1
+    return value
+
+class PortCompilerCapture:
+    """B2 port-only private files; these observations have no compiler authority."""
+    LEAVES=('sdk-port.stdout','sdk-port.stderr')
+    def __init__(self,root,deadline,*,clock=time.monotonic):
+        self.root=Path(root);self.deadline=deadline;self.clock=clock
+        self.identities=[];self.prepared=False;self.attempted=False;self.cancelled=False;self.prepare_status=0;self.cleanup_unknown=False;self.cancel_error=None
+    def remaining(self):
+        if self.clock()>=self.deadline:raise GateFailure(10)
+    def packet(self,statuses,counts=None,projection=None):
+        return dict(phaseCode=3,prepared=self.prepared,streamStatus=statuses,
+          streamBytes=[None,None]if counts is None else counts,projection=projection)
+    def prepare(self):
+        if self.attempted:return False
+        self.attempted=True;pending=sys.exc_info()[1]
+        try:
+            self.remaining();tools.canonical(self.root,directory=True)
+            for leaf in self.LEAVES:
+                self.remaining();path=self.root/leaf;fd=None;primary=None;identity=None
+                try:
+                    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0),0o600)
+                    before=os.fstat(fd);after=tools.canonical(path).stat()
+                    if (not stat.S_ISREG(before.st_mode)or before.st_nlink!=1 or before.st_size!=0
+                      or type(before.st_dev)is not int or type(before.st_ino)is not int or before.st_ino<=0
+                      or tools._identity(before)!=tools._identity(after)):raise GateFailure(2)
+                    identity=(before.st_dev,before.st_ino)
+                except BaseException as error:primary=error
+                finally:
+                    if fd is not None:
+                        try:os.close(fd)
+                        except BaseException as error:
+                            self.cleanup_unknown=True
+                            if isinstance(error,(KeyboardInterrupt,SystemExit)):self.cancelled=True;self.cancel_error=error
+                            if primary is None:primary=error
+                if primary is not None:raise primary
+                self.remaining();self.identities.append(identity)
+            self.prepared=True;return True
+        except BaseException as error:
+            self.prepare_status=8 if isinstance(error,GateFailure)and error.code==10 else 9
+            if self.cancel_error is not None and pending is None:raise self.cancel_error
+            if isinstance(error,(KeyboardInterrupt,SystemExit)):
+                self.cancelled=True
+                if pending is None:raise
+            return False
+    def redirect(self,command):
+        if not self.prepared:return command
+        if type(command)is not str or any(c in command for c in '\r\n<>|&'):raise GateFailure(2)
+        return command+' 1>"sdk-port.stdout" 2>"sdk-port.stderr"'
+    def _read(self,index):
+        self.remaining();path=tools.canonical(self.root/self.LEAVES[index]);before=path.stat()
+        if (before.st_dev,before.st_ino)!=self.identities[index]:raise GateFailure(2)
+        if before.st_size>65536:return 4,None,None
+        fd=None;primary=None;data=None
+        try:
+            self.remaining();fd=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_NOFOLLOW',0))
+            first=os.fstat(fd)
+            if tools._identity(before)!=tools._identity(first):raise GateFailure(2)
+            with os.fdopen(fd,'rb',closefd=False)as stream:data=stream.read(65537)
+            after=os.fstat(fd)
+            if len(data)>65536 or tools._identity(first)!=tools._identity(after)or tools._identity(after)!=tools._identity(tools.canonical(path).stat()):raise GateFailure(2)
+        except BaseException as error:primary=error
+        finally:
+            if fd is not None:
+                try:os.close(fd)
+                except BaseException as error:
+                    self.cleanup_unknown=True
+                    if isinstance(error,(KeyboardInterrupt,SystemExit)):self.cancelled=True;self.cancel_error=error
+                    if primary is None:primary=error
+        if primary is not None:raise primary
+        self.remaining();text=data.decode('utf-8','strict')
+        return (1 if not data else 2),len(data),text
+    def observe(self,row):
+        pending=sys.exc_info()[1]
+        if row.get('cancelled')is True:
+            self.cancelled=True;return self.packet([7,7])
+        if not self.prepared:return self.packet([self.prepare_status or 0]*2)
+        if not BatchObservation.retired(row):return self.packet([7,7])
+        values=[];statuses=[];counts=[]
+        try:
+            for index in range(2):
+                try:status,count,text=self._read(index)
+                except FileNotFoundError:status,count,text=3,None,None
+                except UnicodeDecodeError:status,count,text=5,None,None
+                except GateFailure as error:status,count,text=(8 if error.code==10 else 6),None,None
+                except OSError:status,count,text=9,None,None
+                if self.cancel_error is not None:raise self.cancel_error
+                statuses.append(status);counts.append(count);values.append(text)
+                if self.cleanup_unknown:
+                    statuses.extend([9]*(2-len(statuses)));counts.extend([None]*(2-len(counts)));break
+                if status==8:
+                    statuses.extend([8]*(2-len(statuses)));counts.extend([None]*(2-len(counts)));break
+            if all(status in(1,2)for status in statuses):
+                self.remaining()
+                value=project_compiler_diagnostics(values[0],values[1],self.root)
+                self.remaining();return self.packet(statuses,counts,value)
+            return self.packet(statuses,counts)
+        except BaseException as error:
+            if isinstance(error,(KeyboardInterrupt,SystemExit)):
+                self.cancelled=True
+                if pending is None:raise
+            return self.packet([8,8]if isinstance(error,GateFailure)and error.code==10 else[10,10])
+
 class BatchObservation:
     """Untrusted B hints only. No normal/default SDK entry point uses this."""
     def __init__(self,root,machine,manifest,deadline,*,clock=time.monotonic):
         if type(machine) is not int or machine not in tools.MACHINES.values() or type(manifest) is not str or not re.fullmatch('[0-9a-f]{64}',manifest):raise GateFailure(2)
         self.root=Path(root);self.deadline=deadline;self.clock=clock;self.cancelled=False;self.reason=0;self.enabled={}
-        self.value={'schemaVersion':1,'kind':'sdk-batch-hints-private','mode':'instrumented-batch-hints',
+        self.capture=PortCompilerCapture(self.root,deadline,clock=clock)
+        self.value={'schemaVersion':2,'kind':'sdk-batch-compiler-private','mode':'instrumented-batch-codes',
           'architectureCode':machine,'approvedCodeManifestSha256':manifest,'expectedSourceInputsSha256':tools.SOURCE_INPUTS_SHA,
           'originalSdkGateExecuted':False,'acceptanceEligible':False,'qualification':False,'canService':False,
           'childWritable':True,'authority':False,'compilerInvocationProved':False,
-          'canary':{'statusCode':0,'reasonCode':1,'returns':None},'phases':[]}
+          'canary':{'statusCode':0,'reasonCode':1,'returns':None},'phases':[],'compilerDiagnostics':None}
     def _read(self,leaf):
         if leaf not in ('sdk-canary.phase','sdk-canary.return','sdk-port.phase','sdk-smoke.phase','sdk-link.phase'):raise GateFailure(2)
         if self.clock()>=self.deadline:raise GateFailure(10)
@@ -265,9 +397,18 @@ class BatchObservation:
         enabled=False
         try:
             if self.value is not None and self.value['canary']['statusCode']==1:
-                value=batch_compile_template(original,phase);self.enabled[phase]=True;return value
+                value=batch_compile_template(original,phase)
+                if phase==3:
+                    prepared=self.capture.prepare()
+                    if self.capture.cleanup_unknown:raise GateFailure(14)
+                    if prepared:
+                        command=original.splitlines()[-2]
+                        if value.count(command)!=1:raise GateFailure(2)
+                        value=value.replace(command,self.capture.redirect(command),1)
+                self.enabled[phase]=True;return value
         except (KeyboardInterrupt,SystemExit):self.cancelled=True;self._drop(6);raise
-        except Exception:pass
+        except Exception:
+            if self.capture.cleanup_unknown:raise GateFailure(14)
         try:self.enabled[phase]=enabled
         except Exception:self._drop(6)
         return original
@@ -300,6 +441,9 @@ class BatchObservation:
         try:
             if phase==1:self.value['canary']=record if record is not None else {'statusCode':2,'reasonCode':reason,'returns':None}
             else:self.value['phases'].append({'phaseCode':phase,'enabled':enabled,**(record if record is not None else {'statusCode':0,'reasonCode':reason,'rows':None})})
+            if phase==3:
+                self.value['compilerDiagnostics']=self.capture.observe(row)
+                if self.capture.cancelled:self.cancelled=True
         except BaseException as error:
             self._drop(6)
             if isinstance(error,(KeyboardInterrupt,SystemExit)):
@@ -321,7 +465,7 @@ def _batch_collect_preserving(tracker,phase,row):
 
 def empty_batch_receipt():
     value=empty_receipt()
-    value.update(schemaVersion=1,kind='sdk-batch-instrumented-helper',mode='instrumented-batch-hints',
+    value.update(schemaVersion=2,kind='sdk-batch-compiler-helper',mode='instrumented-batch-codes',
       originalSdkGateExecuted=False,acceptanceEligible=False,sourceInputsVerified=False,batchObservation=None,batchUnavailableReasonCode=7)
     for old,new in (('sdkGatePassed','instrumentedChecksPassed'),('nativeSdkCompiled','instrumentedPortObjectVerified'),
       ('nativeLinked','instrumentedLinkVerified'),('negativeSmokePassed','instrumentedNegativeSmokePassed')):
@@ -376,6 +520,7 @@ def execute_instrumented(architecture,source_bundle,work_root,*,code_admission=N
             finally:
                 if phase_code is not None:_batch_collect_preserving(tracker,phase_code,row)
             if tracker.cancelled:raise SystemExit(130)
+            if tracker.capture.cleanup_unknown:raise GateFailure(14)
         require_fresh_outputs(root,('vswhere.json',))
         name=_fresh_text(root,'vs-discovery.cmd',batch_discovery_template(locations['vswhere']))
         phase([locations['command'],'/d','/v:off','/c',name],15.,phase_code=1)

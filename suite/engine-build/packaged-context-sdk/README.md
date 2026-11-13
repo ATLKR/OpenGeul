@@ -86,50 +86,60 @@ Child-written markers in the separate opt-in path below are untrusted hints;
 actual CMD return-code equivalence and Windows behavior remain unverified.
 
 
-## Explicit instrumented batch-hint mode
+## Explicit B2 port compiler numeric diagnostics
 
-The exact SDK branch may opt in with `[sdk-batch-hints]` in its push message.
-Without that marker the original SDK execution, public protocol6 and one-file
-artifact remain unchanged. With the marker the normal SDK step is skipped; a
-separate controller runs the instrumented path and the job intentionally fails
-its final nonacceptance step. It never claims that the original SDK gate ran.
-No new job, runner, permission, installation or compiler output capture is used.
+The exact SDK branch opts in with `[sdk-batch-codes]`. This replaces the current
+B1 workflow route; B1 source2ac, approved manifest, strict reader and actual ZIP
+remain immutable historical evidence. B1 receipts are not relabelled or selected
+from their own version fields. Without the explicit B2 marker the normal SDK
+execution, public protocol6 and original one-file artifact retain their behavior.
+B2 uses separate kind/schema2 and `--instrumented-batch-codes`; its verifier is
+`--verify-batch-codes-only` with the same architecture/three expected source-pin
+options. The verifier's separate five-field response remains schema1.
 
-The B entry is `ci_entry.py --instrumented-batch-hints` followed by the same
-four architecture/expected-SHA options as the normal entry. Literal source pins
-are checked before execution, and the isolated entry independently repeats the
-exact context, checkout and eight-file admission. B-only admission preserves
-KeyboardInterrupt/SystemExit; the historical normal admission functions retain
-their original behavior. Controller/helper cancellation exits130 and prevents
-new verification, upload or terminal actions.
+B2 adds only two literal private leaves, `sdk-port.stdout` and `sdk-port.stderr`,
+for the first port compile at phase3. The parent exclusively precreates ordinary
+single-link files, records their original device/file IDs and closes both FDs
+before CMD starts. Only then may the original tool command append redirections.
+No smoke/link capture, extra canary, phase, runtime module or Job is added.
+Compiler flags, ERRORLEVEL handling, Source13, finite environment,30/180 limits,
+NativeApi and its outer NUL stdio remain unchanged. Successful precreation does
+not prove Windows redirection sharing or truncation behavior; the next actual
+run must observe it. A changed or unsupported identity is unavailable.
 
-B uses the original15-second discovery phase,30-second compile phases,10-second
-negative phase, at most5phases and the one180-second envelope. Extra canary and
-hint I/O can change its timing and result. A fixed canary observes the statuses
-returned after the marker for builtin0/2/5 cases. Only those exact observations
-enable four fixed checkpoints around VsDevCmd and the compiler/linker call.
-This does not prove preservation of every signed/unsigned code or changes that
-VsDevCmd makes to its environment. The original `if errorlevel 1` guard and
-compiler commands remain intact. No actual CMD canary has been executed yet.
+After the original postlease/command result and proved root exit, empty Job,
+generation/cleanup and4handle closes, B2 may read the fixed pair within the same
+original overall deadline. Forced cleanup does not prevent reading when that
+retirement is proved. Each file is checked against its original dev/ino and
+stable path/open-handle/final metadata, including single-link/no-reparse guards.
+Normal zero bytes, missing, oversize, invalid UTF8 and unstable identity remain
+distinct numeric statuses. FD-close uncertainty stops further I/O and children;
+original operation failure and cancellation retain priority. Synchronous OS calls
+are not made preemptible by before/after deadline checks.
 
-Compile hints are read only after retained root exit, empty Job, identity
-rechecks, cleanup and4handle closes. Completed=false/forcedCleanup=true is
-permitted when that retirement is proved. Missing, malformed, late or uncertain
-hints are unavailable. The independent reader replays the same ordinal
-retirement requirement; a hint never proves compiler creation or compiled code.
-Read, parse and diagnostic storage faults preserve pending operation failures
-and owned cleanup. No diagnostic failure renews a deadline or retries a child.
+Only the existing pure C/D/LNK projector is reused, with the fixed four SDK source
+roles. Its AST differs only in function and FILES-symbol names. The old IME
+three-case/nine-pin collector and its PIPE/60-second capture path are untouched.
+B2 reads at most65536bytes per stream,128KiB total, decodes strict UTF8 and retains
+at most32 numeric descriptors. The existing65536-character/512-line/4096-line-
+length parser limits remain. No chcp, VSLANG or warning-policy change is made.
+Read cap is not a disk-write quota. Raw files stay private, are never printed or
+included in artifacts, and may remain in the owned temporary root until runner
+cleanup. No paths, argv, environment, source text or error prose is published.
 
-The separate fixed directory is
-`.work/packaged-context-sdk-batch-public/<fixed-runner>`. It contains only
-`controller.numeric.json` and `batch-hints.numeric.json`, each at most8192bytes.
-The sidecar binds the actual controller byte SHA, externally expected source,
-run, attempt, architecture and approved-code manifest. Its closed schema rejects
-unknown fields, duplicate keys, non-finite values, bool-as-int, partial arrays,
-foreign identities and mixed normal/B labels. Explicit unavailable is distinct
-from completed hint proof. `originalSdkReportSha256` is always null and
-`originalSdkGateExecuted`, `acceptanceEligible`, `qualification`, `canService`
-and hint authority remain false. The separate verifier CLI is
-`--verify-batch-sidecar-only` with the same fixed options; no path is accepted.
-Portable tests use synthetic processes and bytes only. Real Windows canary,
-compiler/linker boundaries and final product acceptance remain unverified.
+`scanComplete` means only that the projector scanned the stable bytes that were
+read. It does not prove complete compiler output, compiler creation, execution,
+termination history or object generation. After forced cleanup some output may
+be absent. Numeric codes, an empty diagnostic list, read success or a tool-command
+return hint never change `compilerInvocationProved`, `originalSdkGateExecuted`,
+`acceptanceEligible`, `qualification` or `canService` from false. The original SDK
+report SHA stays null. COFF/link/negative checks and the intentional nonacceptance
+terminal retain their independent conditions.
+
+Only the two fixed B numeric JSON files are uploaded, each at most8192bytes.
+The independent reader requires exact B2 keys/types, source/run/attempt/approval
+binding, actual controller-byte SHA and matching retired phase for every successful
+stream, including mixed success/unavailable packets. Missing/unknown fields,
+bool-as-int, wrong versions, aliases, stale identities and forged authority reject.
+Old B1 and normal SDK kinds cannot pass as B2. Portable synthetic results are not
+actual Windows, compiler, package-context or customer acceptance evidence.

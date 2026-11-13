@@ -90,12 +90,19 @@ class CompileObservationWorkflowTests(unittest.TestCase):
   sdk_uploads=[s for s in self.w['jobs']['packaged-context-sdk']['steps']if s.get('uses','').startswith('actions/upload-artifact@')]
   self.assertEqual(len(sdk_uploads),len(expected));self.assertEqual({s['with']['path']for s in sdk_uploads},set(expected))
   for upload in sdk_uploads:
-   observed=hashlib.sha256(json.dumps(upload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+   canonical=copy.deepcopy(upload)
+   if upload['with']['path']!='.work/packaged-context-sdk-public/${{ matrix.os }}/report.numeric.json':
+    clause="contains(github.event.head_commit.message, '[sdk-batch-codes]')"
+    historical="contains(github.event.head_commit.message, '[sdk-batch-hints]')"
+    self.assertEqual(canonical['if'].count(clause),1)
+    self.assertNotIn(historical,canonical['if'])
+    canonical['if']=canonical['if'].replace(clause,historical,1)
+   observed=hashlib.sha256(json.dumps(canonical,sort_keys=True,separators=(',',':')).encode()).hexdigest()
    self.assertEqual(observed,expected[upload['with']['path']])
  def test_sdk_artifact_separation_rejects_missing_duplicate_mixed_and_unknown_outputs(self):
   original=self.w
   try:
-   for mode in('missing-normal','duplicate-normal','mixed-path','unsafe-admission','unknown-output'):
+   for mode in('missing-normal','duplicate-normal','mixed-path','unsafe-admission','unknown-output','legacy-b1-marker','duplicate-b2-marker'):
     self.w=copy.deepcopy(original);steps=self.w['jobs']['packaged-context-sdk']['steps']
     uploads=[s for s in steps if s.get('uses','').startswith('actions/upload-artifact@')]
     normal,batch=uploads
@@ -103,6 +110,8 @@ class CompileObservationWorkflowTests(unittest.TestCase):
     elif mode=='duplicate-normal':steps.append(copy.deepcopy(normal))
     elif mode=='mixed-path':batch['with']['path']=normal['with']['path']+'\n'+batch['with']['path']
     elif mode=='unsafe-admission':batch['if']=batch['if'].replace("== '1'","!= '2'")
+    elif mode=='legacy-b1-marker':batch['if']=batch['if'].replace('[sdk-batch-codes]','[sdk-batch-hints]')
+    elif mode=='duplicate-b2-marker':batch['if']+=" && contains(github.event.head_commit.message, '[sdk-batch-codes]')"
     else:
      unknown=copy.deepcopy(batch);unknown['with']['path']='.work/unreviewed/report.numeric.json';steps.append(unknown)
     with self.subTest(mode=mode),self.assertRaises(AssertionError):self.test_fixed_numeric_artifact_and_original_sdk_artifact_remain_separate()

@@ -144,7 +144,7 @@ def main(argv=None):
         p.add_argument('--expected-approved-manifest-sha256',required=True)
         args,rest=p.parse_known_args(argv)
         root=Path(__file__).absolute().parent
-        batch=rest[:1]==['--instrumented-batch-hints']
+        batch=rest[:1]==['--instrumented-batch-codes']
         context=(admit_batch_code if batch else admit_code)(root,Path(args.approved_manifest),args.expected_approved_manifest_sha256)
         if any(name in sys.modules for name in ('run_sdk_gate','supervisor','toolchain','owned_job_win32')):raise ApprovalFailure()
         if __name__=='__main__':
@@ -152,7 +152,7 @@ def main(argv=None):
             sys.modules['approved_launch']=sys.modules[__name__]
         sys.path.insert(0,str(root))
         gate=importlib.import_module('run_sdk_gate')
-        if rest[:1]==['--instrumented-batch-hints']:
+        if rest[:1]==['--instrumented-batch-codes']:
             try:return gate.batch_main(rest[1:],code_admission=context)
             except (KeyboardInterrupt,SystemExit):return 130
         return gate.main(rest,code_admission=context)

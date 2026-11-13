@@ -1418,7 +1418,7 @@ jobs:
         ref: ${{ github.sha }}
     - name: Verify external pins and run only the bounded SDK negative gate
       id: sdk-compile
-      if: ${{ !contains(github.event.head_commit.message, '[sdk-batch-hints]') }}
+      if: ${{ !contains(github.event.head_commit.message, '[sdk-batch-codes]') }}
       timeout-minutes: 4
       shell: pwsh
       run: |
@@ -1436,9 +1436,9 @@ jobs:
         }
         $machine = if ($architecture -ceq 'x64') { 0x8664 } else { 0xaa64 }
         $base = Join-Path (Get-Location).Path 'suite/engine-build/packaged-context-sdk'
-        $entryPin = 'fe310783c7136d4a6b1bf441727cd0755a12cc5063dbf8599c81383754819989'
-        $bootstrapPin = '56f4b79520437fecef0884b34a5981ab03539648cd597575d37b69056c3f3798'
-        $manifestPin = '2fa63185fc0a1f987418df70336d948270dd1c8287a5d3ba18293959d5286faa'
+        $entryPin = '2cc6e2741993206f42e455dd9031cf9a609097c2ab76b49cb3b43440c44e967f'
+        $bootstrapPin = 'dd9004598494a637cc51d09924a89ec94108c36e140050f261598fef4a23ce1b'
+        $manifestPin = 'e4fe6c06c9292c574436864e7e40f49491b69c71a00c49ef923c7b3a663602bd'
         foreach ($item in @(@('ci_entry.py',$entryPin),@('approved_launch.py',$bootstrapPin),@('approved-sdk-code.json',$manifestPin))) {
         $file = Join-Path $base $item[0]
         $info = Get-Item -LiteralPath $file -Force
@@ -1682,12 +1682,12 @@ jobs:
         if-no-files-found: error
         compression-level: 6
     - id: B
-      if: contains(github.event.head_commit.message, '[sdk-batch-hints]') && !cancelled()
+      if: contains(github.event.head_commit.message, '[sdk-batch-codes]') && !cancelled()
       timeout-minutes: 4
       shell: pwsh
       run: |
-        $ErrorActionPreference='Stop';$PSNativeCommandUseErrorActionPreference=$false;$c=1;$ok='0';try{;$a=switch -CaseSensitive($env:SDK_MATRIX_RUNNER){'windows-2025'{'x64'}'windows-11-arm'{'arm64'}default{throw}};$b=Join-Path $PWD 'suite/engine-build/packaged-context-sdk';$p='fe310783c7136d4a6b1bf441727cd0755a12cc5063dbf8599c81383754819989','56f4b79520437fecef0884b34a5981ab03539648cd597575d37b69056c3f3798','2fa63185fc0a1f987418df70336d948270dd1c8287a5d3ba18293959d5286faa';$n='ci_entry.py','approved_launch.py','approved-sdk-code.json';for($i=0;$i-lt3;$i++){$f=Join-Path $b $n[$i];$o=gi -LP $f -Force;if($o.PSIsContainer-or($o.Attributes-band1024)-or$o.Length-lt1-or$o.Length-gt1MB-or(Get-FileHash -LP $f).Hash-ine$p[$i]){throw}};$py=(gci -Path "$env:RUNNER_TOOL_CACHE/Python/3.12.*/$a/python.exe" -File|Sort-Object FullName -Descending|select -First 1).FullName;if(!$py){throw};$q=@('--architecture',$a,'--expected-entry-sha256',$p[0],'--expected-bootstrap-sha256',$p[1],'--expected-approved-manifest-sha256',$p[2]);$e=Join-Path $b $n[0];& $py -I -B $e --instrumented-batch-hints @q 1>$null 2>$null;$c = $LASTEXITCODE;$x=130,3221225786,-1073741510;if($c-in$x){$ok='2'}else{;$v=& $py -I -B $e --verify-batch-sidecar-only @q 2>$null;$z = $LASTEXITCODE;if($z-in$x){$ok='2';if($c-eq0){$c=130};throw};if($z-ne0-or$v-isnot[string]-or$v.Length-gt512){throw};$r=$v|ConvertFrom-Json;if((($r.psobject.Properties.Name|Sort-Object)-join',')-cne'admitted,controllerSha256,reasonCode,schemaVersion,sidecarSha256'-or$r.schemaVersion-isnot[long]-or$r.schemaVersion-ne1-or$r.admitted-isnot[bool]-or$r.reasonCode-isnot[long]){throw};if($r.admitted){if($r.reasonCode-ne0){throw};foreach($h in @($r.controllerSha256,$r.sidecarSha256)){if($h-isnot[string]-or$h-cnotmatch'\A[0-9a-f]{64}\z'){throw}};$ok='1'}elseif($null-ne$r.controllerSha256-or$null-ne$r.sidecarSha256-or$r.reasonCode-lt1-or$r.reasonCode-gt8){throw};};}catch{};try{"s=$ok" >> $env:GITHUB_OUTPUT}catch{};exit $c
-    - if: always() && !cancelled() && contains(github.event.head_commit.message, '[sdk-batch-hints]') && steps.B.outputs.s == '1'
+        $ErrorActionPreference='Stop';$PSNativeCommandUseErrorActionPreference=$false;$c=1;$ok='0';try{;$a=switch -CaseSensitive($env:SDK_MATRIX_RUNNER){'windows-2025'{'x64'}'windows-11-arm'{'arm64'}default{throw}};$b=Join-Path $PWD 'suite/engine-build/packaged-context-sdk';$p='2cc6e2741993206f42e455dd9031cf9a609097c2ab76b49cb3b43440c44e967f','dd9004598494a637cc51d09924a89ec94108c36e140050f261598fef4a23ce1b','e4fe6c06c9292c574436864e7e40f49491b69c71a00c49ef923c7b3a663602bd';$n='ci_entry.py','approved_launch.py','approved-sdk-code.json';for($i=0;$i-lt3;$i++){$f=Join-Path $b $n[$i];$o=gi -LP $f -Force;if($o.PSIsContainer-or($o.Attributes-band1024)-or$o.Length-lt1-or$o.Length-gt1MB-or(Get-FileHash -LP $f).Hash-ine$p[$i]){throw}};$py=(gci -Path "$env:RUNNER_TOOL_CACHE/Python/3.12.*/$a/python.exe" -File|Sort-Object FullName -Descending|select -First 1).FullName;if(!$py){throw};$q=@('--architecture',$a,'--expected-entry-sha256',$p[0],'--expected-bootstrap-sha256',$p[1],'--expected-approved-manifest-sha256',$p[2]);$e=Join-Path $b $n[0];& $py -I -B $e --instrumented-batch-codes @q 1>$null 2>$null;$c = $LASTEXITCODE;$x=130,3221225786,-1073741510;if($c-in$x){$ok='2'}else{;$v=& $py -I -B $e --verify-batch-codes-only @q 2>$null;$z = $LASTEXITCODE;if($z-in$x){$ok='2';if($c-eq0){$c=130};throw};if($z-ne0-or$v-isnot[string]-or$v.Length-gt512){throw};$r=$v|ConvertFrom-Json;if((($r.psobject.Properties.Name|Sort-Object)-join',')-cne'admitted,controllerSha256,reasonCode,schemaVersion,sidecarSha256'-or$r.schemaVersion-isnot[long]-or$r.schemaVersion-ne1-or$r.admitted-isnot[bool]-or$r.reasonCode-isnot[long]){throw};if($r.admitted){if($r.reasonCode-ne0){throw};foreach($h in @($r.controllerSha256,$r.sidecarSha256)){if($h-isnot[string]-or$h-cnotmatch'\A[0-9a-f]{64}\z'){throw}};$ok='1'}elseif($null-ne$r.controllerSha256-or$null-ne$r.sidecarSha256-or$r.reasonCode-lt1-or$r.reasonCode-gt8){throw};};}catch{};try{"s=$ok" >> $env:GITHUB_OUTPUT}catch{};exit $c
+    - if: always() && !cancelled() && contains(github.event.head_commit.message, '[sdk-batch-codes]') && steps.B.outputs.s == '1'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: b-hints-${{ matrix.os }}
@@ -1696,7 +1696,7 @@ jobs:
           .work/packaged-context-sdk-batch-public/${{ matrix.os }}/batch-hints.numeric.json
         retention-days: 1
         if-no-files-found: error
-    - if: always() && !cancelled() && contains(github.event.head_commit.message, '[sdk-batch-hints]') && steps.B.outcome=='success'
+    - if: always() && !cancelled() && contains(github.event.head_commit.message, '[sdk-batch-codes]') && steps.B.outcome=='success'
       shell: pwsh
       run: exit 1
 
