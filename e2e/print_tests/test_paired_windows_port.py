@@ -1,10 +1,14 @@
 import copy
+import contextlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 FILE = ROOT / 'paired_print_windows.py'
@@ -16,6 +20,81 @@ if FILE.exists():
 else:
     api = None
 import paired_print_contract as core
+
+
+class ReadRegularIdentityTests(unittest.TestCase):
+    def setUp(self):
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        self.path=Path(temporary.name)/'synthetic-stat-input'
+        self.raw=b'SYNTHETIC-STAT-ONLY';self.path.write_bytes(self.raw)
+
+    @contextlib.contextmanager
+    def metadata(self,*,platform='nt',birth=1000,missing_birth=False,
+                 open_change=None,after_change=None,final_change=None,distinct_ctime=True):
+        path_lstat,fd_stat=Path.lstat,os.fstat
+        counts=dict(path=0,handle=0)
+        def changed(info,changes=None,*,handle=False):
+            value={key:getattr(info,key) for key in
+                ('st_dev','st_ino','st_mode','st_nlink','st_size','st_mtime_ns')}
+            value.update(st_ctime_ns=2000 if handle and distinct_ctime else 1000,st_file_attributes=0)
+            if not missing_birth:value['st_birthtime_ns']=birth
+            value.update(changes or {});return SimpleNamespace(**value)
+        def lstat(path,*args,**kwargs):
+            info=path_lstat(path,*args,**kwargs)
+            if path!=self.path:return info
+            counts['path']+=1
+            return changed(info,final_change if counts['path']>1 else None)
+        def fstat(fd):
+            counts['handle']+=1
+            return changed(fd_stat(fd),open_change if counts['handle']==1 else after_change,handle=True)
+        with mock.patch.object(api,'os',SimpleNamespace(name=platform,fstat=fstat)),mock.patch.object(Path,'lstat',lstat):
+            yield counts
+
+    def test_windows_same_file_allows_creation_and_change_time_to_differ(self):
+        with self.metadata() as counts:
+            try:data,_=api.read_regular(self.path,128)
+            except core.Rejected:self.fail('Stable Windows creation/change times must be compatible')
+        self.assertEqual(data,self.raw);self.assertEqual(counts,dict(path=2,handle=2))
+
+    def test_windows_birth_time_is_mandatory_and_strictly_integer(self):
+        cases=[dict(missing_birth=True)]+[dict(birth=value) for value in (None,True,1000.0,'1000')]
+        for index,options in enumerate(cases):
+            with self.subTest(caseNumber=index),self.metadata(distinct_ctime=False,**options),self.assertRaises(core.Rejected):
+                api.read_regular(self.path,128)
+
+    def test_windows_birth_time_must_match_across_and_within_apis(self):
+        for index,phase in enumerate(('open_change','after_change','final_change')):
+            with self.subTest(caseNumber=index),self.metadata(distinct_ctime=False,**{phase:{'st_birthtime_ns':1001}}),self.assertRaises(core.Rejected):
+                api.read_regular(self.path,128)
+
+    def test_each_windows_api_retains_its_own_change_time_stability(self):
+        for index,phase in enumerate(('after_change','final_change')):
+            changes={'st_ctime_ns':2001 if phase=='after_change' else 1001}
+            with self.subTest(caseNumber=index),self.metadata(**{phase:changes}) as counts,self.assertRaises(core.Rejected):
+                api.read_regular(self.path,128)
+            self.assertEqual(counts['handle'],2)
+            if phase=='final_change':self.assertEqual(counts['path'],2)
+
+    def test_original_identity_alias_and_type_guards_remain_fail_closed(self):
+        info=self.path.stat()
+        changes=({'st_dev':info.st_dev+1},{'st_ino':info.st_ino+1},{'st_size':info.st_size+1},
+            {'st_mtime_ns':info.st_mtime_ns+1},{'st_nlink':2},{'st_file_attributes':0x400},{'st_mode':0})
+        for phase in ('open_change','after_change','final_change'):
+            for index,change in enumerate(changes):
+                with self.subTest(phaseCode=('open_change','after_change','final_change').index(phase),caseNumber=index), \
+                     self.metadata(distinct_ctime=False,**{phase:change}),self.assertRaises(core.Rejected):
+                    api.read_regular(self.path,128)
+
+    def test_unix_keeps_ctime_identity_and_does_not_require_birth_time(self):
+        with self.metadata(platform='posix',missing_birth=True,distinct_ctime=False):
+            self.assertEqual(api.read_regular(self.path,128)[0],self.raw)
+        with self.metadata(platform='posix',missing_birth=True),self.assertRaises(core.Rejected):
+            api.read_regular(self.path,128)
+
+    def test_original_size_and_time_caps_still_reject(self):
+        with self.metadata(),self.assertRaises(core.Rejected):api.read_regular(self.path,len(self.raw)-1)
+        ticks=iter((0,11))
+        with self.metadata(),self.assertRaises(core.Rejected):api.read_regular(self.path,128,clock=lambda:next(ticks))
 
 
 class WindowsPortTests(unittest.TestCase):

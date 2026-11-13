@@ -23,7 +23,10 @@ MAX_JSON = 128 * 1024
 
 
 def _identity(info):
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    # Windows path and handle ctime can describe different timestamps.
+    stamp=getattr(info,'st_birthtime_ns',None) if os.name=='nt' else info.st_ctime_ns
+    require(type(stamp) is int,20)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, stamp)
 
 
 def _safe(info, *, directory=False):
@@ -67,8 +70,13 @@ def read_regular(path, limit, *, clock=time.monotonic):
             if not block:
                 break
             chunks.append(block)
-        require(_identity(before) == _identity(os.fstat(stream.fileno())), 20)
-    require(_identity(before) == _identity(path.lstat()) and size == before.st_size, 20)
+        after=os.fstat(stream.fileno())
+        _safe(after)
+        require(_identity(opened) == _identity(after) and opened.st_ctime_ns == after.st_ctime_ns, 20)
+    final=path.lstat()
+    _safe(final)
+    require(_identity(before) == _identity(final) and before.st_ctime_ns == final.st_ctime_ns
+            and size == before.st_size, 20)
     return b''.join(chunks), before
 
 
