@@ -393,7 +393,7 @@ def _batch_retired(row):
       and type(row.get('handlesClosed')) is int and row['handlesClosed']==4)
 
 def _batch_common(value,kind,binding,manifest):
-    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=2
+    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=3
         or value.get('kind')!=kind or value.get('mode')!=B_MODE or value.get('binding')!=binding
         or type(value.get('binding')) is not dict or set(value['binding'])!=set(binding)
         or any(type(value['binding'][key]) is not type(item) for key,item in binding.items())
@@ -444,7 +444,7 @@ def validate_batch_controller(value,binding,manifest):
 
 def validate_compiler_diagnostics(value,controller,canary):
     if value is None:return None
-    keys={'phaseCode','prepared','streamStatus','streamBytes','projection'}
+    keys={'phaseCode','prepared','streamStatus','streamBytes','projection','firstC2338Detail'}
     if type(value)is not dict or set(value)!=keys or type(value['phaseCode'])is not int or value['phaseCode']!=3 or type(value['prepared'])is not bool:raise CiFailure(4)
     rows=controller['helperPhaseResults']
     if rows is None or len(rows)<2:raise CiFailure(4)
@@ -462,7 +462,7 @@ def validate_compiler_diagnostics(value,controller,canary):
           or controller['cancelled']is not False or not _batch_retired(rows[1])or rows[1]['cancelled']is not False):raise CiFailure(4)
     projection=value['projection']
     if not all(status in(1,2)for status in statuses):
-        if projection is not None:raise CiFailure(4)
+        if projection is not None or value['firstC2338Detail']is not None:raise CiFailure(4)
         return value
     if type(projection)is not dict or set(projection)!={'scanComplete','droppedCount','diagnostics'}or not _integer(projection['scanComplete'],1)or not _integer(projection['droppedCount'],1024):raise CiFailure(4)
     diagnostics=projection['diagnostics']
@@ -472,12 +472,22 @@ def validate_compiler_diagnostics(value,controller,canary):
         if type(row)is not dict or set(row)!=set(bounds)or any(not _integer(row[key],bound)for key,bound in bounds.items()):raise CiFailure(4)
         if row['streamCode']not in(1,2)or row['kind']not in(1,2,3)or statuses[row['streamCode']-1]!=2:raise CiFailure(4)
         if (row['fileCode']==0)!=(row['line']==0):raise CiFailure(4)
+    first=next(((index,row)for index,row in enumerate(diagnostics,1)if row['kind']==1 and row['number']==2338),None)
+    detail=value['firstC2338Detail']
+    if first is None:
+        if detail is not None:raise CiFailure(4)
+    else:
+        keys={'diagnosticOrdinal','streamCode','sdkSlot','line','assertionClass'}
+        if (type(detail)is not dict or set(detail)!=keys or any(type(detail[key])is not int for key in keys)
+          or detail['diagnosticOrdinal']!=first[0]or detail['streamCode']!=first[1]['streamCode']
+          or detail['sdkSlot']not in(0,8,9)or(detail['sdkSlot']!=0 and first[1]['fileCode']!=0)or not _integer(detail['line'],9999999)
+          or(detail['sdkSlot']==0)!=(detail['line']==0)or not _integer(detail['assertionClass'],4)):raise CiFailure(4)
     return value
 
 def validate_batch_private(value,controller,manifest):
     keys={'schemaVersion','kind','mode','architectureCode','approvedCodeManifestSha256','expectedSourceInputsSha256',
       'childWritable','authority','compilerInvocationProved','canary','phases','compilerDiagnostics',*B_FALSE}
-    if (type(value) is not dict or set(value)!=keys or type(value['schemaVersion']) is not int or value['schemaVersion']!=2
+    if (type(value) is not dict or set(value)!=keys or type(value['schemaVersion']) is not int or value['schemaVersion']!=3
         or value['kind']!='sdk-batch-compiler-private' or value['mode']!=B_MODE or type(value['architectureCode']) is not int
         or value['architectureCode']!=controller['binding']['architectureCode'] or value['approvedCodeManifestSha256']!=manifest
         or value['expectedSourceInputsSha256']!=B_SOURCE_INPUTS or value['childWritable'] is not True
@@ -602,7 +612,7 @@ def verify_batch_files(public,binding,manifest):
 
 def validate_batch_helper(value,architecture,manifest,deadline,expected_inputs):
     """B-only structural adapter; its normal-shaped view is never published."""
-    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=2
+    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=3
         or value.get('kind')!='sdk-batch-compiler-helper' or value.get('mode')!=B_MODE
         or value.get('originalSdkGateExecuted') is not False or value.get('acceptanceEligible') is not False
         or type(value.get('sourceInputsVerified')) is not bool or not _integer(value.get('batchUnavailableReasonCode'),8)):raise CiFailure(4)
@@ -621,7 +631,7 @@ def validate_batch_helper(value,architecture,manifest,deadline,expected_inputs):
 def batch_controller(binding,outer,raw,manifest,*,failure=0,observation=None,cancelled=False):
     rows=None if raw is None else project_helper_phases(raw['phaseResults'])
     active=None if raw is None else validate_phase_active_observations(raw['phaseActiveObservations'],len(rows))
-    value={'schemaVersion':2,'kind':'sdk-batch-compiler-controller','mode':B_MODE,'binding':binding,
+    value={'schemaVersion':3,'kind':'sdk-batch-compiler-controller','mode':B_MODE,'binding':binding,
       'approvedCodeManifestSha256':manifest,'expectedSourceInputsSha256':B_SOURCE_INPUTS,'originalSdkReportSha256':None,
       **{key:False for key in B_FALSE},'instrumentedStage':0 if raw is None else raw['stage'],'failureCode':failure,
       'helperFailureCode':None if raw is None else raw['failureCode'],'cancelled':bool(cancelled or(raw and raw.get('cancelled'))),

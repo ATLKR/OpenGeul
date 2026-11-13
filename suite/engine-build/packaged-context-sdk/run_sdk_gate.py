@@ -272,17 +272,57 @@ def project_compiler_diagnostics(stdout,stderr,root):
             else:value['droppedCount']+=1
     return value
 
+def project_first_c2338_detail(stdout,stderr,projection,sdk_paths):
+    """One untrusted numeric hint from the already-read bounded streams."""
+    first=next(((index,row)for index,row in enumerate(projection['diagnostics'],1)
+      if row['kind']==1 and row['number']==2338),None)
+    if first is None:return None
+    ordinal,target=first;seen=0
+    located=re.compile(r'^(.*?)\(([1-9][0-9]{0,6})(?:,[1-9][0-9]{0,6})?\)\s*:\s*([^:\r\n]{1,64}?)\s+(C|D|LNK)([0-9]{4})\s*:')
+    driver=re.compile(r'^(?:[^:()\r\n]{1,64}\s*:\s*)?([^:()\r\n]{1,64}?)\s+(C|D|LNK)([0-9]{4})\s*:')
+    literals=('Mismatched C++/WinRT headers.','Not an awaitable type.',
+      'Only native x64/ARM64 observers are supported','T must be WinRT type.')
+    paths={ntpath.normcase(path):slot for slot,path in sdk_paths.items()}
+    for stream,text in enumerate((stdout,stderr),1):
+        if type(text)is not str:continue
+        for row in text[:65536].splitlines()[:512]:
+            if len(row)>4096:continue
+            match=located.match(row);path=None;line=0
+            if match:path,line,_,kind,number=match.groups()
+            else:
+                match=driver.match(row)
+                if not match:continue
+                _,kind,number=match.groups()
+            seen+=1
+            if seen!=ordinal:continue
+            if stream!=target['streamCode']or kind!='C'or int(number)!=2338:return None
+            slot=paths.get(ntpath.normcase(path.strip()),0)if path is not None else 0
+            classes=[index for index,literal in enumerate(literals,1)if literal in row[match.end():]]
+            return dict(diagnosticOrdinal=ordinal,streamCode=stream,sdkSlot=slot,
+              line=int(line)if slot else 0,assertionClass=classes[0]if len(classes)==1 else 0)
+    return None
+
 class PortCompilerCapture:
-    """B2 port-only private files; these observations have no compiler authority."""
+    """B3 port-only private files; these observations have no compiler authority."""
     LEAVES=('sdk-port.stdout','sdk-port.stderr')
     def __init__(self,root,deadline,*,clock=time.monotonic):
         self.root=Path(root);self.deadline=deadline;self.clock=clock
         self.identities=[];self.prepared=False;self.attempted=False;self.cancelled=False;self.prepare_status=0;self.cleanup_unknown=False;self.cancel_error=None
+        self.sdk_paths={}
+    def bind_sdk(self,sdk,architecture):
+        # Caller supplies only the result of the existing SDK-16 authenticated read.
+        # Construct fixed slot paths without re-reading headers or collecting metadata.
+        try:
+            if type(sdk)is not dict or set(sdk)!={'root','version','files'}or len(sdk['files'])!=16:raise GateFailure(2)
+            members=tools.sdk_members(sdk['version'],architecture)
+            if any(type(sdk['files'][slot-1])is not dict or type(sdk['files'][slot-1].get('slot'))is not int or sdk['files'][slot-1]['slot']!=slot for slot in(8,9)):raise GateFailure(2)
+            self.sdk_paths={slot:str(Path(sdk['root'])/members[slot-1])for slot in(8,9)}
+        except Exception:self.sdk_paths={}
     def remaining(self):
         if self.clock()>=self.deadline:raise GateFailure(10)
-    def packet(self,statuses,counts=None,projection=None):
+    def packet(self,statuses,counts=None,projection=None,detail=None):
         return dict(phaseCode=3,prepared=self.prepared,streamStatus=statuses,
-          streamBytes=[None,None]if counts is None else counts,projection=projection)
+          streamBytes=[None,None]if counts is None else counts,projection=projection,firstC2338Detail=detail)
     def prepare(self):
         if self.attempted:return False
         self.attempted=True;pending=sys.exc_info()[1]
@@ -365,7 +405,13 @@ class PortCompilerCapture:
             if all(status in(1,2)for status in statuses):
                 self.remaining()
                 value=project_compiler_diagnostics(values[0],values[1],self.root)
-                self.remaining();return self.packet(statuses,counts,value)
+                detail=next((dict(diagnosticOrdinal=index,streamCode=row['streamCode'],sdkSlot=0,line=0,assertionClass=0)
+                  for index,row in enumerate(value['diagnostics'],1)if row['kind']==1 and row['number']==2338),None)
+                try:
+                    observed=project_first_c2338_detail(values[0],values[1],value,self.sdk_paths)
+                    if observed is not None:detail=observed
+                except Exception:pass
+                self.remaining();return self.packet(statuses,counts,value,detail)
             return self.packet(statuses,counts)
         except BaseException as error:
             if isinstance(error,(KeyboardInterrupt,SystemExit)):
@@ -379,7 +425,7 @@ class BatchObservation:
         if type(machine) is not int or machine not in tools.MACHINES.values() or type(manifest) is not str or not re.fullmatch('[0-9a-f]{64}',manifest):raise GateFailure(2)
         self.root=Path(root);self.deadline=deadline;self.clock=clock;self.cancelled=False;self.reason=0;self.enabled={}
         self.capture=PortCompilerCapture(self.root,deadline,clock=clock)
-        self.value={'schemaVersion':2,'kind':'sdk-batch-compiler-private','mode':'instrumented-batch-codes',
+        self.value={'schemaVersion':3,'kind':'sdk-batch-compiler-private','mode':'instrumented-batch-codes',
           'architectureCode':machine,'approvedCodeManifestSha256':manifest,'expectedSourceInputsSha256':tools.SOURCE_INPUTS_SHA,
           'originalSdkGateExecuted':False,'acceptanceEligible':False,'qualification':False,'canService':False,
           'childWritable':True,'authority':False,'compilerInvocationProved':False,
@@ -465,7 +511,7 @@ def _batch_collect_preserving(tracker,phase,row):
 
 def empty_batch_receipt():
     value=empty_receipt()
-    value.update(schemaVersion=2,kind='sdk-batch-compiler-helper',mode='instrumented-batch-codes',
+    value.update(schemaVersion=3,kind='sdk-batch-compiler-helper',mode='instrumented-batch-codes',
       originalSdkGateExecuted=False,acceptanceEligible=False,sourceInputsVerified=False,batchObservation=None,batchUnavailableReasonCode=7)
     for old,new in (('sdkGatePassed','instrumentedChecksPassed'),('nativeSdkCompiled','instrumentedPortObjectVerified'),
       ('nativeLinked','instrumentedLinkVerified'),('negativeSmokePassed','instrumentedNegativeSmokePassed')):
@@ -528,6 +574,7 @@ def execute_instrumented(architecture,source_bundle,work_root,*,code_admission=N
         vs=tools.installed_vs(metadata,architecture)
         result['sdkCandidateObservation']={'operations':[],'failures':[],'failureCount':0,'truncated':False}
         sdk=tools.installed_sdk(locations['sdk'],architecture,observations=result['sdkCandidateObservation'],operation=1)
+        tracker.capture.bind_sdk(sdk,architecture)
         for p in (vs['devcmd'],vs['cl'],vs['link'],sdk['root']):tools.cmd_path(p)
         result.update(stage=2,compiler=vs['records']['cl'],linker=vs['records']['link'],compilerVersion=vs['version'],
           installationVersion=vs['installationVersion'],devcmdSha256=vs['devcmdSha256'],sdkVersion=sdk['version'],sdkInputs=sdk['files'])

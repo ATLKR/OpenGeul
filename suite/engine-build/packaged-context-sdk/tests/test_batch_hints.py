@@ -21,19 +21,19 @@ FLAGS=dict(originalSdkGateExecuted=False,acceptanceEligible=False,qualification=
 
 def binding():return entry.require_context(fixtures.environment(),'x64')
 def controller():
-    return dict(schemaVersion=2,kind='sdk-batch-compiler-controller',mode=MODE,binding=binding(),
+    return dict(schemaVersion=3,kind='sdk-batch-compiler-controller',mode=MODE,binding=binding(),
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,originalSdkReportSha256=None,
       instrumentedStage=3,failureCode=5,helperFailureCode=10,cancelled=False,instrumentedChecksPassed=False,
       sourceInputsVerified=True,envelopeKnown=True,envelopeCompleted=False,envelopeCleanupProved=True,
       envelopeForcedCleanup=False,envelopeExitCode=2,helperPhaseResults=[],helperPreCleanup=[],
       failureObservation=None,**FLAGS)
 def private():
-    return dict(schemaVersion=2,kind='sdk-batch-compiler-private',mode=MODE,architectureCode=0x8664,
+    return dict(schemaVersion=3,kind='sdk-batch-compiler-private',mode=MODE,architectureCode=0x8664,
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,
       canary=dict(statusCode=0,reasonCode=1,returns=None),phases=[],compilerDiagnostics=None,childWritable=True,
       authority=False,compilerInvocationProved=False,**FLAGS)
 def sidecar(raw):
-    return dict(schemaVersion=2,kind='sdk-batch-compiler-sidecar',mode=MODE,binding=binding(),
+    return dict(schemaVersion=3,kind='sdk-batch-compiler-sidecar',mode=MODE,binding=binding(),
       approvedCodeManifestSha256='1'*64,expectedSourceInputsSha256=INPUTS,originalSdkReportSha256=None,
       controllerReceiptSha256=hashlib.sha256(raw).hexdigest(),unavailableReasonCode=0,
       observation=private(),childWritable=True,authority=False,compilerInvocationProved=False,**FLAGS)
@@ -276,7 +276,7 @@ class InstrumentedDriverTests(unittest.TestCase):
         for cancel in(KeyboardInterrupt(),SystemExit(130)):
             class Tracker:
                 cancelled=False;reason=0
-                def __init__(self,*args,**kwargs):self.capture=__import__('types').SimpleNamespace(cleanup_unknown=False)
+                def __init__(self,*args,**kwargs):self.capture=__import__('types').SimpleNamespace(cleanup_unknown=False,bind_sdk=lambda sdk,architecture:None)
                 def template(self,original,phase):return original
                 def collect(self,phase,row):pass
                 @property
@@ -415,7 +415,7 @@ class BatchBootstrapTests(unittest.TestCase):
 
 def helper_receipt():
     value=fixtures.success_fixture()
-    value.update(schemaVersion=2,kind='sdk-batch-compiler-helper',mode=MODE,originalSdkGateExecuted=False,
+    value.update(schemaVersion=3,kind='sdk-batch-compiler-helper',mode=MODE,originalSdkGateExecuted=False,
       acceptanceEligible=False,sourceInputsVerified=True,batchObservation=None,batchUnavailableReasonCode=7)
     for old,new in(('sdkGatePassed','instrumentedChecksPassed'),('nativeSdkCompiled','instrumentedPortObjectVerified'),
       ('nativeLinked','instrumentedLinkVerified'),('negativeSmokePassed','instrumentedNegativeSmokePassed')):value[new]=value.pop(old)
@@ -612,7 +612,7 @@ class PortCompilerDiagnosticsTests(unittest.TestCase):
         return dict(completed=False,cleanupProved=True,forcedCleanup=True,rootExitObserved=True,
           jobEmptyObserved=True,identityRechecked=True,handlesClosed=4,cancelled=False,**changes)
     def test_new_profile_and_old_wire_cannot_be_confused(self):
-        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],2)
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],3)
         self.assertEqual(gate.empty_batch_receipt()['mode'],'instrumented-batch-codes')
         self.assertNotEqual(gate.empty_batch_receipt()['kind'],'sdk-batch-instrumented-helper')
     def test_pure_parser_ast_is_exact_except_function_and_fixed_files_symbol(self):
@@ -703,7 +703,7 @@ class PortCompilerDiagnosticsTests(unittest.TestCase):
         rows[1].update(completed=False,forcedCleanup=True,exitCode=2,failureCode=10)
         c['helperPhaseResults']=entry.project_helper_phases(rows);c['helperPreCleanup']=[None,None]
         v=private();v['canary']=dict(statusCode=1,reasonCode=0,returns=[0,2,5]);v['phases']=[dict(phaseCode=3,enabled=True,statusCode=1,reasonCode=0,rows=[[1,0],[2,0],[3,0],[4,2]])]
-        v['compilerDiagnostics']=dict(phaseCode=3,prepared=True,streamStatus=[2,1],streamBytes=[40,0],projection=dict(scanComplete=1,droppedCount=0,diagnostics=[dict(streamCode=1,severity=3,kind=1,number=1083,fileCode=2,line=7)]))
+        v['compilerDiagnostics']=dict(phaseCode=3,prepared=True,streamStatus=[2,1],streamBytes=[40,0],firstC2338Detail=None,projection=dict(scanComplete=1,droppedCount=0,diagnostics=[dict(streamCode=1,severity=3,kind=1,number=1083,fileCode=2,line=7)]))
         return c,v
     def test_capture_packet_is_ordinal_retired_numeric_only_and_bounded(self):
         c,v=self.diagnostic_pair();entry.validate_batch_private(v,c,'1'*64)
@@ -790,5 +790,121 @@ class PortCompilerDiagnosticsTests(unittest.TestCase):
             changed={**c,key:bad}
             with self.assertRaises(entry.CiFailure):entry.validate_compiler_diagnostics(packet,changed,canary)
         with self.assertRaises(entry.CiFailure):entry.validate_compiler_diagnostics(packet,c,dict(statusCode=0,reasonCode=1,returns=None))
+
+class FirstC2338DetailTests(unittest.TestCase):
+    """Synthetic public literals only; no SDK header contents are read."""
+    SDK={8:r'C:\SDK\Include\10.0.26100.0\cppwinrt\winrt\base.h',
+      9:r'C:\SDK\Include\10.0.26100.0\cppwinrt\winrt\Windows.Storage.h'}
+    def project(self,stdout,stderr=''):
+        self.assertTrue(hasattr(gate,'project_first_c2338_detail'),'B3 numeric detail required')
+        projection=gate.project_compiler_diagnostics(stdout,stderr,Path('C:/owned'))
+        return gate.project_first_c2338_detail(stdout,stderr,projection,self.SDK)
+    def pair(self):
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],3)
+        c,v=PortCompilerDiagnosticsTests().diagnostic_pair()
+        v['compilerDiagnostics']['projection']['diagnostics'][0].update(number=2338,fileCode=0,line=0)
+        v['compilerDiagnostics']['firstC2338Detail']=dict(diagnosticOrdinal=1,streamCode=1,sdkSlot=8,line=123,assertionClass=1)
+        return c,v
+    def test_schema_three_rejects_historical_b2_even_with_current_detail(self):
+        self.assertEqual(gate.empty_batch_receipt()['schemaVersion'],3)
+        c,v=self.pair()
+        for packet in(c,v):
+            packet['schemaVersion']=2
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_controller(c,binding(),'1'*64)
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(v,c,'1'*64)
+        raw=helper_receipt();raw['schemaVersion']=2
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_helper(raw,'x64','1'*64,180.,raw['compileInputs'])
+    def test_first_descriptor_ordinal_and_stream_span_both_inputs(self):
+        text=self.SDK[9]+'(257): error C2338: Mismatched C++/WinRT headers.'
+        value=self.project('cl : command line warning D9002: synthetic',text+'\n'+self.SDK[8]+'(9): error C2338: Not an awaitable type.')
+        self.assertEqual(value,dict(diagnosticOrdinal=2,streamCode=2,sdkSlot=9,line=257,assertionClass=1))
+    def test_sdk_roles_require_exact_verified_full_path_not_basename_suffix_or_alias(self):
+        for path in('base.h','winrt/base.h',r'C:\foreign\base.h',r'C:\attacker'+self.SDK[8],self.SDK[8].replace('cppwinrt','cppwinrt\\..\\cppwinrt')):
+            with self.subTest(case=path==self.SDK[8]):
+                value=self.project(path+'(123): error C2338: Not an awaitable type.')
+                self.assertEqual((value['sdkSlot'],value['line']),(0,0))
+        self.assertEqual(self.project(self.SDK[8].lower().replace('\\','/')+'(123): error C2338: synthetic')['sdkSlot'],8)
+    def test_only_four_exact_public_assertion_literals_are_classified(self):
+        literals=('Mismatched C++/WinRT headers.','Not an awaitable type.',
+          'Only native x64/ARM64 observers are supported','T must be WinRT type.')
+        for code,literal in enumerate(literals,1):
+            self.assertEqual(self.project(self.SDK[8]+'(3): error C2338: '+literal)['assertionClass'],code)
+        for tail in('synthetic','mismatched C++/WinRT headers.',literals[0]+' '+literals[1]):
+            self.assertEqual(self.project(self.SDK[8]+'(3): error C2338: '+tail)['assertionClass'],0)
+    def test_no_c2338_or_dropped_c2338_cannot_create_detail(self):
+        self.assertIsNone(self.project('error C1083: synthetic'))
+        self.assertIsNone(self.project('error C1001: synthetic\n'*32+self.SDK[8]+'(1): error C2338: synthetic'))
+        self.assertEqual(self.project('error C2338: synthetic'),dict(diagnosticOrdinal=1,streamCode=1,sdkSlot=0,line=0,assertionClass=0))
+    def test_reader_binds_detail_to_first_actual_c2338_and_exact_numeric_shape(self):
+        c,v=self.pair();entry.validate_batch_private(v,c,'1'*64)
+        for key,bad in(('diagnosticOrdinal',2),('diagnosticOrdinal',True),('streamCode',2),('sdkSlot',True),('sdkSlot',1),('line',0),('line',True),('assertionClass',5),('assertionClass',True),('message','synthetic')):
+            changed=copy.deepcopy(v);changed['compilerDiagnostics']['firstC2338Detail'][key]=bad
+            with self.subTest(field=key),self.assertRaises(entry.CiFailure):entry.validate_batch_private(changed,c,'1'*64)
+        for change in('missing','null','not-c2338','later-c2338','unknown-line'):
+            changed=copy.deepcopy(v);d=changed['compilerDiagnostics']
+            if change=='missing':del d['firstC2338Detail']
+            elif change=='null':d['firstC2338Detail']=None
+            elif change=='not-c2338':d['projection']['diagnostics'][0]['number']=1083
+            elif change=='later-c2338':d['projection']['diagnostics']*=2;d['firstC2338Detail']['diagnosticOrdinal']=2
+            else:d['firstC2338Detail']['sdkSlot']=0
+            with self.subTest(case=change),self.assertRaises(entry.CiFailure):entry.validate_batch_private(changed,c,'1'*64)
+    def test_detail_does_not_bypass_retirement_cancel_or_unavailable_projection(self):
+        c,v=self.pair()
+        for key,bad in(('cleanupProved',False),('handlesClosed',3),('cancelled',True)):
+            changed=copy.deepcopy(c);changed['helperPhaseResults'][1][key]=bad
+            with self.assertRaises(entry.CiFailure):entry.validate_batch_private(v,changed,'1'*64)
+        v['compilerDiagnostics'].update(streamStatus=[2,3],streamBytes=[40,None],projection=None)
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(v,c,'1'*64)
+    def test_sdk_slot_cannot_contradict_an_existing_local_source_role(self):
+        c,v=self.pair();v['compilerDiagnostics']['projection']['diagnostics'][0].update(fileCode=2,line=26)
+        with self.assertRaises(entry.CiFailure):entry.validate_batch_private(v,c,'1'*64)
+    def test_capture_reuses_already_read_pair_and_verified_sdk_records(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=gate.PortCompilerCapture(Path(temp),100.,clock=lambda:1.)
+            self.assertTrue(hasattr(capture,'bind_sdk'),'Existing authenticated SDK result binding required')
+            sdk=dict(root=r'C:\SDK',version='10.0.26100.0',files=[dict(slot=i,bytes=1,sha256='a'*64)for i in range(1,17)])
+            with mock.patch.object(gate.tools,'read',side_effect=AssertionError('No header read')):capture.bind_sdk(sdk,'x64')
+            self.assertTrue(capture.prepare())
+            (Path(temp)/'sdk-port.stdout').write_bytes((self.SDK[8]+'(123): error C2338: Mismatched C++/WinRT headers.').encode())
+            real=capture._read
+            with mock.patch.object(capture,'_read',wraps=real)as reads:value=capture.observe(PortCompilerDiagnosticsTests().row())
+            self.assertEqual(reads.call_count,2)
+            self.assertEqual(value['firstC2338Detail'],dict(diagnosticOrdinal=1,streamCode=1,sdkSlot=8,line=123,assertionClass=1))
+            self.assertEqual(value['projection']['diagnostics'][0]['fileCode'],0)
+    def test_optional_detail_fault_preserves_existing_diagnostic_projection(self):
+        with tempfile.TemporaryDirectory()as temp:
+            capture=gate.PortCompilerCapture(Path(temp),100.,clock=lambda:1.);self.assertTrue(capture.prepare())
+            (Path(temp)/'sdk-port.stdout').write_bytes(b'error C2338: synthetic')
+            self.assertTrue(hasattr(gate,'project_first_c2338_detail'),'B3 detail projector required')
+            with mock.patch.object(gate,'project_first_c2338_detail',side_effect=MemoryError()):value=capture.observe(PortCompilerDiagnosticsTests().row())
+            self.assertEqual(value['projection']['diagnostics'][0]['number'],2338)
+            self.assertEqual(value['firstC2338Detail'],dict(diagnosticOrdinal=1,streamCode=1,sdkSlot=0,line=0,assertionClass=0))
+    def test_detail_cancellation_keeps_exact_primary_or_original_cancel(self):
+        self.assertTrue(hasattr(gate,'project_first_c2338_detail'),'B3 detail projector required')
+        for cancel in(KeyboardInterrupt(),SystemExit(130)):
+            with tempfile.TemporaryDirectory()as temp:
+                capture=gate.PortCompilerCapture(Path(temp),100.,clock=lambda:1.);self.assertTrue(capture.prepare())
+                primary=gate.GateFailure(10)
+                with mock.patch.object(gate,'project_first_c2338_detail',side_effect=cancel):
+                    try:
+                        try:raise primary
+                        finally:capture.observe(PortCompilerDiagnosticsTests().row())
+                    except gate.GateFailure as observed:self.assertIs(observed,primary)
+                self.assertTrue(capture.cancelled)
+            with tempfile.TemporaryDirectory()as temp:
+                capture=gate.PortCompilerCapture(Path(temp),100.,clock=lambda:1.);self.assertTrue(capture.prepare())
+                with mock.patch.object(gate,'project_first_c2338_detail',side_effect=cancel):
+                    try:capture.observe(PortCompilerDiagnosticsTests().row())
+                    except BaseException as observed:self.assertIs(observed,cancel)
+                    else:self.fail('Original cancellation required')
+    def test_32_descriptors_plus_single_detail_stays_under_8192(self):
+        c,v=self.pair();rows=fixtures.success_fixture()['phaseResults'];c['helperPhaseResults']=entry.project_helper_phases(rows);c['helperPreCleanup']=[None]*5
+        v['phases']=[dict(phaseCode=i,enabled=True,statusCode=1,reasonCode=0,rows=[[1,0],[2,0],[3,0],[4,4294967295]])for i in(3,4,5)]
+        d=v['compilerDiagnostics'];d.update(streamStatus=[2,2],streamBytes=[65536,65536])
+        d['projection']['diagnostics']=[dict(streamCode=1,severity=3,kind=1,number=2338 if i==31 else 1001,fileCode=0,line=0)for i in range(32)]
+        d['projection'].update(scanComplete=0,droppedCount=992);d['firstC2338Detail'].update(diagnosticOrdinal=32,line=9999999,assertionClass=4)
+        with tempfile.TemporaryDirectory()as temp:
+            self.assertTrue(entry.batch_publish(Path(temp),c,v,deadline=10.,clock=lambda:1.))
+            self.assertLessEqual((Path(temp)/'batch-hints.numeric.json').stat().st_size,8192)
 
 if __name__=='__main__':unittest.main()

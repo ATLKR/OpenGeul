@@ -86,18 +86,19 @@ Child-written markers in the separate opt-in path below are untrusted hints;
 actual CMD return-code equivalence and Windows behavior remain unverified.
 
 
-## Explicit B2 port compiler numeric diagnostics
+## Explicit B3 first-C2338 numeric detail
 
 The exact SDK branch opts in with `[sdk-batch-codes]`. This replaces the current
-B1 workflow route; B1 source2ac, approved manifest, strict reader and actual ZIP
-remain immutable historical evidence. B1 receipts are not relabelled or selected
-from their own version fields. Without the explicit B2 marker the normal SDK
+B1 workflow route. B1 source2ac and B2 sourcebd2894, their approved manifests,
+strict readers and actual ZIPs remain immutable historical evidence. Historical
+receipts are not relabelled or selected from their own version fields. Without
+the explicit marker the normal SDK
 execution, public protocol6 and original one-file artifact retain their behavior.
-B2 uses separate kind/schema2 and `--instrumented-batch-codes`; its verifier is
+B3 uses separate schema3 and `--instrumented-batch-codes`; its verifier is
 `--verify-batch-codes-only` with the same architecture/three expected source-pin
 options. The verifier's separate five-field response remains schema1.
 
-B2 adds only two literal private leaves, `sdk-port.stdout` and `sdk-port.stderr`,
+B3 retains only two literal private leaves, `sdk-port.stdout` and `sdk-port.stderr`,
 for the first port compile at phase3. The parent exclusively precreates ordinary
 single-link files, records their original device/file IDs and closes both FDs
 before CMD starts. Only then may the original tool command append redirections.
@@ -108,7 +109,7 @@ not prove Windows redirection sharing or truncation behavior; the next actual
 run must observe it. A changed or unsupported identity is unavailable.
 
 After the original postlease/command result and proved root exit, empty Job,
-generation/cleanup and4handle closes, B2 may read the fixed pair within the same
+generation/cleanup and4handle closes, B3 may read the fixed pair within the same
 original overall deadline. Forced cleanup does not prevent reading when that
 retirement is proved. Each file is checked against its original dev/ino and
 stable path/open-handle/final metadata, including single-link/no-reparse guards.
@@ -120,12 +121,27 @@ are not made preemptible by before/after deadline checks.
 Only the existing pure C/D/LNK projector is reused, with the fixed four SDK source
 roles. Its AST differs only in function and FILES-symbol names. The old IME
 three-case/nine-pin collector and its PIPE/60-second capture path are untouched.
-B2 reads at most65536bytes per stream,128KiB total, decodes strict UTF8 and retains
+B3 reads at most65536bytes per stream,128KiB total, decodes strict UTF8 and retains
 at most32 numeric descriptors. The existing65536-character/512-line/4096-line-
 length parser limits remain. No chcp, VSLANG or warning-policy change is made.
 Read cap is not a disk-write quota. Raw files stay private, are never printed or
 included in artifacts, and may remain in the owned temporary root until runner
 cleanup. No paths, argv, environment, source text or error prose is published.
+
+`firstC2338Detail` is null unless the published descriptors contain C2338. One
+numeric row then binds the first C2338's one-based `diagnosticOrdinal` and
+`streamCode`. `sdkSlot` is8 for the authenticated SDK16 base.h full path,9 for
+Windows.Storage.h, or0 for unknown; an unknown slot has `line=0`. These two paths
+are constructed from the existing authenticated SDK result, without any header
+read. Basename, suffix and namespace aliases cannot acquire an SDK slot. The
+original four source roles and their unknown-file/line rules stay unchanged.
+`assertionClass` recognizes only exact public literals:1 Mismatched C++/WinRT
+headers.;2 Not an awaitable type.;3 Only native x64/ARM64 observers are supported;
+4 T must be WinRT type. Unknown or ambiguous text is0. No literal text is stored
+in the receipt. A detail-only failure preserves the original descriptor and its
+ordinal/stream with slot/line/class0; cancellation keeps its original priority.
+This extra analysis reuses the already-read strings and adds no file I/O,
+Native API, phase, capture pair, SDK metadata collection or time allowance.
 
 `scanComplete` means only that the projector scanned the stable bytes that were
 read. It does not prove complete compiler output, compiler creation, execution,
@@ -137,9 +153,9 @@ report SHA stays null. COFF/link/negative checks and the intentional nonacceptan
 terminal retain their independent conditions.
 
 Only the two fixed B numeric JSON files are uploaded, each at most8192bytes.
-The independent reader requires exact B2 keys/types, source/run/attempt/approval
+The independent reader requires exact B3 keys/types, source/run/attempt/approval
 binding, actual controller-byte SHA and matching retired phase for every successful
 stream, including mixed success/unavailable packets. Missing/unknown fields,
 bool-as-int, wrong versions, aliases, stale identities and forged authority reject.
-Old B1 and normal SDK kinds cannot pass as B2. Portable synthetic results are not
+Old B1/B2 and normal SDK schemas cannot pass as B3. Portable synthetic results are not
 actual Windows, compiler, package-context or customer acceptance evidence.
