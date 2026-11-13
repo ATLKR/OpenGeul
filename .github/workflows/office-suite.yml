@@ -4,6 +4,7 @@ name: OpenGeul Office Suite 개발 검증
     branches:
     - work/opengeul-office-suite
     - work/opengeul-office-arm64
+    - work/opengeul-office-native-writer-observer-suite-9dea
   workflow_dispatch:
     inputs:
       writer_server_observer:
@@ -1281,12 +1282,12 @@ jobs:
   writer-server-observer:
     if: >-
       github.event.repository.private == false && (
-      github.event_name == 'workflow_dispatch' &&
-      inputs.writer_server_observer == true &&
       github.ref == 'refs/heads/work/opengeul-office-native-writer-observer-suite-9dea' &&
       github.repository == 'ATLKR/OpenGeul' && github.repository_owner == 'ATLKR' &&
       github.actor == 'ATLKR' && github.actor_id == '65988341' &&
-      github.triggering_actor == 'ATLKR' && github.run_attempt == 1)
+      github.triggering_actor == 'ATLKR' && github.run_attempt == 1 && (
+      (github.event_name == 'workflow_dispatch' && inputs.writer_server_observer == true) ||
+      (github.event_name == 'push' && startsWith(github.event.head_commit.message, '[opengeul-writer-observer-9dea-run]'))))
     name: Writer owned numeric diagnostic (arm64; never acceptance)
     runs-on: windows-11-arm
     timeout-minutes: 150
@@ -1304,6 +1305,7 @@ jobs:
       with:
         persist-credentials: false
         ref: ${{ github.sha }}
+        fetch-depth: 2
     - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
       with:
         python-version: '3.12'
@@ -1369,6 +1371,8 @@ jobs:
     - name: Observe one generated blank Writer in a fresh owned child
       id: writer-observe
       timeout-minutes: 22
+      env:
+        WRITER_OBSERVER_PHASE_SECONDS: ${{ steps.writer-context.outputs.phase_seconds }}
       shell: pwsh
       run: |
         $hostPython = (Get-Command python -ErrorAction Stop).Source
