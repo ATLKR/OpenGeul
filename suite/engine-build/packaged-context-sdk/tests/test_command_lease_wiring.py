@@ -65,7 +65,7 @@ class CommandLeaseWiringTests(unittest.TestCase):
         for key,value in (('systemDirectoryKnown',False),('closed',False),('linkCount',None),('rechecks',0)):
             result=ci_entry.public_report(report['binding'],outer,raw,command_binding={**binding(),key:value})
             self.assertFalse(result['sdkGatePassed'])
-    def helper(self,*,cancel=False,close_ok=True):
+    def helper(self,*,cancel=False,close_ok=True,cancel_row_phase=None):
         import contextlib
         import run_sdk_gate as gate
         import toolchain as tools
@@ -91,6 +91,7 @@ class CommandLeaseWiringTests(unittest.TestCase):
                 def run(self,argv,cwd,environment,deadline,*,active_observation=None):
                     events.append(('run',deadline));self.calls+=1
                     if cancel:raise KeyboardInterrupt()
+                    if self.calls==cancel_row_phase:return dict(completed=False,failureCode=13,cancelled=True,exitCode=1)
                     if self.calls==1:(root/'vswhere.json').write_bytes(b'[]')
                     if self.calls in (2,3):
                         b=bytearray(60);b[:4]=b'\x64\x86\x01\x00'
@@ -104,7 +105,7 @@ class CommandLeaseWiringTests(unittest.TestCase):
                 return native_pe if str(path) in (vs['cl'],vs['link']) else original_pe(path,machine)
             def locations_for(arch,*,deadline):
                 events.append(('locations',deadline));return locations
-            pairs=((approved_launch,'require_admission',lambda a,r:Admission()),(gate,'sys',types.SimpleNamespace(platform='win32')),
+            pairs=((approved_launch,'require_admission',lambda a,r:Admission()),(gate,'sys',types.SimpleNamespace(platform='win32',exc_info=sys.exc_info)),
               (gate,'_owned_root',lambda p:root),(tools,'system_locations',locations_for),(owned_job_win32,'NativeApi',lambda:object()),
               (gate,'Runner',Runner),(gate,'child_environment',lambda *a:{}),(tools,'vs_metadata',lambda b:{}),
               (tools,'installed_vs',lambda *a:vs),(tools,'installed_sdk',lambda *a,**kw:sdk),(tools,'cmd_path',lambda v:v),

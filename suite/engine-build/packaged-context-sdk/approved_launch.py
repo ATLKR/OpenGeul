@@ -117,24 +117,46 @@ def require_admission(context,root):
         return context
     except BaseException:raise ApprovalFailure() from None
 
+def admit_batch_code(root,manifest,expected):
+    """Same exact eight-file admission, with explicit B cancellation propagation."""
+    try:
+        root=Path(root);manifest=Path(manifest);rows=_verify(root,manifest,expected)
+        return CodeAdmission(root,manifest,expected,rows,_SEAL)
+    except (KeyboardInterrupt,SystemExit):raise
+    except BaseException:raise ApprovalFailure() from None
+
+def require_batch_admission(context,root):
+    try:
+        if type(context) is not CodeAdmission:raise ApprovalFailure()
+        context.require_root(root)
+        return context
+    except (KeyboardInterrupt,SystemExit):raise
+    except BaseException:raise ApprovalFailure() from None
+
 class Parser(argparse.ArgumentParser):
     def error(self,message):raise ApprovalFailure()
 
 def main(argv=None):
+    batch=False
     try:
         if not sys.flags.isolated or not sys.dont_write_bytecode:raise ApprovalFailure()
         p=Parser(add_help=False);p.add_argument('--approved-manifest',required=True)
         p.add_argument('--expected-approved-manifest-sha256',required=True)
         args,rest=p.parse_known_args(argv)
         root=Path(__file__).absolute().parent
-        context=admit_code(root,Path(args.approved_manifest),args.expected_approved_manifest_sha256)
+        batch=rest[:1]==['--instrumented-batch-hints']
+        context=(admit_batch_code if batch else admit_code)(root,Path(args.approved_manifest),args.expected_approved_manifest_sha256)
         if any(name in sys.modules for name in ('run_sdk_gate','supervisor','toolchain','owned_job_win32')):raise ApprovalFailure()
         if __name__=='__main__':
             if 'approved_launch' in sys.modules:raise ApprovalFailure()
             sys.modules['approved_launch']=sys.modules[__name__]
         sys.path.insert(0,str(root))
         gate=importlib.import_module('run_sdk_gate')
+        if rest[:1]==['--instrumented-batch-hints']:
+            try:return gate.batch_main(rest[1:],code_admission=context)
+            except (KeyboardInterrupt,SystemExit):return 130
         return gate.main(rest,code_admission=context)
+    except (KeyboardInterrupt,SystemExit):return 130 if batch else 3
     except BaseException:return 3
 
 if __name__=='__main__':raise SystemExit(main())

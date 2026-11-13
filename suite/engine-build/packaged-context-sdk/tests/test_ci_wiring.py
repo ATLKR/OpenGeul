@@ -181,9 +181,15 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(job['strategy']['matrix'],{'os':['windows-2025','windows-11-arm']})
         self.assertFalse(job.get('continue-on-error',False))
         self.assertTrue(all(not step.get('continue-on-error',False) for step in job['steps']))
-    def test_artifact_is_one_fixed_numeric_file_and_never_executable_or_private_tree(self):
+    def test_normal_artifact_stays_one_fixed_file_and_b_is_a_distinct_exact_pair(self):
         old,new=self.workflows();job=new['jobs']['packaged-context-sdk']
         uploads=[s for s in job['steps'] if s.get('uses','').startswith('actions/upload-artifact@')]
-        self.assertEqual(len(uploads),1)
+        self.assertEqual(len(uploads),2)
         self.assertEqual(uploads[0]['with']['path'],'.work/packaged-context-sdk-public/${{ matrix.os }}/report.numeric.json')
-        self.assertEqual(uploads[0]['with']['retention-days'],1)
+        self.assertEqual(uploads[1]['with']['path'].splitlines(),[
+          '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/controller.numeric.json',
+          '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/batch-hints.numeric.json'])
+        for upload in uploads:
+            self.assertEqual(upload['with']['retention-days'],1)
+            self.assertEqual(upload['with']['if-no-files-found'],'error')
+            self.assertFalse(upload.get('continue-on-error',False))

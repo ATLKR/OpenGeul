@@ -381,4 +381,344 @@ def main(argv=None):
             else:failure=31
     return 0 if failure==0 else 1
 
-if __name__=='__main__':raise SystemExit(main())
+B_MODE='instrumented-batch-hints'
+B_SOURCE_INPUTS='369bfbf3caaf51867e9dc5b330ad0f8206fa1c04e4f7378575c6922d055bbb04'
+B_FALSE=('originalSdkGateExecuted','acceptanceEligible','qualification','canService')
+B_COMMON={'schemaVersion','kind','mode','binding','approvedCodeManifestSha256','expectedSourceInputsSha256',
+  'originalSdkReportSha256',*B_FALSE}
+
+def _batch_retired(row):
+    return (type(row) is dict and all(row.get(key) is True for key in
+      ('cleanupProved','rootExitObserved','jobEmptyObserved','identityRechecked'))
+      and type(row.get('handlesClosed')) is int and row['handlesClosed']==4)
+
+def _batch_common(value,kind,binding,manifest):
+    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=1
+        or value.get('kind')!=kind or value.get('mode')!=B_MODE or value.get('binding')!=binding
+        or type(value.get('binding')) is not dict or set(value['binding'])!=set(binding)
+        or any(type(value['binding'][key]) is not type(item) for key,item in binding.items())
+        or value.get('approvedCodeManifestSha256')!=manifest or not _sha(manifest)
+        or value.get('expectedSourceInputsSha256')!=B_SOURCE_INPUTS
+        or value.get('originalSdkReportSha256') is not None or any(value.get(key) is not False for key in B_FALSE)):raise CiFailure(4)
+
+def validate_batch_controller(value,binding,manifest):
+    keys=B_COMMON|{'instrumentedStage','failureCode','helperFailureCode','cancelled','instrumentedChecksPassed',
+      'sourceInputsVerified','envelopeKnown','envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup',
+      'envelopeExitCode','helperPhaseResults','helperPreCleanup','failureObservation'}
+    _batch_common(value,'sdk-batch-instrumented-controller',binding,manifest)
+    if set(value)!=keys:raise CiFailure(4)
+    if not _integer(value['instrumentedStage'],7) or not _integer(value['failureCode'],31):raise CiFailure(4)
+    if value['helperFailureCode'] is not None and not _integer(value['helperFailureCode'],31):raise CiFailure(4)
+    for key in ('cancelled','instrumentedChecksPassed','sourceInputsVerified','envelopeKnown'):
+        if type(value[key]) is not bool:raise CiFailure(4)
+    for key in ('envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup'):
+        if value[key] is not None and type(value[key]) is not bool:raise CiFailure(4)
+    if value['envelopeExitCode'] is not None and not _integer(value['envelopeExitCode'],0xffffffff):raise CiFailure(4)
+    if not value['envelopeKnown'] and any(value[key] is not None for key in ('envelopeCompleted','envelopeCleanupProved','envelopeForcedCleanup','envelopeExitCode')):raise CiFailure(4)
+    rows=value['helperPhaseResults']
+    if rows is None:
+        if value['helperPreCleanup'] is not None or value['helperFailureCode'] is not None:raise CiFailure(4)
+    else:
+        if type(rows) is not list or len(rows)>5:raise CiFailure(4)
+        # Convert only public nullable sentinels for the existing pure row checker.
+        private=[]
+        for row in rows:
+            if type(row) is not dict:raise CiFailure(4)
+            private.append({**row,'exitCode':0 if row.get('exitCode') is None else row['exitCode'],
+              'pid':0 if row.get('pid') is None else row['pid'],'creation':0 if row.get('creation') is None else row['creation']})
+        if project_helper_phases(private)!=rows:raise CiFailure(4)
+        validate_phase_active_observations(value['helperPreCleanup'],len(rows))
+    if value['instrumentedChecksPassed']:
+        if (value['instrumentedStage']!=7 or value['failureCode'] or value['helperFailureCode']!=0 or value['cancelled']
+            or not value['sourceInputsVerified'] or not value['envelopeKnown'] or value['envelopeCompleted'] is not True
+            or value['envelopeCleanupProved'] is not True or value['envelopeForcedCleanup'] is not False
+            or value['envelopeExitCode']!=0 or rows is None or len(rows)!=5):raise CiFailure(4)
+        for row in rows:
+            if any(row[key] is not True for key in ('completed','cleanupProved','rootExitObserved','jobEmptyObserved','identityRechecked')) or row['forcedCleanup'] or row['cancelled'] or row['exitCode'] or row['failureCode'] or row['handlesClosed']!=4:raise CiFailure(4)
+    # Reuse the existing closed numeric failure packet, allowing B controller stages.
+    reason=value['failureObservation']
+    if reason is not None:
+        if type(reason) is not dict or not _integer(reason.get('stageCode'),13):raise CiFailure(4)
+        adapted={**reason,'stageCode':1};validate_helper_failure_observation(adapted,1)
+    return value
+
+def validate_batch_private(value,controller,manifest):
+    keys={'schemaVersion','kind','mode','architectureCode','approvedCodeManifestSha256','expectedSourceInputsSha256',
+      'childWritable','authority','compilerInvocationProved','canary','phases',*B_FALSE}
+    if (type(value) is not dict or set(value)!=keys or type(value['schemaVersion']) is not int or value['schemaVersion']!=1
+        or value['kind']!='sdk-batch-hints-private' or value['mode']!=B_MODE or type(value['architectureCode']) is not int
+        or value['architectureCode']!=controller['binding']['architectureCode'] or value['approvedCodeManifestSha256']!=manifest
+        or value['expectedSourceInputsSha256']!=B_SOURCE_INPUTS or value['childWritable'] is not True
+        or value['authority'] is not False or value['compilerInvocationProved'] is not False
+        or any(value[key] is not False for key in B_FALSE)):raise CiFailure(4)
+    canary=value['canary']
+    if type(canary) is not dict or set(canary)!={'statusCode','reasonCode','returns'} or not _integer(canary['statusCode'],2) or not _integer(canary['reasonCode'],8):raise CiFailure(4)
+    status=canary['statusCode'];reason=canary['reasonCode']
+    if status==1:
+        if controller['envelopeKnown'] is not True or controller['envelopeCleanupProved'] is not True or controller['cancelled'] is not False:raise CiFailure(4)
+        if reason or type(canary['returns']) is not list or len(canary['returns'])!=3 or any(type(v) is not int for v in canary['returns']) or canary['returns']!=[0,2,5]:raise CiFailure(4)
+        rows=controller['helperPhaseResults']
+        if not rows or any(rows[0][key] is not True for key in ('completed','cleanupProved','rootExitObserved','jobEmptyObserved','identityRechecked')) or rows[0]['exitCode'] or rows[0]['forcedCleanup'] or rows[0]['cancelled'] or rows[0]['handlesClosed']!=4:raise CiFailure(4)
+    elif canary['returns'] is not None or (status==0 and reason!=1) or (status==2 and not 2<=reason<=8):raise CiFailure(4)
+    phases=value['phases'];rows=controller['helperPhaseResults'];count=min(3,max(0,len(rows)-1)) if rows is not None else 0
+    if type(phases) is not list or len(phases)!=count:raise CiFailure(4)
+    for code,phase in enumerate(phases,3):
+        if (type(phase) is not dict or set(phase)!={'phaseCode','enabled','statusCode','reasonCode','rows'}
+            or type(phase['phaseCode']) is not int or phase['phaseCode']!=code or type(phase['enabled']) is not bool
+            or not _integer(phase['statusCode'],2) or not _integer(phase['reasonCode'],8)):raise CiFailure(4)
+        status=phase['statusCode'];reason=phase['reasonCode']
+        if not phase['enabled']:
+            if status or reason not in (1,8) or phase['rows'] is not None:raise CiFailure(4)
+        elif canary['statusCode']!=1:raise CiFailure(4)
+        elif status==0:
+            if not 2<=reason<=8 or phase['rows'] is not None:raise CiFailure(4)
+        else:
+            retained=rows[code-2]
+            if not _batch_retired(retained) or retained['cancelled'] is not False:raise CiFailure(4)
+            trace=phase['rows'];length=4 if status==1 else 2
+            if reason or type(trace) is not list or len(trace)!=length:raise CiFailure(4)
+            for stage,row in enumerate(trace,1):
+                if type(row) is not list or len(row)!=2 or type(row[0]) is not int or row[0]!=stage or type(row[1]) is not int or not -2147483648<=row[1]<=4294967295:raise CiFailure(4)
+            if (status==1 and trace[1][1]>=1) or (status==2 and trace[1][1]<1):raise CiFailure(4)
+    return value
+
+def _batch_json(raw):
+    def unique(rows):
+        value={}
+        for key,item in rows:
+            if key in value:raise CiFailure(4)
+            value[key]=item
+        return value
+    if type(raw) is not bytes or not 0<len(raw)<=8192:raise CiFailure(4)
+    try:return json.loads(raw.decode('utf-8'),object_pairs_hook=unique,parse_constant=lambda value:(_ for _ in ()).throw(CiFailure(4)))
+    except Exception:raise CiFailure(4) from None
+
+def validate_batch_sidecar(value,controller_raw,binding,manifest):
+    controller=validate_batch_controller(_batch_json(controller_raw),binding,manifest)
+    _batch_common(value,'sdk-batch-hints-sidecar',binding,manifest)
+    keys=B_COMMON|{'controllerReceiptSha256','unavailableReasonCode','observation','childWritable','authority','compilerInvocationProved'}
+    if (set(value)!=keys or value['controllerReceiptSha256']!=hashlib.sha256(controller_raw).hexdigest()
+        or not _integer(value['unavailableReasonCode'],8) or value['childWritable'] is not True
+        or value['authority'] is not False or value['compilerInvocationProved'] is not False):raise CiFailure(4)
+    if value['observation'] is None:
+        if not 1<=value['unavailableReasonCode']<=8:raise CiFailure(4)
+    else:
+        if value['unavailableReasonCode']:raise CiFailure(4)
+        validate_batch_private(value['observation'],controller,manifest)
+    return value
+
+def _batch_remaining(deadline,clock):
+    if not _number(deadline) or clock()>=deadline:raise CiFailure(10)
+
+def _batch_write(path,data,*,deadline,clock=None):
+    clock=time.monotonic if clock is None else clock
+    _batch_remaining(deadline,clock)
+    if path.name not in ('controller.numeric.json','batch-hints.numeric.json') or type(data) is not bytes or not 0<len(data)<=8192:raise CiFailure(4)
+    _regular(path.parent,True);_batch_remaining(deadline,clock);primary=None;stream=path.open('xb')
+    try:
+        _batch_remaining(deadline,clock)
+        if stream.write(data)!=len(data):raise CiFailure(4)
+        _batch_remaining(deadline,clock);stream.flush()
+    except BaseException as error:primary=error
+    finally:
+        try:stream.close()
+        except BaseException as error:
+            if primary is None:primary=error
+    if primary is not None:raise primary
+    _batch_remaining(deadline,clock)
+    if _read(path,8192)!=data:raise CiFailure(4)
+    _batch_remaining(deadline,clock)
+
+def batch_publish(public,controller,observation,*,deadline,clock=None):
+    """Best-effort B publication; never replace an existing primary exception."""
+    pending=sys.exc_info()[1];clock=time.monotonic if clock is None else clock
+    try:
+        _batch_remaining(deadline,clock)
+        binding=controller['binding'];manifest=controller['approvedCodeManifestSha256']
+        validate_batch_controller(controller,binding,manifest)
+        try:
+            if observation is not None:validate_batch_private(observation,controller,manifest)
+            reason=0 if observation is not None else 7
+        except Exception:observation=None;reason=4
+        data=json.dumps(controller,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
+        sidecar={key:controller[key] for key in B_COMMON if key!='kind'}
+        sidecar.update(kind='sdk-batch-hints-sidecar',controllerReceiptSha256=hashlib.sha256(data).hexdigest(),
+          unavailableReasonCode=reason,observation=observation,childWritable=True,authority=False,compilerInvocationProved=False)
+        validate_batch_sidecar(sidecar,data,binding,manifest)
+        encoded=json.dumps(sidecar,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n'
+        if len(data)>8192 or len(encoded)>8192:raise CiFailure(4)
+        _batch_remaining(deadline,clock)
+        _batch_write(Path(public)/'controller.numeric.json',data,deadline=deadline,clock=clock)
+        _batch_remaining(deadline,clock)
+        _batch_write(Path(public)/'batch-hints.numeric.json',encoded,deadline=deadline,clock=clock)
+        return True
+    except BaseException as error:
+        if isinstance(error,(KeyboardInterrupt,SystemExit)):
+            controller['cancelled']=True
+            if pending is None:raise
+        return False
+
+def verify_batch_files(public,binding,manifest):
+    root=_regular(public,True)
+    if (root/'report.numeric.json').exists():raise CiFailure(4)
+    controller_raw=_read(root/'controller.numeric.json',8192)
+    sidecar_raw=_read(root/'batch-hints.numeric.json',8192)
+    validate_batch_sidecar(_batch_json(sidecar_raw),controller_raw,binding,manifest)
+    return {'schemaVersion':1,'admitted':True,'controllerSha256':hashlib.sha256(controller_raw).hexdigest(),
+      'sidecarSha256':hashlib.sha256(sidecar_raw).hexdigest(),'reasonCode':0}
+
+def validate_batch_helper(value,architecture,manifest,deadline,expected_inputs):
+    """B-only structural adapter; its normal-shaped view is never published."""
+    if (type(value) is not dict or type(value.get('schemaVersion')) is not int or value['schemaVersion']!=1
+        or value.get('kind')!='sdk-batch-instrumented-helper' or value.get('mode')!=B_MODE
+        or value.get('originalSdkGateExecuted') is not False or value.get('acceptanceEligible') is not False
+        or type(value.get('sourceInputsVerified')) is not bool or not _integer(value.get('batchUnavailableReasonCode'),8)):raise CiFailure(4)
+    view=dict(value)
+    for key in ('mode','originalSdkGateExecuted','acceptanceEligible','sourceInputsVerified','batchObservation','batchUnavailableReasonCode'):
+        if key not in view:raise CiFailure(4)
+        del view[key]
+    for old,new in (('sdkGatePassed','instrumentedChecksPassed'),('nativeSdkCompiled','instrumentedPortObjectVerified'),
+      ('nativeLinked','instrumentedLinkVerified'),('negativeSmokePassed','instrumentedNegativeSmokePassed')):
+        if new not in view or old in view:raise CiFailure(4)
+        view[old]=view.pop(new)
+    view.update(schemaVersion=2,kind='packaged-context-sdk-negative-gate')
+    validate_sdk_report(view,architecture,manifest,deadline,expected_inputs)
+    return value
+
+def batch_controller(binding,outer,raw,manifest,*,failure=0,observation=None,cancelled=False):
+    rows=None if raw is None else project_helper_phases(raw['phaseResults'])
+    active=None if raw is None else validate_phase_active_observations(raw['phaseActiveObservations'],len(rows))
+    value={'schemaVersion':1,'kind':'sdk-batch-instrumented-controller','mode':B_MODE,'binding':binding,
+      'approvedCodeManifestSha256':manifest,'expectedSourceInputsSha256':B_SOURCE_INPUTS,'originalSdkReportSha256':None,
+      **{key:False for key in B_FALSE},'instrumentedStage':0 if raw is None else raw['stage'],'failureCode':failure,
+      'helperFailureCode':None if raw is None else raw['failureCode'],'cancelled':bool(cancelled or(raw and raw.get('cancelled'))),
+      'instrumentedChecksPassed':bool(raw and outer and raw['instrumentedChecksPassed'] and outer['completed'] and failure==0 and not cancelled and not raw.get('cancelled')),
+      'sourceInputsVerified':False if raw is None else raw['sourceInputsVerified'],'envelopeKnown':outer is not None,
+      'envelopeCompleted':None if outer is None else outer['completed'],'envelopeCleanupProved':None if outer is None else outer['cleanupProved'],
+      'envelopeForcedCleanup':None if outer is None else outer['forcedCleanup'],'envelopeExitCode':None if outer is None else outer['exitCode'],
+      'helperPhaseResults':rows,'helperPreCleanup':active,'failureObservation':observation}
+    return validate_batch_controller(value,binding,manifest)
+
+def _batch_code(root,expected_bootstrap,expected_manifest):
+    raw=_read(root/'approved_launch.py',1024*1024)
+    if not _sha(expected_bootstrap) or hashlib.sha256(raw).hexdigest()!=expected_bootstrap:raise CiFailure(3)
+    if 'approved_launch' in sys.modules:raise CiFailure(3)
+    spec=importlib.util.spec_from_file_location('approved_launch',root/'approved_launch.py')
+    module=importlib.util.module_from_spec(spec);sys.modules['approved_launch']=module;spec.loader.exec_module(module)
+    context=module.admit_batch_code(root,root/'approved-sdk-code.json',expected_manifest)
+    sys.path.insert(0,str(root));return context
+
+def _batch_context(argv):
+    if not sys.flags.isolated or not sys.dont_write_bytecode:raise CiFailure(1)
+    p=Parser(add_help=False);p.add_argument('--architecture',choices=('x64','arm64'),required=True)
+    for name in ('entry','bootstrap','approved-manifest'):p.add_argument('--expected-'+name+'-sha256',required=True)
+    args=p.parse_args(argv);root=Path(__file__).absolute().parent;repo=root.parents[2]
+    if not _sha(args.expected_entry_sha256) or hashlib.sha256(_read(root/'ci_entry.py',1024*1024)).hexdigest()!=args.expected_entry_sha256:raise CiFailure(3)
+    binding=require_context({name:os.environ.get(name) for name in KEYS},args.architecture)
+    if Path(os.environ.get('GITHUB_WORKSPACE',''))!=repo:raise CiFailure(2)
+    check_checkout(repo,binding)
+    admission=_batch_code(root,args.expected_bootstrap_sha256,args.expected_approved_manifest_sha256)
+    if sys.platform!='win32' or sys.version_info[:2]!=(3,12):raise CiFailure(11)
+    return args,root,repo,binding,admission
+
+def batch_verify_main(argv=None):
+    answer={'schemaVersion':1,'admitted':False,'controllerSha256':None,'sidecarSha256':None,'reasonCode':7}
+    lease=None;cancelled=False
+    try:
+        args,root,repo,binding,admission=_batch_context(argv)
+        import toolchain
+        before=toolchain.verify_bundle(root/'frozen-v2')
+        locations=toolchain.system_locations(args.architecture,deadline=time.monotonic()+10.)
+        lease=locations['commandLease']
+        public=repo/'.work/packaged-context-sdk-batch-public'/('windows-2025' if args.architecture=='x64' else 'windows-11-arm')
+        answer=verify_batch_files(public,binding,args.expected_approved_manifest_sha256)
+        admission.require_root(root);check_checkout(repo,binding)
+        if toolchain.verify_bundle(root/'frozen-v2')!=before:raise CiFailure(4)
+    except (KeyboardInterrupt,SystemExit):cancelled=True
+    except Exception:answer={'schemaVersion':1,'admitted':False,'controllerSha256':None,'sidecarSha256':None,'reasonCode':7}
+    finally:
+        if lease is not None:
+            try:
+                if not lease.close():answer={'schemaVersion':1,'admitted':False,'controllerSha256':None,'sidecarSha256':None,'reasonCode':6}
+            except BaseException as error:
+                cancelled=cancelled or isinstance(error,(KeyboardInterrupt,SystemExit))
+                answer={'schemaVersion':1,'admitted':False,'controllerSha256':None,'sidecarSha256':None,'reasonCode':6}
+    if cancelled:return 130
+    print(json.dumps(answer,sort_keys=True,separators=(',',':')))
+    return 0 if answer['admitted'] else 1
+
+def batch_main(argv=None):
+    """Separate instrumented controller. Normal main/report6 are never invoked."""
+    start=time.monotonic();deadline=start+180.;lease=None;outer=None;raw=None;public=None;binding=None
+    failure=0;reason=None;cancelled=False;admission=None;args=None;stage=0
+    try:
+        args,root,repo,binding,admission=_batch_context(argv)
+        public=repo/'.work/packaged-context-sdk-batch-public'/('windows-2025' if args.architecture=='x64' else 'windows-11-arm')
+        normal=repo/'.work/packaged-context-sdk-public'/public.name
+        if public.exists() or public.is_symlink() or normal.exists() or normal.is_symlink():raise CiFailure(2)
+        public.parent.mkdir(parents=True,exist_ok=True);_regular(public.parent,True);public.mkdir()
+        import toolchain
+        from supervisor import child_environment
+        from owned_job_win32 import NativeApi
+        toolchain.verify_bundle(root/'frozen-v2');stage=1
+        expected=[]
+        for index,name in enumerate(('context_observer.hpp','context_observer_windows.cpp','sdk_smoke.hpp','windows_sdk_smoke.cpp'),1):
+            data=toolchain.read(root/'frozen-v2'/name,1024*1024) if index<=2 else admission.read_approved(name)
+            expected.append({'slot':index,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+        locations=toolchain.system_locations(args.architecture,deadline=deadline);lease=locations['commandLease']
+        temp=_regular(os.environ.get('RUNNER_TEMP',''),True);work=temp/('opengeul-sdk-gate-'+uuid.uuid4().hex)
+        envelope=temp/('opengeul-sdk-envelope-'+uuid.uuid4().hex);envelope.mkdir()
+        for name in ('temp','profile','appdata','local'):(envelope/name).mkdir()
+        environment=child_environment(locations['system'],locations['programFiles'],locations['programFilesX86'],str(envelope))
+        command=[sys.executable,'-I','-B',str(root/'approved_launch.py'),'--approved-manifest',str(root/'approved-sdk-code.json'),
+          '--expected-approved-manifest-sha256',args.expected_approved_manifest_sha256,'--instrumented-batch-hints','--architecture',args.architecture,
+          '--source-bundle',str(root/'frozen-v2'),'--work-root',str(work),'--output',str(work/'sdk-batch.numeric.json'),
+          '--overall-start',repr(start),'--overall-deadline',repr(deadline)]
+        if deadline-time.monotonic()<=1:raise CiFailure(10)
+        lease.verify(deadline=deadline)
+        outer=EnvelopeRunner(NativeApi()).run(command,str(repo),environment,deadline)
+        if outer.get('cancelled') is True or outer['exitCode'] in (130,3221225786):cancelled=True;raise KeyboardInterrupt()
+        lease.verify(deadline=deadline)
+        if not _batch_retired(outer):raise CiFailure(5)
+        _batch_remaining(deadline,time.monotonic)
+        path=work/'sdk-batch.numeric.json'
+        if path.exists():
+            candidate=json.loads(_read(path,16384),object_pairs_hook=_batch_unique,
+              parse_constant=lambda value:(_ for _ in ()).throw(CiFailure(4)))
+            validate_batch_helper(candidate,args.architecture,args.expected_approved_manifest_sha256,deadline,expected)
+            raw=candidate
+            if raw.get('cancelled') is True:cancelled=True;raise KeyboardInterrupt()
+        admission.require_root(root);check_checkout(repo,binding)
+        if not outer['completed'] or raw is None or not raw['instrumentedChecksPassed']:raise CiFailure(5)
+    except BaseException as error:
+        cancelled=cancelled or isinstance(error,(KeyboardInterrupt,SystemExit))
+        failure=error.code if isinstance(error,CiFailure) else 31
+        reason=failure_observation(error,min(stage,13))
+    finally:
+        if lease is not None:
+            try:
+                if not lease.close() and not failure:failure=31
+            except BaseException as error:
+                cancelled=cancelled or isinstance(error,(KeyboardInterrupt,SystemExit))
+                if not failure:failure=31
+        if time.monotonic()>deadline and not failure:failure=10
+    if cancelled:return 130
+    if time.monotonic()>=deadline:return 1
+    if public is not None and binding is not None and args is not None:
+        value=batch_controller(binding,outer,raw,args.expected_approved_manifest_sha256,failure=failure,observation=reason)
+        try:
+            if not batch_publish(public,value,None if raw is None else raw['batchObservation'],deadline=deadline):return 1
+        except (KeyboardInterrupt,SystemExit):return 130
+    return 0 if failure==0 else 1
+
+def _batch_unique(rows):
+    value={}
+    for key,item in rows:
+        if key in value:raise CiFailure(4)
+        value[key]=item
+    return value
+
+if __name__=='__main__':
+    if sys.argv[1:2]==['--instrumented-batch-hints']:raise SystemExit(batch_main(sys.argv[2:]))
+    if sys.argv[1:2]==['--verify-batch-sidecar-only']:raise SystemExit(batch_verify_main(sys.argv[2:]))
+    raise SystemExit(main())

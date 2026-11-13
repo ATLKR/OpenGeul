@@ -1,5 +1,5 @@
 """Independent numeric compiler observation; synthetic PS, no checkout/compile/API."""
-import ast,copy,importlib.util,json,os,shutil,struct,subprocess,tempfile,unittest
+import ast,copy,hashlib,importlib.util,json,os,shutil,struct,subprocess,tempfile,unittest
 from pathlib import Path
 import yaml
 ROOT=Path(__file__).resolve().parents[1];REPO=ROOT.parents[2]
@@ -85,7 +85,28 @@ class CompileObservationWorkflowTests(unittest.TestCase):
   uploads=[s for s in self.job['steps']if s.get('uses','').startswith('actions/upload-artifact@')];self.assertTrue(len(uploads)==1);u=uploads[0]
   self.assertTrue(u['with']['path']=='.work/ime-finalization-compile/report.numeric.json'and u['with']['retention-days']==1 and u['with']['if-no-files-found']=='error')
   self.assertTrue('permissions'not in self.job and not self.job.get('continue-on-error',False)and all(not s.get('continue-on-error',False)for s in self.job['steps']))
-  sdk_uploads=[s for s in self.w['jobs']['packaged-context-sdk']['steps']if s.get('uses','').startswith('actions/upload-artifact@')];self.assertTrue(len(sdk_uploads)==1 and sdk_uploads[0]['with']['path']=='.work/packaged-context-sdk-public/${{ matrix.os }}/report.numeric.json')
+  expected={'.work/packaged-context-sdk-public/${{ matrix.os }}/report.numeric.json':'f2739c9168c824d91fae588b4c2b3163d14201ac8ac5f09df6778a83fb1461e7',
+    '.work/packaged-context-sdk-batch-public/${{ matrix.os }}/controller.numeric.json\n.work/packaged-context-sdk-batch-public/${{ matrix.os }}/batch-hints.numeric.json\n':'ea16de6365ef4e3a45abd4c840b969ba7b9c8b54e2deb12e3a01499d9407e030'}
+  sdk_uploads=[s for s in self.w['jobs']['packaged-context-sdk']['steps']if s.get('uses','').startswith('actions/upload-artifact@')]
+  self.assertEqual(len(sdk_uploads),len(expected));self.assertEqual({s['with']['path']for s in sdk_uploads},set(expected))
+  for upload in sdk_uploads:
+   observed=hashlib.sha256(json.dumps(upload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+   self.assertEqual(observed,expected[upload['with']['path']])
+ def test_sdk_artifact_separation_rejects_missing_duplicate_mixed_and_unknown_outputs(self):
+  original=self.w
+  try:
+   for mode in('missing-normal','duplicate-normal','mixed-path','unsafe-admission','unknown-output'):
+    self.w=copy.deepcopy(original);steps=self.w['jobs']['packaged-context-sdk']['steps']
+    uploads=[s for s in steps if s.get('uses','').startswith('actions/upload-artifact@')]
+    normal,batch=uploads
+    if mode=='missing-normal':steps.remove(normal)
+    elif mode=='duplicate-normal':steps.append(copy.deepcopy(normal))
+    elif mode=='mixed-path':batch['with']['path']=normal['with']['path']+'\n'+batch['with']['path']
+    elif mode=='unsafe-admission':batch['if']=batch['if'].replace("== '1'","!= '2'")
+    else:
+     unknown=copy.deepcopy(batch);unknown['with']['path']='.work/unreviewed/report.numeric.json';steps.append(unknown)
+    with self.subTest(mode=mode),self.assertRaises(AssertionError):self.test_fixed_numeric_artifact_and_original_sdk_artifact_remain_separate()
+  finally:self.w=original
  def test_rendered_powershell_and_existing_free_runner_policy_accept_new_job(self):
   shell=shutil.which('pwsh');self.assertTrue(shell is not None)
   with tempfile.TemporaryDirectory()as t:
