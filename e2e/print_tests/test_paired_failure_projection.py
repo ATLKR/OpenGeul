@@ -29,17 +29,18 @@ class PairedFailureProjectionTests(unittest.TestCase):
             original = fonts / 'arial.ttf'
             original.write_bytes(b'SYNTHETIC-FONT-BYTES')
             os.link(original, root / 'alias')
+            os.link(original, root / 'second-alias')
             class Getter:
                 def __call__(self, buffer, cap):
                     buffer.value = str(root)
                     return len(str(root))
-            kernel = types.SimpleNamespace(GetWindowsDirectoryW=Getter())
+            kernel = types.SimpleNamespace(GetSystemWindowsDirectoryW=Getter())
             with mock.patch.object(ctypes, 'WinDLL', return_value=kernel, create=True):
                 try: windows.sampled_fonts()
                 except Rejected as error: return error
-            self.fail('the existing single-link guard did not reject')
+            self.fail('the unsupported font link count did not reject')
 
-    def test_actual_font_hardlink_failure_preserves_existing_stat_and_closed_font_role(self):
+    def test_actual_three_link_font_failure_preserves_existing_stat_and_closed_font_role(self):
         error = self.font_failure()
         with mock.patch.object(Path, 'stat', side_effect=AssertionError()), \
              mock.patch.object(Path, 'lstat', side_effect=AssertionError()), \
@@ -49,7 +50,7 @@ class PairedFailureProjectionTests(unittest.TestCase):
         self.assertEqual(result['stageCode'], 6)
         self.assertEqual(result['fontCode'], 1)
         self.assertEqual(result['fileSize'], len(b'SYNTHETIC-FONT-BYTES'))
-        self.assertEqual(result['linkCount'], 2)
+        self.assertEqual(result['linkCount'], 3)
         self.assertTrue(result['fileSizeKnown'])
         self.assertTrue(result['linkCountKnown'])
         self.assertNotIn('SYNTHETIC', json.dumps(result))

@@ -48,19 +48,19 @@ def _parents(path):
         _safe(parent.lstat(), directory=True)
 
 
-def read_regular(path, limit, *, clock=time.monotonic):
+def _read_checked(path, limit, *, clock, check_file, identity):
     path = Path(path).absolute()
     _parents(path)
     before = path.lstat()
-    _safe(before)
+    check_file(before)
     require(0 < before.st_size <= limit, 20)
     start = clock()
     require(type(start) in (int, float) and math.isfinite(start), 20)
     chunks, size = [], 0
     with path.open('rb') as stream:
         opened = os.fstat(stream.fileno())
-        _safe(opened)
-        require(_identity(before) == _identity(opened), 20)
+        check_file(opened)
+        require(identity(before) == identity(opened), 20)
         while True:
             block = stream.read(min(1024 * 1024, limit + 1 - size))
             size += len(block)
@@ -71,13 +71,18 @@ def read_regular(path, limit, *, clock=time.monotonic):
                 break
             chunks.append(block)
         after=os.fstat(stream.fileno())
-        _safe(after)
-        require(_identity(opened) == _identity(after) and opened.st_ctime_ns == after.st_ctime_ns, 20)
+        check_file(after)
+        require(identity(opened) == identity(after) and opened.st_ctime_ns == after.st_ctime_ns, 20)
     final=path.lstat()
-    _safe(final)
-    require(_identity(before) == _identity(final) and before.st_ctime_ns == final.st_ctime_ns
+    check_file(final)
+    require(identity(before) == identity(final) and before.st_ctime_ns == final.st_ctime_ns
             and size == before.st_size, 20)
     return b''.join(chunks), before
+
+
+def read_regular(path, limit, *, clock=time.monotonic):
+    # The public payload/evidence reader always retains its single-link policy.
+    return _read_checked(path, limit, clock=clock, check_file=_safe, identity=_identity)
 
 
 def fingerprint_file(path, limit=96 * 1024 * 1024):
@@ -114,17 +119,54 @@ def requested_profile(session):
             'createdNs': info.st_ctime_ns}
 
 
+def _font_safe(info):
+    """Read-only fixed OS samples only; no general hard-link exception."""
+    try:
+        require(not getattr(info, 'st_file_attributes', 0) & 0x400, 20)
+        require(stat.S_ISREG(info.st_mode), 20)
+        # Support only the observed domain, not arbitrary link counts.
+        require(type(info.st_nlink) is int and info.st_nlink in (1, 2), 20)
+    except Rejected as error:
+        try:error.pairedFileStats = (getattr(info, 'st_size', None), getattr(info, 'st_nlink', None))
+        except BaseException:pass
+        raise
+
+
+def _font_identity(info):
+    # Both allowed counts must stay identical across all four stat samples.
+    return (*_identity(info), info.st_nlink)
+
+
+def _font_fingerprint(path, fonts_root):
+    """Private fixed-name path join; no caller flag changes the public reader."""
+    path, fonts_root = Path(path), Path(fonts_root)
+    require(fonts_root.is_absolute() and fonts_root.name == 'Fonts'
+            and not str(fonts_root).startswith(('\\\\', '//'))
+            and path.is_absolute() and path.parent == fonts_root
+            and path.name in ('arial.ttf', 'malgun.ttf'), 20)
+    data, info = _read_checked(path, 32 * 1024 * 1024, clock=time.monotonic,
+                              check_file=_font_safe, identity=_font_identity)
+    return {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data),
+            'volume': info.st_dev, 'fileId': info.st_ino, 'modifiedNs': info.st_mtime_ns}
+
+
 def sampled_fonts():
-    """Two fixed installed files; this is not glyph-selection evidence."""
+    """Two system-directory samples, not glyph/authenticity/ACL evidence.
+
+    Aliases can modify the same file. Per-read identity/link-count stability and
+    the existing later content/identity rechecks remain required.
+    """
     import ctypes
     from ctypes import wintypes as W
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    get_windows = kernel.GetWindowsDirectoryW
+    get_windows = kernel.GetSystemWindowsDirectoryW
     get_windows.argtypes, get_windows.restype = [W.LPWSTR, W.UINT], W.UINT
     buffer = ctypes.create_unicode_buffer(32768)
     size = int(get_windows(buffer, len(buffer)))
     require(0 < size < len(buffer), 22)
-    folder = Path(buffer.value) / 'Fonts'
+    windows = Path(buffer.value)
+    require(windows.is_absolute() and not str(windows).startswith(('\\\\', '//')), 22)
+    folder = windows / 'Fonts'
     rows = []
     for code, name in ((1, 'arial.ttf'), (2, 'malgun.ttf')):
         path = folder / name
@@ -133,7 +175,7 @@ def sampled_fonts():
                    'volume': 0, 'fileId': 0, 'modifiedNs': 0}
         else:
             try:
-                row = {'present': True, **fingerprint_file(path, 32 * 1024 * 1024)}
+                row = {'present': True, **_font_fingerprint(path, folder)}
             except BaseException as error:
                 try:error.pairedFontCode = code
                 except BaseException:pass
