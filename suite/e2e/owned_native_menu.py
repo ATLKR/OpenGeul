@@ -2195,6 +2195,7 @@ class NativeMenuProbe(NativeControlProbe):
                                 shellPid=self._identity_scope['shellPid'],
                                 shellCreationTime=self._identity_scope['shellCreationTime'],
                                 officeCreationTime=self._identity_scope['officeCreationTime']))
+                        self._observe_failed_source_focus_bounds(cursor,rect,popup,before)
                     except BaseException:pass
                     raise
                 row=dict(runtimeId=list(runtime),runtimeObservation=observation,pid=pid,kindCode=kind,nativeHwnd=hwnd,
@@ -2223,6 +2224,126 @@ class NativeMenuProbe(NativeControlProbe):
             proof['edges'].append(dict(parentFreshEquals=True,differentFromEarlier=negatives))
             seen.append(cursor);cursor=parent
         raise AssertionError('Source focus did not reach its retained menu')
+    def _observe_failed_source_focus_bounds(self,cursor,rectangle,popup,before):
+        """Numeric structure after rejection; never repair/admit the menu.
+
+        Direct reads use entry/return fences. Existing owned-window helpers keep
+        their inner deadline/timeout checks, not a new per-inner-call pending
+        fence or a guarantee that synchronous COM can be preempted at five seconds.
+        """
+        value=None;saved=None;missing=object();walker=parent=current=None;seen=[]
+        class Halt(Exception):pass
+        try:
+            value=dict(schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,sourceCode=38,guardSiteCode=1,
+                phaseCode=1,statusCode=0,known=0,complete=0,parents=[],point=[],popup={},
+                ownerBefore=0,ownerAfter=0,parentChainEnded=0,remainingMicrosAtEntry=None)
+            self.interop['sourceFocusBoundsStructure']=value
+            scope=getattr(self,'_identity_scope',None);context=getattr(self,'_menu_classification_context',None)
+            refs=getattr(self,'_identity_refs',None);client=getattr(self,'provider_client',None)
+            keys=('version','binding','shellPid','shellCreationTime','officeCreationTime','startedAt','deadline')
+            if (getattr(self,'source_selection',None) is None or getattr(self,'_native_point_profile_version',0)!=4
+                    or getattr(self,'_native_identity_diagnostic',0)!=0 or type(scope) is not dict
+                    or type(context) is not tuple or len(context)!=2 or type(context[0]) is not dict
+                    or set(context[0])!=set(keys) or not callable(context[1])
+                    or any(context[0][key]!=scope.get(key) for key in keys) or type(refs) is not dict
+                    or client is None or getattr(self,'_uia',None) is None or self._uia.iuia is not client
+                    or getattr(self,'_provider_closed',False)):
+                value['statusCode']=4;return
+            deadline=self.deadline;binding=scope.get('binding');continuity=context[1]
+            if (type(binding) is not dict or set(binding)!={'document','parent','child','officePid'}
+                    or any(type(n) is not int or n<=0 for n in binding.values())
+                    or any(type(scope.get(k)) is not int or scope[k]<=0 for k in
+                        ('version','shellPid','shellCreationTime','officeCreationTime'))
+                    or scope['version']!=1 or scope['shellPid']==binding['officePid']
+                    or scope['officeCreationTime']<scope['shellCreationTime']
+                    or any(type(scope.get(k)) not in (int,float) or not math.isfinite(scope[k]) for k in ('startedAt','deadline'))
+                    or not scope['startedAt']<scope['deadline']<=scope['startedAt']+5 or deadline!=scope['deadline']):
+                value['statusCode']=4;return
+            def rect_valid(rect):
+                return (type(rect) is list and len(rect)==4 and all(type(n) is int and -(1<<31)<=n<1<<31 for n in rect)
+                    and rect[0]<rect[2] and rect[1]<rect[3])
+            if not rect_valid(rectangle):value['statusCode']=6;return
+            point=[(rectangle[0]+rectangle[2])//2,(rectangle[1]+rectangle[3])//2]
+            value['point']=point
+            original_scope=copy.deepcopy(scope);original_context=copy.deepcopy(context[0]);original_refs=dict(refs)
+            original_popup=copy.deepcopy(popup);original_before=copy.deepcopy(before)
+            def stop(code):
+                value['statusCode']=code;raise Halt()
+            def budget():
+                if self.deadline!=deadline:stop(2)
+                now=self.clock()
+                remaining=deadline-now if type(now) in (int,float) and math.isfinite(now) else 0
+                if not 0<remaining<=5 or not 1<=int((remaining*1000-1)//4)<=1250:stop(2)
+                if value['remainingMicrosAtEntry'] is None:value['remainingMicrosAtEntry']=int(remaining*1000000)
+                if self._provider_pending():stop(3)
+                current_context=getattr(self,'_menu_classification_context',None)
+                current_refs=getattr(self,'_identity_refs',None)
+                if (getattr(self,'provider_client',None) is not client or getattr(self,'_provider_closed',False)
+                        or getattr(self,'_uia',None) is None or self._uia.iuia is not client
+                        or self._identity_scope is not scope or scope!=original_scope
+                        or type(current_context) is not tuple or len(current_context)!=2
+                        or current_context[0]!=original_context or current_context[1] is not continuity
+                        or type(current_refs) is not dict or set(current_refs)!=set(original_refs)
+                        or any(current_refs[k] is not v for k,v in original_refs.items())
+                        or self._source_focus_popup is not popup or popup!=original_popup):stop(4)
+            def checked(function,*args):
+                budget();result=function(*args);budget();return result
+            def read(code,function,*args):return checked(self._uia_call,code,function,*args)
+            budget()
+            saved=[(name,getattr(self,name,missing)) for name in
+                ('_diagnostic_sink','_observed_call','_last_call_exception','provider_timeout_verified')]
+            self._diagnostic_sink=value;self._observed_call=None
+            value['phaseCode']=2;creator=checked(self._require_provider_creator)
+            if checked(self._source_focus_owned,popup)!=original_before:stop(4)
+            value['ownerBefore']=1
+            value['phaseCode']=3;walker=read(0,lambda:self._uia.iuia.ControlViewWalker)
+            current=cursor;seen.append(cursor)
+            for _ in range(2):
+                value['phaseCode']=4;parent=read(6,walker.GetParentElement,current)
+                if parent is None or not parent:
+                    value['parentChainEnded']=1;break
+                if any(parent is earlier for earlier in seen):stop(6)
+                pid=read(8,lambda:parent.CurrentProcessId)
+                if type(pid) is not int or not 0<pid<2**32:stop(6)
+                if pid!=binding['officePid']:stop(5)
+                kind=read(9,lambda:parent.CurrentControlType)
+                if type(kind) is not int or not 50000<=kind<=50040:stop(6)
+                hwnd=read(7,lambda:parent.CurrentNativeWindowHandle)
+                if hwnd is not None and (type(hwnd) is not int or not -(1<<31)<=hwnd<1<<32):stop(6)
+                box=read(10,lambda:parent.CurrentBoundingRectangle)
+                rect=[getattr(box,key) for key in ('left','top','right','bottom')]
+                if not rect_valid(rect):stop(6)
+                value['parents'].append(dict(pid=pid,kindCode=kind,nativeHwnd=0 if hwnd is None else hwnd&0xffffffff,rectangle=rect))
+                current=parent;seen.append(parent)
+            value['phaseCode']=5;observed=checked(self._popup_exposure,binding,point,rectangle)
+            fixed=('classCode','hwnd','pid','threadId','rootHwnd','style','extendedStyle','foreground')
+            if (type(observed) is not dict or any(type(observed.get(k)) is not int or observed[k]<0 for k in fixed)
+                    or observed['classCode']!=1 or observed['pid']!=binding['officePid']
+                    or observed['hwnd']!=observed['rootHwnd'] or observed['hwnd'] in (0,binding['document'],binding['parent'],binding['child'])
+                    or observed['threadId']!=original_before['childThreadId']
+                    or observed.get('point')!=point or not rect_valid(observed.get('rectangle'))
+                    or type(observed.get('ownerChain')) is not list or not 2<=len(observed['ownerChain'])<=16
+                    or any(type(n) is not int or n<=0 for n in observed['ownerChain'])
+                    or observed['ownerChain'][0]!=observed['hwnd'] or observed['ownerChain'][-1] not in (binding['child'],binding['document'])
+                    or observed.get('ownershipBefore') is not True or observed.get('ownershipAfter') is not True):stop(6)
+            value['popup']={k:observed[k] for k in fixed}
+            value['popup'].update(rectangle=list(observed['rectangle']),point=list(point),ownerChain=list(observed['ownerChain']))
+            value['phaseCode']=6
+            if checked(self._require_provider_creator)!=creator or checked(self._source_focus_owned,popup)!=original_before:stop(4)
+            budget();value.update(statusCode=1,known=1,complete=1,ownerAfter=1)
+        except Halt:pass
+        except BaseException:
+            if value is not None:
+                try:value.update(statusCode=7,known=0,complete=0)
+                except BaseException:pass
+        finally:
+            walker=parent=current=None;seen.clear()
+            if saved is not None:
+                for name,old in saved:
+                    try:
+                        if old is missing:self.__dict__.pop(name,None)
+                        else:setattr(self,name,old)
+                    except BaseException:pass
     def _observe_failed_focus_cursor(self,cursor,depth,primary):
         """Separate numeric facts after the unchanged retained-role rejection.
 
