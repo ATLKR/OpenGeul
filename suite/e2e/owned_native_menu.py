@@ -2144,86 +2144,133 @@ class NativeMenuProbe(NativeControlProbe):
         cursor=self._uia_call(15,self.uia.iuia.GetFocusedElement);assert cursor
         initial=cursor;fresh=self._uia_call(15,self.uia.iuia.GetFocusedElement)
         assert fresh and self._same(cursor,fresh), 'Source focus changed before ancestry observation'
-        proof=dict(schemaVersion=1,scope=copy.deepcopy(self._identity_scope),before=before,after=None,
+        proof=dict(schemaVersion=2,scope=copy.deepcopy(self._identity_scope),before=before,after=None,
             focusFreshEquals=True,focusEndEquals=False,rows=[],edges=[],terminalRole=None)
         result=[];seen=[];unknown=False;self._focus_identity=None
         refs=self._identity_refs
         assert {'file','bar','peer','contrast-edit'}<=set(refs)<=set(IDENTITY_ROLES)
-        for depth in range(32):
-            runtime,observation=self._runtime(cursor)
-            assert observation['versionObserved'] is observation['declaration']['verified'] is True
-            matches={role:self._same(cursor,original) for role,original in refs.items()}
-            roles=[role for role,same in matches.items() if same]
-            assert len(roles)<=1 and (not roles or roles[0]!='contrast-edit'), 'Source focus roles alias'
-            distinct=[self._same(cursor,prior) for prior in seen]
-            assert all(value is False for value in distinct), 'Source focus ancestry cycles'
-            role=roles[0] if roles else None
-            if role is not None:
-                assert role in ('file','bar') or role.startswith('target:'), 'Source focus did not reach its retained menu'
-                row=_getter_call_site(self,9,self._chrome,cursor)
-                assert row['pid']==self._identity_scope['binding']['officePid'] and row['visible'] is row['enabled'] is True
-                result.append(row)
-            else:
-                # Unretained MenuItems are read-only ancestry observations with
-                # either verified empty or bounded signed-int runtime IDs. A valid
-                # ID does not grant a retained role or input target identity.
-                pid=self._uia_call(8,lambda:cursor.CurrentProcessId)
-                assert type(pid) is int and pid==self._identity_scope['binding']['officePid']
-                kind=self._uia_call(9,lambda:cursor.CurrentControlType);assert type(kind) is int and kind==50011
-                offscreen=self._uia_call(11,lambda:cursor.CurrentIsOffscreen)
-                enabled=self._uia_call(12,lambda:cursor.CurrentIsEnabled)
-                assert all(type(value) is bool or type(value) is int and value in (0,1) for value in (offscreen,enabled))
-                assert not bool(offscreen) and bool(enabled)
-                hwnd=self._uia_call(7,lambda:cursor.CurrentNativeWindowHandle)
-                assert hwnd is None or type(hwnd) is int and -(1<<31)<=hwnd<1<<32
-                hwnd=0 if hwnd is None else hwnd&0xffffffff
-                assert hwnd in (0,popup['hwnd'])
-                box=self._uia_call(10,lambda:cursor.CurrentBoundingRectangle)
-                rect=[getattr(box,key) for key in ('left','top','right','bottom')]
-                assert all(type(number) is int and -(1<<31)<=number<1<<31 for number in rect)
-                outer=popup['rectangle']
-                try:
-                    assert outer[0]<=rect[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<rect[3]<=outer[3]
-                except AssertionError:
+        scope=self._identity_scope;context=self._menu_classification_context
+        saved_context=copy.deepcopy(context[0]);saved_popup=copy.deepcopy(popup);saved_refs=dict(refs)
+        client=getattr(self,'provider_client',None);deadline=self.deadline;nested=[];creator_anchor=None
+        def nested_budget():
+            now=self.clock()
+            assert type(now) in (int,float) and math.isfinite(now)
+            assert self.deadline==deadline==scope['deadline'] and scope['startedAt']<=now<deadline
+            assert not self._provider_pending() and not getattr(self,'_provider_closed',False)
+            assert client is not None and self.provider_client is client and self._uia.iuia is client
+            assert self._identity_scope is scope and scope==proof['scope']
+            current=self._menu_classification_context
+            assert current[0]==saved_context and current[1] is context[1]
+            assert self._source_focus_popup is popup and popup==saved_popup
+            assert set(self._identity_refs)==set(saved_refs) and all(self._identity_refs[k] is v for k,v in saved_refs.items())
+            assert self._native_point_profile_version==4 and self._native_identity_diagnostic==0
+            return now
+        def checked(function,*args):
+            nested_budget();value=function(*args);nested_budget();return value
+        def exposure(row):
+            nonlocal creator_anchor
+            creator=checked(self._require_provider_creator)
+            if creator_anchor is None:creator_anchor=creator
+            assert creator==creator_anchor
+            assert checked(self._source_focus_owned,popup)==before
+            rect=row['rectangle'];point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
+            value=checked(self._popup_exposure,scope['binding'],point,rect)
+            _require_source_focus_nested_popup(value,row,scope['binding'],popup,before)
+            assert checked(self._source_focus_owned,popup)==before
+            return value,nested_budget()
+        try:
+            for depth in range(32):
+                containment=None
+                runtime,observation=self._runtime(cursor)
+                assert observation['versionObserved'] is observation['declaration']['verified'] is True
+                matches={role:self._same(cursor,original) for role,original in refs.items()}
+                roles=[role for role,same in matches.items() if same]
+                assert len(roles)<=1 and (not roles or roles[0]!='contrast-edit'), 'Source focus roles alias'
+                distinct=[self._same(cursor,prior) for prior in seen]
+                assert all(value is False for value in distinct), 'Source focus ancestry cycles'
+                role=roles[0] if roles else None
+                if role is not None:
+                    assert role in ('file','bar') or role.startswith('target:'), 'Source focus did not reach its retained menu'
+                    row=_getter_call_site(self,9,self._chrome,cursor)
+                    assert row['pid']==self._identity_scope['binding']['officePid'] and row['visible'] is row['enabled'] is True
+                    result.append(row)
+                else:
+                    # Unretained MenuItems are read-only ancestry observations with
+                    # either verified empty or bounded signed-int runtime IDs. A valid
+                    # ID does not grant a retained role or input target identity.
+                    pid=self._uia_call(8,lambda:cursor.CurrentProcessId)
+                    assert type(pid) is int and pid==self._identity_scope['binding']['officePid']
+                    kind=self._uia_call(9,lambda:cursor.CurrentControlType);assert type(kind) is int and kind==50011
+                    offscreen=self._uia_call(11,lambda:cursor.CurrentIsOffscreen)
+                    enabled=self._uia_call(12,lambda:cursor.CurrentIsEnabled)
+                    assert all(type(value) is bool or type(value) is int and value in (0,1) for value in (offscreen,enabled))
+                    assert not bool(offscreen) and bool(enabled)
+                    hwnd=self._uia_call(7,lambda:cursor.CurrentNativeWindowHandle)
+                    assert hwnd is None or type(hwnd) is int and -(1<<31)<=hwnd<1<<32
+                    hwnd=0 if hwnd is None else hwnd&0xffffffff
+                    box=self._uia_call(10,lambda:cursor.CurrentBoundingRectangle)
+                    rect=[getattr(box,key) for key in ('left','top','right','bottom')]
+                    assert all(type(number) is int and -(1<<31)<=number<1<<31 for number in rect)
+                    assert rect[0]<rect[2] and rect[1]<rect[3]
+                    row=dict(runtimeId=list(runtime),runtimeObservation=observation,pid=pid,kindCode=kind,nativeHwnd=hwnd,
+                        visible=True,enabled=True,rectangle=rect)
+                    outer=popup['rectangle']
                     try:
-                        self.interop['sourceFocusBoundsFailure']=dict(sourceCode=38,guardSiteCode=1,depth=depth,
-                            focus=dict(pid=pid,kindCode=kind,nativeHwnd=hwnd,rectangle=list(rect)),
-                            popup=dict(pid=popup['pid'],hwnd=popup['hwnd'],rectangle=list(outer)),
-                            entryFence=copy.deepcopy(before),
-                            scope=dict(binding={key:self._identity_scope['binding'][key]
-                                for key in ('document','parent','child','officePid')},
-                                shellPid=self._identity_scope['shellPid'],
-                                shellCreationTime=self._identity_scope['shellCreationTime'],
-                                officeCreationTime=self._identity_scope['officeCreationTime']))
-                        self._observe_failed_source_focus_bounds(cursor,rect,popup,before)
-                    except BaseException:pass
-                    raise
-                row=dict(runtimeId=list(runtime),runtimeObservation=observation,pid=pid,kindCode=kind,nativeHwnd=hwnd,
-                    visible=True,enabled=True,rectangle=rect)
-                unknown=True
-            proof['rows'].append(dict(observation=copy.deepcopy(row),retainedRole=role,differentFrom=matches,
-                differentFromPrior=distinct))
-            if role in ('file','bar'):
-                assert self._same(cursor,self.file_element if role=='file' else self.menu_bar_element)
-                self._focus_identity=dict(scope=copy.deepcopy(self._identity_scope),role=role,
-                    fileEquals=role=='file',barEquals=role=='bar',retainedEquals=True)
-                proof['terminalRole']=role
-                fresh=self._uia_call(15,self.uia.iuia.GetFocusedElement)
-                assert fresh and self._same(initial,fresh), 'Source focus changed during ancestry observation'
-                proof['focusEndEquals']=True;proof['after']=self._source_focus_owned(popup)
-                assert proof['after']==proof['before']
-                self._source_focus_proof=proof
-                self._source_focus_branch=2 if unknown else 1
-                return result,True
-            assert depth<31, 'Source focus ancestry exceeded bound'
-            parent=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor);assert parent
-            repeated=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
-            assert repeated and self._same(parent,repeated), 'Source focus parent changed'
-            negatives=[self._same(parent,prior) for prior in (*seen,cursor)]
-            assert all(value is False for value in negatives), 'Source focus parent cycles'
-            proof['edges'].append(dict(parentFreshEquals=True,differentFromEarlier=negatives))
-            seen.append(cursor);cursor=parent
-        raise AssertionError('Source focus did not reach its retained menu')
+                        if outer[0]<=rect[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<rect[3]<=outer[3]:
+                            assert hwnd in (0,popup['hwnd'])
+                            containment=dict(kindCode=0)
+                        else:
+                            captured,at=exposure(row)
+                            containment=dict(kindCode=1,rowIndex=depth,before=captured,after=None,beforeAt=at,afterAt=None)
+                            nested.append((containment,row))
+                    except AssertionError:
+                        try:
+                            self.interop['sourceFocusBoundsFailure']=dict(sourceCode=38,guardSiteCode=1,depth=depth,
+                                focus=dict(pid=pid,kindCode=kind,nativeHwnd=hwnd,rectangle=list(rect)),
+                                popup=dict(pid=popup['pid'],hwnd=popup['hwnd'],rectangle=list(outer)),
+                                entryFence=copy.deepcopy(before),
+                                scope=dict(binding={key:self._identity_scope['binding'][key]
+                                    for key in ('document','parent','child','officePid')},
+                                    shellPid=self._identity_scope['shellPid'],
+                                    shellCreationTime=self._identity_scope['shellCreationTime'],
+                                    officeCreationTime=self._identity_scope['officeCreationTime']))
+                            self._observe_failed_source_focus_bounds(cursor,rect,popup,before)
+                        except BaseException:pass
+                        raise
+                    unknown=True
+                proof['rows'].append(dict(observation=copy.deepcopy(row),retainedRole=role,differentFrom=matches,
+                    differentFromPrior=distinct,containment=containment))
+                if role in ('file','bar'):
+                    assert self._same(cursor,self.file_element if role=='file' else self.menu_bar_element)
+                    proof['terminalRole']=role
+                    for packet,observed in nested:
+                        captured,at=exposure(observed)
+                        assert captured==packet['before'] and packet['beforeAt']<=at
+                        packet.update(after=captured,afterAt=at)
+                    proof['after']=self._source_focus_owned(popup)
+                    assert proof['after']==proof['before']
+                    if nested:assert checked(self._require_provider_creator)==creator_anchor
+                    fresh=self._uia_call(15,self.uia.iuia.GetFocusedElement)
+                    assert fresh and self._same(initial,fresh), 'Source focus changed during ancestry observation'
+                    if nested:nested_budget()
+                    proof['focusEndEquals']=True
+                    self._focus_identity=dict(scope=copy.deepcopy(self._identity_scope),role=role,
+                        fileEquals=role=='file',barEquals=role=='bar',retainedEquals=True)
+                    self._source_focus_proof=proof
+                    self._source_focus_branch=2 if unknown else 1
+                    return result,True
+                assert depth<31, 'Source focus ancestry exceeded bound'
+                parent=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor);assert parent
+                repeated=self._call(self.uia.iuia.ControlViewWalker.GetParentElement,cursor)
+                assert repeated and self._same(parent,repeated), 'Source focus parent changed'
+                negatives=[self._same(parent,prior) for prior in (*seen,cursor)]
+                assert all(value is False for value in negatives), 'Source focus parent cycles'
+                proof['edges'].append(dict(parentFreshEquals=True,differentFromEarlier=negatives))
+                seen.append(cursor);cursor=parent
+            raise AssertionError('Source focus did not reach its retained menu')
+        finally:
+            # A preserved primary traceback must not retain the extra client/refs.
+            client=context=creator_anchor=None;saved_refs.clear();nested.clear()
     def _observe_failed_source_focus_bounds(self,cursor,rectangle,popup,before):
         """Numeric structure after rejection; never repair/admit the menu.
 
@@ -3118,7 +3165,7 @@ def _bind_source_generation(probe,process,suite,binding,shell,engine,handle,rece
     # bound source-selected instance installs the extra expiry admission.
     source_send=getattr(probe,'_source_send',None)
     if source_send is not None:probe.send=source_send
-    receipt['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,focusProtocolVersion=1,admission=summary,generation=generation)
+    receipt['sourceMenu']=dict(schemaVersion=1,pointProfileVersion=4,focusProtocolVersion=2,admission=summary,generation=generation)
     # Each newly generated source snapshot carries the current mandatory focus
     # protocol, including snapshots that need no focused-ancestry walk. Removing
     # the new proof cannot silently select a historical retained-only contract.
@@ -3133,7 +3180,7 @@ def _bind_source_generation(probe,process,suite,binding,shell,engine,handle,rece
         branch=getattr(probe,'_source_focus_branch',0)
         # Any compared focused path must have been produced by the closed walker.
         assert not focused or branch in (1,2)
-        measured['sourceFocus']=dict(protocolVersion=1,admissionSha256=summary['admissionSha256'],
+        measured['sourceFocus']=dict(protocolVersion=2,admissionSha256=summary['admissionSha256'],
             scope=copy.deepcopy(scope),branchCode=branch,proof=copy.deepcopy(probe._source_focus_proof))
         return measured
     probe.snapshot=snapshot
@@ -3146,7 +3193,7 @@ def _require_source_header(value,admission):
     assert type(header) is dict and set(header)=={'schemaVersion','pointProfileVersion','focusProtocolVersion','admission','generation'}
     assert type(header['schemaVersion']) is int and header['schemaVersion']==1
     assert type(header['pointProfileVersion']) is int and header['pointProfileVersion']==4
-    assert type(header['focusProtocolVersion']) is int and header['focusProtocolVersion']==1
+    assert type(header['focusProtocolVersion']) is int and header['focusProtocolVersion']==2
     assert json.dumps(header['admission'],sort_keys=True,separators=(',',':'),ensure_ascii=True)==json.dumps(summary,sort_keys=True,separators=(',',':'),ensure_ascii=True)
     shell,engine=value['originalProcess'],value['originalEngine']
     root=Path(admission.suite_root)
@@ -3169,10 +3216,40 @@ def _require_source_header(value,admission):
     return summary
 
 
+def _require_source_focus_nested_popup(data,row,binding,original,before):
+    """Replay one live exposure; an owned sibling never becomes a container."""
+    fields=set(('classCode hwnd pid threadId rootHwnd style extendedStyle rectangle '
+        'point ownerChain foreground ownershipBefore ownershipAfter').split())
+    assert type(data) is dict and set(data)==fields
+    for key in ('classCode','pid','threadId'):
+        _int(data[key]);assert data[key]<1<<32
+    for key in ('hwnd','rootHwnd','foreground'):
+        _int(data[key]);assert data[key]<1<<64
+    assert data['classCode']==1 and data['ownershipBefore'] is data['ownershipAfter'] is True
+    assert data['pid']==original['pid']==binding['officePid']
+    assert data['threadId']==original['threadId']==before['childThreadId']
+    assert data['hwnd']==data['rootHwnd'] and data['hwnd'] not in (binding['document'],binding['parent'],binding['child'],original['hwnd'])
+    assert data['foreground']==before['foreground'] and data['foreground'] in (binding['document'],original['hwnd'])
+    assert all(type(data[key]) is int and 0<=data[key]<1<<32 for key in ('style','extendedStyle'))
+    assert data['style']&0x80000000 and not data['style']&0x40000000 and data['extendedStyle']&0x80
+    owners=data['ownerChain'];old=original['ownerChain']
+    assert type(old) is list and 2<=len(old)<=16 and old[0]==original['hwnd']
+    assert type(owners) is list and 3<=len(owners)<=16
+    assert all(type(n) is int and 0<n<1<<64 for n in owners) and len(set(owners))==len(owners)
+    assert owners==[data['hwnd']]+old and owners[-1] in (binding['child'],binding['document'])
+    outer=data['rectangle'];rect=row['rectangle']
+    assert all(type(box) is list and len(box)==4 and all(type(n) is int and -(1<<31)<=n<1<<31 for n in box)
+        and box[0]<box[2] and box[1]<box[3] for box in (outer,rect))
+    point=[(rect[0]+rect[2])//2,(rect[1]+rect[3])//2]
+    assert type(data['point']) is list and len(data['point'])==2 and all(type(n) is int for n in data['point']) and data['point']==point
+    assert outer[0]<=rect[0]<=point[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<=point[1]<rect[3]<=outer[3]
+    assert type(row['nativeHwnd']) is int and row['nativeHwnd'] in (0,data['hwnd'])
+
+
 def _require_source_focus_snapshot(snapshot,value,admission):
     marker=snapshot['sourceFocus']
     assert type(marker) is dict and set(marker)=={'protocolVersion','admissionSha256','scope','branchCode','proof'}
-    assert type(marker['protocolVersion']) is int and marker['protocolVersion']==1
+    assert type(marker['protocolVersion']) is int and marker['protocolVersion']==2
     assert marker['admissionSha256']==admission.admission_sha256
     binding=value['binding'];shell_pid=value['shellPid']
     scope=_menu_scope(binding,value['originalProcess'],value['originalEngine'],value['startedAt'],value['deadline'])
@@ -3185,7 +3262,7 @@ def _require_source_focus_snapshot(snapshot,value,admission):
     identity=snapshot['identityProof'];_comparison_proof(identity,binding,shell_pid,'file')
     proof=marker['proof']
     assert type(proof) is dict and set(proof)=={'schemaVersion','scope','before','after','focusFreshEquals','focusEndEquals','rows','edges','terminalRole'}
-    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==1
+    assert type(proof['schemaVersion']) is int and proof['schemaVersion']==2
     assert proof['scope']==identity['scope']==value['elementIdentityScope']
     assert proof['focusFreshEquals'] is proof['focusEndEquals'] is True
     before=proof['before'];popup=snapshot['popup'];assert popup is not None
@@ -3205,7 +3282,7 @@ def _require_source_focus_snapshot(snapshot,value,admission):
     assert type(rows) is list and 0<len(rows)<=32 and type(edges) is list and len(edges)==len(rows)-1
     retained=[];unknown=0;roles=identity['roles']
     for index,item in enumerate(rows):
-        assert type(item) is dict and set(item)=={'observation','retainedRole','differentFrom','differentFromPrior'}
+        assert type(item) is dict and set(item)=={'observation','retainedRole','differentFrom','differentFromPrior','containment'}
         comparisons=item['differentFrom'];role=item['retainedRole'];row=item['observation']
         assert type(comparisons) is dict and set(comparisons)==set(roles)
         assert all(type(same) is bool for same in comparisons.values())
@@ -3233,11 +3310,24 @@ def _require_source_focus_snapshot(snapshot,value,admission):
             assert all(declaration[key] is True for key in ('interfaceKnown','methodUnique','hresultDeclared',
                 'singleOutArgument','outFlag','retvalFlag','exactFlags','safeArrayInt32'))
             assert declaration['hresultValueObserved'] is declaration['safeArrayPointerObserved'] is declaration['safeArrayDimensionsObserved'] is False
-            assert type(row['nativeHwnd']) is int and row['nativeHwnd'] in (0,popup['hwnd'])
             rect=row['rectangle'];assert type(rect) is list and len(rect)==4
             assert all(type(n) is int and -(1<<31)<=n<1<<31 for n in rect)
-            assert outer[0]<=rect[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<rect[3]<=outer[3]
+            container=item['containment']
+            assert type(container) is dict and type(container.get('kindCode')) is int and container['kindCode'] in (0,1)
+            if container['kindCode']==0:
+                assert set(container)=={'kindCode'}
+                assert type(row['nativeHwnd']) is int and row['nativeHwnd'] in (0,popup['hwnd'])
+                assert outer[0]<=rect[0]<rect[2]<=outer[2] and outer[1]<=rect[1]<rect[3]<=outer[3]
+            else:
+                assert set(container)=={'kindCode','rowIndex','before','after','beforeAt','afterAt'}
+                assert type(container['rowIndex']) is int and container['rowIndex']==index
+                assert all(type(container[k]) in (int,float) and math.isfinite(container[k]) for k in ('beforeAt','afterAt'))
+                assert value['startedAt']<=container['beforeAt']<=container['afterAt']<=value['finishedAt']<value['deadline']
+                _require_source_focus_nested_popup(container['before'],row,binding,popup,before)
+                _require_source_focus_nested_popup(container['after'],row,binding,popup,before)
+                assert container['before']==container['after']
         else:
+            assert item['containment'] is None
             assert type(role) is str and (role in ('file','bar') or role.startswith('target:')) and role in roles
             assert all(same is (name==role) for name,same in comparisons.items())
             _element_anchor(row,identity,binding,shell_pid)

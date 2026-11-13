@@ -61,6 +61,7 @@ class SourceFocusAncestryTests(unittest.TestCase):
             def CurrentIsEnabled(self):return 1 if state.mode=='integer-bool' else state.mode!='disabled'
             @property
             def CurrentNativeWindowHandle(self):
+                if state.mode=='outside' and hasattr(state,'focus_hwnd'):return state.focus_hwnd
                 if state.mode=='none-hwnd':return None
                 if state.mode=='bad-hwnd':return 1<<32
                 if state.mode=='boolean-hwnd':return False
@@ -174,6 +175,301 @@ class SourceFocusAncestryTests(unittest.TestCase):
         self.assertFalse(value['success']);self.assertNotIn('inputVerified',value)
         self.assertIsNone(b.probe._source_focus_proof);self.assertEqual(b.probe._source_focus_branch,0)
         self.assertEqual([item for item in b.native.calls if type(item)is tuple and item[0]=='key'],[('key','ALT_F')])
+
+    def nested_fixture(self,hook=None):
+        m,api,process,record,clock,b,state=self.fixture('outside')
+        p=b.probe;state.outside_rectangle=[257,93,464,115]
+        state.nested_hwnd=199;state.nested_pid=88;state.nested_thread=9
+        state.nested_rect=[255,91,464,373];state.nested_owner=99
+        state.original_rect=[0,45,258,427];state.focus_hwnd=0
+        state.original_owner=11;state.visible=True;state.enabled=True;state.cloaked=0;state.iconic=False
+        state.style=0x94000000;state.extended=0x80;state.class_name='SALTMPSUBFRAME'
+        state.pending=False;state.exposures=0;state.events=[]
+        def event(name):
+            state.events.append(name)
+            if hook is not None:hook(name,p,clock,state,b)
+        class NewParent(b.Node):
+            @property
+            def CurrentName(self):raise AssertionError('No unretained parent names')
+            @property
+            def CurrentBoundingRectangle(self):return NS(left=2,top=95,right=258,bottom=117)
+        old_parent=p.uia.iuia.ControlViewWalker.GetParentElement
+        def parent(node):
+            if node.key=='blank':return NewParent('unretained-new')
+            if isinstance(node,NewParent):return b.Node('file')
+            return old_parent(node)
+        p.uia.iuia.ControlViewWalker.GetParentElement=parent
+        client=p._uia.iuia;p.provider_client=client
+        client.ConnectionTimeout=client.TransactionTimeout=1
+        p._provider_creator=dict(threadId=9,mta=True);p._mta_snapshot=lambda:(9,True)
+        p._provider_pending=lambda:state.pending
+        old_window=p.window_snapshot
+        def window(hwnd):
+            event('window')
+            if hwnd==299:
+                return dict(hwnd=hwnd,pid=88,rootHwnd=hwnd,threadId=9,visible=True,enabled=True,
+                    iconic=False,cloaked=0,rectangle=list(state.nested_rect))
+            if hwnd==state.nested_hwnd:
+                return dict(hwnd=hwnd,pid=state.nested_pid,rootHwnd=hwnd,threadId=state.nested_thread,
+                    visible=state.visible,enabled=state.enabled,iconic=state.iconic,cloaked=state.cloaked,
+                    rectangle=list(state.nested_rect))
+            value=old_window(hwnd);value.update(iconic=False,cloaked=0)
+            if hwnd==99:value['rectangle']=list(state.original_rect)
+            return value
+        p.window_snapshot=window
+        def hit(point):
+            if (point.x,point.y)==(360,104):event('hit');return state.nested_hwnd
+            return b.hit(point)
+        p.user.WindowFromPhysicalPoint=hit
+        old_owner=p.user.GetWindow
+        def owner(hwnd,flag):
+            if hwnd==state.nested_hwnd:return state.nested_owner
+            if hwnd==299:return 99
+            if hwnd==99:return state.original_owner
+            return old_owner(hwnd,flag)
+        p.user.GetWindow=owner
+        def class_name(hwnd,buffer,size):buffer.value=state.class_name;return len(buffer.value)
+        p.user.GetClassNameW=class_name
+        def style(hwnd,index):return state.style if index==-16 else state.extended
+        p.user.GetWindowLongW=style
+        exposure=p._popup_exposure
+        def measured(*args):
+            state.exposures+=1;event('exposure-before')
+            value=exposure(*args);event('exposure-return');return value
+        p._popup_exposure=measured
+        return m,api,process,record,clock,b,state
+
+    def nested_action(self,hook=None):
+        m,api,process,record,clock,b,state=self.nested_fixture(hook)
+        import native_menu_source_selection as selected
+        with patch.object(selected.time,'monotonic',clock):
+            value=m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+        return m,value,process,record,clock,b,state
+
+    def test_fresh_direct_nested_popup_preserves_the_complete_retained_focus_path(self):
+        try:m,value,process,record,clock,b,state=self.nested_action()
+        except AssertionError:self.fail('Fresh direct nested popup was rejected before the original keyboard path')
+        self.assertTrue(value['success']);self.assertEqual(value['sourceMenu']['focusProtocolVersion'],2)
+        self.assertEqual([row['shortcut']for row in value['keys']],['ALT_F','DOWN','ESCAPE'])
+        proof=value['keys'][1]['before']['sourceFocus']['proof']
+        self.assertEqual(proof['schemaVersion'],2)
+        self.assertEqual([row['retainedRole']for row in proof['rows']],[None,None,'file'])
+        container=proof['rows'][0]['containment']
+        self.assertEqual(container['kindCode'],1);self.assertEqual(container['rowIndex'],0)
+        self.assertEqual(container['before']['ownerChain'],[199,99,11]);self.assertEqual(container['before'],container['after'])
+        self.assertEqual(proof['rows'][1]['containment'],dict(kindCode=0));self.assertIsNone(proof['rows'][2]['containment'])
+        self.assertNotIn('sourceFocusBoundsFailure',value['uiaInterop']);self.assertNotIn('sourceFocusBoundsStructure',value['uiaInterop'])
+        self.assertIs(m.require_native_menu_action(value,77,11,source_admission=self.prepared.admission),value)
+
+    def test_failed_nested_exposure_releases_the_new_client_reference_with_the_primary_alive(self):
+        def fail(name,p,clock,state,b):
+            if name=='exposure-return' and state.exposures==2:raise AssertionError()
+        m,api,process,record,clock,b,state=self.nested_fixture(fail)
+        original=b.probe.provider_client
+        class Client:
+            def __init__(self,value):self.value=value
+            def __getattr__(self,name):return getattr(self.value,name)
+        client=Client(original);reference=weakref.ref(client)
+        b.probe.provider_client=client;b.probe._uia.iuia=client;del client
+        import native_menu_source_selection as selected
+        primary=trace=None
+        with patch.object(selected.time,'monotonic',clock):
+            try:m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+            except AssertionError as error:primary=error;trace=error.__traceback__
+        self.assertIsNotNone(primary);self.assertIsNotNone(trace);gc.collect()
+        self.assertIsNone(reference())
+        self.assertEqual([x for x in b.native.calls if type(x)is tuple and x[0]=='key'],[('key','ALT_F')])
+
+    def assert_nested_rejected(self,hook):
+        m,api,process,record,clock,b,state=self.nested_fixture(hook)
+        import native_menu_source_selection as selected
+        try:
+            with patch.object(selected.time,'monotonic',clock),self.assertRaises(AssertionError):
+                m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+            self.assertEqual([x for x in b.native.calls if type(x)is tuple and x[0]=='key'],[('key','ALT_F')])
+            self.assertFalse(record['nativeMenuActions'][-1]['success'])
+            self.assertIsNone(b.probe._source_focus_proof)
+            self.assertEqual(b.probe._source_focus_branch,0)
+        finally:
+            # This fixture's synthetic pending callback has no live OS work.
+            state.pending=False;b.probe.close_provider()
+        return record,state
+
+    def test_nested_popup_rejects_siblings_deeper_chains_and_unowned_or_incomplete_windows(self):
+        cases=(('nested_owner',11),('nested_owner',299),('nested_owner',199),('nested_pid',999),
+            ('nested_thread',10),('class_name','OTHER'),('style',0x40000000),('style',0xc0000000),
+            ('extended',0),('visible',False),('enabled',False),('cloaked',1),('iconic',True),
+            ('nested_rect',[300,100,400,110]),('nested_rect',[255,91,463,373]),
+            ('focus_hwnd',99),('focus_hwnd',299))
+        for index,(field,value) in enumerate(cases):
+            with self.subTest(case=index):
+                def change(name,p,clock,state,b):
+                    if name=='exposure-before' and state.exposures==1:setattr(state,field,value)
+                self.assert_nested_rejected(change)
+
+    def test_nested_popup_hwnd_has_its_own_namespace_and_can_be_the_rows_native_handle(self):
+        for hwnd in (199,88):
+            with self.subTest(hwnd=hwnd):
+                def change(name,p,clock,state,b):
+                    if name=='exposure-before':state.nested_hwnd=hwnd
+                m,api,process,record,clock,b,state=self.nested_fixture(change)
+                state.nested_hwnd=state.focus_hwnd=hwnd
+                import native_menu_source_selection as selected
+                with patch.object(selected.time,'monotonic',clock):
+                    value=m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+                row=value['keys'][1]['before']['sourceFocus']['proof']['rows'][0]
+                self.assertEqual(row['observation']['nativeHwnd'],hwnd)
+                self.assertEqual(row['containment']['before']['hwnd'],hwnd)
+                self.assertIs(m.require_native_menu_action(value,77,11,source_admission=self.prepared.admission),value)
+
+    def test_nested_popup_final_refresh_precedes_original_owner_and_fresh_focus_fences(self):
+        changes=(lambda p,state,b:setattr(state,'original_rect',[0,45,257,427]),
+            lambda p,state,b:setattr(state,'original_owner',56),
+            lambda p,state,b:p._identity_scope.update(shellCreationTime=101),
+            lambda p,state,b:setattr(p,'provider_client',NS()),
+            lambda p,state,b:p._identity_refs.update(file=NS()),
+            lambda p,state,b:setattr(p,'_mta_snapshot',lambda:(10,True)),
+            lambda p,state,b:b.native.engine.update(creationTime=201),
+            lambda p,state,b:setattr(p,'foreground',lambda:1234),
+            lambda p,state,b:setattr(p._uia.iuia,'GetFocusedElement',lambda:b.Node('stale')))
+        for index,change in enumerate(changes):
+            with self.subTest(case=index):
+                def mutate(name,p,clock,state,b):
+                    if name=='exposure-return' and state.exposures==2:change(p,state,b)
+                self.assert_nested_rejected(mutate)
+        for field,value in (('nested_rect',[255,91,465,373]),('nested_owner',56),('style',0x80000000)):
+            with self.subTest(field=field):
+                def mutate(name,p,clock,state,b):
+                    if name=='exposure-before' and state.exposures==2:setattr(state,field,value)
+                self.assert_nested_rejected(mutate)
+
+    def test_nested_popup_pending_or_original_deadline_never_allows_the_next_input(self):
+        for boundary in ('exposure-before','exposure-return'):
+            for ordinal in (1,2):
+                for pending in (False,True):
+                    with self.subTest(boundary=boundary,ordinal=ordinal,pending=pending):
+                        def stop(name,p,clock,state,b):
+                            if name==boundary and state.exposures==ordinal:
+                                if pending:state.pending=True
+                                else:clock.now=p.deadline
+                        self.assert_nested_rejected(stop)
+
+    def test_failed_numeric_structure_never_substitutes_for_fresh_nested_popup_proof(self):
+        m,api,process,record,clock,b,state=self.nested_fixture()
+        b.probe.interop['sourceFocusBoundsStructure']=dict(diagnosticOnly=1,acceptanceEligible=0,
+            complete=1,popup=dict(hwnd=199,ownerChain=[199,99,11]))
+        state.nested_owner=11
+        import native_menu_source_selection as selected
+        with patch.object(selected.time,'monotonic',clock),self.assertRaises(AssertionError):
+            m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+        self.assertEqual([x for x in b.native.calls if type(x)is tuple and x[0]=='key'],[('key','ALT_F')])
+        self.assertIsNone(b.probe._source_focus_proof)
+
+    def test_existing_contained_focus_does_not_query_nested_exposure_or_creator(self):
+        m,api,process,record,clock,b,state=self.fixture()
+        def forbidden(*args):raise AssertionError('Contained focus added a nested query')
+        b.probe._popup_exposure=forbidden;b.probe._require_provider_creator=forbidden
+        import native_menu_source_selection as selected
+        with patch.object(selected.time,'monotonic',clock):
+            value=m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+        self.assertTrue(value['success'])
+        self.assertEqual(value['keys'][1]['before']['sourceFocus']['proof']['rows'][0]['containment'],dict(kindCode=0))
+
+    def test_fresh_nested_exposure_does_not_replace_terminal_uia_roles_or_cycle_checks(self):
+        for mode in ('peer','cycle','changing-parent'):
+            with self.subTest(mode=mode):
+                def change(name,p,clock,state,b):
+                    if name=='exposure-return' and state.exposures==1:
+                        reads=[0]
+                        def parent(node):
+                            reads[0]+=1
+                            if mode=='cycle':return node
+                            return b.Node('bar' if mode=='changing-parent' and reads[0]%2==0 else 'peer')
+                        p._uia.iuia.ControlViewWalker.GetParentElement=parent
+                self.assert_nested_rejected(change)
+
+    def test_nested_exposure_api_fault_or_cancellation_preserves_the_same_primary(self):
+        for error_type in (AssertionError,RuntimeError,KeyboardInterrupt,SystemExit):
+            with self.subTest(errorCode=(AssertionError,RuntimeError,KeyboardInterrupt,SystemExit).index(error_type)):
+                primary=error_type()
+                def fail(name,p,clock,state,b):
+                    if name=='exposure-return' and state.exposures==2:raise primary
+                m,api,process,record,clock,b,state=self.nested_fixture(fail)
+                import native_menu_source_selection as selected
+                with patch.object(selected.time,'monotonic',clock),self.assertRaises(error_type)as caught:
+                    m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+                self.assertIs(caught.exception,primary)
+                self.assertEqual([x for x in b.native.calls if type(x)is tuple and x[0]=='key'],[('key','ALT_F')])
+                self.assertIsNone(b.probe._source_focus_proof)
+
+    def test_nonempty_nested_row_runtime_is_observation_without_new_role_or_input_plan(self):
+        m,api,process,record,clock,b,state=self.nested_fixture()
+        runtime=b.Node.GetRuntimeId
+        b.Node.GetRuntimeId=lambda node:[5,-7,321]if node.key=='blank'else runtime(node)
+        import native_menu_source_selection as selected
+        with patch.object(selected.time,'monotonic',clock):
+            value=m.inspect_native_menu(api,process,11,record,'keyboard-escape',probe=b.probe,clock=clock)
+        row=value['keys'][1]['before']['sourceFocus']['proof']['rows'][0]
+        self.assertEqual(row['observation']['runtimeId'],[5,-7,321]);self.assertIsNone(row['retainedRole'])
+        self.assertTrue(all(same is False for same in row['differentFrom'].values()))
+        self.assertEqual([key['shortcut']for key in value['keys']],['ALT_F','DOWN','ESCAPE'])
+        self.assertIs(m.require_native_menu_action(value,77,11,source_admission=self.prepared.admission),value)
+
+    def test_nested_popup_receipt_requires_closed_per_row_versioned_before_after_proof(self):
+        m,value,process,record,clock,b,state=self.nested_action()
+        def proof(p):return p['keys'][1]['before']['sourceFocus']['proof']
+        def container(p):return proof(p)['rows'][0]['containment']
+        changes=(lambda p:p['sourceMenu'].update(focusProtocolVersion=1),
+            lambda p:p['keys'][1]['before']['sourceFocus'].update(protocolVersion=1),
+            lambda p:proof(p).update(schemaVersion=1),
+            lambda p:proof(p)['rows'][0].pop('containment'),
+            lambda p:proof(p)['rows'][0].update(containment=None),
+            lambda p:container(p).update(kindCode=True),
+            lambda p:container(p).update(kindCode=2),
+            lambda p:proof(p)['rows'][0].update(containment=dict(kindCode=0)),
+            lambda p:container(p).update(rowIndex=True),
+            lambda p:container(p).update(rowIndex=1),
+            lambda p:container(p).pop('rowIndex'),
+            lambda p:container(p).update(extra=0),
+            lambda p:container(p).update(after=None),
+            lambda p:container(p).update(beforeAt=float('nan')),
+            lambda p:container(p).update(afterAt=p['deadline']),
+            lambda p:container(p).update(beforeAt=p['startedAt']-1),
+            lambda p:container(p).update(beforeAt=container(p)['afterAt']+0.01),
+            lambda p:proof(p)['rows'][-1].update(containment=dict(kindCode=0)),
+            lambda p:proof(p)['rows'][1].update(containment=copy.deepcopy(container(p))),
+            lambda p:proof(p).update(focusEndEquals=False),
+            lambda p:proof(p)['edges'][0].update(parentFreshEquals=False),
+            lambda p:proof(p)['rows'][0]['differentFrom'].update(file=True),
+            lambda p:proof(p)['rows'][1].update(differentFromPrior=[True]),
+            lambda p:proof(p)['scope'].update(shellCreationTime=101),
+            lambda p:proof(p)['after'].update(ownerChain=[99,56]))
+        for index,change in enumerate(changes):
+            with self.subTest(case=index):
+                altered=copy.deepcopy(value);change(altered)
+                with self.assertRaises((AssertionError,KeyError,TypeError)):
+                    m.require_native_menu_action(altered,77,11,source_admission=self.prepared.admission)
+
+    def test_nested_popup_receipt_rejects_malformed_changed_or_merely_point_contained_exposures(self):
+        m,value,process,record,clock,b,state=self.nested_action()
+        changes=(lambda d:d.update(classCode=True),lambda d:d.update(pid=True),lambda d:d.update(pid=999),
+            lambda d:d.update(threadId=10),lambda d:d.update(hwnd=99),lambda d:d.update(rootHwnd=99),
+            lambda d:d.update(foreground=199),lambda d:d.update(style=0xc0000000),
+            lambda d:d.update(extendedStyle=0),lambda d:d.update(ownershipBefore=1),
+            lambda d:d.update(ownerChain=[199,11]),lambda d:d.update(ownerChain=[199,299,99,11]),
+            lambda d:d.update(ownerChain=[199,99,56]),lambda d:d.update(ownerChain=[199,99,99,11]),
+            lambda d:d.update(ownerChain=[199,99,True]),lambda d:d.update(point=[359,104]),
+            lambda d:d.update(point=[360.,104]),lambda d:d.update(rectangle=[300,100,400,110]),
+            lambda d:d.update(rectangle=[255,91,463,373]),lambda d:d.update(rectangle=[255,91,True,373]),
+            lambda d:d.update(rectangle=[255.,91,464,373]),lambda d:d.pop('classCode'),
+            lambda d:d.update(diagnosticOnly=1))
+        for index,change in enumerate(changes):
+            for edge in ('before','after'):
+                with self.subTest(case=index,edge=edge):
+                    altered=copy.deepcopy(value)
+                    change(altered['keys'][1]['before']['sourceFocus']['proof']['rows'][0]['containment'][edge])
+                    with self.assertRaises((AssertionError,KeyError)):
+                        m.require_native_menu_action(altered,77,11,source_admission=self.prepared.admission)
 
     def bounds_structure_fixture(self,*,parents=2,same_popup=False,hook=None):
         m,api,process,record,clock,b,state=self.fixture('outside')
@@ -436,7 +732,7 @@ class SourceFocusAncestryTests(unittest.TestCase):
 
     def test_source_replay_requires_current_protocol_and_complete_closed_proof(self):
         m,value,process,record,clock,b,state=self.action()
-        self.assertEqual(value['sourceMenu']['focusProtocolVersion'],1)
+        self.assertEqual(value['sourceMenu']['focusProtocolVersion'],2)
         snapshots=[key['before'] for key in value['keys']]
         proven=[row for row in snapshots if row['sourceFocus']['branchCode']==2]
         self.assertTrue(proven)
