@@ -1917,10 +1917,17 @@ class InitialFocusStderrTests(unittest.TestCase):
         guard=queue[:queue.index('private sealed class InitialFocusFlow')]
         self.assertEqual(guard.count(' ||'),6)
         self.assertIn('return value;',source[source.index('private static bool InitialFocusGate('):])
+        attach_guard='            if (!ReferenceEquals(editorFocus, initialFocusOwner) || !attached || IsDisposed || Disposing || !IsHandleCreated) return;\n'
+        ready='            NativeWindowProperties.SetNativeMenuReady(Handle, true);'
+        reviewed=attach_guard+'            // Activation may have finished before the retained focus owner existed.\n            QueueInitialEditorFocus();\n'+ready
+        attach=source.split('private async Task AttachAsync()',1)[1].split('\n    private ',1)[0]
+        self.assertEqual(attach.count(reviewed),1)
+        self.assertEqual(source.count(reviewed),1)
+        canonical=source.replace(reviewed,attach_guard+ready,1)
         for name,count in [('IsHandleCreated',21),('InitialFocusPending',9),('ActiveForm',3),('Visible',2),
                            ('Modal',1),('IsDisposed',22),('Disposing',18),('BeginInvoke',4),
                            ('QueueInitialEditorFocus',3),('TryInitialEditorFocus',2)]:
-            self.assertEqual(len(re.findall(r'\b'+name+r'\b',source)),count,name)
+            self.assertEqual(len(re.findall(r'\b'+name+r'\b',canonical)),count,name)
         self.assertEqual(source.count('worker?.DiagnosticTraceId'),7)
         for forbidden in ('SetForegroundWindow(', 'AttachThreadInput(', 'SetFocus(', 'SetEditorFocus('):
             self.assertNotIn(forbidden,source)

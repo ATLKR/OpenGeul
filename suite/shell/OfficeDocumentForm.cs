@@ -156,6 +156,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
             var initialFocusOwner = editorFocus;
             TryInitialEditorFocus();
             if (!ReferenceEquals(editorFocus, initialFocusOwner) || !attached || IsDisposed || Disposing || !IsHandleCreated) return;
+            // Activation may have finished before the retained focus owner existed.
+            QueueInitialEditorFocus();
             NativeWindowProperties.SetNativeMenuReady(Handle, true);
             PublishNativeMenuStatus(menuSurface);
         }
