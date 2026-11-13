@@ -1302,6 +1302,10 @@ class NativeMenuProbe(NativeControlProbe):
         value=dict(schemaVersion=1,statusCode=0,knownPartial=1,popupQualified=0,
             bindingBefore=0,bindingAfter=0,foregroundSame=0,foreground={},
             ownerStopCode=0,owners=[],engineGui={},stageCode=0)
+        facts=dict(schemaVersion=1,diagnosticOnly=1,acceptanceEligible=0,
+            foregroundClassKnown=0,foregroundClassCode=0,rootClassKnown=0,rootClassCode=0,
+            sourceMatched=0,engineIdentityKnown=0,engineWaitKnown=0,engineWaitResult=0)
+        value['boundaryFacts']=facts
         observation['foregroundMismatch']=value
         def budget():
             if self._provider_pending() or self.deadline-self.clock()<=.05:raise TimeoutError()
@@ -1320,6 +1324,107 @@ class NativeMenuProbe(NativeControlProbe):
             root=int(read(self.user.GetAncestor,hwnd,2) or 0)
             self._required(root,'Diagnostic window root')
             return dict(hwnd=hwnd,pid=int(pid.value),threadId=tid,rootHwnd=root)
+        def classify(hwnd,root_anchor):
+            # This is a fixed-class observation, never foreign application trust.
+            name=None
+            try:
+                assert root_anchor is not None
+                def metadata(handle):
+                    row=window(handle);row['ownerHwnd']=int(read(self.user.GetWindow,handle,4) or 0);return row
+                before=metadata(hwnd)
+                anchor_before=before if hwnd==root else metadata(root)
+                assert before['rootHwnd']==root and anchor_before==root_anchor
+                assert all(type(before[k]) is int and 0<before[k]<1<<64 for k in ('hwnd','rootHwnd'))
+                assert all(type(before[k]) is int and 0<before[k]<1<<32 for k in ('pid','threadId'))
+                assert 0<=before['ownerHwnd']<1<<64
+                name=C.create_unicode_buffer(64)
+                count=read(self.user.GetClassNameW,hwnd,name,len(name))
+                after=metadata(hwnd)
+                anchor_after=after if hwnd==root else metadata(root)
+                assert after==before and anchor_after==root_anchor
+                code=0
+                if type(count) is int and 0<count<len(name) and count==len(name.value):
+                    classes=('SALFRAME','SALTMPSUBFRAME','#32770','ConsoleWindowClass',
+                        'Windows.UI.Core.CoreWindow','ApplicationFrameWindow','Tauri Window')
+                    code=next((i for i,label in enumerate(classes,1) if name.value==label),0)
+                budget();return int(code!=0),code
+            except BaseException:
+                budget();return 0,0
+            finally:name=None
+        def engine_facts():
+            # Borrow only the original source-bound HANDLE. No open, close, image,
+            # exit-code or foreign process query is part of this observation.
+            scope=getattr(self,'_identity_scope',None)
+            generation=getattr(self,'_source_generation_binding',None)
+            source=getattr(self,'_point_source',None)
+            context=getattr(self,'_menu_classification_context',None)
+            selection=getattr(self,'source_selection',None)
+            generation_keys={'document','parent','child','officePid','shellPid','shellCreationTime',
+                'shellHandleValue','engineCreationTime','engineHandleValue'}
+            scope_keys=('version','binding','shellPid','shellCreationTime','officeCreationTime','startedAt','deadline')
+            if (type(scope) is not dict or type(generation) is not dict or set(generation)!=generation_keys
+                    or type(source) is not dict or set(source)!={'shellHandle','engineHandle'}
+                    or type(context) is not tuple or len(context)!=2 or type(context[0]) is not dict
+                    or set(context[0])!=set(scope_keys) or not callable(context[1])
+                    or selection is None or getattr(self,'_source_bound_selection',None) is not selection
+                    or type(getattr(self,'_native_point_profile_version',None)) is not int
+                    or self._native_point_profile_version!=4
+                    or type(getattr(self,'_native_identity_diagnostic',None)) is not int
+                    or self._native_identity_diagnostic!=0):return
+            if (any(type(n) is not int or not 0<n<1<<64 for n in (*generation.values(),*source.values()))
+                    or type(scope.get('binding')) is not dict or set(scope['binding'])!=set(binding)
+                    or any(type(n) is not int or not 0<n<1<<64 for n in scope['binding'].values())
+                    or any(type(scope.get(k)) is not int or scope[k]<=0 for k in
+                        ('version','shellPid','shellCreationTime','officeCreationTime'))
+                    or scope['version']!=1 or scope['shellPid']==binding['officePid']
+                    or generation['officePid']>=1<<32 or generation['shellPid']>=1<<32
+                    or any(type(scope.get(k)) not in (int,float) or not math.isfinite(scope[k]) for k in ('startedAt','deadline'))
+                    or not scope['startedAt']<scope['deadline']<=scope['startedAt']+5
+                    or scope['deadline']!=self.deadline
+                    or any(context[0][key]!=scope.get(key) for key in scope_keys)
+                    or any(type(context[0][key]) is not type(scope.get(key)) for key in scope_keys)
+                    or any(type(n) is not int for n in context[0]['binding'].values())
+                    or scope['binding']!=binding
+                    or any(generation[key]!=binding[key] for key in ('document','parent','child','officePid'))
+                    or (generation['shellPid'],generation['shellCreationTime'],generation['engineCreationTime'])!=
+                        (scope['shellPid'],scope['shellCreationTime'],scope['officeCreationTime'])
+                    or generation['engineCreationTime']<generation['shellCreationTime']
+                    or source!=dict(shellHandle=generation['shellHandleValue'],engineHandle=generation['engineHandleValue'])):return
+            saved_scope=copy.deepcopy(scope);saved_generation=dict(generation);saved_source=dict(source)
+            saved_context=copy.deepcopy(context[0])
+            def same_source():
+                return (self._identity_scope is scope and scope==saved_scope
+                    and all(type(scope.get(k)) is type(saved_scope[k]) for k in scope_keys)
+                    and scope['deadline']==self.deadline
+                    and all(type(scope.get(k)) is int for k in ('version','shellPid','shellCreationTime','officeCreationTime'))
+                    and type(scope.get('binding')) is dict and all(type(n) is int for n in scope['binding'].values())
+                    and self._source_generation_binding is generation and generation==saved_generation
+                    and all(type(n) is int for n in generation.values())
+                    and self._point_source is source and source==saved_source and all(type(n) is int for n in source.values())
+                    and self._menu_classification_context is context
+                    and context[0]==saved_context
+                    and all(type(context[0][key]) is type(saved_context[key]) for key in scope_keys)
+                    and all(type(n) is int for n in context[0]['binding'].values())
+                    and type(self._native_point_profile_version) is int and self._native_point_profile_version==4
+                    and type(self._native_identity_diagnostic) is int and self._native_identity_diagnostic==0
+                    and self.source_selection is selection and self._source_bound_selection is selection)
+            def borrowed(function,*args):
+                assert same_source();result=read(function,*args);assert same_source();return result
+            facts['sourceMatched']=1
+            try:
+                from suite_window_activation import FileTime
+                handle=generation['engineHandleValue']
+                pid=borrowed(self.kernel.GetProcessId,handle)
+                assert type(pid) is int and pid==generation['officePid']
+                times=[FileTime() for _ in range(4)]
+                self._required(borrowed(self.kernel.GetProcessTimes,handle,*(C.byref(t) for t in times)),'Diagnostic engine times')
+                assert (int(times[0].high)<<32)|int(times[0].low)==generation['engineCreationTime']
+                facts['engineIdentityKnown']=1
+                wait=borrowed(self.kernel.WaitForSingleObject,handle,0)
+                if type(wait) is int and wait in (0,258):facts.update(engineWaitKnown=1,engineWaitResult=wait)
+            except BaseException:
+                if not same_source():facts.update(sourceMatched=0,engineIdentityKnown=0,engineWaitKnown=0,engineWaitResult=0)
+                budget()
         try:
             budget();value['stageCode']=1
             assert attachment['valid'] is True and attachment['binding']==binding
@@ -1366,6 +1471,13 @@ class NativeMenuProbe(NativeControlProbe):
             after_root=int(read(self.user.GetAncestor,after,2) or 0) if after else 0
             value['foregroundSame']=int((after,after_root)==(raw,root))
             if not value['foregroundSame']:value['statusCode']=5;return
+            root_rows=[dict(row) for row in value['owners'] if row['hwnd']==root]
+            root_anchor=root_rows[0] if len(root_rows)==1 else None
+            facts['foregroundClassKnown'],facts['foregroundClassCode']=classify(raw,root_anchor)
+            if raw==root:
+                facts['rootClassKnown'],facts['rootClassCode']=facts['foregroundClassKnown'],facts['foregroundClassCode']
+            else:facts['rootClassKnown'],facts['rootClassCode']=classify(root,root_anchor)
+            engine_facts()
             value.update(statusCode=2,knownPartial=int(value['ownerStopCode']!=2))
         except TimeoutError:value['statusCode']=1
         except BaseException:value['statusCode']=4 if value['stageCode'] in (1,5) else 3
