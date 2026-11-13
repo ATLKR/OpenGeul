@@ -282,8 +282,12 @@ public x64 family and default remain the original nine files.
 
 ## Build deadlines and authenticated ingestion
 
-`suite/scripts/build-native-engine.ps1 -Phase Full` runs the complete candidate
-build. The current `.github/workflows/office-native-engine.yml` fixes one UTC
+The producer retained at `suite/scripts/build-native-engine.ps1` targets the
+legacy LibreOffice 26.8.1.1/bf6 source family and accepts a matching explicit
+`-SourceLockPath`. The application locks select separately qualified 26.8.2.2
+engines; each lock's `runtime.sourceBuild.sourceCommit`, `sourceTree` and
+`driverSha256` identify its corresponding producer. The legacy source guard
+remains exact. Its `.github/workflows/office-native-engine.yml` fixes one UTC
 deadline 330 minutes after its first user step. It saves `job-budget.json` under
 `RUNNER_TEMP` before checkout and later copies it into host evidence. The
 360-minute job limit therefore has a nominal 30-minute finalization/upload

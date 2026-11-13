@@ -154,10 +154,11 @@ class SourceMenuSelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.prepared()
         lock.write_bytes(original)
-        msi = ROOT/'suite/config/runtime.lock.json'
-        (self.harness/'suite/config/runtime.lock.json').write_bytes(msi.read_bytes())
+        # Keep this format rejection independent of the active qualified lock.
+        msi = dict(schemaVersion=1, architecture='x64', runtime=dict(format='msi'))
+        (self.harness/'suite/config/runtime.lock.json').write_text(json.dumps(msi))
         (self.archive.parent/'OpenGeul-Office-engine-x64.zip').write_bytes(self.archive.read_bytes())
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, 'requires an external reviewed source runtime lock'):
             self.prepared(architecture='x64')
 
     def test_nonprovider_payload_change_and_same_bytes_replacement_stale_the_epoch(self):

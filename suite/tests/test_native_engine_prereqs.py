@@ -124,10 +124,15 @@ class NativeJavaPrerequisiteTests(unittest.TestCase):
     def test_driver_binds_installed_java_tools_before_large_source_downloads(self):
         jdk, ant = self.jdk(), self.ant()
         work, output = self.root/'owned-work', self.root/'evidence'
+        # Exercise this retained producer with its exact legacy source family.
+        source=json.loads((SOURCE.parents[1]/'tests/fixtures/native-source-tar/source.json').read_text())['sourceArchive']
+        lock=self.root/'legacy-source-pin.json'
+        lock.write_text(json.dumps(dict(schemaVersion=1,runtime=dict(
+            version=source['version'],sourceUrl=source['url'],sourceSha256=source['sha256']))))
         self.ps("function Get-NativeBuildHost { @{isWindows=$true;processMachine=0;nativeMachine=43620} }; "
                 "function Get-SourceRunBinding { @{sourceCommit=('a'*40);sourceTree=('b'*40)} }; "
                 "function Get-AuthenticatedDownload { throw 'stopped before downloading actual sources' }; "
-                f"try {{Invoke-NativeEngineBuild Full {quote(work)} {quote(output)} '' 4 {quote(jdk)} {quote(ant)}}} catch {{}}")
+                f"try {{Invoke-NativeEngineBuild Full {quote(work)} {quote(output)} {quote(lock)} 4 {quote(jdk)} {quote(ant)}}} catch {{}}")
         receipt = json.loads((output/'source-build-receipt.json').read_text())
         self.assertEqual(str(jdk), receipt.get('javaTools', {}).get('jdk', {}).get('home'))
         self.assertEqual(str(ant), receipt.get('javaTools', {}).get('ant', {}).get('home'))

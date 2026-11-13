@@ -281,7 +281,14 @@ foreach($key in @('MAKEFLAGS','MFLAGS','GNUMAKEFLAGS','MAKEOVERRIDES','enable_sy
         self.assertIn('--with-external-tar=/owned/source-cache',data['configure'])
 
     def test_authenticated_source_uses_exact_official_url_size_and_hash(self):
-        lock=SOURCE.parents[1]/'config/runtime.lock.json'
+        # This retained producer has a legacy source contract independent of
+        # the application's separately qualified runtime.
+        fixture=SOURCE.parents[1]/'tests/fixtures/native-source-tar/source.json'
+        source=json.loads(fixture.read_text())['sourceArchive']
+        self.assertEqual('26.8.1.1',source['version'])
+        lock=self.root/'legacy-source-pin.json'
+        lock.write_text(json.dumps(dict(schemaVersion=1,runtime=dict(
+            version=source['version'],sourceUrl=source['url'],sourceSha256=source['sha256']))))
         data=json.loads(self.ps(f"Get-SourcePin {quote(lock)}|ConvertTo-Json -Compress"))
         self.assertEqual(302435508,data['size'])
         self.assertEqual('296ba78e7ab0d381b94c3d6342f4ebb2320ee5097ca58781b9b744cab90b9785',data['sha256'])
