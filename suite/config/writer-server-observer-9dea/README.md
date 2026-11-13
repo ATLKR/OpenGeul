@@ -22,3 +22,11 @@ sourceRun/runAttempt and all source hooks must still match during acquisition.
 IPC1, sink ABI2 and mapping131328 are unchanged. This Full diagnostic build and
 staged input remain ineligible for normal payload or release acceptance; GUI,
 IME, accessibility and original-process retirement require separate observation.
+
+The dedicated atomic bootstrap explicitly discovers one VS17/VS18 installation
+without requiring a particular installed-component metadata ID. It still requires
+native pinned ARM64 clang/lld tools, successful target environment setup, an
+ARM64 output DLL, unchanged source/tool bytes and natural compiler Job closure
+within the original 30 seconds. Other callers retain component-based discovery.
+This capability policy does not establish why the earlier filtered discovery
+output failed its length check or qualify a runtime or GUI result.

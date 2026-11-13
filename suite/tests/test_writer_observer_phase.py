@@ -163,13 +163,15 @@ class AtomicFailureExit(unittest.TestCase):
         self.assertEqual(reads,[])
 
     def test_atomic_child_encodes_failure_but_observe_keeps_its_original_exit_contract(self):
-        m=module()
+        m=module();preparation_calls=[]
         def fail(*args,**kwargs):
+            preparation_calls.append(kwargs)
             raise self.raised(BASE/'suite/e2e/native_compiler_tools.py',61,AssertionError())
         with patch.dict(sys.modules,{'ascii_message_preparation':SimpleNamespace(prepare_observer=fail),
                 'writer_server_observer_runner':SimpleNamespace(main=fail)}):
             atomic=m.child(['atomic','--work','/synthetic/work','--descriptor','/synthetic/descriptor.json'])
             self.assertEqual(atomic,0x5A000000|(1<<20)|(3<<16)|61)
+            self.assertEqual(preparation_calls,[{'architecture':'arm64','discovery_policy':'installed-native'}])
             self.assertEqual(m.child(['observe']),3)
         self.assertEqual(m.child(['unsupported']),3)
 

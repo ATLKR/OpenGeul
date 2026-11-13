@@ -194,7 +194,7 @@ def child(arguments):
             parser=Parser(add_help=False,allow_abbrev=False);parser.add_argument('--work',required=True);parser.add_argument('--descriptor',required=True)
             args=parser.parse_args(arguments[1:])
             from ascii_message_preparation import prepare_observer
-            descriptor=prepare_observer(Path(args.work).resolve(),architecture='arm64')
+            descriptor=prepare_observer(Path(args.work).resolve(),architecture='arm64',discovery_policy='installed-native')
             _save(args.descriptor,descriptor);return 0
         if arguments and arguments[0]=='observe':
             from writer_server_observer_runner import main

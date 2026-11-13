@@ -276,17 +276,21 @@ def _write_json(path, value):
         os.fsync(stream.fileno())
 
 
-def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', budget=None):
+def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', budget=None,
+                     discovery_policy='target-component'):
     budget = _Budget() if budget is None else budget
     assert budget.deadline == budget.started + LIMIT and budget.work_deadline == budget.deadline - CLEANUP_RESERVE, 'Original preparation budget required'
     budget.now()
     architecture = native_arch.require_architecture(architecture)
     assert compiler_mode in ('msvc', 'clang-lld'), 'Unknown observer compiler mode'
+    assert type(discovery_policy) is str and discovery_policy in ('target-component','installed-native'), 'Unknown observer discovery policy'
+    assert discovery_policy != 'installed-native' or compiler_mode == 'clang-lld', 'Installed discovery requires native pinned LLVM tools'
     folder = _absolute(output_folder)
     folder.mkdir(parents=True, exist_ok=False)
     receipt = dict(schemaVersion=1, kind='ascii-message-observer-preparation', architecture=architecture,
                    startedAt=budget.started, deadline=budget.deadline, workDeadline=budget.work_deadline,
                    stages=[], success=False, sourcePins={})
+    if discovery_policy == 'installed-native':receipt['discoveryPolicy'] = discovery_policy
     receipt_path = folder / 'preparation.json'
     try:
         budget.now()
@@ -302,14 +306,21 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', 
         assert vswhere.is_file(), 'Microsoft C++ tools discovery is unavailable'
         component = ('Microsoft.VisualStudio.Component.VC.Tools.ARM64' if architecture == 'arm64'
                      else 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64')
+        # The dedicated Writer bootstrap selects supported installations, then
+        # proves actual native-tool/target-DLL capability below. This does not
+        # claim equivalence to the default installed-component metadata check.
+        selection = (' -version "[17.0,19.0)"' if discovery_policy == 'installed-native'
+                     else ' -requires ' + component)
         discovery = folder / 'discover.cmd'
-        discovery.write_text('@echo off\n"%~1" -utf8 -latest -products * -requires ' + component
+        discovery.write_text('@echo off\n"%~1" -utf8 -latest -products *' + selection
             + ' -property installationPath >"%~2" 2>"%~3"\nexit /b %errorlevel%\n', encoding='ascii')
         _run_stage(runtime, folder, 'discovery', discovery, budget, receipt,
                    [vswhere, folder / 'discovery.stdout', folder / 'discovery.stderr'])
-        raw = (folder / 'discovery.stdout').read_bytes()
-        assert 0 < len(raw) <= 32768, 'Invalid MSVC discovery output'
+        with (folder / 'discovery.stdout').open('rb') as stream:raw = stream.read(32769)
+        assert len(raw) > 0, 'Empty MSVC discovery output'
+        assert len(raw) <= 32768, 'MSVC discovery output exceeds bound'
         found = raw.decode('utf-8-sig').strip()
+        assert found, 'Empty decoded MSVC installation path'
         assert '\n' not in found and '\r' not in found, 'Ambiguous MSVC installation'
         vcvars = Path(found) / 'VC/Auxiliary/Build/vcvarsall.bat'
         assert vcvars.is_file(), 'Native C++ compiler environment unavailable'
@@ -401,6 +412,9 @@ def require_prepared_library(descriptor, *, architecture=None):
         assert set(compiler['before']) == {'clang-cl.exe', 'lld-link.exe'}
         for name, value in compiler['before'].items(): validate_tool_pin(value, selected, name)
         assert receipt['stages'][1]['command'][-2:] == [compiler['before'][name]['path'] for name in ('clang-cl.exe', 'lld-link.exe')]
+    if 'discoveryPolicy' in receipt:
+        assert type(receipt['discoveryPolicy']) is str and receipt['discoveryPolicy'] == 'installed-native'
+        assert 'compiler' in receipt and receipt['compiler']['mode'] == 'clang-lld', 'Installed discovery requires native pinned LLVM tools'
     native_arch.validate_native_architecture(receipt['nativeArchitecture'], selected)
     times = [receipt[key] for key in ('startedAt', 'finishedAt', 'workDeadline', 'deadline')]
     assert all(type(value) in (int, float) and math.isfinite(value) for value in times)
