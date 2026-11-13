@@ -1,0 +1,18 @@
+{
+  "architecture": "arm64",
+  "artifactId": 14018638324,
+  "artifactSha256": "95d3974ebe115cbe9ca510ae727682e9f5d7cd5865e84364d487a1f826ddda6a",
+  "artifactSize": 421497050,
+  "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+  "kind": "writer-server-observer-diagnostic-input",
+  "patchSha256": "7cdab1afebc8c83ea2a50e8b36bff98fda1b5e7de101607e2e41774c41fb4825",
+  "repository": "ATLKR/OpenGeul",
+  "repositoryId": 1405493151,
+  "runAttempt": 1,
+  "runId": 43356064111,
+  "schemaVersion": 1,
+  "sourceCommit": "561fd1e747fe63368184d82f2aa87bc0c031f673",
+  "sourceLockSha256": "5717878d19d95c56383accb8b451271a741539f9752470bfb41cb3de4649beed",
+  "sourceTree": "5d72656932a47b324f96d2b18ef095018e5cefe1",
+  "wireSchemaSha256": "bdf17ce841c6f3a7af900bf27b57bc2a1b871c19962dffe15c9a4349a19ec084"
+}

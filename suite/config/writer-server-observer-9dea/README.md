@@ -14,8 +14,11 @@ and ARM recipe
 These do not replace the normal ARM497 or x64 qualified runtime locks.
 
 A completed, successful native ARM producer run and its actual two-file artifact
-must be externally pinned before acquisition. No diagnostic input lock is supplied
-here. Both rebuilt DLLs, paired marker bytes, typed sourceRun/runAttempt and all
-source hooks must match that external input. IPC1, sink ABI2 and mapping131328 are
-unchanged. A staged diagnostic is always ineligible for normal payload or release
-acceptance; the observation job deliberately ends without qualification.
+are pinned in `../writer-server-observer.arm64.lock.json`. The input comes from
+run43356064111 attempt1, source561fd1e747fe63368184d82f2aa87bc0c031f673.
+Its published outer size/hash, original receipt, paired markers and ARM64 DLL
+bytes were authenticated before adding this lock. Both rebuilt DLLs, typed
+sourceRun/runAttempt and all source hooks must still match during acquisition.
+IPC1, sink ABI2 and mapping131328 are unchanged. This Full diagnostic build and
+staged input remain ineligible for normal payload or release acceptance; GUI,
+IME, accessibility and original-process retirement require separate observation.
