@@ -25,6 +25,11 @@ from ui_contract import (
 from driver import Session
 import equation_dialog_focus
 
+FOCUS_SOURCES = (
+    'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/picture-props-dialog.ts',
+)
+
 
 def frontend_binding():
     helper = equation_dialog_focus.HELPER
@@ -61,6 +66,7 @@ class UiContractTests(unittest.TestCase):
                 self.validate(payload, xml, mode=mode)
 
     def test_equation_dialog_focus_helper_and_preparation_are_bound_for_both_modes(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         for name in ('scripts/equation_dialog_focus.py', 'scripts/prepare_upstream.py'):
             with self.subTest(helper=name):
                 self.assertIn(name, HELPERS)
@@ -73,44 +79,57 @@ class UiContractTests(unittest.TestCase):
                 self.validate(payload, xml, mode=mode)
 
     def test_equation_dialog_focus_matching_input_and_payload_cannot_forge_fixed_source(self):
-        name, = equation_dialog_focus.SOURCE_FILES
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         for mode in ('browser', 'native'):
-            for change in ('missing-proof', 'helper', 'before', 'after', 'missing-source', 'observed-hash', 'coherent-legacy', 'extra-proof', 'extra-source'):
-                payload, xml = evidence(mode); binding = copy.deepcopy(payload['frontendSource'])
-                proof = binding['equationDialogFocus']
-                if change == 'missing-proof': binding.pop('equationDialogFocus')
-                elif change == 'helper':
-                    proof['helperSha256'] = binding['helperSha256'][equation_dialog_focus.HELPER] = '0'*64
-                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
-                elif change == 'missing-source': binding['preparedFiles'].pop(name)
-                elif change == 'observed-hash': binding['preparedFiles'][name] = '0'*64
-                elif change == 'extra-proof': proof['optional'] = True
-                elif change == 'extra-source': binding['preparedFiles']['unreviewed.ts'] = '0'*64
-                else:
-                    proof['afterSha256'][name] = binding['preparedFiles'][name] = equation_dialog_focus.INPUT_SOURCE_SHA256[name]
-                payload['frontendSource'] = copy.deepcopy(binding)
-                with self.subTest(mode=mode, change=change), self.assertRaises(ValueError):
-                    self.validate(payload, xml, mode=mode, source_binding=binding)
+            for source_code, name in enumerate(FOCUS_SOURCES):
+                for change in ('missing-proof', 'helper', 'before', 'after', 'missing-before', 'missing-after', 'missing-source', 'observed-hash', 'coherent-legacy', 'extra-proof', 'extra-source'):
+                    payload, xml = evidence(mode); binding = copy.deepcopy(payload['frontendSource'])
+                    proof = binding['equationDialogFocus']
+                    if change == 'missing-proof': binding.pop('equationDialogFocus')
+                    elif change == 'helper':
+                        proof['helperSha256'] = binding['helperSha256'][equation_dialog_focus.HELPER] = '0'*64
+                    elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                    elif change in ('missing-before', 'missing-after'): proof[change.removeprefix('missing-')+'Sha256'].pop(name)
+                    elif change == 'missing-source': binding['preparedFiles'].pop(name)
+                    elif change == 'observed-hash': binding['preparedFiles'][name] = '0'*64
+                    elif change == 'extra-proof': proof['optional'] = True
+                    elif change == 'extra-source': binding['preparedFiles']['unreviewed.ts'] = '0'*64
+                    else:
+                        proof['afterSha256'][name] = binding['preparedFiles'][name] = equation_dialog_focus.INPUT_SOURCE_SHA256[name]
+                    payload['frontendSource'] = copy.deepcopy(binding)
+                    with self.subTest(mode=mode, sourceCode=source_code, change=change), self.assertRaises(ValueError):
+                        self.validate(payload, xml, mode=mode, source_binding=binding)
 
     def test_equation_dialog_focus_serialized_payload_cannot_replace_actual_input_binding(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         for mode in ('browser', 'native'):
-            payload, xml = evidence(mode)
-            payload['frontendSource']['preparedFiles'][equation_dialog_focus.SOURCE_FILES[0]] = '0'*64
-            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'Equation dialog focus serialized/input'):
-                self.validate(payload, xml, mode=mode)
+            for source_code, name in enumerate(FOCUS_SOURCES):
+                payload, xml = evidence(mode)
+                payload['frontendSource']['preparedFiles'][name] = '0'*64
+                with self.subTest(mode=mode, sourceCode=source_code), self.assertRaisesRegex(ValueError, 'Equation dialog focus serialized/input'):
+                    self.validate(payload, xml, mode=mode)
 
     def test_equation_dialog_focus_actual_input_provenance_is_read_and_revalidated(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         with tempfile.TemporaryDirectory() as directory:
             fixtures = Path(directory); path = fixtures/'advanced-owned/provenance.json'
             path.parent.mkdir()
             binding = frontend_binding()
             path.write_text(json.dumps({'generated':{}, 'frontendSource':binding}))
             self.assertEqual(frontend_source_binding(fixtures, ROOT), binding)
-            changed = copy.deepcopy(binding)
-            name, = equation_dialog_focus.SOURCE_FILES
-            changed['equationDialogFocus']['afterSha256'][name] = changed['preparedFiles'][name] = '0'*64
-            path.write_text(json.dumps({'generated':{}, 'frontendSource':changed}))
-            with self.assertRaises(ValueError): frontend_source_binding(fixtures, ROOT)
+            for source_code, name in enumerate(FOCUS_SOURCES):
+                for change in ('wrong', 'missing', 'legacy'):
+                    changed = copy.deepcopy(binding)
+                    if change == 'missing':
+                        changed['equationDialogFocus']['beforeSha256'].pop(name)
+                        changed['equationDialogFocus']['afterSha256'].pop(name)
+                        changed['preparedFiles'].pop(name)
+                    else:
+                        value = equation_dialog_focus.INPUT_SOURCE_SHA256[name] if change == 'legacy' else '0'*64
+                        changed['equationDialogFocus']['afterSha256'][name] = changed['preparedFiles'][name] = value
+                    path.write_text(json.dumps({'generated':{}, 'frontendSource':changed}))
+                    with self.subTest(sourceCode=source_code, change=change), self.assertRaises(ValueError):
+                        frontend_source_binding(fixtures, ROOT)
             path.write_text(json.dumps({'generated':{}}))
             with self.assertRaisesRegex(ValueError, 'Equation dialog focus'): frontend_source_binding(fixtures, ROOT)
             path.unlink()
@@ -119,18 +138,23 @@ class UiContractTests(unittest.TestCase):
     def test_actual_input_generator_reobserves_equation_source_helper_and_ledger(self):
         # Owned engine double exercises the actual generator's source lifetime;
         # this is a producer contract test, not product/GUI execution evidence.
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         generator = (ROOT/'e2e/generate-advanced-fixtures.mjs').read_bytes()
         helper = (ROOT/equation_dialog_focus.HELPER).read_bytes()
-        for changed in ('source', 'helper', 'ledger'):
-            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+        changes = [('source', name) for name in FOCUS_SOURCES] + [('helper', None), ('ledger', None)]
+        for case_code, (changed, selected) in enumerate(changes):
+            with self.subTest(caseCode=case_code), tempfile.TemporaryDirectory() as directory:
                 folder = Path(directory); prepared = folder/'prepared'
-                source = prepared/equation_dialog_focus.SOURCE_FILES[0]
-                source.parent.mkdir(parents=True)
-                source.write_bytes(b'owned equation source lifetime fixture\n')
+                actual_files = {}
+                for source_code, name in enumerate(FOCUS_SOURCES):
+                    source = prepared/name
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_bytes(('owned dialog source lifetime fixture '+str(source_code)+'\n').encode())
+                    actual_files[name] = hashlib.sha256(source.read_bytes()).hexdigest()
                 target = folder/equation_dialog_focus.HELPER
                 target.parent.mkdir(); target.write_bytes(helper)
                 proof = {'beforeSha256':dict(equation_dialog_focus.INPUT_SOURCE_SHA256),
-                         'afterSha256':{source.relative_to(prepared).as_posix():hashlib.sha256(source.read_bytes()).hexdigest()},
+                         'afterSha256':actual_files,
                          'helperSha256':hashlib.sha256(helper).hexdigest()}
                 ledger = prepared/'.opengeul-overlay.json'
                 ledger.write_text(json.dumps({'equationDialogFocus':proof}))
@@ -140,7 +164,7 @@ class UiContractTests(unittest.TestCase):
                 vendor.mkdir(parents=True)
                 (vendor/'package.json').write_text('{"type":"module"}')
                 (vendor/'rhwp_bg.wasm').write_bytes(b'\0asm\1\0\0\0')
-                mutation = {'source': f"writeFileSync({json.dumps(str(source))},'changed owned source');",
+                mutation = {'source': f"writeFileSync({json.dumps(str(prepared/selected))},'changed owned source');" if selected is not None else '',
                             'helper': f"writeFileSync({json.dumps(str(target))},'changed owned helper');",
                             'ledger': f"writeFileSync({json.dumps(str(ledger))},JSON.stringify({{equationDialogFocus:{{changed:true}}}}));"}[changed]
                 (vendor/'rhwp.js').write_text("import {writeFileSync} from 'node:fs';\n"
@@ -153,7 +177,8 @@ class UiContractTests(unittest.TestCase):
                 result = subprocess.run(['node', str(local), str(prepared), str(output)],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn(b'actual prepared source/helper proof changed during input generation', result.stderr)
+                self.assertTrue(b'actual prepared source/helper proof changed during input generation' in result.stderr,
+                                'Generator did not reject a changed source lifetime')
                 self.assertFalse((output/'provenance.json').exists())
 
     def test_reviewed_baseline_and_fixed_counts(self):

@@ -35,6 +35,11 @@ import picture_line_segment_owner
 import virtual_picture_layout_admission
 import hwpx_persistence_verification
 
+FOCUS_SOURCES = (
+    'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts',
+    'third_party/rhwp/rhwp-studio/src/ui/picture-props-dialog.ts',
+)
+
 FONT_SOURCE_PINS = {
     'apps/studio-host/src/main.ts': '2c5c4ffc4e42ad6234e798cf8a95a877c61b41a4c771e54713d34ea65d263208',
     'apps/studio-host/src/ui/toolbar.ts': '8fc3134d76935de08acd987335d5ef879d5e40558e8f55a3e861fefcb753559c',
@@ -81,15 +86,16 @@ class WindowsComponentsTests(unittest.TestCase):
         self.assertEqual(helpers[budget_helper], digest(ROOT/budget_helper))
 
     def test_equation_dialog_focus_actual_frontend_source_is_explicit(self):
-        name = 'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts'
-        self.assertIn(name, self.helper().SOURCE_FILES)
-        self.assertEqual(equation_dialog_focus.SOURCE_FILES, (name,))
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
+        self.assertTrue(set(FOCUS_SOURCES) <= set(self.helper().SOURCE_FILES))
         config = self.helper().configured()
         self.assertEqual(config['helpers'][equation_dialog_focus.HELPER], digest(ROOT/equation_dialog_focus.HELPER))
         source = self.source()
         _, contract = self.helper().source_contract(source, config)
-        self.assertEqual(contract['preparedFiles'][name], digest(source/name))
-        self.assertEqual(contract['equationDialogFocus']['afterSha256'][name], digest(source/name))
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            with self.subTest(sourceCode=source_code):
+                self.assertEqual(contract['preparedFiles'][name], digest(source/name))
+                self.assertEqual(contract['equationDialogFocus']['afterSha256'][name], digest(source/name))
 
     def test_equation_dialog_focus_missing_proof_cannot_publish_component(self):
         source = self.source()
@@ -101,70 +107,82 @@ class WindowsComponentsTests(unittest.TestCase):
             self.helper().source_contract(source, self.helper().configured())
 
     def test_equation_dialog_focus_capture_rejects_forged_proof_and_actual_source_drift(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         source = self.source(); c = self.helper(); payload = self.payload('editor')
-        name, = equation_dialog_focus.SOURCE_FILES
-        path = source/name; raw = path.read_bytes()
+        raw = {name:(source/name).read_bytes() for name in FOCUS_SOURCES}
         ledger_path = source/'.opengeul-overlay.json'; original = json.loads(ledger_path.read_bytes())
-        for i, change in enumerate(('helper', 'before', 'after', 'extra-proof', 'missing-source', 'source-drift', 'coherent-legacy')):
-            path.write_bytes(raw); ledger = copy.deepcopy(original); proof = ledger['equationDialogFocus']
-            if change == 'helper': proof['helperSha256'] = '0'*64
-            elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
-            elif change == 'extra-proof': proof['optional'] = True
-            elif change == 'missing-source': path.unlink()
-            else:
-                path.write_bytes(b'owned former equation dialog focus source\n')
-                if change == 'coherent-legacy': proof['afterSha256'][name] = digest(path)
-            write_json(ledger_path, ledger)
-            out = self.root/('invalid-equation-focus-'+str(i))
-            with self.subTest(change=change), self.assertRaises((ValueError, FileNotFoundError)):
-                c.capture('editor', payload, source, out, env=self.env)
-            self.assertFalse(out.exists())
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            for i, change in enumerate(('helper', 'before', 'after', 'missing-before', 'missing-after', 'extra-proof', 'missing-source', 'source-drift', 'coherent-legacy')):
+                for restored, data in raw.items():(source/restored).write_bytes(data)
+                path = source/name; ledger = copy.deepcopy(original); proof = ledger['equationDialogFocus']
+                if change == 'helper': proof['helperSha256'] = '0'*64
+                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                elif change in ('missing-before', 'missing-after'): proof[change.removeprefix('missing-')+'Sha256'].pop(name)
+                elif change == 'extra-proof': proof['optional'] = True
+                elif change == 'missing-source': path.unlink()
+                else:
+                    path.write_bytes(b'owned former dialog focus source\n')
+                    if change == 'coherent-legacy': proof['afterSha256'][name] = digest(path)
+                write_json(ledger_path, ledger)
+                out = self.root/('invalid-equation-focus-'+str(source_code)+'-'+str(i))
+                with self.subTest(sourceCode=source_code, change=change), self.assertRaises((ValueError, FileNotFoundError)):
+                    c.capture('editor', payload, source, out, env=self.env)
+                self.assertFalse(out.exists())
 
     def test_equation_dialog_focus_reobserves_actual_frontend_after_core_capture(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         source = self.source(); c = self.helper(); actual_tree = c.tree
-        name, = equation_dialog_focus.SOURCE_FILES
-        def changed_frontend(folder, cap):
-            if folder == source/'third_party/rhwp/src':
-                path = source/name; path.write_bytes(path.read_bytes()+b'// changed during actual source capture\n')
-            return actual_tree(folder, cap)
-        out = self.root/'changed-equation-focus-source'
-        with patch.object(c, 'tree', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
-            c.capture('editor', self.payload('editor'), source, out, env=self.env)
-        self.assertFalse(out.exists())
+        payload = self.payload('editor')
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            path = source/name; raw = path.read_bytes()
+            def changed_frontend(folder, cap):
+                if folder == source/'third_party/rhwp/src':
+                    path.write_bytes(path.read_bytes()+b'// changed during actual source capture\n')
+                return actual_tree(folder, cap)
+            out = self.root/('changed-equation-focus-source-'+str(source_code))
+            with self.subTest(sourceCode=source_code), patch.object(c, 'tree', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+            path.write_bytes(raw)
 
     def test_equation_dialog_focus_reobserves_actual_frontend_after_vendor_validation(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         source = self.source(); c = self.helper(); actual_read = c.read_json
-        name, = equation_dialog_focus.SOURCE_FILES
+        payload = self.payload('editor')
         provenance = source/'apps/studio-host/vendor/rhwp-core/PROVENANCE.json'
-        def changed_frontend(path):
-            value = actual_read(path)
-            if path == provenance:
-                current = source/name
-                current.write_bytes(current.read_bytes()+b'// changed during final vendor validation\n')
-            return value
-        out = self.root/'changed-equation-focus-final-source'
-        with patch.object(c, 'read_json', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
-            c.capture('editor', self.payload('editor'), source, out, env=self.env)
-        self.assertFalse(out.exists())
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            current = source/name; raw = current.read_bytes()
+            def changed_frontend(path):
+                value = actual_read(path)
+                if path == provenance:
+                    current.write_bytes(current.read_bytes()+b'// changed during final vendor validation\n')
+                return value
+            out = self.root/('changed-equation-focus-final-source-'+str(source_code))
+            with self.subTest(sourceCode=source_code), patch.object(c, 'read_json', side_effect=changed_frontend), self.assertRaisesRegex(ValueError, 'Equation dialog focus current source changed'):
+                c.capture('editor', payload, source, out, env=self.env)
+            self.assertFalse(out.exists())
+            current.write_bytes(raw)
 
     def test_matching_component_pair_requires_equation_focus_fixed_proof_and_observation(self):
+        self.assertEqual(equation_dialog_focus.SOURCE_FILES, FOCUS_SOURCES)
         folders = self.pair()
         original = {role:json.loads((folder/'provenance.json').read_bytes()) for role, folder in folders.items()}
-        name, = equation_dialog_focus.SOURCE_FILES
-        for change in ('missing-proof', 'missing-source', 'helper', 'before', 'after', 'observed-hash', 'coherent-legacy', 'extra-proof'):
-            for role, folder in folders.items():
-                value = copy.deepcopy(original[role]); source = value['source']; proof = source['equationDialogFocus']
-                if change == 'missing-proof': source.pop('equationDialogFocus')
-                elif change == 'missing-source': source['preparedFiles'].pop(name)
-                elif change == 'helper': proof['helperSha256'] = '0'*64
-                elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
-                elif change == 'observed-hash': source['preparedFiles'][name] = '0'*64
-                elif change == 'extra-proof': proof['optional'] = True
-                else:
-                    legacy = equation_dialog_focus.INPUT_SOURCE_SHA256[name]
-                    proof['afterSha256'][name] = source['preparedFiles'][name] = legacy
-                write_json(folder/'provenance.json', value)
-            with self.subTest(change=change): self.assert_rejected_without_outputs(folders)
+        for source_code, name in enumerate(FOCUS_SOURCES):
+            for change in ('missing-proof', 'missing-source', 'helper', 'before', 'after', 'missing-before', 'missing-after', 'observed-hash', 'coherent-legacy', 'extra-proof'):
+                for role, folder in folders.items():
+                    value = copy.deepcopy(original[role]); source = value['source']; proof = source['equationDialogFocus']
+                    if change == 'missing-proof': source.pop('equationDialogFocus')
+                    elif change == 'missing-source': source['preparedFiles'].pop(name)
+                    elif change == 'helper': proof['helperSha256'] = '0'*64
+                    elif change in ('before', 'after'): proof[change+'Sha256'][name] = '0'*64
+                    elif change in ('missing-before', 'missing-after'): proof[change.removeprefix('missing-')+'Sha256'].pop(name)
+                    elif change == 'observed-hash': source['preparedFiles'][name] = '0'*64
+                    elif change == 'extra-proof': proof['optional'] = True
+                    else:
+                        legacy = equation_dialog_focus.INPUT_SOURCE_SHA256[name]
+                        proof['afterSha256'][name] = source['preparedFiles'][name] = legacy
+                    write_json(folder/'provenance.json', value)
+                with self.subTest(sourceCode=source_code, change=change): self.assert_rejected_without_outputs(folders)
 
     def test_rehashed_public_ledger_cannot_omit_or_replace_equation_focus_proof(self):
         folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
