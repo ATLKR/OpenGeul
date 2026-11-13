@@ -4,6 +4,9 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
+import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -13,7 +16,23 @@ from suite.tests.test_payload import pe
 
 ROOT=Path(__file__).resolve().parents[2]
 FAMILY='writer-server-observer-diagnostic'
-CORE='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+CORE='9dea406ab7695df6325b11b0e19fdca8db4b7276'
+
+
+def normal_source_fixture():
+    """Synthetic pre-overlay hooks from the current pure source-profile fixture.
+
+    This is not the normal ARM497 producer owner or runtime qualification.
+    The diagnostic producer uses the independently pinned254 raw manifest.
+    """
+    from suite.tests import test_prepare_source_profile_v2 as profiles
+    proof=profiles.PrepareSourceProfileV2Tests().source_only('arm64')
+    keys=('sourcePin','sourcePortManifestSha256','nativeTargetsSha256','sourceRecipeProof',
+        'sourceHooks','winAccFocusOrderSourcePatch','flexFatalCompatibilitySourcePatch')
+    proof={key:proof[key] for key in keys}
+    proof['sourcePortManifestSha256']='37fba766084127e2fdf2f51c3108290a39ddfdaa895af03c68d3cfc8b35d2020'
+    proof['sourceRecipeProof']['manifestSha256']=proof['sourcePortManifestSha256']
+    return proof
 
 
 def load(name,path):
@@ -35,7 +54,7 @@ class WriterStageTests(unittest.TestCase):
         self.receipt=self.base.parent/'writer-server-observer-source-build-receipt.json'
         self.artifact=self.base.parent/'github-artifact.zip'
         self.source_lock=self.base.parent/'source-lock.json';self.lock_file=self.base.parent/'writer-input.json'
-        package=ROOT/'suite/engine-build/writer-server-observer-diagnostic'
+        package=ROOT/'suite/config/writer-server-observer-9dea'
         self.assertTrue(package.is_dir(),'Writer source package is missing from this checkout')
         self.source_lock.write_bytes((package/'source-lock.json').read_bytes());self.source=json.loads(self.source_lock.read_bytes())
         self.entries=dict(self.old.entries);self.entries.pop(self.old.m.MARKER)
@@ -43,7 +62,7 @@ class WriterStageTests(unittest.TestCase):
         for path in ('program/UAccCOM.dll','program/winaccessibility.dll'):
             self.entries[path]=pe(0xaa64,dll=True)
             binaries.append(dict(path=path,bytes=len(self.entries[path]),sha256=sha(self.entries[path]),machine=0xaa64))
-        self.marker=dict(schemaVersion=1,family=FAMILY,kind=FAMILY,sourceCommit='b'*40,sourceTree='d'*40,coreCommit=CORE,
+        self.marker=dict(schemaVersion=1,family=FAMILY,kind=FAMILY,sourceCommit='b'*40,sourceTree='d'*40,sourceRun=123,runAttempt=1,coreCommit=CORE,
             sourceLockSha256=sha(self.source_lock.read_bytes()),patchSha256=self.source['patch']['sha256'],wireSchema=self.source['wireSchema'],
             descriptorSchemaVersion=1,mappingBytes=131328,ipcVersion=1,sinkAbiVersion=2,requiredRebuiltLibraries=['UAccCOM','winaccessibility'],
             binaries=binaries,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False)
@@ -63,9 +82,10 @@ class WriterStageTests(unittest.TestCase):
         self.proof=dict(schemaVersion=1,kind='native-office-engine-writer-server-observer-diagnostic',phase='Full',architecture='arm64',stage='complete',
             status='native-engine-writer-server-observer-diagnostic-built',passed=True,fullEngineQualified=False,acceptanceEligible=False,guiVerified=False,
             sourceCommit='b'*40,sourceTree='d'*40,sourceRun=123,runAttempt=1,sourceLockSha256=self.marker['sourceLockSha256'],
-            sourcePin=dict(coreCommit=CORE),host=dict(isWindows=True,processMachine=0,nativeMachine=0xaa64),
+            host=dict(isWindows=True,processMachine=0,nativeMachine=0xaa64),
             writerServerObserverSourceHooks=self.hooks,writerServerObserverRuntime=self.marker,
             artifact=dict(path='producer-owned',size=self.archive.stat().st_size,sha256=sha(self.archive.read_bytes())))
+        self.proof.update(normal_source_fixture())
         self.receipt.write_text(json.dumps(self.proof))
         self.repack_outer()
 
@@ -108,6 +128,77 @@ class WriterStageTests(unittest.TestCase):
         self.assertFalse(ready['acceptanceEligible']);self.assertFalse(ready['fullEngineQualified']);self.assertFalse(ready['guiVerified'])
         with self.assertRaisesRegex(ValueError,'Writer observer diagnostic'):
             self.m.payload.verify_payload(self.output,json.loads((self.output/'suite-inventory.json').read_bytes()))
+
+    def test_new_family_requires_typed_marker_run_and_attempt_and_no_legacy_core(self):
+        original=copy.deepcopy(self.marker)
+        for key,value in [('sourceRun',None),('sourceRun',True),('sourceRun',124),('runAttempt',True),
+                ('runAttempt',2),('coreCommit','bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'),('extra',False)]:
+            with self.subTest(field=key):
+                self.marker=copy.deepcopy(original)
+                if value is None:self.marker.pop(key)
+                else:self.marker[key]=value
+                self.pack()
+                with self.assertRaises(ValueError):self.stage()
+                self.assertFalse(self.output.exists())
+
+    def test_preoverlay_recipe_is_exact_diagnostic_source_only_not_normal497_authority(self):
+        self.m._normal_source_recipe(self.proof)
+        from suite import prepare
+        with self.assertRaises(ValueError):prepare._source_new_recipe(self.proof,'arm64')
+        original=copy.deepcopy(self.proof)
+        changes=[lambda p:p.pop('sourceRecipeProof'),
+            lambda p:p['sourceRecipeProof'].update(manifestSha256='9bf'+'0'*61),
+            lambda p:p['sourceRecipeProof'].update(recipeSha256='0'*64),
+            lambda p:p['sourceRecipeProof']['hookOrder'].reverse(),
+            lambda p:p['sourceRecipeProof']['armGuardedSources'][0].update(unchanged=0),
+            lambda p:p['sourceRecipeProof'].update(fullEngineQualified=True),
+            lambda p:p['sourceHooks']['dotnetProjectGraph']['sources'][0].update(afterSha256='0'*64),
+            lambda p:p['sourceHooks']['moduleBootstrap']['evidence'].update(original='C:\\other\\original-unpack-sources'),
+            lambda p:p['winAccFocusOrderSourcePatch'].update(beforeFocusBaseline='legacy-bf6'),
+            lambda p:p['flexFatalCompatibilitySourcePatch'].update(nativeBuildVerified=True),
+            lambda p:p['sourcePin'].update(coreCommit='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1')]
+        for index,change in enumerate(changes):
+            with self.subTest(change=index):
+                proof=copy.deepcopy(original);change(proof)
+                with self.assertRaises(ValueError):self.m._normal_source_recipe(proof)
+
+    def test_source_metadata_has_one_raw_pin_and_cannot_select_another_family(self):
+        self.assertEqual(sha(self.source_lock.read_bytes()),self.m.SOURCE_LOCK_SHA256)
+        self.assertEqual(self.source['targets'],['windows-arm64'])
+        source=copy.deepcopy(self.source);source['targets'].append('windows-x64')
+        self.source_lock.write_text(json.dumps(source))
+        self.marker['sourceLockSha256']=sha(self.source_lock.read_bytes());self.pack()
+        with self.assertRaises(ValueError):self.stage()
+        self.assertFalse(self.output.exists())
+
+    def test_preoverlay_check_preserves_original_exception_identity(self):
+        for kind in (OSError,TypeError,KeyError,KeyboardInterrupt,SystemExit):
+            error=kind()
+            def check():raise error
+            with self.subTest(kind=kind.__name__),self.assertRaises(kind) as caught:
+                self.m._normal_source_recipe(self.proof,check)
+            self.assertIs(caught.exception,error)
+
+    def test_new_stage_is_rejected_by_normal_menu_ime_and_launch_before_input(self):
+        self.stage()
+        layout=self.base.parent/'normal-callers';e2e=layout/'suite/e2e';e2e.mkdir(parents=True)
+        shutil.copyfile(ROOT/'suite/payload.py',layout/'suite/payload.py')
+        for name in ('windows_smoke.py','korean_ime_smoke.py','native_menu_smoke.py',
+                'native_window_evidence.py','ascii_editor_input.py'):
+            shutil.copyfile(ROOT/'suite/e2e'/name,e2e/name)
+        with patch.object(sys,'path',[str(e2e),str(ROOT/'suite/e2e'),*sys.path]):
+            launcher=load('writer9_normal_launcher',e2e/'windows_smoke.py')
+            with patch.object(launcher,'prepare_launch_pointer',side_effect=AssertionError('Pointer reached')),\
+                    patch.object(launcher.subprocess,'Popen',side_effect=AssertionError('Launch reached')):
+                with self.assertRaisesRegex(ValueError,'Writer observer diagnostic'):
+                    launcher.launch_suite(['synthetic.exe'],self.output,self.base.parent/'normal-output','synthetic')
+            with patch.dict(sys.modules,{'windows_smoke':launcher}):
+                modules=[launcher,load('writer9_normal_ime',e2e/'korean_ime_smoke.py'),load('writer9_normal_menu',e2e/'native_menu_smoke.py')]
+                for module in modules:
+                    args=['--suite',str(self.output)]
+                    if module is not modules[1]:args+=['--fixtures',str(self.base.parent/'fixtures'),'--output',str(self.base.parent/'normal-output')]
+                    with self.subTest(caller=module.__name__),patch.object(module,'os',SimpleNamespace(name='nt')):
+                        with self.assertRaisesRegex(ValueError,'Writer observer diagnostic'):module.main(args)
 
     def test_unpinned_or_changed_outer_inner_receipt_and_lock_are_rejected(self):
         for target in (self.artifact,self.archive,self.receipt,self.source_lock):

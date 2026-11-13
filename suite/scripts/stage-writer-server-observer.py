@@ -19,18 +19,22 @@ import tempfile
 import zipfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-from suite import payload
+from suite import payload, prepare
 from suite.runtime_branding import brand_runtime
 
 FAMILY='writer-server-observer-diagnostic'
-CORE='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+CORE='9dea406ab7695df6325b11b0e19fdca8db4b7276'
+SOURCE_LOCK_SHA256='5717878d19d95c56383accb8b451271a741539f9752470bfb41cb3de4649beed'
+NORMAL_MANIFEST_SHA256='37fba766084127e2fdf2f51c3108290a39ddfdaa895af03c68d3cfc8b35d2020'
+NORMAL_RECIPE_SHA256='9b10511f31066a5966014c6357268b4d1dcfa3ffa24eb9c97c8bc0c05dbef0fe'
+NORMAL_TARGETS_SHA256='ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc'
 MARKER='program/opengeul-writer-server-observer-diagnostic.json'
 OVERLAY='writer-server-observer-diagnostic.json'
 RECEIPT='writer-server-observer-source-build-receipt.json'
 SOURCE_LOCK='writer-server-observer-source-lock.json'
 ENGINE='OpenGeul-Office-engine-arm64-writer-server-observer.zip'
 BINARIES=('program/UAccCOM.dll','program/winaccessibility.dll')
-MARKER_KEYS=frozenset('schemaVersion family kind sourceCommit sourceTree coreCommit sourceLockSha256 patchSha256 wireSchema descriptorSchemaVersion mappingBytes ipcVersion sinkAbiVersion requiredRebuiltLibraries binaries fullEngineQualified acceptanceEligible guiVerified'.split())
+MARKER_KEYS=frozenset('schemaVersion family kind sourceCommit sourceTree sourceRun runAttempt coreCommit sourceLockSha256 patchSha256 wireSchema descriptorSchemaVersion mappingBytes ipcVersion sinkAbiVersion requiredRebuiltLibraries binaries fullEngineQualified acceptanceEligible guiVerified'.split())
 MAX_ARCHIVE_BYTES=8*1024**3
 MAX_EXTRACTED_BYTES=8*1024**3
 MAX_MEMBER_BYTES=1024**3
@@ -94,7 +98,8 @@ def _lock(path,source_lock,check):
     if (type(lock) is not dict or set(lock)!=LOCK_KEYS or type(lock['schemaVersion']) is not int or lock['schemaVersion']!=1
             or lock['kind']!='writer-server-observer-diagnostic-input' or lock['architecture']!='arm64'
             or lock['repository']!='ATLKR/OpenGeul' or type(lock['repositoryId']) is not int or lock['repositoryId']!=1405493151
-            or lock['coreCommit']!=CORE or not all(_commit(lock[k]) for k in ('sourceCommit','sourceTree'))
+            or lock['coreCommit']!=CORE or lock['sourceLockSha256']!=SOURCE_LOCK_SHA256
+            or not all(_commit(lock[k]) for k in ('sourceCommit','sourceTree'))
             or not all(_positive(lock[k],2**63-1) for k in ('runId','artifactId'))
             or type(lock['runAttempt']) is not int or lock['runAttempt']!=1
             or not _positive(lock['artifactSize'],MAX_ARCHIVE_BYTES+9437184)
@@ -105,7 +110,7 @@ def _lock(path,source_lock,check):
     if hashlib.sha256(source_raw).hexdigest()!=lock['sourceLockSha256']:raise ValueError('Writer source lock hash differs')
     source=payload._json_bytes(source_raw,source_lock.name)
     if (source.get('schemaVersion')!=1 or type(source['schemaVersion']) is not int or source.get('kind')!='writer-server-observer-diagnostic-source'
-            or source.get('coreCommit')!=CORE or 'windows-arm64' not in source.get('targets',[])
+            or source.get('coreCommit')!=CORE or source.get('targets')!=['windows-arm64']
             or source.get('requiredRebuiltLibraries')!=['UAccCOM','winaccessibility']
             or any(source.get(k) is not False for k in ('fullEngineQualified','acceptanceEligible','guiVerified'))
             or any(type(source.get(k)) is not int or source[k]!=value for k,value in [('ipcVersion',1),('sinkAbiVersion',2),('mappingBytes',131328),('descriptorSchemaVersion',1)])
@@ -115,7 +120,62 @@ def _lock(path,source_lock,check):
     return lock,source,source_raw
 
 
-def _receipt(proof,lock,source):
+def _normal_source_recipe(proof,check=None):
+    """Replay only the fixed254 pre-overlay source proof, never ARM497 ownership.
+
+    Reuse the normal pure hook validators; the ordinary Full/qualified contract
+    and its exact ARM497 producer binding remain untouched.
+    """
+    _check(check)
+    manifest_path=Path(prepare.__file__).resolve().parent/'engine-build/source-build.26.8.2.2.json'
+    if payload._kind(manifest_path).st_nlink!=1:raise ValueError('Writer source manifest must be unaliased')
+    raw=_raw(manifest_path,1024*1024,check)
+    if hashlib.sha256(raw).hexdigest()!=NORMAL_MANIFEST_SHA256:raise ValueError('Writer diagnostic source manifest differs')
+    try:
+        if (type(proof) is not dict or prepare.contract_for_source_pin(proof.get('sourcePin')) is not prepare.NEW
+                or proof.get('sourcePortManifestSha256')!=NORMAL_MANIFEST_SHA256
+                or proof.get('nativeTargetsSha256')!=NORMAL_TARGETS_SHA256):
+            raise ValueError('Writer diagnostic pre-overlay source tuple differs')
+        manifest=payload._json_bytes(raw,manifest_path.name);plan=prepare._source_new_plan(manifest,'arm64')
+        if hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':')).encode()).hexdigest()!=NORMAL_RECIPE_SHA256:
+            raise ValueError('Writer diagnostic canonical source plan differs')
+        expected=prepare.new_source_only_expectations(proof['sourcePin'],'arm64')
+        recipe=dict(expected.recipe_fields)
+        recipe.update(manifestSha256=NORMAL_MANIFEST_SHA256,recipeSha256=NORMAL_RECIPE_SHA256,
+            hookOrder=['arm64Full','winAccFocusOrder','flexFatalCompatibility','dotnetProjectGraph'],armGuardedSources=[dict(path=row['path'],beforeSha256=row['beforeSha256'],
+                sha256=row['afterSha256'],unchanged=False) for row in plan['armGuardedSources']])
+        if not _same(proof.get('sourceRecipeProof'),recipe):raise ValueError('Writer diagnostic pre-overlay recipe differs')
+        hooks=proof.get('sourceHooks');bootstrap=manifest['moduleBootstrap']
+        fields=dict(path=bootstrap['path'],beforeSha256=bootstrap['sha256'],afterSha256=bootstrap['afterSha256'])
+        if (type(hooks) is not dict or type(hooks.get('moduleBootstrap')) is not dict
+                or set(hooks['moduleBootstrap'])!=set(fields)|{'evidence'}
+                or not _same({key:hooks['moduleBootstrap'][key] for key in fields},fields)):
+            raise ValueError('Writer diagnostic bootstrap differs')
+        parent=prepare._source_new_evidence(hooks['moduleBootstrap']['evidence'],
+            dict(original='original-unpack-sources',effective='effective-unpack-sources'))
+        pin=manifest['winAccFocusOrder'];fields=dict(expected.winacc_fields)
+        fields['sourceFiles']=[dict(path=row['path'],beforeBytes=row['size'],
+            afterBytes=pin['afterBytes'] if row['path']==pin['path'] else row['size'],beforeSha256=row['sha256'],
+            afterSha256=pin['afterSha256'] if row['path']==pin['path'] else row['sha256']) for row in pin['sources']]
+        patch=proof.get('winAccFocusOrderSourcePatch')
+        if (type(patch) is not dict or set(patch)!=set(fields)|{'evidence'}
+                or not _same({key:patch[key] for key in fields},fields)):
+            raise ValueError('Writer diagnostic WinAcc pre-overlay differs')
+        prepare._source_new_evidence(patch['evidence'],dict(original='original-AccObjectWinManager.cxx',
+            effective='effective-AccObjectWinManager.cxx',patch='winacc-focus-order.patch'),parent=parent)
+        fields=dict(expected.flex_fields);flex=proof.get('flexFatalCompatibilitySourcePatch')
+        if (type(flex) is not dict or set(flex)!=set(fields)|{'evidence'}
+                or not _same({key:flex[key] for key in fields},fields)):
+            raise ValueError('Writer diagnostic Flex pre-overlay differs')
+        prepare._source_new_evidence(flex['evidence'],{side:side+'-arm64-sqlflex.l' for side in ('original','effective')},parent=parent)
+        prepare._source_new_dotnet_hook(hooks.get('dotnetProjectGraph'),manifest,'arm64',parent=parent)
+        prepare._source_new_arm_hooks(hooks,manifest,parent)
+    except (KeyError,TypeError,IndexError,AttributeError,OSError) as error:
+        raise ValueError('Writer diagnostic pre-overlay proof is incomplete') from error
+    _check(check)
+
+
+def _receipt(proof,lock,source,check=None):
     strings=dict(kind='native-office-engine-writer-server-observer-diagnostic',phase='Full',architecture='arm64',stage='complete',
         status='native-engine-writer-server-observer-diagnostic-built',sourceCommit=lock['sourceCommit'],sourceTree=lock['sourceTree'],sourceLockSha256=lock['sourceLockSha256'])
     if (type(proof) is not dict or any(type(proof.get(k)) is not str or proof[k]!=v for k,v in strings.items())
@@ -127,8 +187,10 @@ def _receipt(proof,lock,source):
     host=proof.get('host',{})
     if host.get('isWindows') is not True or type(host.get('processMachine')) is not int or host['processMachine']!=0 or type(host.get('nativeMachine')) is not int or host['nativeMachine']!=0xaa64:
         raise ValueError('Writer producer is not native ARM64 Windows')
+    _normal_source_recipe(proof,check)
     hooks=proof.get('writerServerObserverSourceHooks',{})
-    if (hooks.get('passed') is not True or hooks.get('target')!='windows-arm64' or hooks.get('kind')!=source['kind']
+    hook_keys=set('passed target lockSha256 schemaVersion kind coreCommit patch wireSchema sources payloads dependencies ipcVersion sinkAbiVersion mappingBytes descriptorSchemaVersion requiredRebuiltLibraries fullEngineQualified acceptanceEligible guiVerified'.split())
+    if (type(hooks) is not dict or set(hooks)!=hook_keys or hooks.get('passed') is not True or hooks.get('target')!='windows-arm64' or hooks.get('kind')!=source['kind']
             or hooks.get('lockSha256')!=lock['sourceLockSha256'] or hooks.get('coreCommit')!=CORE
             or any(hooks.get(k) is not False for k in ('fullEngineQualified','acceptanceEligible','guiVerified'))
             or any(not _same(hooks.get(k),source.get(k)) for k in ('schemaVersion','patch','wireSchema','sources','payloads','dependencies','ipcVersion','sinkAbiVersion','mappingBytes','descriptorSchemaVersion','requiredRebuiltLibraries'))):
@@ -205,6 +267,8 @@ def _members(zipped,proof,lock,source,check):
     marker=payload._json_bytes(root_raw,OVERLAY)
     if (type(marker) is not dict or set(marker)!=MARKER_KEYS or not _same(marker,proof.get('writerServerObserverRuntime')) or marker.get('schemaVersion')!=1 or type(marker['schemaVersion']) is not int
             or marker.get('kind')!=FAMILY or marker.get('family')!=FAMILY or marker.get('coreCommit')!=CORE
+            or type(marker.get('sourceRun')) is not int or marker['sourceRun']!=lock['runId']
+            or type(marker.get('runAttempt')) is not int or marker['runAttempt']!=lock['runAttempt']
             or any(marker.get(k)!=lock[k] for k in ('sourceCommit','sourceTree','sourceLockSha256','patchSha256'))
             or not _same(marker.get('wireSchema'),source['wireSchema']) or marker.get('requiredRebuiltLibraries')!=['UAccCOM','winaccessibility']
             or any(marker.get(k) is not False for k in ('fullEngineQualified','acceptanceEligible','guiVerified'))
@@ -227,7 +291,7 @@ def _authenticated(artifact,diagnostic_lock,source_lock,*,archive=None,receipt=N
         for entry in entries:
             if entry.is_dir() or entry.flag_bits&1 or entry.external_attr&0x410 or stat.S_IFMT(entry.external_attr>>16) not in (0,stat.S_IFREG) or entry.compress_type not in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED):raise ValueError('Unsafe Writer outer member')
         raw=_entry_bytes(outer,outer.getinfo(RECEIPT),payload.MAX_METADATA,check)
-        proof=_receipt(payload._json_bytes(raw,RECEIPT),lock,source)
+        proof=_receipt(payload._json_bytes(raw,RECEIPT),lock,source,check)
         inner=outer.getinfo(ENGINE)
         if inner.file_size!=proof['artifact']['size'] or _entry_hash(outer,inner,check)!=proof['artifact']['sha256']:raise ValueError('Writer authenticated inner digest differs')
         if receipt is not None and _raw(_local(receipt),payload.MAX_METADATA,check)!=raw:raise ValueError('Writer receipt differs from authenticated outer bytes')

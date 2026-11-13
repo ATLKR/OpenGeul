@@ -17,7 +17,11 @@ PWSH = shutil.which('pwsh')
 ENGINE = 'OpenGeul-Office-engine-arm64-writer-server-observer.zip'
 RECEIPT = 'writer-server-observer-source-build-receipt.json'
 MARKERS = ('writer-server-observer-diagnostic.json', 'program/opengeul-writer-server-observer-diagnostic.json')
-CORE = 'bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'
+CORE = '9dea406ab7695df6325b11b0e19fdca8db4b7276'
+SOURCE_LOCK_SHA = '5717878d19d95c56383accb8b451271a741539f9752470bfb41cb3de4649beed'
+PATCH_SHA = '7cdab1afebc8c83ea2a50e8b36bff98fda1b5e7de101607e2e41774c41fb4825'
+WIRE_SHA = 'bdf17ce841c6f3a7af900bf27b57bc2a1b871c19962dffe15c9a4349a19ec084'
+PRODUCER_REF = 'work/opengeul-office-native-writer-observer-9dea'
 
 
 def child_environment(root, *, windows=False, read=os.environ.get):
@@ -65,8 +69,8 @@ class WriterObserverFetchTests(unittest.TestCase):
     def fixture(self, root):
         libraries = [('program/UAccCOM.dll', arm_dll()), ('program/winaccessibility.dll', arm_dll())]
         marker = dict(schemaVersion=1, family='writer-server-observer-diagnostic', kind='writer-server-observer-diagnostic',
-                      sourceCommit='a'*40, sourceTree='b'*40, coreCommit=CORE, sourceLockSha256='c'*64,
-                      patchSha256='d'*64, wireSchema=dict(path='wire-schema.json', bytes=7855, sha256='e'*64),
+                      sourceCommit='a'*40, sourceTree='b'*40, sourceRun=123, runAttempt=1, coreCommit=CORE, sourceLockSha256=SOURCE_LOCK_SHA,
+                      patchSha256=PATCH_SHA, wireSchema=dict(path='wire-schema.json', bytes=7855, sha256=WIRE_SHA),
                       ipcVersion=1, sinkAbiVersion=2, mappingBytes=131328, descriptorSchemaVersion=1,
                       requiredRebuiltLibraries=['UAccCOM', 'winaccessibility'],
                       binaries=[dict(path=name, bytes=len(data), sha256=fetch.sha(data), machine=0xaa64) for name, data in libraries],
@@ -75,28 +79,28 @@ class WriterObserverFetchTests(unittest.TestCase):
         entries = [(name, data, 0) for name, data in libraries] + [(name, raw, 0) for name in MARKERS]
         engine = fetch.zip_bytes(entries)
         hooks = dict(schemaVersion=1, kind='writer-server-observer-diagnostic-source', target='windows-arm64',
-                     coreCommit=CORE, lockSha256='c'*64, passed=True, fullEngineQualified=False,
+                     coreCommit=CORE, lockSha256=SOURCE_LOCK_SHA, passed=True, fullEngineQualified=False,
                      acceptanceEligible=False, guiVerified=False, ipcVersion=1, sinkAbiVersion=2,
                      mappingBytes=131328, descriptorSchemaVersion=1,
                      requiredRebuiltLibraries=['UAccCOM', 'winaccessibility'],
-                     patch=dict(path='source.patch', bytes=9937, sha256='d'*64), wireSchema=copy.deepcopy(marker['wireSchema']))
+                     patch=dict(path='source.patch', bytes=10105, sha256=PATCH_SHA), wireSchema=copy.deepcopy(marker['wireSchema']))
         proof = dict(schemaVersion=1, kind='native-office-engine-writer-server-observer-diagnostic', phase='Full',
                      architecture='arm64', stage='complete', status='native-engine-writer-server-observer-diagnostic-built',
                      passed=True, fullEngineQualified=False, acceptanceEligible=False, guiVerified=False,
-                     sourceCommit='a'*40, sourceTree='b'*40, sourceRun=123, runAttempt=1, sourceLockSha256='c'*64,
+                     sourceCommit='a'*40, sourceTree='b'*40, sourceRun=123, runAttempt=1, sourceLockSha256=SOURCE_LOCK_SHA,
                      sourcePin=dict(coreCommit=CORE), host=dict(isWindows=True, processMachine=0, nativeMachine=0xaa64),
                      writerServerObserverSourceHooks=hooks, writerServerObserverRuntime=copy.deepcopy(marker),
                      artifact=dict(path='producer-private-output.zip', size=len(engine), sha256=fetch.sha(engine)))
         lock = dict(schemaVersion=1, kind='writer-server-observer-diagnostic-input', architecture='arm64',
                     repository='ATLKR/OpenGeul', repositoryId=1405493151, sourceCommit='a'*40, sourceTree='b'*40,
-                    runId=123, runAttempt=1, artifactId=456, sourceLockSha256='c'*64, coreCommit=CORE,
-                    patchSha256='d'*64, wireSchemaSha256='e'*64)
+                    runId=123, runAttempt=1, artifactId=456, sourceLockSha256=SOURCE_LOCK_SHA, coreCommit=CORE,
+                    patchSha256=PATCH_SHA, wireSchemaSha256=WIRE_SHA)
         artifact = dict(id=456, name='opengeul-native-arm64-writer-server-observer-123-1', expired=False,
                         workflow_run=dict(id=123, repository_id=1405493151, head_repository_id=1405493151,
-                                          head_sha='a'*40, head_branch='work/opengeul-office-native-writer-observer'))
+                                          head_sha='a'*40, head_branch=PRODUCER_REF))
         repository = dict(id=1405493151, full_name='ATLKR/OpenGeul', private=False)
         run = dict(id=123, run_attempt=1, head_sha='a'*40, status='completed', conclusion='success', event='push',
-                   head_branch='work/opengeul-office-native-writer-observer', path='.github/workflows/office-native-engine.yml',
+                   head_branch=PRODUCER_REF, path='.github/workflows/office-native-engine.yml',
                    actor=dict(login='ATLKR', id=65988341, type='User'), repository=repository, head_repository=copy.deepcopy(repository))
         jobs = dict(total_count=1, jobs=[dict(id=999, run_id=123, head_sha='a'*40,
                     name='native-firebird-and-office', status='completed', conclusion='success')])
@@ -160,6 +164,29 @@ class WriterObserverFetchTests(unittest.TestCase):
                 else: lock[key]=value
                 self.save(root,'lock',lock); process, events=self.execute(root)
                 self.assertNotEqual(process.returncode, 0); self.assertEqual(events, [])
+
+    def test_new_marker_run_attempt_cannot_be_missing_bool_or_unbound(self):
+        for key,value in [('sourceRun',None),('sourceRun',True),('sourceRun',124),('runAttempt',True),('runAttempt',2)]:
+            with self.subTest(field=key), tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);lock,artifact,proof,entries,marker=self.fixture(root)
+                if value is None:marker.pop(key)
+                else:marker[key]=value
+                proof['writerServerObserverRuntime']=copy.deepcopy(marker)
+                raw=json.dumps(marker).encode();entries[-2:]=[(p,raw,0) for p in MARKERS]
+                self.pack(root,lock,artifact,proof,fetch.zip_bytes(entries))
+                process,_=self.execute(root);self.assertNotEqual(process.returncode,0)
+
+    def test_only_exact_new_source_pin_and_producer_ref_can_be_fetched(self):
+        for key,value in [('coreCommit','bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'),
+                ('sourceLockSha256','c'*64),('patchSha256','d'*64),('wireSchemaSha256','e'*64)]:
+            with self.subTest(field=key),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);lock,_,_,_,_=self.fixture(root);lock[key]=value;self.save(root,'lock',lock)
+                process,events=self.execute(root);self.assertNotEqual(process.returncode,0);self.assertEqual(events,[])
+        for branch in ('work/opengeul-office-native-writer-observer','work/opengeul-office-native-writer-observer-suite-9dea'):
+            with self.subTest(branchKind=branch.endswith('suite-9dea')),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);self.fixture(root);run=json.loads((root/'run.json').read_text());run['head_branch']=branch;self.save(root,'run',run)
+                process,events=self.execute(root);self.assertNotEqual(process.returncode,0)
+                self.assertFalse(any(e['endpoint'] in ('redirect','blob') for e in events))
 
     def test_server_owner_branch_job_and_family_are_checked_before_download(self):
         cases=[('run','head_branch','main'),('run','event','workflow_dispatch'),('run','run_attempt',2),

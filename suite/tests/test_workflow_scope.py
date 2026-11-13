@@ -108,10 +108,12 @@ class WorkflowScopeTests(unittest.TestCase):
                         normal.replace('architecture: ${{ matrix.architecture }}', 'architecture: x64'),
                         normal.replace('Pillow==13.0.0', 'Pillow==14.0.0'),
                         normal.replace('PyYAML==6.0.3', 'PyYAML==6.0.4'),
-                        normal.replace("github.ref != 'refs/heads/work/opengeul-office-native-writer-observer'",'true'),
+                        normal.replace("github.ref != 'refs/heads/work/opengeul-office-native-writer-observer-suite-9dea'",'true'),
                         normal+EXACT_SDK_SETUP, normal+EXACT_YAML_SETUP,
                         normal.replace("throw 'Pinned YAML workflow tooling installation failed.'", 'exit 0')):
-            with self.subTest(),self.assertRaises(ValueError):original_normal_oracle_text(changed)
+            with self.subTest():
+                self.assertNotEqual(changed,normal)
+                with self.assertRaises(ValueError):original_normal_oracle_text(changed)
 
     def test_unknown_normal_workflow_edits_still_fail_the_immutable_oracle(self):
         from suite.tests.reviewed_normal_workflow import original_normal_oracle_text

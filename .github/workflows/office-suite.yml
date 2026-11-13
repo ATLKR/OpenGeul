@@ -34,7 +34,7 @@ env:
   DOTNET_NOLOGO: '1'
 jobs:
   windows-suite:
-    if: github.event.repository.private == false && (github.ref != 'refs/heads/work/opengeul-office-native-writer-observer')
+    if: github.event.repository.private == false && (github.ref != 'refs/heads/work/opengeul-office-native-writer-observer-suite-9dea')
     name: windows-suite (${{ matrix.architecture }})
     strategy:
       fail-fast: false
@@ -1283,7 +1283,7 @@ jobs:
       github.event.repository.private == false && (
       github.event_name == 'workflow_dispatch' &&
       inputs.writer_server_observer == true &&
-      github.ref == 'refs/heads/work/opengeul-office-native-writer-observer' &&
+      github.ref == 'refs/heads/work/opengeul-office-native-writer-observer-suite-9dea' &&
       github.repository == 'ATLKR/OpenGeul' && github.repository_owner == 'ATLKR' &&
       github.actor == 'ATLKR' && github.actor_id == '65988341' &&
       github.triggering_actor == 'ATLKR' && github.run_attempt == 1)
@@ -1353,7 +1353,7 @@ jobs:
       timeout-minutes: 20
       shell: pwsh
       run: |
-        python -B suite/scripts/stage-writer-server-observer.py --baseline .work/writer-normal-baseline --artifact .work/writer-engine-input/github-artifact.zip --archive .work/writer-engine-input/OpenGeul-Office-engine-arm64-writer-server-observer.zip --receipt .work/writer-engine-input/writer-server-observer-source-build-receipt.json --source-lock suite/engine-build/writer-server-observer-diagnostic/source-lock.json --diagnostic-lock suite/config/writer-server-observer.arm64.lock.json --output .work/writer-diagnostic --expected-suite-source-commit $env:GITHUB_SHA
+        python -B suite/scripts/stage-writer-server-observer.py --baseline .work/writer-normal-baseline --artifact .work/writer-engine-input/github-artifact.zip --archive .work/writer-engine-input/OpenGeul-Office-engine-arm64-writer-server-observer.zip --receipt .work/writer-engine-input/writer-server-observer-source-build-receipt.json --source-lock suite/config/writer-server-observer-9dea/source-lock.json --diagnostic-lock suite/config/writer-server-observer.arm64.lock.json --output .work/writer-diagnostic --expected-suite-source-commit $env:GITHUB_SHA
         if ($LASTEXITCODE -ne 0) { throw 'Writer diagnostic staging rejected its authenticated inputs.' }
     - name: Prepare the atomic library inside a fresh bounded Python child
       id: atomic-prepare
@@ -1374,7 +1374,7 @@ jobs:
         $hostPython = (Get-Command python -ErrorAction Stop).Source
         $private = [IO.Path]::GetFullPath('.work/writer-observer-private')
         $program = [IO.Path]::GetFullPath('.work/writer-diagnostic/Office/program')
-        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds $env:WRITER_OBSERVER_PHASE_SECONDS --receipt .work/writer-observer-public/observe-phase.numeric.json -- observe --output ([IO.Path]::GetFullPath('.work/writer-diagnostic')) --baseline ([IO.Path]::GetFullPath('.work/writer-normal-baseline')) --artifact ([IO.Path]::GetFullPath('.work/writer-engine-input/github-artifact.zip')) --diagnostic-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer.arm64.lock.json')) --source-lock ([IO.Path]::GetFullPath('suite/engine-build/writer-server-observer-diagnostic/source-lock.json')) --expected-suite-source-commit $env:GITHUB_SHA --prepared-library "$private/atomic-descriptor.json" --host-python $hostPython --helper-script ([IO.Path]::GetFullPath('suite/e2e/writer_server_observer_msaa_helper.py')) --windows $env:SystemRoot --work-root "$private/owned-blank-writer" --report ([IO.Path]::GetFullPath('.work/writer-observer-public/report.numeric.json'))
+        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds $env:WRITER_OBSERVER_PHASE_SECONDS --receipt .work/writer-observer-public/observe-phase.numeric.json -- observe --output ([IO.Path]::GetFullPath('.work/writer-diagnostic')) --baseline ([IO.Path]::GetFullPath('.work/writer-normal-baseline')) --artifact ([IO.Path]::GetFullPath('.work/writer-engine-input/github-artifact.zip')) --diagnostic-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer.arm64.lock.json')) --source-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer-9dea/source-lock.json')) --expected-suite-source-commit $env:GITHUB_SHA --prepared-library "$private/atomic-descriptor.json" --host-python $hostPython --helper-script ([IO.Path]::GetFullPath('suite/e2e/writer_server_observer_msaa_helper.py')) --windows $env:SystemRoot --work-root "$private/owned-blank-writer" --report ([IO.Path]::GetFullPath('.work/writer-observer-public/report.numeric.json'))
         $result = $LASTEXITCODE
         exit $result
     - name: Validate the exact numeric report before upload

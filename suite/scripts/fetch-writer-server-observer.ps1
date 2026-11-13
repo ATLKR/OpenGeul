@@ -30,9 +30,9 @@ function Assert-WriterObserverMarker($Marker, $Lock, $Hooks, $Reference=$null) {
     Assert-WriterObserverValues $Marker @{kind='writer-server-observer-diagnostic';family='writer-server-observer-diagnostic';
         sourceCommit=$Lock.sourceCommit;sourceTree=$Lock.sourceTree;coreCommit=$Lock.coreCommit;
         sourceLockSha256=$Lock.sourceLockSha256;patchSha256=$Lock.patchSha256} @{
-        schemaVersion=1;ipcVersion=1;sinkAbiVersion=2;mappingBytes=131328;descriptorSchemaVersion=1} @{
+        schemaVersion=1;sourceRun=$Lock.runId;runAttempt=$Lock.runAttempt;ipcVersion=1;sinkAbiVersion=2;mappingBytes=131328;descriptorSchemaVersion=1} @{
         fullEngineQualified=$false;acceptanceEligible=$false;guiVerified=$false}
-    $keys=@('schemaVersion','kind','family','sourceCommit','sourceTree','coreCommit','sourceLockSha256','patchSha256',
+    $keys=@('schemaVersion','kind','family','sourceCommit','sourceTree','sourceRun','runAttempt','coreCommit','sourceLockSha256','patchSha256',
         'wireSchema','ipcVersion','sinkAbiVersion','mappingBytes','descriptorSchemaVersion','requiredRebuiltLibraries',
         'binaries','fullEngineQualified','acceptanceEligible','guiVerified')
     if ($Marker.Count -ne $keys.Count -or @($Marker.Keys|Where-Object {$_ -cnotin $keys}).Count) { throw 'Writer runtime marker shape differs.' }
@@ -197,7 +197,10 @@ function Invoke-WriterServerObserverFetch([string]$DiagnosticLockPath, [string]$
     $keys=@('schemaVersion','kind','architecture','repository','repositoryId','sourceCommit','sourceTree','runId','runAttempt',
         'artifactId','artifactSha256','artifactSize','sourceLockSha256','coreCommit','patchSha256','wireSchemaSha256')
     Assert-WriterObserverValues $lock @{kind='writer-server-observer-diagnostic-input';architecture='arm64';repository='ATLKR/OpenGeul';
-        coreCommit='bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1'} @{schemaVersion=1;repositoryId=1405493151;runAttempt=1}
+        coreCommit='9dea406ab7695df6325b11b0e19fdca8db4b7276';
+        sourceLockSha256='5717878d19d95c56383accb8b451271a741539f9752470bfb41cb3de4649beed';
+        patchSha256='7cdab1afebc8c83ea2a50e8b36bff98fda1b5e7de101607e2e41774c41fb4825';
+        wireSchemaSha256='bdf17ce841c6f3a7af900bf27b57bc2a1b871c19962dffe15c9a4349a19ec084'} @{schemaVersion=1;repositoryId=1405493151;runAttempt=1}
     if ($lock.Count -ne $keys.Count -or @($lock.Keys|Where-Object {$_ -cnotin $keys}).Count) { throw 'Exactly sixteen Writer external lock fields required.' }
     foreach ($key in @('sourceCommit','sourceTree')) {
         if ($lock[$key] -isnot [string] -or $lock[$key] -cnotmatch '^[0-9a-f]{40}$' -or $lock[$key] -ceq ('0'*40)) { throw 'Writer external source pin differs.' }
@@ -226,14 +229,14 @@ function Invoke-WriterServerObserverFetch([string]$DiagnosticLockPath, [string]$
         $artifact=Read-EngineApiJson $ApiClient ($api+'/artifacts/'+$lock.artifactId) $token $cancellation.Token
         $run=Read-EngineApiJson $ApiClient ($api+'/runs/'+$lock.runId) $token $cancellation.Token
         Assert-WriterObserverValues $run @{head_sha=$lock.sourceCommit;status='completed';conclusion='success';event='push';
-            head_branch='work/opengeul-office-native-writer-observer';path='.github/workflows/office-native-engine.yml'} @{id=$lock.runId;run_attempt=1}
+            head_branch='work/opengeul-office-native-writer-observer-9dea';path='.github/workflows/office-native-engine.yml'} @{id=$lock.runId;run_attempt=1}
         Assert-WriterObserverValues $run.actor @{login='ATLKR';type='User'} @{id=65988341}
         foreach($repository in @($run.repository,$run.head_repository)) {
             Assert-WriterObserverValues $repository @{full_name=$lock.repository} @{id=$lock.repositoryId} @{private=$false}
         }
         Assert-WriterObserverValues $artifact @{name=('opengeul-native-arm64-writer-server-observer-'+$lock.runId+'-1');
             digest=('sha256:'+$lock.artifactSha256)} @{id=$lock.artifactId;size_in_bytes=$lock.artifactSize} @{expired=$false}
-        Assert-WriterObserverValues $artifact.workflow_run @{head_sha=$lock.sourceCommit;head_branch='work/opengeul-office-native-writer-observer'} @{
+        Assert-WriterObserverValues $artifact.workflow_run @{head_sha=$lock.sourceCommit;head_branch='work/opengeul-office-native-writer-observer-9dea'} @{
             id=$lock.runId;repository_id=$lock.repositoryId;head_repository_id=$lock.repositoryId}
         $jobs=Read-EngineApiJson $ApiClient ($api+'/runs/'+$lock.runId+'/attempts/1/jobs?per_page=100') $token $cancellation.Token
         Assert-WriterObserverValues $jobs @{} @{total_count=1}

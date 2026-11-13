@@ -1,0 +1,192 @@
+{
+  "schemaVersion": 1,
+  "kind": "writer-server-observer-diagnostic-source",
+  "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+  "targets": [
+    "windows-arm64"
+  ],
+  "ipcVersion": 1,
+  "sinkAbiVersion": 2,
+  "acceptanceEligible": false,
+  "fullEngineQualified": false,
+  "requiredRebuiltLibraries": [
+    "UAccCOM",
+    "winaccessibility"
+  ],
+  "patch": {
+    "path": "source.patch",
+    "bytes": 10105,
+    "sha256": "7cdab1afebc8c83ea2a50e8b36bff98fda1b5e7de101607e2e41774c41fb4825"
+  },
+  "wireSchema": {
+    "path": "wire-schema.json",
+    "bytes": 7855,
+    "sha256": "bdf17ce841c6f3a7af900bf27b57bc2a1b871c19962dffe15c9a4349a19ec084"
+  },
+  "sources": [
+    {
+      "path": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+      "before": {
+        "bytes": 90847,
+        "sha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad"
+      },
+      "after": {
+        "bytes": 92810,
+        "sha256": "b1dcb200a61533a3979a9dfd78a9d28714d741db66a33e9a67e4a14742db739c"
+      }
+    },
+    {
+      "path": "winaccessibility/source/service/AccObjectWinManager.cxx",
+      "before": {
+        "bytes": 33670,
+        "sha256": "5e5f42a6b448c0d9c70a05bf762e86951565b5a96decaf050399f577dd38332b"
+      },
+      "after": {
+        "bytes": 34365,
+        "sha256": "9e07a69ca1a753257aa55357779802e7133ccdcd49019bb61f76afd5358ae372"
+      }
+    },
+    {
+      "path": "winaccessibility/inc/AccObjectWinManager.hxx",
+      "before": {
+        "bytes": 5244,
+        "sha256": "b520683294faf15e7441788e774fe34b1e018802c24c398ed69a5d3be4dffb5d"
+      },
+      "after": {
+        "bytes": 5801,
+        "sha256": "81de60c793cb5e02517300d5dacc8507a819d5e16627100ce327a8f6e92612f4"
+      }
+    },
+    {
+      "path": "winaccessibility/Library_uacccom.mk",
+      "before": {
+        "bytes": 3409,
+        "sha256": "7ec1fed59fad36368739d5917f46bd74f6560d33460bc73ea9438592356de815"
+      },
+      "after": {
+        "bytes": 3557,
+        "sha256": "10975680daf2ebcf0067c8afeb1da72ad4975363fe1b59fe45400ade4fb9d48d"
+      }
+    },
+    {
+      "path": "winaccessibility/Library_winaccessibility.mk",
+      "before": {
+        "bytes": 3394,
+        "sha256": "c99e623c082accaa84efebf254876ee083effc071a1bd8de63ee10bcf6f45e6d"
+      },
+      "after": {
+        "bytes": 3547,
+        "sha256": "28f92bfdc0688fd03355ba1879f35471d63e092591ba47b0f50163e0e06816ee"
+      }
+    }
+  ],
+  "dependencies": [
+    {
+      "path": "winaccessibility/source/UAccCOM/MAccessible.h",
+      "bytes": 10617,
+      "sha256": "e55e66e87ee81d512c0577243f7a35ab90b71fe1918a8e48c46393fb9a10deb2",
+      "before": {
+        "bytes": 10617,
+        "sha256": "e55e66e87ee81d512c0577243f7a35ab90b71fe1918a8e48c46393fb9a10deb2"
+      },
+      "after": {
+        "bytes": 10617,
+        "sha256": "e55e66e87ee81d512c0577243f7a35ab90b71fe1918a8e48c46393fb9a10deb2"
+      }
+    },
+    {
+      "path": "winaccessibility/inc/AccObject.hxx",
+      "bytes": 3574,
+      "sha256": "ffa17615a29f049615b3bdc7780155a0a82b5bace3c2857b9187f53ca0906a91",
+      "before": {
+        "bytes": 3574,
+        "sha256": "ffa17615a29f049615b3bdc7780155a0a82b5bace3c2857b9187f53ca0906a91"
+      },
+      "after": {
+        "bytes": 3574,
+        "sha256": "ffa17615a29f049615b3bdc7780155a0a82b5bace3c2857b9187f53ca0906a91"
+      }
+    },
+    {
+      "path": "winaccessibility/source/service/AccObject.cxx",
+      "bytes": 26374,
+      "sha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+      "before": {
+        "bytes": 26374,
+        "sha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e"
+      },
+      "after": {
+        "bytes": 26374,
+        "sha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e"
+      }
+    },
+    {
+      "path": "winaccessibility/source/UAccCOM/UAccCOM.cxx",
+      "bytes": 3170,
+      "sha256": "4ca9fb4db07c2fa950d080ffaff35a6e499223ca0635a9c5dad3202d9561a2eb",
+      "before": {
+        "bytes": 3170,
+        "sha256": "4ca9fb4db07c2fa950d080ffaff35a6e499223ca0635a9c5dad3202d9561a2eb"
+      },
+      "after": {
+        "bytes": 3170,
+        "sha256": "4ca9fb4db07c2fa950d080ffaff35a6e499223ca0635a9c5dad3202d9561a2eb"
+      }
+    }
+  ],
+  "payloads": [
+    {
+      "source": "wire.h",
+      "path": "include/opengeul_writer_observer/wire.h",
+      "bytes": 3366,
+      "sha256": "5c79e4fd9c8dadb9ed76ec798f8b810dd02538822beb70486bf12754c15d4c5d"
+    },
+    {
+      "source": "atomic.h",
+      "path": "include/opengeul_writer_observer/atomic.h",
+      "bytes": 1414,
+      "sha256": "a23faa85ae156a6ad9b0522f7e60e5f5e375c7caf0ed9caed93fe2851a17f4cb"
+    },
+    {
+      "source": "descriptor.h",
+      "path": "include/opengeul_writer_observer/descriptor.h",
+      "bytes": 1352,
+      "sha256": "5c0af6a3e14590944d06cf998e2ee051dd61c37f1d983b94029ba2bd0f5e1d8f"
+    },
+    {
+      "source": "private_sink.hxx",
+      "path": "include/opengeul_writer_observer/private_sink.hxx",
+      "bytes": 1571,
+      "sha256": "983e442d317500e8f4aa0ee6c33c6d26f88acfa1c49565ba2518cab6552e1423"
+    },
+    {
+      "source": "recorder.h",
+      "path": "include/opengeul_writer_observer/recorder.h",
+      "bytes": 11914,
+      "sha256": "ba45b069e0dac50d8d7635bee5b071d2d60efe8eb15822c426484eacd3533083"
+    },
+    {
+      "source": "session.h",
+      "path": "include/opengeul_writer_observer/session.h",
+      "bytes": 2214,
+      "sha256": "d5de989bde6fe648921c5b27240ba960fd93c8b3cb4d36099cf739d91593fb79"
+    },
+    {
+      "source": "observer_api.hxx",
+      "path": "include/opengeul_writer_observer/observer_api.hxx",
+      "bytes": 3224,
+      "sha256": "e37768e5ade669aff08483489ff6c219973fcd6e023b2a6f2b80be7f60b30fae"
+    },
+    {
+      "source": "native.cpp",
+      "path": "winaccessibility/source/UAccCOM/OpenGeulWriterObserver.cxx",
+      "bytes": 6397,
+      "sha256": "517b6d143d92ecb3ff34f7b06529297e34e8b36ad19bbdef219c55da801dcf0b"
+    }
+  ],
+  "baseline": "effective ARM2921 source hook baseline, original bf6 manager focus order already patched old-unset before new-set",
+  "binaryOverlay": "Both rebuilt DLLs from this exact lock required; one-DLL overlay prohibited",
+  "guiVerified": false,
+  "mappingBytes": 131328,
+  "descriptorSchemaVersion": 1
+}

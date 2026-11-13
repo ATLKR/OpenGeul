@@ -10,7 +10,8 @@ import ast
 
 BASE=Path(__file__).resolve().parents[2]
 CANDIDATE=BASE/'.github/workflows/office-suite.yml'
-BRANCH='work/opengeul-office-native-writer-observer'
+BRANCH='work/opengeul-office-native-writer-observer-suite-9dea'
+PRODUCER_BRANCH='work/opengeul-office-native-writer-observer-9dea'
 FIXTURE=BASE/'suite/tests/fixtures/writer-server-observer-normal-workflow.json'
 FIXTURE_SHA256='191eb38642ecdc5d885815cea9567c70cdd49c7950d325403e143db113b62e2c'
 
@@ -68,6 +69,16 @@ class Workflow(unittest.TestCase):
         self.assertNotIn('permissions:',job)
         self.assertNotIn('workflow_dispatch:',job)
 
+    def test_producer_ref_cannot_be_the_suite_authority_or_normal_job_exclusion(self):
+        self.assertNotEqual(BRANCH,PRODUCER_BRANCH)
+        m=module();values=context()
+        values.update(GITHUB_REF='refs/heads/'+PRODUCER_BRANCH,
+            GITHUB_WORKFLOW_REF='ATLKR/OpenGeul/.github/workflows/office-suite.yml@refs/heads/'+PRODUCER_BRANCH)
+        with self.assertRaises(m.Rejected):m.require_context(values,event())
+        normal=self.candidate().split('jobs:\n',1)[1].split('\n  writer-server-observer:',1)[0]
+        self.assertIn("github.ref != 'refs/heads/"+BRANCH+"'",normal)
+        self.assertNotIn("github.ref != 'refs/heads/"+PRODUCER_BRANCH+"'",normal)
+
     def test_actual_order_and_original_entry_guards_are_preserved(self):
         job=self.candidate().split('\n  writer-server-observer:',1)[1]
         ordered=['id: writer-context','id: normal-engine','id: normal-build','id: normal-verify',
@@ -79,6 +90,9 @@ class Workflow(unittest.TestCase):
             self.assertIn(required,job)
         for forbidden in ('windows_smoke.py','launch_suite','taskkill','Remove-Item','fullEngineQualified = $true','acceptanceEligible = $true'):
             self.assertNotIn(forbidden,job)
+        self.assertEqual(job.count('--source-lock suite/config/writer-server-observer-9dea/source-lock.json'),1)
+        self.assertEqual(job.count("--source-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer-9dea/source-lock.json'))"),1)
+        self.assertNotIn('suite/engine-build/writer-server-observer-diagnostic/source-lock.json',job)
         phase=(BASE/'suite/e2e/writer_server_observer_phase.py').read_text()
         self.assertIn('from writer_server_observer_runner import main',phase)
         self.assertIn('return main(arguments[1:])',phase)
