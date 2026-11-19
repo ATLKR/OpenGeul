@@ -127,6 +127,55 @@ class WorkflowScopeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Reviewed bundled Clang observation delta differs'):
             original_normal_oracle_text(normal+'    - run: unreviewed_gate\n')
 
+    def test_both_original_ui_install_routes_pin_the_observed_comtypes_version(self):
+        from suite.tests.test_calc_matrix_workflow import workflow_steps,field,run_code
+        root=Path(__file__).resolve().parents[2]
+        text=(root/'.github/workflows/office-suite.yml').read_text()
+        expected='python -m pip install pywinauto==0.6.9 comtypes==1.5.0'
+        steps={field(step,'id'):step for step in workflow_steps() if field(step,'id')}
+        for name in ('readiness','native31-privacy-prepare'):
+            with self.subTest(route=name):
+                installs=[line.strip() for line in run_code(steps[name]).splitlines()
+                    if line.strip().startswith('python -m pip install')]
+                self.assertEqual(installs,[expected])
+                self.assertIn("if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }",run_code(steps[name]))
+        self.assertEqual(text.count(expected),2)
+
+    def test_historical_oracle_requires_the_two_exact_comtypes_pin_seams(self):
+        from suite.tests.reviewed_normal_workflow import original_normal_oracle_text
+        root=Path(__file__).resolve().parents[2]
+        normal=self.scope().suite_workflow_sections((root/'.github/workflows/office-suite.yml').read_text())[1]
+        first='        python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n'
+        second='          python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n'
+        variants=(
+            normal.replace(first,first.replace(' comtypes==1.5.0',''),1),
+            normal.replace(second,second.replace(' comtypes==1.5.0',''),1),
+            normal.replace('comtypes==1.5.0','comtypes==1.4.17',1),
+            normal.replace('comtypes==1.5.0','comtypes==1.5.0 comtypes==1.5.0',1),
+            normal.replace('comtypes==1.5.0\n','comtypes==1.5.0 --pre\n',1),
+            normal.replace("if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic') {\n"+second,
+                "if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance') {\n"+second,1),
+            normal.replace('    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n',
+                '    - name: other dependency route\n',1),
+        )
+        for index,changed in enumerate(variants):
+            with self.subTest(mutation=index),self.assertRaises(ValueError):
+                original_normal_oracle_text(changed)
+
+    def test_extra_comtypes_route_remains_visible_to_the_original_immutable_oracle(self):
+        from suite.tests.reviewed_normal_workflow import original_normal_oracle_text
+        root=Path(__file__).resolve().parents[2]
+        normal=self.scope().suite_workflow_sections((root/'.github/workflows/office-suite.yml').read_text())[1]
+        expected=json.loads((root/'suite/tests/fixtures/writer-server-observer-normal-workflow.json').read_bytes())['normalJobTextSha256']
+        extra=('    - name: unreviewed extra dependency\n      shell: pwsh\n      run: |\n'
+            '        python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n')
+        changed=normal.replace('    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n',
+            extra+'    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n',1)
+        normalized=original_normal_oracle_text(changed)
+        self.assertIn(extra,normalized)
+        self.assertEqual(normalized.count(' comtypes==1.5.0'),1)
+        self.assertNotEqual(hashlib.sha256(normalized.encode()).hexdigest(),expected)
+
 
 
 class OriginalAcceptanceViewTests(unittest.TestCase):

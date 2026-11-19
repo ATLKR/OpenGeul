@@ -21,7 +21,7 @@ RESULT_KEYS = {'schemaVersion','kindCode','resultCode','exitCode','major','minor
                'stdoutBytes','stderrBytes','timedOut','outputCapReached','pid','creationTime',
                'imageMatched','naturalExit','handlesClosed'}
 # capture-observation:begin schema
-RESULT_KEYS=RESULT_KEYS|{'captureObservation'}
+RESULT_KEYS=RESULT_KEYS|{'captureObservation','discoveryParseStage'}
 # capture-observation:end schema
 
 def parse_version(raw,kind):
@@ -257,6 +257,9 @@ def query(request,*,capture_call=capture):
     validate_capture_observation(observed['captureObservation'])
     result['captureObservation']=observed['captureObservation']
     # capture-observation:end query-projection
+    # discovery-observation:begin parse-init
+    discovery_stage=0
+    # discovery-observation:end parse-init
     if observed['timedOut']:result['resultCode'] = 2
     elif observed['outputCapReached']:result['resultCode'] = 3
     elif observed['captureError'] or not all(observed[k] for k in ('imageMatched','naturalExit','handlesClosed')):result['resultCode'] = 7
@@ -266,12 +269,28 @@ def query(request,*,capture_call=capture):
             if kind:
                 result['major'],result['minor'] = parse_version(out,kind)
             else:
+                # discovery-observation:begin parse-length
+                discovery_stage=1
+                # discovery-observation:end parse-length
                 assert 0 < len(out) <= 4096 and b'\0' not in out
+                # discovery-observation:begin parse-decode
+                discovery_stage=2
+                # discovery-observation:end parse-decode
                 root = out.decode('utf-8-sig').strip()
-                assert '\n' not in root and '\r' not in root and Path(root).is_absolute()
+                # discovery-observation:begin parse-crlf
+                discovery_stage=3
+                # The truthy local stamp runs only after both original CR/LF short circuits.
+                # discovery-observation:end parse-crlf
+                assert '\n' not in root and '\r' not in root and (discovery_stage:=4) and Path(root).is_absolute()
                 result['selectedRoot'] = root
+                # discovery-observation:begin parse-complete
+                discovery_stage=5
+                # discovery-observation:end parse-complete
         except BaseException:
             result['resultCode'] = 5 if kind else 8
+    # discovery-observation:begin parse-return
+    result['discoveryParseStage']=discovery_stage
+    # discovery-observation:end parse-return
     return result
 
 def main(argv=None):

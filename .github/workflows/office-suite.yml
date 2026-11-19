@@ -383,7 +383,7 @@ jobs:
     - name: 실제 한국어 IME와 네이티브 UI 검사 준비
       shell: pwsh
       run: |
-        python -m pip install pywinauto==0.6.9
+        python -m pip install pywinauto==0.6.9 comtypes==1.5.0
         if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
         ./suite/scripts/ensure-korean-ime.ps1 -Architecture '${{ matrix.architecture }}' -Output .work/suite-korean-readiness
         if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
@@ -410,7 +410,7 @@ jobs:
       run: |
         $ErrorActionPreference = 'Stop'
         if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic') {
-          python -m pip install pywinauto==0.6.9
+          python -m pip install pywinauto==0.6.9 comtypes==1.5.0
           if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
         }
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'

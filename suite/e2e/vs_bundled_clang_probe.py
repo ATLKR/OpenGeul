@@ -28,7 +28,7 @@ TOP_KEYS={'schemaVersion','kindCode','diagnosticOnly','acceptance','productionBu
           'sourceHeadWords','nativeHostMachine','sourceCount','sourcePinsBeforeAfterEqual','selectionStable',
           'cacheUsed','discoveryRequests','versionRequestsTotal','totalLimitMs','workLimitMs','elapsedMs',
           'pendingHandleCount','tools','stages','postPinResultCode','failureStageCode',
-          'discoveryHelperResultCode','discoveryCaptureObservation'}
+          'discoveryHelperResultCode','discoveryCaptureObservation','discoveryQuery','discoveryParseStage'}
 TOOL_KEYS={'present','presenceKnown','knownUnavailable','observedComplete','majorSupported','peVerified','resultCode','postPinResultCode',
            'beforePinned','afterPinned','pinsEqual','statJoinMatched','bytes','machine','sha256Words',
            'major','minor','versionExit','versionRequests','naturalJob','jobEmpty','handlesClosed',
@@ -151,6 +151,18 @@ def _query(runtime,folder,budget,record,kind,tool,host_python):
     for key,maximum in (('pid',0xffffffff),('creationTime',0xffffffffffffffff)):
         assert value[key] is None or type(value[key]) is int and 0<value[key]<=maximum
     assert value['exitCode'] is None or type(value['exitCode']) is int and -0x80000000<=value['exitCode']<=0xffffffff
+    stage=value['discoveryParseStage']
+    assert type(stage) is int and 0<=stage<=5
+    if kind==0:
+        if value['resultCode']==0:assert stage==5
+        elif value['resultCode']==8:assert 1<=stage<=4
+        else:assert stage==0
+        if stage:
+            assert value['exitCode']==0 and all(value[k] is True for k in ('imageMatched','naturalExit','handlesClosed'))
+            assert value['pid'] is not None and value['creationTime'] is not None
+            assert not value['captureObservation']['observedMask']&2
+            if stage>=2:assert 0<value['stdoutBytes']<=4096
+    else:assert stage==0
     if value['resultCode']==0:
         assert value['exitCode']==0 and all(value[k] is True for k in ('imageMatched','naturalExit','handlesClosed'))
         assert not value['captureObservation']['observedMask']&2
@@ -202,7 +214,8 @@ def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_s
                 sourcePinsBeforeAfterEqual=False,selectionStable=False,cacheUsed=False,discoveryRequests=0,
                 versionRequestsTotal=0,totalLimitMs=30000,workLimitMs=27000,elapsedMs=0,pendingHandleCount=0,
                 tools=[_tool_row(),_tool_row()],stages=[],postPinResultCode=0,failureStageCode=0,
-                discoveryHelperResultCode=None,discoveryCaptureObservation=helper_module.capture_observation())
+                discoveryHelperResultCode=None,discoveryCaptureObservation=helper_module.capture_observation(),
+                discoveryQuery=None,discoveryParseStage=None)
     record={'stages':[]}
     runtime=None;source_pins=None;before_pins={};before_stats={};selection=None;paths=[]
     phase_code=1;step_code=1
@@ -232,6 +245,10 @@ def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_s
             result['discoveryRequests']=1
             value=_query(runtime,output,budget,record,0,vswhere,host_python)
             result.update(discoveryHelperResultCode=value['resultCode'],discoveryCaptureObservation=value['captureObservation'])
+            result.update(discoveryParseStage=value['discoveryParseStage'],discoveryQuery=dict(
+                stdoutBytes=value['stdoutBytes'],stderrBytes=value['stderrBytes'],exitCode=value['exitCode'],
+                imageMatched=value['imageMatched'],naturalExit=value['naturalExit'],handlesClosed=value['handlesClosed'],
+                pid=value['pid'],creationTime=value['creationTime']))
             _require_query_success(value)
             assert prep._pin(vswhere)==before_discovery
             selection,_=prep._msvc_selection(value['selectedRoot'],'x64',budget.now)
@@ -352,6 +369,26 @@ def validate_report(value):
     else:assert value['discoveryRequests']==1 and value['cacheUsed'] is False
     if value['cacheUsed']:assert value['discoveryRequests']==0 and discovery is None
     if discovery==0:assert not observation['observedMask']&2
+    query=value['discoveryQuery'];stage=value['discoveryParseStage']
+    if discovery is None:assert query is None and stage is None
+    else:
+        assert type(query) is dict and set(query)=={'stdoutBytes','stderrBytes','exitCode',
+            'imageMatched','naturalExit','handlesClosed','pid','creationTime'}
+        for key,maximum in (('stdoutBytes',32768),('stderrBytes',4096)):
+            assert type(query[key]) is int and 0<=query[key]<=maximum
+        for key in ('imageMatched','naturalExit','handlesClosed'):assert type(query[key]) is bool
+        assert query['exitCode'] is None or type(query['exitCode']) is int and -0x80000000<=query['exitCode']<=0xffffffff
+        for key,maximum in (('pid',0xffffffff),('creationTime',0xffffffffffffffff)):
+            assert query[key] is None or type(query[key]) is int and 0<query[key]<=maximum
+        assert type(stage) is int and 0<=stage<=5
+        if discovery==0:assert stage==5
+        elif discovery==8:assert 1<=stage<=4
+        else:assert stage==0
+        if stage:
+            assert query['exitCode']==0 and all(query[key] is True for key in ('imageMatched','naturalExit','handlesClosed'))
+            assert query['pid'] is not None and query['creationTime'] is not None
+            assert not observation['observedMask']&2
+            if stage>=2:assert 0<query['stdoutBytes']<=4096
     stable=value['sourcePinsBeforeAfterEqual'] and value['selectionStable'] and value['pendingHandleCount']==0
     for tool in value['tools']:
         assert type(tool) is dict and set(tool)==TOOL_KEYS
