@@ -426,7 +426,7 @@ _UNKNOWN_IMAGE_FIELDS = ('classificationUnknownImageScopeCode',
 _ADMISSION_BOOL=('started consumerAttempted consumerReturned descriptorVerified completedWithinDeadline handoffComplete durationKnown').split()
 _ADMISSION_INT={'startQpc':MAX_I64,'deadlineQpc':MAX_I64,'frequency':MAX_I64,'lastObservedQpc':MAX_I64,
     'completedQpc':MAX_I64,'durationQpc':MAX_I64,'errorCode':13}
-from writer_server_observer_activation import BOOLS as _CAPTION_BOOL, INTS as _CAPTION_INT
+from writer_server_observer_activation import BOOLS as _CAPTION_BOOL, INTS as _CAPTION_INT, valid_hit_observation as _valid_hit_observation
 
 _FOCUS_BOOL = ('ready query_succeeded foreground_owned focus_within_child capture_clear menu_clear flags_clear').split()
 _FOCUS_INT = {'sampled_before_qpc':MAX_I64,'sampled_after_qpc':MAX_I64}
@@ -477,6 +477,7 @@ def empty_report():
         'editorFocus': {key: None for key in set(_FOCUS_BOOL) | _FOCUS_INT.keys()},
         'msaa': {key: None for key in MSAA_KEYS}, 'snapshot': snapshot, 'pendingRetainedCount': 0, 'caseCount': 1}
     report['captionActivation']={key:None for key in set(_CAPTION_BOOL)|_CAPTION_INT.keys()}
+    report['captionHitObservation']={'candidateCount':None,'samples':None}
     report['admission']={key:None for key in set(_ADMISSION_BOOL)|_ADMISSION_INT.keys()}
     report['preparation']['started']=False
     return report
@@ -593,6 +594,7 @@ def validate_public_report(report):
                 admission['durationQpc'] != admission['completedQpc']-admission['startQpc'] or
                 admission['deadlineQpc'] != admission['startQpc']+300*admission['frequency']):raise RunnerFailure(Code.NUMERIC)
     a = _section(report['captionActivation'], _CAPTION_BOOL, _CAPTION_INT)
+    if not _valid_hit_observation(report['captionHitObservation'],a):raise RunnerFailure(Code.NUMERIC)
     if native_source == 8 and (report['stageCode'] != 5 or a['enabled'] is not True):
         raise RunnerFailure(Code.NUMERIC)
     if a['enabled'] is None:

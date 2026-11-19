@@ -216,3 +216,41 @@ unverified cleanup forces capture-incomplete and global pending retention.
 Preparation failure source 8 names the fixed activation module only; it adds no
 exception content. Original failure codes, runtime/MSAA evidence and all normal
 acceptance flags retain their prior meaning.
+
+
+### Cached caption-hit observation after T14
+
+T14 reached original-cohort and original-peer binding, then rejected caption
+selection before any pointer movement/input. Its source8/PreparationCode5
+coordinate names only the exhausted original predicate, not occlusion, geometry,
+API failure, or a foreign application. The exact number of evaluated points was
+not recorded by T14 (the measured generator yields between one and three).
+
+R15 adds an independent `captionHitObservation` numeric section. It grants no
+input/ownership authority and leaves the existing 17-field `captionActivation`
+section, default profile, predicate, native calls and deadlines unchanged.
+The exact section has `candidateCount` and `samples`; both are null until one
+`point_snapshot` has returned AND its ORIGINAL `_caption_hit` has completed.
+A known count is 1..3 and equals the sample-list length. It counts the completed
+predicate prefix, never all calculated candidates, attempted native queries, or
+input. A first query/predicate exception leaves both null; a later query/budget
+exception retains only the already completed prefix. Neither state proves zero
+native calls or that unobserved later candidates passed/failed.
+
+Each sample has exactly `mismatchMask`, `pidRoleCode`, `hitTestCode`. Mask bits
+1/2/4/8/16 mean mismatch of the returned point/original document HWND/original
+document root HWND/original host PID/HTCAPTION. The successful original predicate
+has mask zero. PID role is separate: 0 unmatched cached PID, 1 original host,
+2 original engine. Unmatched is not an application identity or occlusion proof.
+Hit-test code is a known standard Win32 integer -2..21 or null. Null may mean
+that no HTCAPTION query was made for a foreign hit/root, or a nonstandard result;
+it is not a fabricated zero or a hidden raw LRESULT. Raw HWND/PID/coordinates,
+window names, text, URI and exception data are never copied into this section.
+
+Projection occurs only after the original predicate and uses cached primitive
+returns. Projection failure makes that row entirely null while retaining the
+completed-prefix count and any earlier rows. If the observer itself cannot
+retain its bounded metadata, the whole section is unknown. These states do not
+change the original guard, first failure, successful input sequence or cleanup.
+No new clock/native query, point search, activation retry, focus API or deadline
+is introduced. The original preparation55/60 and runtime25/30 remain in force.

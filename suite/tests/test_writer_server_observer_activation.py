@@ -1,5 +1,8 @@
 """Real typed caption port with synthetic Win32 calls; never Windows proof."""
 import copy
+import ast
+import hashlib
+import inspect
 import ctypes as C
 import importlib
 import contextlib
@@ -446,6 +449,155 @@ class CaptionPreparationTests(unittest.TestCase):
         report,c,s,_=self.run_case(lambda c,s:setattr(s,'inserts',[OSError()]))
         changed=copy.deepcopy(report);changed['captionActivation']['pendingInputPrefix']=0
         with self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(changed)
+
+    def hit_observation(self,report):
+        self.assertIn('captionHitObservation',report,'Cached original caption-hit witness is absent')
+        return report['captionHitObservation']
+
+    def test_cached_caption_client_hits_explain_rejection_without_any_input(self):
+        report,c,s,_=self.run_case(lambda c,s:setattr(s,'hit_test',1))
+        witness=self.hit_observation(report)
+        self.assertEqual(witness,{'candidateCount':3,'samples':[
+            {'mismatchMask':16,'pidRoleCode':1,'hitTestCode':1} for _ in range(3)]})
+        self.assertEqual(len(report['captionActivation']),17)
+        self.assertEqual(len(s.user.SendMessageTimeoutW.calls),3)
+        self.assertEqual(s.user.SendInput.calls,[]);self.assertEqual(s.user.SetPhysicalCursorPos.calls,[])
+        self.assertEqual(report['preparation']['preparationFailureCode'],5)
+        self.assertTrue(report['preparation']['cleanupComplete']);self.assertEqual(report['pendingRetainedCount'],0)
+
+    def test_cached_foreign_or_original_engine_hit_has_only_closed_role_and_mask(self):
+        for engine in (False,True):
+            composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+            def change(c,s):
+                s.facts[888]=(901,911,0,888)
+                s.user.WindowFromPhysicalPoint.action=lambda p:s.child if engine else 888
+            report,c,s,_=self.run_case(change);witness=self.hit_observation(report)
+            expected={'mismatchMask':26 if engine else 30,'pidRoleCode':2 if engine else 0,'hitTestCode':None}
+            self.assertEqual(witness,{'candidateCount':3,'samples':[expected]*3})
+            self.assertEqual(s.user.SendMessageTimeoutW.calls,[]);self.assertEqual(s.user.SendInput.calls,[])
+            self.assertFalse(set(witness['samples'][0]) & {'pid','hwnd','root','point','rectangle','name','uri','text'})
+
+    def test_hit_codes_are_nullable_fixed_win32_numbers_and_success_is_mask_zero(self):
+        for code in (-2,-1,0,1,2,21,9999,-9999):
+            composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+            report,c,s,_=self.run_case(lambda c,s:setattr(s,'hit_test',code))
+            witness=self.hit_observation(report)
+            self.assertEqual(witness['candidateCount'],1 if code==2 else 3)
+            self.assertEqual(witness['samples'][-1],{'mismatchMask':0 if code==2 else 16,
+                'pidRoleCode':1,'hitTestCode':code if -2<=code<=21 else None})
+            self.assertEqual(len(s.user.SendInput.calls),int(code==2))
+            self.assertEqual(report['preparation']['inputCount'],2 if code==2 else 0)
+
+        module=self.module()
+        a=typed.M.OriginalAttachment(600,610,601,101,501,401,611,201,203,111)
+        original={'point':[1,2],'hitHwnd':600,'rootHwnd':600,'pid':101,'hitTest':2}
+        for key,value,bit in (('point',[2,2],1),('hitHwnd',7,2),('rootHwnd',7,4),('pid',401,8),('hitTest',1,16)):
+            observed=dict(original);observed[key]=value
+            self.assertFalse(physical._caption_hit(observed,600,101,(1,2)))
+            row=module._hit_numbers(observed,a,(1,2));self.assertEqual(row['mismatchMask'],bit)
+            self.assertEqual(row['pidRoleCode'],2 if key=='pid' else 1)
+
+    def test_candidate_prefix_is_completed_predicates_not_attempted_queries_or_total_candidates(self):
+        for completed,budget_late in ((0,False),(1,False),(0,True),(1,True)):
+            composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+            def change(c,s):
+                original=s.user.SendMessageTimeoutW.action;calls=0
+                def hit(*args):
+                    nonlocal calls
+                    calls+=1
+                    if calls>completed:
+                        if budget_late:
+                            returned=original(*args);c.clock.value+=56000;return returned
+                        raise OSError()
+                    return original(*args)
+                s.hit_test=1;s.user.SendMessageTimeoutW.action=hit
+            report,c,s,_=self.run_case(change);witness=self.hit_observation(report)
+            self.assertEqual(len(s.user.SendMessageTimeoutW.calls),completed+1)
+            expected={'candidateCount':1,'samples':[{'mismatchMask':16,'pidRoleCode':1,'hitTestCode':1}]} if completed else {'candidateCount':None,'samples':None}
+            self.assertEqual(witness,expected)
+            self.assertEqual(s.user.SendInput.calls,[])
+            self.assertEqual(report['preparation']['preparationFailureCode'],2 if budget_late else 3)
+        composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+        with tempfile.TemporaryDirectory() as folder:
+            obj,inputs,c,_=composed.setup(folder);report=obj.execute(inputs)
+        self.assertEqual(self.hit_observation(report),{'candidateCount':None,'samples':None})
+
+    def test_projection_failure_keeps_completed_prefix_and_original_predicate_query_clock_order(self):
+        module=self.module();projection=getattr(module,'_hit_numbers',None)
+        self.assertTrue(callable(projection),'Pure cached hit projection is absent')
+        for accepted in (False,True):
+            runs=[]
+            for poison in (False,True):
+                composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+                with tempfile.TemporaryDirectory() as folder:
+                    obj,inputs,c,s,_=self.fixture(folder);s.hit_test=2 if accepted else 1;events=[];native=[];reads=[]
+                    for library in (s.user,s.kernel,s.dwm):
+                        for name,fn in vars(library).items():
+                            if isinstance(fn,Function):
+                                original=fn.action
+                                def traced(*args,_fn=original,_name=name):native.append(_name);return _fn(*args)
+                                fn.action=traced
+                    original_read=c.clock.read
+                    c.clock.read=lambda:(reads.append(1) or original_read())
+                    point=module.NativeCaptionProbe.point_snapshot;predicate=module._caption_hit
+                    def snapshot(*args):events.append('query');return point(*args)
+                    def tested(*args):events.append('predicate');return predicate(*args)
+                    def project(*args):
+                        events.append('projection')
+                        if poison:raise OSError('SYNTHETIC_PRIVATE')
+                        return projection(*args)
+                    with mock.patch.object(module.NativeCaptionProbe,'point_snapshot',snapshot), \
+                            mock.patch.object(module,'_caption_hit',tested),mock.patch.object(module,'_hit_numbers',project):
+                        report=obj.execute(inputs)
+                    witness=self.hit_observation(report)
+                    self.assertEqual(events,['query','predicate','projection','query','predicate'] if accepted else ['query','predicate','projection']*3)
+                    self.assertEqual(witness['candidateCount'],1 if accepted else 3)
+                    if poison:self.assertEqual(witness['samples'],[{'mismatchMask':None,'pidRoleCode':None,'hitTestCode':None}]*(1 if accepted else 3))
+                    self.assertEqual(len(s.user.SendInput.calls),int(accepted));self.assertEqual(len(s.user.SetPhysicalCursorPos.calls),int(accepted))
+                    runs.append((native,len(reads),c.api.calls,report['failureCode'],report['preparation']['preparationFailureCode']))
+            self.assertEqual(runs[0],runs[1])
+
+        # Undo only the exact metadata wrapper, recovering the reviewed R14
+        # prepare AST. Other native/clock/effect/guard edits stay detectable.
+        tree=ast.parse(Path(module.__file__).read_bytes())
+        cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='OwnedCaptionPreparation')
+        prepare=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='prepare')
+        body=next(n for n in prepare.body if isinstance(n,ast.Try)).body
+        wrapper=next(n for n in body if isinstance(n,ast.FunctionDef) and n.name=='candidate_hit')
+        self.assertEqual(len(wrapper.body),4)
+        self.assertEqual([n.targets[0].id for n in wrapper.body[:2]],['value','matched'])
+        self.assertEqual(wrapper.body[0].value.func.attr,'point_snapshot')
+        self.assertEqual(wrapper.body[1].value.func.id,'_caption_hit')
+        self.assertEqual(wrapper.body[2].value.func.id,'_record_hit')
+        self.assertIsInstance(wrapper.body[3],ast.Return);self.assertEqual(wrapper.body[3].value.id,'matched')
+        target=next(n for n in body if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and n.targets[0].id=='point')
+        test=target.value.args[0].generators[0].ifs[0]
+        self.assertEqual(test.func.id,'candidate_hit');self.assertEqual(len(test.args),1)
+        replacement=copy.deepcopy(wrapper.body[1].value)
+        self.assertEqual(replacement.args[0].id,'value');replacement.args[0]=copy.deepcopy(wrapper.body[0].value)
+        target.value.args[0].generators[0].ifs[0]=replacement;body.remove(wrapper)
+        options={'show_empty':True} if 'show_empty' in inspect.signature(ast.dump).parameters else {}
+        self.assertEqual(hashlib.sha256(ast.dump(prepare,include_attributes=False,**options).encode()).hexdigest(),
+            '2c878961f716097a44d340bda06a84a5f1d921e00f934cf924a8a99f49901b55')
+        pure={'_hit_numbers','_record_hit','_valid_hit_row','valid_hit_observation'}
+        for helper in (n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in pure):
+            for call in (n for n in ast.walk(helper) if isinstance(n,ast.Call)):
+                if isinstance(call.func,ast.Name):self.assertIn(call.func.id,{'type','len','sum','list','ValueError','any','bool','_hit_numbers','_valid_hit_row'})
+                else:self.assertIn(call.func.attr,{'keys','append','update'})
+
+    def test_hit_observation_schema_is_exact_bounded_and_preserves_guard_correlations(self):
+        report,c,s,_=self.run_case(lambda c,s:setattr(s,'hit_test',1));self.hit_observation(report)
+        cases=({'extra':0},{'candidateCount':True},{'candidateCount':0},{'candidateCount':4},
+            {'samples':[]},{'samples':report['captionHitObservation']['samples']*2},
+            {'samples':[{'mismatchMask':True,'pidRoleCode':1,'hitTestCode':1}]*3},
+            {'samples':[{'mismatchMask':32,'pidRoleCode':1,'hitTestCode':1}]*3},
+            {'samples':[{'mismatchMask':16,'pidRoleCode':3,'hitTestCode':1}]*3},
+            {'samples':[{'mismatchMask':16,'pidRoleCode':1,'hitTestCode':22}]*3},
+            {'samples':[{'mismatchMask':0,'pidRoleCode':1,'hitTestCode':2}]*3},
+            {'samples':[{'mismatchMask':16,'pidRoleCode':2,'hitTestCode':1}]*3})
+        for changes in cases:
+            altered=copy.deepcopy(report);altered['captionHitObservation'].update(changes)
+            with self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(altered)
 
     def test_actual_report_rejects_unknown_bool_overflow_and_impossible_input_accounting(self):
         report,c,s,_=self.run_case()

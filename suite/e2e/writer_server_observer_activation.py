@@ -17,6 +17,75 @@ INTS = {'stageCode':8, 'reasonCode':3, 'pointerMoves':1, 'inputCalls':1, 'reques
     'pendingInputPrefix':1, 'pendingDpiContext':1}
 
 
+_HIT_KEYS = {'mismatchMask','pidRoleCode','hitTestCode'}
+
+
+def _valid_hit_row(row):
+    if type(row) is not dict or row.keys()!=_HIT_KEYS:return False
+    mask,role,code=(row[key] for key in ('mismatchMask','pidRoleCode','hitTestCode'))
+    if mask is None:return role is None and code is None
+    if type(mask) is not int or not 0<=mask<=31 or type(role) is not int or not 0<=role<=2:return False
+    if code is not None and (type(code) is not int or not -2<=code<=21):return False
+    return bool((not (mask & 8))==(role==1) and (not (mask & 16))==(code==2))
+
+
+def _hit_numbers(value, attachment, point):
+    """Project cached primitive returns only; no identity or input authority.
+
+    Bits 1/2/4/8/16 mean mismatch of point/doc/root/host PID/HTCAPTION.
+    pidRoleCode is separate: 0 unmatched, 1 original host, 2 original engine.
+    Only standard Win32 hit-test codes leave RAM; an absent/nonstandard LRESULT
+    is null. No raw HWND/PID/coordinate, error content or native call is needed.
+    """
+    if (type(value) is not dict or value.keys()!={'point','hitHwnd','rootHwnd','pid','hitTest'} or
+            type(attachment) is not OriginalAttachment or type(point) is not tuple or len(point)!=2 or
+            any(type(v) is not int or not -32768<=v<=32767 for v in point) or
+            type(value['point']) is not list or len(value['point'])!=2 or
+            any(type(v) is not int or not -(1<<31)<=v<(1<<31) for v in value['point']) or
+            any(type(value[k]) is not int or not 0<=value[k]<(1<<64) for k in ('hitHwnd','rootHwnd')) or
+            type(value['pid']) is not int or not 0<=value['pid']<=0xffffffff or
+            value['hitTest'] is not None and (type(value['hitTest']) is not int or not -(1<<63)<=value['hitTest']<(1<<63))):
+        raise ValueError()
+    mask=sum(bit for bit,matched in ((1,value['point']==list(point)),(2,value['hitHwnd']==attachment.document),
+        (4,value['rootHwnd']==attachment.document),(8,value['pid']==attachment.host_pid),(16,value['hitTest']==2)) if not matched)
+    role=1 if value['pid']==attachment.host_pid else 2 if value['pid']==attachment.engine_pid else 0
+    code=value['hitTest']
+    return {'mismatchMask':mask,'pidRoleCode':role,
+        'hitTestCode':code if type(code) is int and -2<=code<=21 else None}
+
+
+def _record_hit(observation, value, attachment, point):
+    # Count only snapshots whose ORIGINAL predicate already finished. A later
+    # native/budget failure leaves this prefix, never a total/query-count claim.
+    unknown={key:None for key in _HIT_KEYS}
+    try:
+        try:row=_hit_numbers(value,attachment,point)
+        except BaseException:row=unknown
+        if not _valid_hit_row(row):row=unknown
+        rows=[] if observation['samples'] is None else list(observation['samples'])
+        if len(rows)>=3:raise ValueError()
+        rows.append(row)
+        observation.update(candidateCount=len(rows),samples=rows)
+    except BaseException:
+        # Metadata cannot replace the original decision or primary failure.
+        observation.update(candidateCount=None,samples=None)
+
+
+def valid_hit_observation(value, caption):
+    if type(value) is not dict or value.keys()!={'candidateCount','samples'}:return False
+    count,rows=value['candidateCount'],value['samples']
+    if count is None:return rows is None
+    if (type(count) is not int or not 1<=count<=3 or type(rows) is not list or len(rows)!=count or
+            caption['enabled'] is not True or caption['stageCode'] is None or caption['stageCode']<3 or
+            any(not _valid_hit_row(row) for row in rows)):
+        return False
+    if any(row['mismatchMask']==0 for row in rows[:-1]):return False
+    last=rows[-1]['mismatchMask']
+    if last==0 and caption['stageCode']<4:return False
+    if last is not None and last!=0 and caption['stageCode']>=4:return False
+    return True
+
+
 class NativeCaptionProbe(NativeActivationProbe):
     """Reuse measured native leaves, not the Popen wrapper or unbounded release.
 
@@ -160,8 +229,12 @@ class OwnedCaptionPreparation:
             original=probe.owned(c,launch,cohort,attachment)
             caption=probe.caption(attachment.document)
             if caption['state'] & (1|0x8000|0x10000):raise PreparationError(PreparationCode.ATTACHMENT)
-            point=next((p for p in caption_candidates(original['rectangle'],caption['rectangle'])
-                if _caption_hit(probe.point_snapshot(attachment.document,p),attachment.document,attachment.host_pid,p)),None)
+            def candidate_hit(p):
+                value=probe.point_snapshot(attachment.document,p)
+                matched=_caption_hit(value,attachment.document,attachment.host_pid,p)
+                _record_hit(report['captionHitObservation'],value,attachment,p)
+                return matched
+            point=next((p for p in caption_candidates(original['rectangle'],caption['rectangle']) if candidate_hit(p)),None)
             if point is None:raise PreparationError(PreparationCode.ATTACHMENT)
             a['stageCode']=4
             probe.owned(c,launch,cohort,attachment,original=original)
