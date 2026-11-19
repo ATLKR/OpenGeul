@@ -63,3 +63,20 @@ old 3.13.15 requirement belonged to the earlier bf6ef source contract and that
 directory is absent from this pinned engine. A synthetic 3.13.17 tree must pass
 the unchanged layout checks and a legacy-only 3.13.15 tree must fail. This path
 correction does not qualify a runtime or prove Windows launch, focus or MSAA.
+
+Classification records only existing observations: attempt count (at most 4096),
+current census count, matched-role mask, current role, historical role, and the
+original state call's wait result and exit code. Role codes 1 through 4 mean
+host, worker, engine and launcher; mask bits use that same order. Historical role
+uses only an exact PID/birth tuple from the previous successful classification,
+never authorizes a current image, and remains 0 for an unknown generation.
+`classificationCount` still means the last successful classification's size,
+which can differ from the current failing census or its partially matched mask.
+
+Fixed reason codes preserve the original guards and evaluation order: 1 census
+shape, 2 missing host, 3 identity, 4 membership, 5 non-live state, 6 unknown image,
+7 duplicate role, 8 host/handle mismatch, 9 host generation, 10 original iteration
+cap. Reason 0 means no explicit classification guard has rejected the current
+attempt; it does not prove success if another call failed. Values not observed
+remain null. No additional native query, process role, cleanup PID reopen,
+deadline or acceptance authority is introduced.

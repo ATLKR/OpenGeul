@@ -336,7 +336,15 @@ _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 
     'lastQpc': MAX_I64, 'classificationCount': 128, 'focusSampleCount': 4096, 'activationCount': 1,
     'inputCount': 0, 'cleanupErrorCount': 64, 'pendingRetainedCount': 256,
     'prelaunchStepCode': 14, 'prelaunchExceptionKindCode': 17,
-    'prelaunchExceptionSourceCode': 5, 'prelaunchExceptionLine': 20000}
+    'prelaunchExceptionSourceCode': 5, 'prelaunchExceptionLine': 20000,
+    'classificationAttemptCount': 4096, 'classificationReasonCode': 10,
+    'classificationCensusCount': 128, 'classificationMatchedRoleMask': 15,
+    'classificationCurrentRoleCode': 4, 'classificationHistoricalRoleCode': 4,
+    'classificationWaitResult': 0xffffffff, 'classificationExitCode': 0xffffffff}
+_CLASSIFICATION_FIELDS = ('classificationAttemptCount', 'classificationReasonCode',
+    'classificationCensusCount', 'classificationMatchedRoleMask', 'classificationCurrentRoleCode',
+    'classificationHistoricalRoleCode', 'classificationWaitResult', 'classificationExitCode')
+_ROLE_CODES = {'host': 1, 'worker': 2, 'engine': 3, 'launcher': 4}
 _ADMISSION_BOOL=('started consumerAttempted consumerReturned descriptorVerified completedWithinDeadline handoffComplete durationKnown').split()
 _ADMISSION_INT={'startQpc':MAX_I64,'deadlineQpc':MAX_I64,'frequency':MAX_I64,'lastObservedQpc':MAX_I64,
     'completedQpc':MAX_I64,'durationQpc':MAX_I64,'errorCode':13}
@@ -419,6 +427,36 @@ def validate_public_report(report):
             (failure_source == 0 and failure_line is not None) or
             (failure_source != 0 and (failure_kind == 0 or failure_line is None or failure_line == 0))):
         raise RunnerFailure(Code.NUMERIC)
+    attempt = prep['classificationAttemptCount']
+    if attempt is None:
+        if any(prep[key] is not None for key in _CLASSIFICATION_FIELDS): raise RunnerFailure(Code.NUMERIC)
+    else:
+        reason = prep['classificationReasonCode']
+        if (attempt == 0 or report['stageCode'] < 3 or prep['launchAttempted'] is not True or prep['launchResumed'] is not True or
+                admission['handoffComplete'] is not True or
+                any(prep[key] is None for key in ('classificationReasonCode', 'classificationMatchedRoleMask',
+                    'classificationCurrentRoleCode', 'classificationHistoricalRoleCode'))):
+            raise RunnerFailure(Code.NUMERIC)
+        if reason and (report['stageCode'] != 3 or report['failureCode'] not in (int(Code.CLASSIFICATION), int(Code.CLEANUP)) or
+                report['captureIncomplete'] is not True or prep['rolesClassified'] is True or
+                prep['cohortAdmitted'] is True or prep['runtimeEntered'] is True):
+            raise RunnerFailure(Code.NUMERIC)
+        if reason == 10 and attempt != 4096: raise RunnerFailure(Code.NUMERIC)
+        if prep['classificationCensusCount'] is None and (
+                any(prep[key] != 0 for key in ('classificationMatchedRoleMask', 'classificationCurrentRoleCode',
+                    'classificationHistoricalRoleCode')) or
+                any(prep[key] is not None for key in ('classificationWaitResult', 'classificationExitCode'))):
+            raise RunnerFailure(Code.NUMERIC)
+        if (prep['classificationCensusCount'] is not None and
+                prep['classificationMatchedRoleMask'].bit_count() > prep['classificationCensusCount']):
+            raise RunnerFailure(Code.NUMERIC)
+        if reason == 5 and prep['classificationWaitResult'] == 258: raise RunnerFailure(Code.NUMERIC)
+        if prep['rolesClassified'] is True:
+            mask, current = prep['classificationMatchedRoleMask'], prep['classificationCurrentRoleCode']
+            if (reason != 0 or mask & 7 != 7 or current == 0 or mask & (1 << (current - 1)) == 0 or
+                    prep['classificationCensusCount'] != mask.bit_count() or
+                    prep['classificationCount'] != mask.bit_count() or prep['classificationWaitResult'] != 258):
+                raise RunnerFailure(Code.NUMERIC)
     if admission['handoffComplete'] is True:
         if (admission['completedWithinDeadline'] is not True or admission['durationKnown'] is not True or
                 prep['started'] is not True or admission['completedQpc'] != prep['startQpc'] or
@@ -552,13 +590,23 @@ class DedicatedWriterRunner:
         self.pause(min(.05, budget.remaining_ms(observation=True) / 1000))
         budget.check(observation=True)
 
-    def _classify(self, launch, images, budget):
+    def _classify(self, launch, images, budget, prep, previous_roles):
         api, handles, roles = self.c.api, [], {}
+        prep['classificationAttemptCount'] += 1
+        prep.update(classificationReasonCode=0, classificationCensusCount=None,
+            classificationMatchedRoleMask=0, classificationCurrentRoleCode=0,
+            classificationHistoricalRoleCode=0, classificationWaitResult=None, classificationExitCode=None)
+        def reject(reason):
+            prep['classificationReasonCode'] = reason
+            raise RunnerFailure(Code.CLASSIFICATION)
         try:
             pids = self._checked(budget, api.census, launch.job)
-            if type(pids) is not tuple or len(pids) > 128 or len(set(pids)) != len(pids): raise RunnerFailure(Code.CLASSIFICATION)
-            if launch.identity[0] not in pids: raise RunnerFailure(Code.CLASSIFICATION)
+            if type(pids) is not tuple or len(pids) > 128 or len(set(pids)) != len(pids): reject(1)
+            prep['classificationCensusCount'] = len(pids)
+            if launch.identity[0] not in pids: reject(2)
             for pid in pids:
+                prep.update(classificationCurrentRoleCode=0, classificationHistoricalRoleCode=0,
+                    classificationWaitResult=None, classificationExitCode=None)
                 handle = launch.host if pid == launch.identity[0] else None
                 try:
                     if handle is None:
@@ -568,14 +616,27 @@ class DedicatedWriterRunner:
                         budget.check(observation=True)
                     identity = self._checked(budget, api.identity, handle)
                     if (type(identity) is not tuple or len(identity) != 2 or identity[0] != pid or
-                            not all(type(v) is int and v > 0 for v in identity) or
-                            self._checked(budget, api.member, handle, launch.job) is not True or
-                            self._checked(budget, api.state, handle)[0] != 258): raise RunnerFailure(Code.CLASSIFICATION)
+                            not all(type(v) is int and v > 0 for v in identity)): reject(3)
+                    # Prior roles are metadata only. No historical value feeds
+                    # the current image, liveness, membership or admission gate.
+                    prep['classificationHistoricalRoleCode'] = next((_ROLE_CODES[name]
+                        for name, original in previous_roles.items() if identity == original), 0)
+                    if self._checked(budget, api.member, handle, launch.job) is not True: reject(4)
+                    state = self._checked(budget, api.state, handle)
+                    waited = state[0]
+                    if type(state) is tuple and len(state) == 2:
+                        for key, value in zip(('classificationWaitResult', 'classificationExitCode'), state):
+                            if type(value) is int and 0 <= value <= 0xffffffff: prep[key] = value
+                    if waited != 258: reject(5)
                     image = Path(self.c.prep.process_image(handle, check=budget.check)).resolve(strict=True)
                     role = next((name for name, expected in images.items() if image == expected), None)
-                    if role is None or role in roles or (role == 'host') != (handle == launch.host): raise RunnerFailure(Code.CLASSIFICATION)
-                    if role == 'host' and identity != launch.identity: raise RunnerFailure(Code.CLASSIFICATION)
+                    prep['classificationCurrentRoleCode'] = _ROLE_CODES.get(role, 0)
+                    if role is None: reject(6)
+                    if role in roles: reject(7)
+                    if (role == 'host') != (handle == launch.host): reject(8)
+                    if role == 'host' and identity != launch.identity: reject(9)
                     roles[role] = identity
+                    prep['classificationMatchedRoleMask'] |= 1 << (_ROLE_CODES[role] - 1)
                 except Exception as exc:
                     retained = getattr(exc, 'retained_handle', None)
                     if retained is not None and retained not in handles: handles.append(retained)
@@ -686,12 +747,16 @@ class DedicatedWriterRunner:
             if launch.failed is not False or launch.uncertain is not False or launch.resumed is not True: raise RunnerFailure(Code.LAUNCH)
             prep['launchResumed'] = True
             report['stageCode'] = 3
+            prep['classificationAttemptCount'] = 0
+            roles = {}
             for _ in range(4096):
-                roles = self._classify(launch, images, budget)
+                roles = self._classify(launch, images, budget, prep, roles)
                 prep['classificationCount'] = len(roles)
                 if {'host','worker','engine'} <= roles.keys(): break
                 self._pause(budget)
-            else: raise RunnerFailure(Code.CLASSIFICATION)
+            else:
+                prep['classificationReasonCode'] = 10
+                raise RunnerFailure(Code.CLASSIFICATION)
             prep['rolesClassified'] = True
             cohort = _CohortTap(c.Cohort(c.api, launch, expected_worker=roles['worker'], expected_engine=roles['engine']))
             self._checked(budget, cohort.cohort.admit)
