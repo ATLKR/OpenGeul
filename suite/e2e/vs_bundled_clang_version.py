@@ -123,7 +123,151 @@ def _capture_observe(result,phase,error=None):
 
 
 # capture-observation:end helpers
-def capture(argv,deadline,stdout_cap,*,popen=subprocess.Popen,identity=_identity,clock=time.monotonic):
+# suspended-witness:begin launcher
+def _suspended_ops():
+    assert os.name=='nt' and sys.version_info[:2]==(3,12), 'CPython 3.12 Windows launcher required'
+    import _winapi
+    import ctypes
+    from ctypes import wintypes
+    import io
+    import msvcrt
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    native_resume=kernel.ResumeThread
+    native_resume.argtypes=(wintypes.HANDLE,)
+    native_resume.restype=wintypes.DWORD
+    def resume(thread):
+        previous=native_resume(thread)
+        if previous==0xffffffff:raise ctypes.WinError(ctypes.get_last_error())
+        return previous
+    def duplicate(handle):
+        current=_winapi.GetCurrentProcess()
+        return _winapi.DuplicateHandle(current,handle,current,0,True,_winapi.DUPLICATE_SAME_ACCESS)
+    # None inherits the already finite helper environment; no mapping is read.
+    return types.SimpleNamespace(pipe=lambda:_winapi.CreatePipe(None,0),duplicate=duplicate,
+        open_nul=lambda:os.open(os.devnull,os.O_RDONLY|os.O_BINARY),fd_handle=msvcrt.get_osfhandle,
+        close_fd=os.close,read_fd=lambda handle:msvcrt.open_osfhandle(handle,os.O_RDONLY|os.O_BINARY),
+        fileio=lambda fd:io.FileIO(fd,'rb',closefd=False),startupinfo=subprocess.STARTUPINFO,
+        create=_winapi.CreateProcess,close=_winapi.CloseHandle,wait=_winapi.WaitForSingleObject,
+        exit_code=_winapi.GetExitCodeProcess,terminate=_winapi.TerminateProcess,resume=resume)
+
+
+class _SuspendedProcess:
+    """One original process/thread pair; CRT read FDs remain owned here."""
+    def __init__(self,argv,*,stdin,stdout,stderr,bufsize,creationflags,close_fds,ops=None):
+        assert type(argv) is list and 0<len(argv)<=16
+        assert all(type(v) is str and 0<len(v)<=4096 and '\0' not in v for v in argv)
+        assert Path(argv[0]).is_absolute()
+        assert stdin==subprocess.DEVNULL and stdout==stderr==subprocess.PIPE
+        assert type(bufsize) is int and bufsize==0 and type(creationflags) is int and creationflags==0 and close_fds is True
+        self._ops=_suspended_ops() if ops is None else ops
+        self._raw=[];self._fds=[];self._streams=[];self._process_handle=None;self._thread_handle=None
+        self._close_started=False;self._close_error=None;self._resume_attempted=False
+        self._termination_attempted=False;self._retirement_wait_attempted=False
+        self._handle=self;self.returncode=None
+        try:
+            nul=self._ops.open_nul();self._fds.append(nul)
+            child_in=self._ops.duplicate(self._ops.fd_handle(nul));self._own_handles(child_in)
+            self._fds.remove(nul);self._ops.close_fd(nul)
+            readers=[];children=[child_in]
+            for _ in range(2):
+                reader,writer=self._ops.pipe();self._own_handles(reader,writer)
+                child=self._ops.duplicate(writer);self._own_handles(child);children.append(child)
+                self._raw.remove(writer);self._ops.close(writer)
+                fd=self._ops.read_fd(reader);self._raw.remove(reader);self._fds.append(fd)
+                stream=self._ops.fileio(fd);self._streams.append(stream);readers.append(stream)
+            self.stdout,self.stderr=readers
+            assert len(set(children))==3
+            startup=self._ops.startupinfo(dwFlags=0x100,hStdInput=children[0],hStdOutput=children[1],hStdError=children[2],
+                lpAttributeList={'handle_list':list(children)})
+            # CREATE_SUSPENDED only. The current private Job is inherited; no breakaway.
+            hp,ht,pid,tid=self._ops.create(argv[0],subprocess.list2cmdline(argv),None,None,True,4,None,None,startup)
+            self._process_handle,self._thread_handle=hp,ht;self._own_handles(hp,ht)
+            assert all(type(v) is int and v>0 for v in (hp,ht,pid,tid)) and hp!=ht
+            self.pid=pid
+            for child in children:
+                self._raw.remove(child);self._ops.close(child)
+        except BaseException:
+            if self._process_handle is not None:
+                self._termination_attempted=True
+                try:self._ops.terminate(self._process_handle,1)
+                except BaseException:pass
+                self._retirement_wait_attempted=True
+                try:assert self._ops.wait(self._process_handle,1000)==0
+                except BaseException:pass
+            try:self.Close()
+            except BaseException:pass
+            raise
+
+    def _own_handles(self,*handles):
+        previous=set(self._raw)
+        valid=all(type(handle) is int and handle>0 for handle in handles)
+        for handle in handles:
+            if type(handle) is int and handle>0 and handle not in self._raw:self._raw.append(handle)
+        assert valid and len(set(handles))==len(handles) and not previous.intersection(handles)
+
+    def __int__(self):
+        assert not self._close_started and self._process_handle is not None
+        return self._process_handle
+
+    def resume_original(self):
+        assert not self._resume_attempted and not self._close_started
+        self._resume_attempted=True
+        previous=self._ops.resume(self._thread_handle)
+        assert type(previous) is int and previous==1, 'Original thread suspend count differs'
+
+    def poll(self):
+        if self.returncode is None:
+            waited=self._ops.wait(int(self),0)
+            assert type(waited) is int and waited in (0,258)
+            if waited==0:self.returncode=self._ops.exit_code(int(self))
+        return self.returncode
+
+    def wait(self,timeout):
+        assert type(timeout) in (int,float) and math.isfinite(timeout) and 0<=timeout<=1.
+        if self._termination_attempted:self._retirement_wait_attempted=True
+        if self.returncode is None:
+            waited=self._ops.wait(int(self),int(timeout*1000))
+            if waited==258:raise subprocess.TimeoutExpired('native-query',timeout)
+            assert type(waited) is int and waited==0
+            self.returncode=self._ops.exit_code(int(self))
+        return self.returncode
+
+    def kill(self):
+        self._termination_attempted=True
+        try:self._ops.terminate(int(self),1)
+        except PermissionError:
+            result=self._ops.exit_code(int(self))
+            if result==259:raise
+            self.returncode=result
+
+    def Close(self):
+        if self._close_started:
+            if self._close_error is not None:raise self._close_error
+            return
+        self._close_started=True;errors=[]
+        if self._process_handle is not None and self.returncode is None:
+            if not self._termination_attempted:
+                self._termination_attempted=True
+                try:self._ops.terminate(self._process_handle,1)
+                except BaseException as error:errors.append(error)
+            if not self._retirement_wait_attempted:
+                self._retirement_wait_attempted=True
+                try:assert self._ops.wait(self._process_handle,1000)==0
+                except BaseException as error:errors.append(error)
+        for stream in self._streams:
+            try:stream.close()
+            except BaseException as error:errors.append(error)
+        for fd in self._fds:
+            try:self._ops.close_fd(fd)
+            except BaseException as error:errors.append(error)
+        for handle in reversed(self._raw):
+            try:self._ops.close(handle)
+            except BaseException as error:errors.append(error)
+        self._streams.clear();self._fds.clear();self._raw.clear()
+        if errors:self._close_error=errors[0];raise self._close_error
+# suspended-witness:end launcher
+
+def capture(argv,deadline,stdout_cap,*,popen=_SuspendedProcess,identity=_identity,clock=time.monotonic):
     result = dict(exitCode=None,pid=None,creationTime=None,imageMatched=False,naturalExit=False,
                   handlesClosed=False,timedOut=False,outputCapReached=False,captureError=False)
     # capture-observation:begin capture-init
@@ -170,6 +314,11 @@ def capture(argv,deadline,stdout_cap,*,popen=subprocess.Popen,identity=_identity
         capture_phase=4
         # capture-observation:end after-witness
         assert result['imageMatched'], 'Queried child image differs'
+        # suspended-witness:begin resume
+        if type(process) is _SuspendedProcess:
+            assert clock()<end, 'Query expired before original thread resume'
+            process.resume_original()
+        # suspended-witness:end resume
         for pipe,target,cap in ((process.stdout,out,stdout_cap),(process.stderr,err,STDERR_CAP)):
             reader = threading.Thread(target=drain,args=(pipe,target,cap),daemon=True)
             reader.start()
@@ -208,24 +357,35 @@ def capture(argv,deadline,stdout_cap,*,popen=subprocess.Popen,identity=_identity
         # capture-observation:end main-exception
     finally:
         if process is not None:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=1.)
-            for reader in readers:
-                reader.join(timeout=.2)
-            # capture-observation:begin cleanup-phase
-            capture_phase=7
-            # capture-observation:end cleanup-phase
+            # suspended-witness:begin cleanup
             try:
-                process.stdout.close()
-                process.stderr.close()
-                process._handle.Close()
-                result['handlesClosed'] = True
-            except BaseException as capture_error:
-                result['captureError'] = True
-                # capture-observation:begin cleanup-exception
-                _capture_observe(result,capture_phase,capture_error)
-                # capture-observation:end cleanup-exception
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=1.)
+                for reader in readers:
+                    reader.join(timeout=.2)
+            finally:
+                # capture-observation:begin cleanup-phase
+                capture_phase=7
+                # capture-observation:end cleanup-phase
+                try:
+                    # suspended-witness:begin close-primary
+                    try:
+                        process.stdout.close()
+                        process.stderr.close()
+                    except BaseException:
+                        try:process._handle.Close()
+                        except BaseException:pass
+                        raise
+                    process._handle.Close()
+                    # suspended-witness:end close-primary
+                    result['handlesClosed'] = True
+                except BaseException as capture_error:
+                    result['captureError'] = True
+                    # capture-observation:begin cleanup-exception
+                    _capture_observe(result,capture_phase,capture_error)
+                    # capture-observation:end cleanup-exception
+            # suspended-witness:end cleanup
     # capture-observation:begin capture-return
     _capture_observe(result,8)
     # capture-observation:end capture-return
