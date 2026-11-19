@@ -230,6 +230,22 @@ fn external_stored_positive_bit31_is_not_authenticated_runtime_origin() {
 }
 
 #[test]
+fn hwpx_sized_stored_rows_keep_origin_without_requiring_runtime_tag() {
+    use rhwp::parser::hwpx::section::parse_hwpx_section;
+    for (flags,height,expected) in [
+        (0,1000,Some(vec![7777])),
+        (LineSeg::TAG_IMPLEMENTATION_PROPERTY,1000,Some(vec![7777])),
+        (LineSeg::TAG_EMPTY_SEGMENT,1000,None),
+        (0,0,None),
+    ] {
+        let xml=format!(r#"<hs:sec xmlns:hs="urn:hwp:section" xmlns:hp="urn:hwp:paragraph"><hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>A</hp:t></hp:run><hp:linesegarray><hp:lineseg textpos="0" vertpos="7777" vertsize="{height}" textheight="{height}" baseline="850" spacing="600" horzpos="0" horzsize="1000" flags="{flags}"/></hp:linesegarray></hp:p></hs:sec>"#);
+        let section=parse_hwpx_section(&xml).expect("authored synthetic stored section");
+        assert_eq!(section.paragraphs.len(),1);
+        assert_eq!(section.paragraphs[0].source_line_seg_vertical_pos,expected);
+    }
+}
+
+#[test]
 fn authenticated_native_runtime_rows_do_not_become_external_stored_origin() {
     let mut author=DocumentCore::new_empty();author.create_blank_document_native().expect("owned authenticated blank");
     author.insert_text_native(0,0,0,"AUTHENTICATED-RUNTIME-ROW").expect("public authored text");
