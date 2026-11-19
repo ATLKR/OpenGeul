@@ -27,11 +27,12 @@ TOP_KEYS={'schemaVersion','kindCode','diagnosticOnly','acceptance','productionBu
           'productionQualified','observedComplete','knownUnavailable','majorSupported',
           'sourceHeadWords','nativeHostMachine','sourceCount','sourcePinsBeforeAfterEqual','selectionStable',
           'cacheUsed','discoveryRequests','versionRequestsTotal','totalLimitMs','workLimitMs','elapsedMs',
-          'pendingHandleCount','tools','stages','postPinResultCode','failureStageCode'}
+          'pendingHandleCount','tools','stages','postPinResultCode','failureStageCode',
+          'discoveryHelperResultCode','discoveryCaptureObservation'}
 TOOL_KEYS={'present','presenceKnown','knownUnavailable','observedComplete','majorSupported','peVerified','resultCode','postPinResultCode',
            'beforePinned','afterPinned','pinsEqual','statJoinMatched','bytes','machine','sha256Words',
            'major','minor','versionExit','versionRequests','naturalJob','jobEmpty','handlesClosed',
-           'queryPid','queryCreationTime','queryNaturalExit','queryHandleClosed'}
+           'queryPid','queryCreationTime','queryNaturalExit','queryHandleClosed','helperResultCode','captureObservation'}
 STAGE_KEYS={'stageCode','rootExit','natural','jobEmpty','handlesClosed','lastActive','queryCount','pid','creationTime'}
 
 class ProbeFailure(Exception):
@@ -63,7 +64,8 @@ def _tool_row():
                 beforePinned=False,afterPinned=False,pinsEqual=False,statJoinMatched=False,
                 bytes=None,machine=None,sha256Words=[None]*8,major=None,minor=None,versionExit=None,
                 versionRequests=0,naturalJob=False,jobEmpty=False,handlesClosed=False,
-                queryPid=None,queryCreationTime=None,queryNaturalExit=False,queryHandleClosed=False)
+                queryPid=None,queryCreationTime=None,queryNaturalExit=False,queryHandleClosed=False,
+                helperResultCode=None,captureObservation=helper_module.capture_observation())
 
 def _stage_numbers(row,code):
     samples=row.get('samples',[])
@@ -138,6 +140,7 @@ def _query(runtime,folder,budget,record,kind,tool,host_python):
     raw=prep._selection_read(result,8192,budget.now)
     value=json.loads(raw)
     assert type(value) is dict and set(value)==helper_module.RESULT_KEYS
+    helper_module.validate_capture_observation(value['captureObservation'])
     assert type(value['schemaVersion']) is int and value['schemaVersion']==1
     assert type(value['kindCode']) is int and value['kindCode']==kind
     assert type(value['resultCode']) is int and 0<=value['resultCode']<=8
@@ -150,6 +153,7 @@ def _query(runtime,folder,budget,record,kind,tool,host_python):
     assert value['exitCode'] is None or type(value['exitCode']) is int and -0x80000000<=value['exitCode']<=0xffffffff
     if value['resultCode']==0:
         assert value['exitCode']==0 and all(value[k] is True for k in ('imageMatched','naturalExit','handlesClosed'))
+        assert not value['captureObservation']['observedMask']&2
     if kind:
         assert value['selectedRoot'] is None
         if value['resultCode']==0 or value['major'] is not None or value['minor'] is not None:
@@ -197,7 +201,8 @@ def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_s
                 resultCode=0,sourceHeadWords=words,nativeHostMachine=None,sourceCount=4,
                 sourcePinsBeforeAfterEqual=False,selectionStable=False,cacheUsed=False,discoveryRequests=0,
                 versionRequestsTotal=0,totalLimitMs=30000,workLimitMs=27000,elapsedMs=0,pendingHandleCount=0,
-                tools=[_tool_row(),_tool_row()],stages=[],postPinResultCode=0,failureStageCode=0)
+                tools=[_tool_row(),_tool_row()],stages=[],postPinResultCode=0,failureStageCode=0,
+                discoveryHelperResultCode=None,discoveryCaptureObservation=helper_module.capture_observation())
     record={'stages':[]}
     runtime=None;source_pins=None;before_pins={};before_stats={};selection=None;paths=[]
     phase_code=1;step_code=1
@@ -226,6 +231,7 @@ def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_s
             before_discovery=prep._pin(vswhere)
             result['discoveryRequests']=1
             value=_query(runtime,output,budget,record,0,vswhere,host_python)
+            result.update(discoveryHelperResultCode=value['resultCode'],discoveryCaptureObservation=value['captureObservation'])
             _require_query_success(value)
             assert prep._pin(vswhere)==before_discovery
             selection,_=prep._msvc_selection(value['selectedRoot'],'x64',budget.now)
@@ -258,6 +264,7 @@ def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_s
                 row.update(major=value['major'],minor=value['minor'],versionExit=value['exitCode'],
                     queryPid=value['pid'],queryCreationTime=value['creationTime'],
                     queryNaturalExit=value['naturalExit'],queryHandleClosed=value['handlesClosed'])
+                row.update(helperResultCode=value['resultCode'],captureObservation=value['captureObservation'])
                 _require_query_success(value)
                 row['resultCode']=0 if row['major']>=22 else 7
                 if row['resultCode']:fail(row['resultCode'],step_code)
@@ -338,9 +345,23 @@ def validate_report(value):
     assert type(value['sourceHeadWords']) is list and len(value['sourceHeadWords'])==5
     assert all(type(x) is int and 0<=x<=0xffffffff for x in value['sourceHeadWords'])
     assert type(value['tools']) is list and len(value['tools'])==2
+    discovery=value['discoveryHelperResultCode'];observation=value['discoveryCaptureObservation']
+    assert discovery is None or type(discovery) is int and 0<=discovery<=8
+    helper_module.validate_capture_observation(observation)
+    if discovery is None:assert observation['observedMask']==0
+    else:assert value['discoveryRequests']==1 and value['cacheUsed'] is False
+    if value['cacheUsed']:assert value['discoveryRequests']==0 and discovery is None
+    if discovery==0:assert not observation['observedMask']&2
     stable=value['sourcePinsBeforeAfterEqual'] and value['selectionStable'] and value['pendingHandleCount']==0
     for tool in value['tools']:
         assert type(tool) is dict and set(tool)==TOOL_KEYS
+        assert tool['helperResultCode'] is None or type(tool['helperResultCode']) is int and 0<=tool['helperResultCode']<=8
+        helper_module.validate_capture_observation(tool['captureObservation'])
+        if tool['helperResultCode'] is None:assert tool['captureObservation']['observedMask']==0
+        else:assert tool['versionRequests']==1
+        if tool['helperResultCode']==0:
+            assert tool['versionExit']==0 and tool['queryNaturalExit'] is tool['queryHandleClosed'] is True
+            assert not tool['captureObservation']['observedMask']&2
         for key in ('present','presenceKnown','knownUnavailable','observedComplete','peVerified','beforePinned','afterPinned','pinsEqual','statJoinMatched','naturalJob','jobEmpty','handlesClosed','queryNaturalExit','queryHandleClosed'):
             assert type(tool[key]) is bool
         for key,maximum in (('bytes',512*1024*1024),('machine',0xffff),('major',999),('minor',999),('queryPid',0xffffffff),('queryCreationTime',0xffffffffffffffff)):

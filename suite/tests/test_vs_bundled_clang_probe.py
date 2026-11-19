@@ -7,9 +7,12 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 import struct
+import subprocess
 import sys
 import tempfile
+import types
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -88,7 +91,7 @@ class ProbeTests(unittest.TestCase):
         value=dict(schemaVersion=1,kindCode=kind,resultCode=0,exitCode=0,major=major,minor=minor,
                    selectedRoot=str(self.install) if kind==0 else None,stdoutBytes=64,stderrBytes=0,
                    timedOut=False,outputCapReached=False,pid=180+kind,creationTime=134395652231767531,
-                   imageMatched=True,naturalExit=True,handlesClosed=True)
+                   imageMatched=True,naturalExit=True,handlesClosed=True,captureObservation=m.helper_module.capture_observation())
         if self.helper_mutation:self.helper_mutation(value,kind)
         Path(arguments[3]).write_text(json.dumps(value))
         if self.after_query:self.after_query(kind)
@@ -336,7 +339,7 @@ class ProbeTests(unittest.TestCase):
                     output=str(case.install).encode()+b'\n' if kind==0 else b'clang version 22.1.7\n' if kind==1 else b'LLD 22.1.7\n'
                     return dict(exitCode=0,pid=180+kind,creationTime=134395652231767531,
                         imageMatched=True,naturalExit=True,handlesClosed=True,timedOut=False,
-                        outputCapReached=False,captureError=False),output,b''
+                        outputCapReached=False,captureError=False,captureObservation=m.helper_module.capture_observation()),output,b''
                 actual_query=m.helper_module.query
                 with patch.object(m.helper_module,'query',side_effect=lambda request:actual_query(request,capture_call=captured)):
                     case.assertEqual(m.helper_module.main(['--request',str(request_path),'--result',str(result_path)]),0)
@@ -363,12 +366,115 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(all(x['natural'] and x['jobEmpty'] and x['handlesClosed'] for x in value['stages']))
         self.assertFalse(value['productionQualified'])
 
+
+    def test_inner_helper_failure_keeps_result_and_projects_capture_numbers(self):
+        def fail(value,kind):
+            if kind==2:
+                value.update(resultCode=7,exitCode=None,pid=None,creationTime=None,imageMatched=False,naturalExit=False,handlesClosed=True)
+        self.helper_mutation=fail
+        value=self.run_probe()
+        self.assertEqual((value['resultCode'],value['failureStageCode']),(5,6))
+        self.assertEqual(value['tools'][1]['helperResultCode'],7)
+        self.assertEqual(value['tools'][1]['captureObservation'],m.helper_module.capture_observation())
+        self.assertTrue(value['tools'][1]['naturalJob']);self.assertTrue(value['tools'][1]['jobEmpty'])
+        self.assertIsNone(value['majorSupported']);self.assertFalse(value['productionQualified'])
+
+    def test_public_report_strictly_validates_optional_capture_observation(self):
+        value=self.run_probe()
+        self.assertEqual(value['tools'][0]['helperResultCode'],0)
+        m.validate_report(value)
+        for mutation in ('helper-bool','helper-range','extra','mask-bool','unknown-mask','invented-source'):
+            changed=copy.deepcopy(value);tool=changed['tools'][0]
+            if mutation=='helper-bool':tool['helperResultCode']=True
+            elif mutation=='helper-range':tool['helperResultCode']=9
+            elif mutation=='extra':tool['captureObservation']['extra']=0
+            elif mutation=='mask-bool':tool['captureObservation']['observedMask']=True
+            elif mutation=='unknown-mask':tool['captureObservation']['observedMask']=32
+            else:tool['captureObservation']['sourceLine']=175
+            with self.subTest(mutation=mutation),self.assertRaises(AssertionError):m.validate_report(changed)
+
+    def test_closed_source_validator_binds_only_the_pure_capture_validator(self):
+        value=self.run_probe();before=len(self.calls)
+        helper_tree=ast.parse((ROOT/'e2e/vs_bundled_clang_version.py').read_text())
+        helper_function=next(node for node in helper_tree.body if isinstance(node,ast.FunctionDef)
+            and node.name=='validate_capture_observation')
+        pure={}
+        exec(compile(ast.Module(body=[helper_function],type_ignores=[]),'<fixed capture validator>','exec'),pure)
+        tree=ast.parse((ROOT/'e2e/vs_bundled_clang_probe.py').read_text())
+        nodes=[node for node in tree.body if isinstance(node,ast.Assign) and len(node.targets)==1
+            and isinstance(node.targets[0],ast.Name) and node.targets[0].id in ('TOP_KEYS','TOOL_KEYS','STAGE_KEYS')]
+        self.assertEqual(len(nodes),3)
+        nodes.append(next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='validate_report'))
+        space=dict(json=json,prep=SimpleNamespace(QUERY_CAP=4096),
+            helper_module=SimpleNamespace(validate_capture_observation=pure['validate_capture_observation']))
+        exec(compile(ast.Module(body=nodes,type_ignores=[]),'<fixed report validator>','exec'),space)
+        space['validate_report'](value)
+        changed=copy.deepcopy(value);changed['tools'][0]['captureObservation']['sourceLine']=175
+        with self.assertRaises(AssertionError):space['validate_report'](changed)
+        self.assertEqual(len(self.calls),before)
+
+    def test_fresh_discovery_failures_keep_original_codes_and_helper_observation(self):
+        for helper_code,result_code in ((7,5),(8,6)):
+            with self.subTest(helperCode=helper_code):
+                self.output=self.root/('discovery-failure-'+str(helper_code))
+                self.report=self.root/('discovery-failure-'+str(helper_code)+'.numeric.json')
+                def fail(value,kind):
+                    if kind==0:
+                        value.update(resultCode=helper_code,selectedRoot=None)
+                        if helper_code==7:
+                            value.update(exitCode=None,pid=None,creationTime=None,imageMatched=False,naturalExit=False)
+                            value['captureObservation'].update(observedMask=3,phaseCode=2,exceptionKindCode=2)
+                self.helper_mutation=fail
+                value=self.run_probe()
+                self.assertEqual((value['resultCode'],value['failureStageCode']),(result_code,3))
+                self.assertEqual(value['discoveryRequests'],1);self.assertFalse(value['cacheUsed'])
+                self.assertEqual(value['discoveryHelperResultCode'],helper_code)
+                expected=m.helper_module.capture_observation()
+                if helper_code==7:expected.update(observedMask=3,phaseCode=2,exceptionKindCode=2)
+                self.assertEqual(value['discoveryCaptureObservation'],expected)
+                self.assertEqual(value['versionRequestsTotal'],0)
+                self.assertFalse(value['productionQualified']);m.validate_report(value)
+
+    def test_cached_discovery_has_unknown_helper_fields_without_fresh_query(self):
+        value=self.run_probe(cached_preparation=self.cached())
+        self.assertEqual([row['kindCode'] for row in self.calls],[1,2])
+        self.assertEqual(value['discoveryRequests'],0);self.assertTrue(value['cacheUsed'])
+        self.assertIsNone(value['discoveryHelperResultCode'])
+        self.assertEqual(value['discoveryCaptureObservation'],m.helper_module.capture_observation())
+        for mutation in ('invented-result','invented-observation'):
+            changed=copy.deepcopy(value)
+            if mutation=='invented-result':changed['discoveryHelperResultCode']=0
+            else:changed['discoveryCaptureObservation'].update(observedMask=1,phaseCode=8)
+            with self.subTest(mutation=mutation),self.assertRaises(AssertionError):m.validate_report(changed)
+
+    def test_helper_success_cannot_forge_capture_exception_or_failed_query_flags(self):
+        value=self.run_probe()
+        for mutation in ('exception','exit','natural','closed','discovery-exception'):
+            changed=copy.deepcopy(value);tool=changed['tools'][0]
+            if mutation=='discovery-exception':
+                changed['discoveryCaptureObservation'].update(observedMask=3,phaseCode=2,exceptionKindCode=2)
+            elif mutation=='exception':tool['captureObservation'].update(observedMask=3,phaseCode=2,exceptionKindCode=2)
+            else:
+                changed.update(resultCode=5,failureStageCode=5,majorSupported=None)
+                tool.update(resultCode=5,majorSupported=None)
+                if mutation=='exit':tool['versionExit']=17
+                else:
+                    tool['queryNaturalExit' if mutation=='natural' else 'queryHandleClosed']=False
+                    tool['observedComplete']=False;changed['observedComplete']=False
+            with self.subTest(mutation=mutation),self.assertRaises(AssertionError):m.validate_report(changed)
+        self.output=self.root/'forged-helper-private';self.report=self.root/'forged-helper.numeric.json'
+        self.helper_mutation=lambda row,kind:row['captureObservation'].update(observedMask=3,phaseCode=2,exceptionKindCode=2) if kind==1 else None
+        rejected=self.run_probe()
+        self.assertEqual(rejected['resultCode'],6)
+        self.assertIsNone(rejected['tools'][0]['helperResultCode'])
+
 class HelperTests(unittest.TestCase):
     def setUp(self):self.helper=m.helper_module
 
     def observed(self):
         return dict(exitCode=0,pid=71,creationTime=134395652231767531,imageMatched=True,naturalExit=True,
-                    handlesClosed=True,timedOut=False,outputCapReached=False,captureError=False)
+                    handlesClosed=True,timedOut=False,outputCapReached=False,captureError=False,
+                    captureObservation=self.helper.capture_observation())
 
     def test_private_query_drops_unselected_version_text(self):
         request=dict(schemaVersion=1,kindCode=1,tool=str(Path.cwd()/'VS/VC/Tools/Llvm/x64/bin/clang-cl.exe'),deadline=m.time.monotonic()+4)
@@ -453,6 +559,202 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(result['naturalExit'])
         self.assertEqual(process.kills,1)
         self.assertTrue(result['handlesClosed'])
+
+
+    def test_capture_identity_failure_keeps_fixed_source_and_hostile_exception_numeric(self):
+        for boundary,line in (('image',173),('times',177)):
+            with self.subTest(boundary=boundary):
+                seen=[]
+                class HostileOSError(OSError):
+                    def __str__(self):seen.append('str');raise AssertionError('No exception text')
+                    def __repr__(self):seen.append('repr');raise AssertionError('No exception repr')
+                error=HostileOSError(5,'synthetic private text');error.winerror=6
+                native_source=ROOT/'worker/native_windows.py'
+                native_class=next(node for node in ast.parse(native_source.read_text()).body
+                    if isinstance(node,ast.ClassDef) and node.name=='ProcessDiagnosticsApi')
+                import ctypes
+                from ctypes import wintypes
+                space={'ctypes':ctypes,'wt':wintypes}
+                exec(compile(ast.Module(body=[native_class],type_ignores=[]),str(native_source),'exec'),space)
+                native=SimpleNamespace(ctypes=ctypes,ProcessDiagnosticsApi=space['ProcessDiagnosticsApi'])
+                api=native.ProcessDiagnosticsApi.__new__(native.ProcessDiagnosticsApi)
+                api.query_image=lambda *_:boundary!='image'
+                api.get_times=lambda *_:False
+                process=self.process()
+                class Handle:
+                    def __int__(self):return 99
+                    def Close(self):pass
+                process._handle=Handle()
+                with patch.object(native.ctypes,'WinError',return_value=error,create=True),patch.object(native.ctypes,'get_last_error',return_value=6,create=True):
+                    result,out,err=self.helper.capture(['synthetic.exe','--version'],m.time.monotonic()+4,4096,
+                        popen=lambda *a,**k:process,identity=lambda child:self.helper._identity(child,api=api))
+                value=self.helper.query(dict(schemaVersion=1,kindCode=2,
+                    tool=str(Path.cwd()/'VS/VC/Tools/Llvm/x64/bin/lld-link.exe'),deadline=m.time.monotonic()+4),
+                    capture_call=lambda *_:(result,out,err))
+                self.assertEqual(value['resultCode'],7)
+                self.assertIsNone(value['pid']);self.assertIsNone(value['creationTime'])
+                self.assertFalse(value['naturalExit']);self.assertTrue(value['handlesClosed'])
+                observation=value['captureObservation'];self.helper.validate_capture_observation(observation)
+                native_winerror=OSError.__dict__.get('winerror')
+                winerror_known=type(native_winerror) is types.MemberDescriptorType
+                self.assertEqual(observation,dict(observedMask=31 if winerror_known else 27,phaseCode=2,exceptionKindCode=2,
+                    winerror=6 if winerror_known else 0,errno=5,sourceFileCode=2,sourceLine=line))
+                self.assertEqual(seen,[])
+
+    def test_capture_observation_default_and_strict_unknown_mask(self):
+        empty=self.helper.capture_observation()
+        self.assertEqual(empty,dict(observedMask=0,phaseCode=0,exceptionKindCode=0,
+            winerror=0,errno=0,sourceFileCode=0,sourceLine=0))
+        self.helper.validate_capture_observation(empty)
+        mutations=(dict(extra=0),dict(observedMask=True),dict(observedMask=32),dict(phaseCode=1),
+            dict(exceptionKindCode=1),dict(observedMask=4,winerror=5),
+            dict(observedMask=3,phaseCode=2,exceptionKindCode=2,errno=1),
+            dict(observedMask=19,phaseCode=2,exceptionKindCode=2,sourceFileCode=3,sourceLine=175),
+            dict(observedMask=19,phaseCode=2,exceptionKindCode=2,sourceFileCode=2,sourceLine=0),
+            dict(observedMask=19,phaseCode=2,exceptionKindCode=2,sourceFileCode=2,sourceLine=65536),
+            dict(observedMask=7,phaseCode=2,exceptionKindCode=2,winerror=True),
+            dict(observedMask=11,phaseCode=2,exceptionKindCode=2,errno=2**31))
+        for mutation in mutations:
+            with self.subTest(mutation=tuple(mutation)):
+                changed=dict(empty);changed.update(mutation)
+                with self.assertRaises(AssertionError):self.helper.validate_capture_observation(changed)
+
+    def original_capture_source(self):
+        source=(ROOT/'e2e/vs_bundled_clang_version.py').read_text()
+        pattern=r'(?ms)^[ \t]*# capture-observation:begin ([a-z-]+)\n.*?^[ \t]*# capture-observation:end \1\n'
+        names=re.findall(r'(?m)^\s*# capture-observation:begin ([a-z-]+)$',source)
+        self.assertEqual(set(names),{'imports','schema','helpers','capture-init','capture-expired',
+            'after-launch','after-identity','after-witness','before-sampling','before-wait',
+            'main-exception','cleanup-phase','cleanup-exception','capture-return','query-projection'})
+        self.assertEqual(len(names),15)
+        original=re.sub(pattern,'',source).replace('except BaseException as capture_error:', 'except BaseException:')
+        self.assertEqual(hashlib.sha256(original.encode()).hexdigest(),'e9acc73c7e6cc3b1ae0873be8e0b856ea8519d2f558be336445613c61b25d0e1')
+        return original
+
+    def test_capture_source_reverse_and_original_calls_results_remain_exact(self):
+        namespace={'__name__':'fixed_original_bundled_version','__file__':str(ROOT/'e2e/vs_bundled_clang_version.py')}
+        exec(compile(self.original_capture_source(),namespace['__file__'],'exec'),namespace)
+        original=SimpleNamespace(**namespace)
+        def attempt(module,scenario):
+            import io
+            calls=[]
+            class Pipe:
+                def __init__(self,name):self.name=name;self.data=io.BytesIO(b'LLD 22.1.7\n' if name=='stdout' else b'')
+                def read(self,n):calls.append(('read',self.name,n));return self.data.read(n)
+                def close(self):calls.append(('close',self.name))
+            class Handle:
+                def Close(self):
+                    calls.append(('close','handle'))
+                    if scenario=='close-error':raise OSError(6,'synthetic')
+            class Process:
+                pid=71
+                def __init__(self):self.stdout=Pipe('stdout');self.stderr=Pipe('stderr');self._handle=Handle();self.returncode=None if scenario=='timeout' else 0
+                def poll(self):calls.append(('poll',));return self.returncode
+                def wait(self,timeout):
+                    calls.append(('wait',timeout))
+                    if self.returncode is None:raise subprocess.TimeoutExpired('synthetic',timeout)
+                    return self.returncode
+                def kill(self):calls.append(('kill',));self.returncode=1
+            process=Process()
+            class Thread:
+                def __init__(self,target,args,daemon):self.target=target;self.args=args;calls.append(('thread',int(daemon)))
+                def start(self):calls.append(('start',));self.target(*self.args)
+                def join(self,timeout):calls.append(('join',timeout))
+                def is_alive(self):calls.append(('alive',));return False
+            class Clock:
+                value=100.
+                def __call__(self):calls.append(('clock',));self.value+=.05;return self.value
+            def identity(_):
+                calls.append(('identity',))
+                if scenario=='identity-error':raise OSError(5,'synthetic')
+                return dict(pid=71,creationTime=134395652231767531,image='synthetic.exe')
+            def popen(*_,**options):
+                calls.append(('popen',options['creationflags'],int(options['close_fds']),options['bufsize']))
+                return process
+            with patch.object(module.threading,'Thread',Thread):
+                value,out,err=module.capture(['synthetic.exe','--version'],100.25 if scenario=='timeout' else 104.,4096,
+                    popen=popen,identity=identity,clock=Clock())
+            value=dict(value);value.pop('captureObservation',None)
+            return value,out,err,calls
+        for scenario in ('success','identity-error','timeout','close-error'):
+            with self.subTest(scenario=scenario):self.assertEqual(attempt(original,scenario),attempt(self.helper,scenario))
+        changed=self.original_capture_source().replace('process.kill()','process.terminate()',1)
+        self.assertNotEqual(hashlib.sha256(changed.encode()).hexdigest(),'e9acc73c7e6cc3b1ae0873be8e0b856ea8519d2f558be336445613c61b25d0e1')
+
+    def test_capture_observation_failure_cannot_replace_original_result_or_exception(self):
+        failure=KeyboardInterrupt()
+        process=self.process()
+        def identity(_):raise OSError(5,'synthetic')
+        with patch.object(self.helper,'_capture_exception_numbers',side_effect=failure):
+            result,out,err=self.helper.capture(['synthetic.exe','--version'],m.time.monotonic()+4,4096,
+                popen=lambda *a,**k:process,identity=identity)
+        self.assertTrue(result['captureError']);self.assertTrue(result['handlesClosed'])
+        self.assertIsNone(result['pid']);self.assertEqual(result['captureObservation']['observedMask']&2,0)
+        escaped=KeyboardInterrupt()
+        class Child:
+            def poll(self):raise escaped
+        for module in (self.helper,):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                module.capture(['synthetic.exe'],m.time.monotonic()+4,4096,popen=lambda *a,**k:Child(),identity=identity)
+            self.assertIs(caught.exception,escaped)
+
+    def test_capture_untrusted_numbers_and_clipped_trace_stay_unknown(self):
+        class Hostile(OSError):
+            def __str__(self):raise AssertionError('No exception text')
+            def __repr__(self):raise AssertionError('No exception repr')
+        for clipped in (False,True):
+            with self.subTest(clipped=clipped):
+                error=Hostile(5,'synthetic private text');error.winerror='synthetic private value';error.errno=True
+                def nested(depth):
+                    if depth:return nested(depth-1)
+                    raise error
+                result,_,_=self.helper.capture(['synthetic.exe'],m.time.monotonic()+4,4096,
+                    popen=lambda *a,**k:self.process(),identity=lambda _:nested(20 if clipped else 0))
+                observation=result['captureObservation'];self.helper.validate_capture_observation(observation)
+                self.assertEqual(observation['observedMask']&12,0)
+                self.assertEqual((observation['winerror'],observation['errno']),(0,0))
+                if clipped:self.assertEqual((observation['sourceFileCode'],observation['sourceLine']),(0,0))
+                else:self.assertEqual(observation['sourceFileCode'],1)
+                self.assertTrue(result['captureError']);self.assertIsNone(result['pid'])
+                self.assertNotIn('synthetic private',json.dumps(observation))
+
+    def test_cached_exception_reads_never_execute_class_attribute_or_property_getters(self):
+        calls=[]
+        class Properties(OSError):
+            def __getattribute__(self,name):
+                if name=='__class__':calls.append(name);raise RuntimeError('forbidden class getter')
+                return super().__getattribute__(name)
+            @property
+            def winerror(self):calls.append('property-winerror');raise RuntimeError('forbidden property')
+            @property
+            def errno(self):calls.append('property-errno');raise RuntimeError('forbidden property')
+            def __str__(self):calls.append('str');raise RuntimeError('forbidden text')
+            def __repr__(self):calls.append('repr');raise RuntimeError('forbidden text')
+        class Attributes(OSError):
+            def __getattribute__(self,name):
+                if name in ('__class__','winerror','errno'):
+                    calls.append(name);raise RuntimeError('forbidden instance getter')
+                return super().__getattribute__(name)
+            def __str__(self):calls.append('str');raise RuntimeError('forbidden text')
+            def __repr__(self):calls.append('repr');raise RuntimeError('forbidden text')
+        class Other(BaseException):
+            def __getattribute__(self,name):
+                if name in ('__class__','winerror','errno'):
+                    calls.append(name);raise RuntimeError('forbidden instance getter')
+                return super().__getattribute__(name)
+        for error,kind in ((Properties(5,'synthetic'),2),(Attributes(5,'synthetic'),2),(Other(),6)):
+            with self.subTest(kind=kind):
+                calls.clear();process=self.process()
+                def identity(_):raise error
+                value,out,err=self.helper.capture(['synthetic.exe'],m.time.monotonic()+4,4096,
+                    popen=lambda *a,**k:process,identity=identity)
+                self.assertEqual(calls,[])
+                self.assertTrue(value['captureError']);self.assertTrue(value['handlesClosed'])
+                observation=value['captureObservation'];self.helper.validate_capture_observation(observation)
+                self.assertEqual(observation['exceptionKindCode'],kind)
+                self.assertEqual(observation['phaseCode'],2)
+                if kind==2:self.assertEqual(observation['errno'],5)
+                else:self.assertEqual(observation['observedMask']&12,0)
 
 class LegacyEnvironmentTests(unittest.TestCase):
     def functions(self):
