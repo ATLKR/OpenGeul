@@ -233,6 +233,89 @@ def write_phase_output(path,phase):
     except Exception:raise Rejected() from None
 
 
+PREPARATION_CONTEXT_KEYS={'schemaVersion','stageCode','passed','sourceFileCount','errorCode',
+    'normalAcceptance','fullEngineQualified','acceptanceEligible','guiVerified'}
+PREPARATION_PHASE_KEYS={'schemaVersion','passed','launchAttempted','originalChildIdentityMatched',
+    'originalChildExitObserved','originalChildExitCode','ownedJobEmpty','forcedDisposalRequested',
+    'timedOut','cleanupComplete','pendingRetainedCount','errorCode','originalEngineRetirementAuthority',
+    'normalAcceptance','fullEngineQualified','acceptanceEligible','guiVerified','hardDeadlineEnforcementVerified'}
+
+
+def validate_preparation_failure_values(context,phase,*,expected_source_file_count=None):
+    """Closed failure metadata only; the existing context step owns source admission."""
+    def number(value,low,high):
+        if type(value) is not int or not low<=value<=high:raise Rejected()
+    if type(context) is not dict or set(context)!=PREPARATION_CONTEXT_KEYS:raise Rejected()
+    if type(phase) is not dict or set(phase)!=PREPARATION_PHASE_KEYS:raise Rejected()
+    number(context['schemaVersion'],1,1);number(context['stageCode'],1,1)
+    number(context['sourceFileCount'],1,100000);number(context['errorCode'],0,0)
+    if context['passed'] is not True:raise Rejected()
+    if expected_source_file_count is not None:
+        number(expected_source_file_count,1,100000)
+        if context['sourceFileCount']!=expected_source_file_count:raise Rejected()
+    for key in ('normalAcceptance','fullEngineQualified','acceptanceEligible','guiVerified'):
+        if context[key] is not False:raise Rejected()
+    number(phase['schemaVersion'],1,1);number(phase['errorCode'],0,3)
+    number(phase['pendingRetainedCount'],0,5)
+    for key in ('passed','launchAttempted','originalChildIdentityMatched','originalChildExitObserved',
+                'forcedDisposalRequested','timedOut','cleanupComplete'):
+        if type(phase[key]) is not bool:raise Rejected()
+    if phase['passed'] is not False:raise Rejected()
+    if phase['errorCode']==2 and not phase['timedOut']:raise Rejected()
+    if phase['timedOut'] and phase['errorCode'] not in (2,3):raise Rejected()
+    for key in ('originalEngineRetirementAuthority','normalAcceptance','fullEngineQualified',
+                'acceptanceEligible','guiVerified','hardDeadlineEnforcementVerified'):
+        if phase[key] is not False:raise Rejected()
+    if phase['ownedJobEmpty'] is not None and type(phase['ownedJobEmpty']) is not bool:raise Rejected()
+    if phase['ownedJobEmpty'] is not None and not phase['originalChildExitObserved']:raise Rejected()
+    if phase['originalChildExitObserved']:
+        number(phase['originalChildExitCode'],0,0xffffffff)
+        if not phase['launchAttempted'] or not phase['originalChildIdentityMatched']:raise Rejected()
+    elif phase['originalChildExitCode'] is not None:raise Rejected()
+    if (phase['originalChildIdentityMatched'] or phase['forcedDisposalRequested'] or
+            phase['ownedJobEmpty'] is not None) and not phase['launchAttempted']:raise Rejected()
+    if phase['cleanupComplete'] and (not phase['launchAttempted'] or phase['pendingRetainedCount']):raise Rejected()
+    if (phase['originalChildExitObserved'] and phase['originalChildExitCode']==0 and
+            phase['ownedJobEmpty'] is True and phase['cleanupComplete'] and
+            not phase['timedOut'] and phase['errorCode']==0):raise Rejected()
+    return True
+
+
+def _read_preparation_json(path):
+    """The existing file/ancestor guard plus one bounded retained-file read."""
+    before=_regular(path)
+    if before.st_nlink!=1 or not 0<before.st_size<=4096:raise Rejected()
+    identity=lambda row:(row.st_dev,row.st_ino,row.st_mode,row.st_nlink,row.st_size,row.st_mtime_ns)
+    fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0))
+    try:
+        if identity(os.fstat(fd))!=identity(before):raise Rejected()
+        raw=os.read(fd,4097)
+        if len(raw)!=before.st_size or identity(os.fstat(fd))!=identity(before):raise Rejected()
+        if identity(_regular(path))!=identity(before):raise Rejected()
+    finally:os.close(fd)
+    return raw,_decode_json(raw)
+
+
+def require_preparation_failure(context_path,phase_path,output):
+    try:
+        context_path,phase_path,output=(Path(p).absolute() for p in (context_path,phase_path,output))
+        if any('..' in p.parts for p in (context_path,phase_path,output)):raise Rejected()
+        if (context_path.name!='context.numeric.json' or phase_path.name!='compiler-phase.numeric.json' or
+                context_path.parent!=phase_path.parent or context_path.parent.name!='writer-observer-public' or
+                output.name!='writer-preparation-failure-public' or output.parent!=context_path.parent.parent):raise Rejected()
+        context_raw,context=_read_preparation_json(context_path)
+        phase_raw,phase=_read_preparation_json(phase_path)
+        validate_preparation_failure_values(context,phase)
+        _regular(output.parent,directory=True)
+        output.mkdir(mode=0o700,exist_ok=False)
+        for name,raw in (('context.numeric.json',context_raw),('compiler-phase.numeric.json',phase_raw)):
+            fd=os.open(output/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            with os.fdopen(fd,'wb') as stream:
+                if stream.write(raw)!=len(raw):raise Rejected()
+        return True
+    except Exception:raise Rejected() from None
+
+
 def require_report(path):
     try:
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'e2e'))
@@ -250,8 +333,9 @@ def main(arguments=None):
         'normalAcceptance':False,'fullEngineQualified':False,'acceptanceEligible':False,'guiVerified':False}
     output=None
     try:
-        parser=Parser(add_help=False,allow_abbrev=False);parser.add_argument('mode',choices=('admit','validate-report'))
-        parser.add_argument('--output');parser.add_argument('--input');args=parser.parse_args(arguments)
+        parser=Parser(add_help=False,allow_abbrev=False);parser.add_argument('mode',choices=('admit','validate-report','validate-preparation-failure'))
+        parser.add_argument('--output');parser.add_argument('--input')
+        parser.add_argument('--context');parser.add_argument('--compiler-phase');args=parser.parse_args(arguments)
         if args.mode=='admit':
             output=args.output
             values={key:os.environ.get(key) for key in KEYS}
@@ -265,6 +349,8 @@ def main(arguments=None):
                 count=verify_source(Path.cwd(),values['GITHUB_SHA'])
             receipt['sourceFileCount']=count
             write_phase_output(os.environ.get('GITHUB_OUTPUT'),phase)
+        elif args.mode=='validate-preparation-failure':
+            receipt['stageCode']=3;require_preparation_failure(args.context,args.compiler_phase,args.output)
         else:
             receipt['stageCode']=2;require_report(args.input)
         receipt['passed']=True

@@ -175,8 +175,11 @@ def build_atomic_environment(read_value,runtime,descriptor):
     return result
 
 
-def atomic_failure_exit(error):
+def atomic_failure_exit(error, *, profile=None):
     """Report only a builtin kind and deepest fixed-source coordinate.
+
+    The opt-in caller profile skips only the cached, exact original Budget.now
+    code at its fixed deadline assertion. Clock guards and default encoding stay.
 
     This is a nonzero child status, not a compiler/native error code or an
     engine-retirement witness. No exception arguments, locals, messages, log
@@ -188,6 +191,7 @@ def atomic_failure_exit(error):
         ModuleNotFoundError:10,OverflowError:11,UnicodeDecodeError:12}
     kind=kinds.get(type(error))
     if kind is None:return 3
+    if profile is not None and (type(profile) is not str or profile != 'budget-deadline-caller-v1'):return 3
     try:
         root=Path(__file__).resolve().parent
         sources={str(root/'writer_server_observer_phase.py'):1,
@@ -195,6 +199,16 @@ def atomic_failure_exit(error):
             str(root/'native_compiler_tools.py'):3,
             str(root/'native_suite_architecture.py'):4,
             str(root.parent/'worker/native_windows.py'):5}
+        skip_code=None
+        if profile == 'budget-deadline-caller-v1' and kind == 1:
+            cached=sys.modules.get('ascii_message_preparation')
+            if type(cached) is type(sys):
+                budget=cached.__dict__.get('_Budget')
+                method=budget.__dict__.get('now') if type(budget) is type else None
+                if type(method) is type(atomic_failure_exit):
+                    code=method.__code__
+                    if (code.co_filename == str(root/'ascii_message_preparation.py') and
+                            code.co_name == 'now' and code.co_firstlineno == 56):skip_code=code
         frame=BaseException.__getattribute__(error,'__traceback__')
         deepest=None;seen=0
         while frame is not None and seen<64:
@@ -202,7 +216,8 @@ def atomic_failure_exit(error):
             if file is not None:
                 line=frame.tb_lineno
                 if type(line) is not int or not 1<=line<=20000:return 3
-                deepest=(file,line)
+                if not (skip_code is not None and frame.tb_frame.f_code is skip_code and file == 2 and line == 60):
+                    deepest=(file,line)
             frame=frame.tb_next;seen+=1
         if frame is not None or deepest is None:return 3
         file,line=deepest
@@ -213,10 +228,12 @@ def atomic_failure_exit(error):
 def child(arguments):
     # This entry is only invoked by the parent wrapper's creation-owned NUL
     # launch, with the named-key fresh environment. It performs no host copy.
+    failure_profile=None
     try:
         if arguments and arguments[0]=='atomic':
             parser=Parser(add_help=False,allow_abbrev=False);parser.add_argument('--work',required=True);parser.add_argument('--descriptor',required=True)
-            args=parser.parse_args(arguments[1:])
+            parser.add_argument('--failure-origin-profile',choices=('budget-deadline-caller-v1',))
+            args=parser.parse_args(arguments[1:]);failure_profile=args.failure_origin_profile
             from ascii_message_preparation import prepare_observer
             descriptor=prepare_observer(Path(args.work).resolve(),architecture='arm64',discovery_policy='installed-native')
             _save(args.descriptor,descriptor);return 0
@@ -225,7 +242,7 @@ def child(arguments):
             return main(arguments[1:])
         return 3
     except BaseException as error:
-        return atomic_failure_exit(error) if arguments and arguments[0]=='atomic' else 3
+        return atomic_failure_exit(error,profile=failure_profile) if arguments and arguments[0]=='atomic' else 3
 
 
 def main(arguments=None):

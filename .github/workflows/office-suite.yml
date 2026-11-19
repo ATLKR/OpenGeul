@@ -1366,7 +1366,7 @@ jobs:
         $hostPython = (Get-Command python -ErrorAction Stop).Source
         $private = [IO.Path]::GetFullPath('.work/writer-observer-private')
         $program = [IO.Path]::GetFullPath('.work/writer-diagnostic/Office/program')
-        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds 45 --receipt .work/writer-observer-public/compiler-phase.numeric.json -- atomic --work "$private/atomic" --descriptor "$private/atomic-descriptor.json"
+        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds 45 --receipt .work/writer-observer-public/compiler-phase.numeric.json -- atomic --work "$private/atomic" --descriptor "$private/atomic-descriptor.json" --failure-origin-profile budget-deadline-caller-v1
         if ($LASTEXITCODE -ne 0) { throw 'Fresh compiler preparation is incomplete; original logs stay private.' }
     - name: Observe one generated blank Writer in a fresh owned child
       id: writer-observe
@@ -1399,6 +1399,22 @@ jobs:
           .work/writer-observer-public/report.numeric.json
           .work/writer-observer-public/compiler-phase.numeric.json
           .work/writer-observer-public/observe-phase.numeric.json
+        retention-days: 1
+        if-no-files-found: error
+    - name: Validate only preparation failure numeric context and compiler phase
+      id: writer-preparation-failure-validate
+      if: always() && !cancelled() && steps.writer-context.outcome == 'success' && steps.writer-stage.outcome == 'success' && steps.atomic-prepare.outcome == 'failure' && steps.writer-observe.outcome == 'skipped'
+      shell: pwsh
+      run: python -B suite/scripts/writer-server-observer-workflow.py validate-preparation-failure --context .work/writer-observer-public/context.numeric.json --compiler-phase .work/writer-observer-public/compiler-phase.numeric.json --output .work/writer-preparation-failure-public
+    - name: Retain two closed preparation failure receipts without observation authority
+      id: writer-preparation-failure-upload
+      if: always() && !cancelled() && steps.writer-context.outcome == 'success' && steps.writer-stage.outcome == 'success' && steps.atomic-prepare.outcome == 'failure' && steps.writer-observe.outcome == 'skipped' && steps.writer-preparation-failure-validate.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-writer-preparation-failure-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          .work/writer-preparation-failure-public/context.numeric.json
+          .work/writer-preparation-failure-public/compiler-phase.numeric.json
         retention-days: 1
         if-no-files-found: error
     - name: Writer observation cannot qualify or deliver the Suite
