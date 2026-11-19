@@ -694,12 +694,17 @@ _CASE_STARTED = False
 
 
 class DedicatedWriterRunner:
-    def __init__(self, components, *, read_value=None, pause=time.sleep, nonce=None, console_profile=None):
+    def __init__(self, components, *, read_value=None, pause=time.sleep, nonce=None, console_profile=None,
+                 admission_profile=None):
+        if admission_profile is not None and (type(admission_profile) is not str or
+                admission_profile != 'owned-peer-before-first-admission-v1'):
+            raise RunnerFailure(Code.INPUT)
         self.c = components
         self.read_value = read_value if read_value is not None else lambda key: os.environ.get(key)
         self.pause, self.nonce, self.attempted = pause, nonce, False
         self._private_pending = []
         self.console_profile = console_profile
+        self.admission_profile = admission_profile
 
     def __repr__(self): return '<DedicatedWriterRunner private>'
 
@@ -897,10 +902,17 @@ class DedicatedWriterRunner:
             report['stageCode'] = 3
             prep['classificationAttemptCount'] = 0
             roles = {}
+            attachment = None
             for _ in range(4096):
                 roles = self._classify(launch, images, budget, prep, roles, classification_roots)
                 prep['classificationCount'] = len(roles)
-                if {'host','worker','engine'} <= roles.keys(): break
+                if {'host','worker','engine'} <= roles.keys():
+                    if self.admission_profile is None: break
+                    # A pre-admission snapshot is current metadata only. The
+                    # original typed peer adapter must bind this exact PID.
+                    attachment = self._checked(budget, c.prep.find_attachment_once,
+                        launch, roles['engine'][0], check=budget.check)
+                    if attachment is not None: break
                 self._pause(budget)
             else:
                 prep['classificationReasonCode'] = 10
@@ -910,18 +922,28 @@ class DedicatedWriterRunner:
             if console is not None:
                 members = tuple(roles.values()) + (() if console.auxiliary is None else ((console.auxiliary.pid, console.auxiliary.birth),))
                 options = dict(auxiliary=console.auxiliary, expected_members=members, require_all_exit=True)
+            elif self.admission_profile is not None:
+                options = dict(expected_members=tuple(roles.values()))
             cohort = _CohortTap(c.Cohort(c.api, launch, expected_worker=roles['worker'], expected_engine=roles['engine'], **options))
             if console is not None: console.transfer_to(cohort.cohort)
             self._checked(budget, cohort.cohort.admit)
             prep['cohortAdmitted'] = True
-            attachment = None
             report['stageCode'] = 4
-            for _ in range(4096):
+            if self.admission_profile is not None:
+                # Only this first cohort may own the already bound peer. Never
+                # reclassify or search for a replacement after admission.
                 self._checked(budget, cohort.verify, budget)
-                attachment = c.prep.find_attachment_once(launch, cohort.original_engine.pid, check=budget.check)
-                if attachment is not None: break
-                self._pause(budget)
-            else: raise RunnerFailure(Code.ATTACHMENT)
+                if self._checked(budget, c.prep.recheck_attachment, launch, attachment,
+                        check=budget.check) is not True:
+                    raise RunnerFailure(Code.ATTACHMENT)
+                self._checked(budget, cohort.verify, budget)
+            else:
+                for _ in range(4096):
+                    self._checked(budget, cohort.verify, budget)
+                    attachment = c.prep.find_attachment_once(launch, cohort.original_engine.pid, check=budget.check)
+                    if attachment is not None: break
+                    self._pause(budget)
+                else: raise RunnerFailure(Code.ATTACHMENT)
             prep['attachmentBound'] = True
             report['stageCode'] = 5
             for _ in range(4096):
@@ -1167,6 +1189,7 @@ def main(argv=None):
         for key in ('output','baseline','artifact','diagnostic-lock','source-lock','expected-suite-source-commit',
                     'prepared-library','host-python','helper-script','windows','work-root','report'):
             parser.add_argument('--'+key, required=True)
+        parser.add_argument('--admission-profile', choices=('owned-peer-before-first-admission-v1',))
         args = parser.parse_args(argv)
         output = Path(args.report)
         values = vars(args)
@@ -1174,7 +1197,8 @@ def main(argv=None):
             args.expected_suite_source_commit, _json(args.prepared_library), Path(args.host_python),
             Path(args.helper_script), Path(args.windows), Path(args.work_root))
         components = NativeComponents()
-        report = DedicatedWriterRunner(components, console_profile=components.ConsoleProfile()).execute(inputs)
+        report = DedicatedWriterRunner(components, console_profile=components.ConsoleProfile(),
+            admission_profile=args.admission_profile).execute(inputs)
     except Exception:
         report['failureCode'] = int(Code.INPUT)
     data = json.dumps(validate_public_report(report), separators=(',',':'), sort_keys=True)+'\n'

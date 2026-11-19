@@ -158,3 +158,17 @@ or success. The failed guard still rejects every non-258 wait result; this
 observation does not permit an exited member or change any role or deadline.
 Raw process identities remain private. The numeric state remains useful when
 the independent bounded source-coordinate projection is unknown.
+
+
+The dedicated observed child opts into
+`owned-peer-before-first-admission-v1`. Before its first retained-cohort
+admission, it requires a fresh complete Job classification and the existing
+typed peer lookup for that exact engine PID. Only an absent peer retries within
+the original budget; classification, liveness, ownership and lookup errors fail.
+Earlier classification tuples are metadata and never authorize admission.
+
+The original engine means the first engine admitted with that owned peer, not
+the first startup image encountered. Admission fixes the exact current PID/birth
+set, followed by retained verification and a recheck of the same peer. There is
+no replacement or restart allowance after admission. The default runner remains
+strict, and original runtime, input, cleanup and acceptance requirements remain.

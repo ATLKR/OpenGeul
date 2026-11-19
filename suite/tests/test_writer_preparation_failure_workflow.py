@@ -51,6 +51,12 @@ class PreparationFailureWorkflowTests(unittest.TestCase):
         for step in original['jobs']['writer-server-observer']['steps']:
             if step.get('id') == 'atomic-prepare':
                 step['run'] = step['run'].replace(' --failure-origin-profile budget-deadline-caller-v1', '')
+            if step.get('id') == 'writer-observe':
+                option = ' --admission-profile owned-peer-before-first-admission-v1'
+                self.assertEqual(step['run'].count(option), 1)
+                self.assertEqual(step['run'].count('--admission-profile'), 1)
+                self.assertIn('-- observe' + option + ' --output', step['run'])
+                step['run'] = step['run'].replace(option, '', 1)
         actual = hashlib.sha256(json.dumps(original, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         self.assertEqual(actual, BASELINE_SHA256)
 
