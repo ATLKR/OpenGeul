@@ -1,3 +1,4 @@
+# Revalidate the unchanged pinned ARM64 Full source after the prior input became unavailable.
 name: OpenGeul native ARM64 Office engine source build
 'on':
   push:
