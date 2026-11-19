@@ -79,6 +79,7 @@ tests.AddRange(OwnedEditorFocusTests.Cases());
 tests.AddRange(OwnedDocumentMenuFocusTests.Cases());
 tests.AddRange(DocumentMenuSurfaceTests.Cases());
 tests.AddRange(WorkerMenuCommandTests.Cases());
+tests.AddRange(HwpCommandRouteObservationTests.Cases());
 tests.AddRange(StandaloneSaveCloseIntentTests.Cases());
 tests.AddRange(StartupDiagnosticTests.Cases(mode => mode == "normal" ? StartWorker() : WorkerClient.Start(new ProcessStartInfo
 {

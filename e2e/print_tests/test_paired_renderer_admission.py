@@ -24,7 +24,7 @@ class RendererAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.assertTrue(callable(getattr(api, 'legacy_assets', None)), 'legacy canonical-route admission is absent')
         self.assertTrue(callable(getattr(api, 'admit_current', None)), 'current same-run admission is absent')
-        self.upstream = {'rhwp': {'version': '0.9.0', 'commit': 'c9095c5f67632e6721e800ccc7fb43ea49d26682'},
+        self.upstream = {'rhwp': {'version': '0.9.1', 'commit': '981ce66b4183b13c1a3b5907e04a8969c8c42034'},
                          'hop': {'version': '0.5.3', 'commit': 'c298160120c9ffbfca7e72f13dc2e7060ddff7fe'}}
         self.wasm_source = {'upstream': self.upstream, 'namespaceHelper': '1' * 64, 'namespacePatcher': '2' * 64}
         wasm = {**copy.deepcopy(self.wasm_source), 'generator': 'wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api',
@@ -65,6 +65,15 @@ class RendererAdmissionTests(unittest.TestCase):
     def test_current_binds_source_run_attempt_component_bytes_and_wasm(self):
         result = self.current()
         self.assertEqual(result, {'editorSha256': 'b' * 64, 'editorBytes': 300, 'wasmSha256': '3' * 64, 'jsSha256': '3' * 64})
+
+    def test_previous_or_mixed_rhwp_version_and_source_are_rejected(self):
+        for version, commit in [('0.9.0', 'c9095c5f67632e6721e800ccc7fb43ea49d26682'),
+                                ('0.9.1', 'c9095c5f67632e6721e800ccc7fb43ea49d26682'),
+                                ('0.9.0', '981ce66b4183b13c1a3b5907e04a8969c8c42034')]:
+            self.upstream['rhwp'] = {'version': version, 'commit': commit}
+            self.value['sourceParity']['wasmRebuild']['upstream'] = copy.deepcopy(self.upstream)
+            with self.subTest(version=version, commit=commit), self.assertRaises(api.Rejected):
+                self.current()
 
     def test_receipt_source_cannot_choose_the_expected_source(self):
         self.value['commit'] = '9' * 40

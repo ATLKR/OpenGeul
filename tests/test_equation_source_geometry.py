@@ -2,7 +2,7 @@
 
 rhwp 0.8.7/1a76570 used width guesses (.55, italic1.05, symbol .5) and
 fraction height 2.44em. Its positive continuous width2712.5HU truncates to2712.
-rhwp 0.9.0/c9095c5 uses Latin Modern Math advances and MATH positioning:
+rhwp 0.9.1/981ce66 uses Latin Modern Math advances and MATH positioning:
 italic x572, plus778, digit500, script70%; fraction shifts677/686, gap120,
 axis250 and rule40 (UPM1000). The independently read source font has SHA256
 b11060f37967c090457580275129d0d7da1d5fbfc82b04e78c91aa31977f547c.
@@ -11,8 +11,8 @@ font tables were read independently and match, without claiming byte equality.
 
 Primary references (exact public source, not saved browser documents):
 https://github.com/edwardkim/rhwp/blob/1a76570e833917d15817415a53c09ad61ab3203f/src/renderer/equation/layout.rs
-https://github.com/edwardkim/rhwp/blob/c9095c5f67632e6721e800ccc7fb43ea49d26682/src/renderer/equation/layout/glyph_advances.rs
-https://github.com/edwardkim/rhwp/blob/c9095c5f67632e6721e800ccc7fb43ea49d26682/src/renderer/equation/layout/fraction_geometry.rs
+https://github.com/edwardkim/rhwp/blob/981ce66b4183b13c1a3b5907e04a8969c8c42034/src/renderer/equation/layout/glyph_advances.rs
+https://github.com/edwardkim/rhwp/blob/981ce66b4183b13c1a3b5907e04a8969c8c42034/src/renderer/equation/layout/fraction_geometry.rs
 These tests invoke the real live checkpoint oracle with authored metadata only.
 They do not perform browser input, prove paint, or replace the full UI cases.
 """
@@ -29,7 +29,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'e2e'))
 from advanced_edit_oracle import assert_equation
 
-NEW_CORE='c9095c5f67632e6721e800ccc7fb43ea49d26682'
+NEW_CORE='981ce66b4183b13c1a3b5907e04a8969c8c42034'
 
 def declared_frames():
     # One-letter base, one superscript digit, plus, one-over-two fraction.
@@ -80,7 +80,7 @@ def live_checkpoint_accepts(result):
 class EquationSourceGeometryTests(unittest.TestCase):
     def test_reference_is_bound_to_the_current_reviewed_source_pin(self):
         pin=json.loads((ROOT/'config/upstream.lock.json').read_text())['rhwp']
-        self.assertEqual((pin['version'],pin['commit']),('0.9.0',NEW_CORE))
+        self.assertEqual((pin['version'],pin['commit']),('0.9.1',NEW_CORE))
 
     def test_old_and_new_declared_metrics_are_independently_exact(self):
         self.assertEqual(declared_frames(),((2712,2440),(2900,2367)))

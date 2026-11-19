@@ -14,13 +14,13 @@ SOURCE_FILES = ('third_party/rhwp/src/parser/body_text.rs',
  'third_party/rhwp/src/parser/hwpx/section.rs',
  'third_party/rhwp/src/serializer/hwpx/section.rs',
  'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs')
-INPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '2ee7268ce3551d647eaa12e60e9396307ac5a6107c975e94c03e6db042c685f8',
- 'third_party/rhwp/src/parser/hwpx/section.rs': '52525a51471a6d0a2d3c30d4b4829c895d93f8fe121c5baf677a36aa60b9f313',
- 'third_party/rhwp/src/serializer/hwpx/section.rs': 'a3b508ba3278959dcda554ee30aaf629bb1ddd51080bf6d25cff3e5ba0c969c6',
+INPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '25b49e6c998943ff9a674e7ef8f9baaf7f78dc7da9791ecf6b4a757f3cdd56a1',
+ 'third_party/rhwp/src/parser/hwpx/section.rs': '9b5a862765a9d55319619b63350fec298d750e57d547e7544d4af051f8d57b6f',
+ 'third_party/rhwp/src/serializer/hwpx/section.rs': 'f22a4a41e6a381028b927167d7dbab537693c9bad044c1dd045c200b4c37675c',
  'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs': 'fffb404df94819fbb2f427280ae89a51b8dac37c35535015feb95cf4fd928936'}
-OUTPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '393dc7ae3ca5d0fc95d1f9808f537a6ba151c2d825b298154ed806f4c07ab44b',
- 'third_party/rhwp/src/parser/hwpx/section.rs': '9d31c3b7ac652c01cc137e9ef2ca1df0de734af3010f7706a8613e031f656928',
- 'third_party/rhwp/src/serializer/hwpx/section.rs': '7e6e795d59dbe81f5bcbd202f5c00fb0e75e0b644003664340951d886e874c22',
+OUTPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '183109289587ad200d3bd24c08c06cba4ca62745883e939f93a64670c52343c3',
+ 'third_party/rhwp/src/parser/hwpx/section.rs': '81326287d5ed1dde4ce01afdadcbbd175addebe2fe139d8d5955e18ea9824381',
+ 'third_party/rhwp/src/serializer/hwpx/section.rs': '795206e3d38124490e5bf8c6ebdbd9eb1e9abca14fcbe67caa636fbc4aadc346',
  'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs': '83028d89330c646f316e0dc67a0dd28e280754d5c3c78f8827c8c71262b6820f'}
 
 _BEFORE_0 = """                para.line_segs = parse_para_line_seg(&record.data);
@@ -30,7 +30,8 @@ _AFTER_0 = """                para.source_line_seg_vertical_pos = None;
                 // OpenGeul: an implementation bit in actual stored bytes is not proof
                 // that this row was synthesized by this runtime. Preserve only sized,
                 // non-placeholder imported rows; replacement/reflow clears this origin.
-                if !para.line_segs.is_empty()
+                if !RHWP_LINE_SEG_TAGS.with(std::cell::Cell::get)
+                    && !para.line_segs.is_empty()
                     && para.line_segs.iter().all(|s| {
                         s.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
                             && s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0

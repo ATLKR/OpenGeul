@@ -27,7 +27,7 @@ class WebView2SourceNoticeTests(unittest.TestCase):
         self.pins = {}
         self.number = 0
         for name in ['skia-safe', 'skia-bindings']:
-            self.add_package(name, '0.156.0', 'MIT')
+            self.add_package(name, '0.157.0', 'MIT')
         self.add_package('unreviewed-same-spdx', '1.0.0', 'MIT')
         paths = {'webview2-com': 'crates/webview2-com', 'webview2-com-sys': 'crates/bindings',
                  'webview2-com-macros': 'crates/callback-macros'}

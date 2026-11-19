@@ -252,8 +252,8 @@ class JobProcessWitnesses:
 
 
 class OwnedOfficeProcess:
-    def __init__(self, argv, cwd):
-        env = canonicalize_temp_environment(os.environ)
+    def __init__(self, argv, cwd, *, environment=None):
+        env = canonicalize_temp_environment(os.environ) if environment is None else canonicalize_temp_environment(environment)
         kernel = windows_dll('kernel32')
         self.close_handle = bind(kernel, 'CloseHandle', [wt.HANDLE], wt.BOOL)
         self.get_exit = bind(kernel, 'GetExitCodeProcess', [wt.HANDLE, ctypes.POINTER(wt.DWORD)], wt.BOOL)

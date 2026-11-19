@@ -1,0 +1,421 @@
+"""Read-only, x64-only VS-bundled Clang observation; never compiler admission.
+
+This owns an independent 30/27 second diagnostic budget. Original observer
+preparation, consumer authority, physical cases and their budgets are untouched.
+"""
+import hashlib
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import re
+import struct
+import sys
+import time
+
+import ascii_message_preparation as prep
+from native_compiler_tools import pin_native_tool, STAT_FIELDS
+
+_spec=importlib.util.spec_from_file_location('bundled_version_query',Path(__file__).with_name('vs_bundled_clang_version.py'))
+helper_module=importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(helper_module)
+_run_stage=prep._run_stage
+TOOLS=('clang-cl.exe','lld-link.exe')
+SYSTEM_DLL_NAMES=frozenset(x.casefold() for x in ('ADVAPI32.dll','KERNEL32.dll','ntdll.dll','ole32.dll','OLEAUT32.dll','SHELL32.dll','VERSION.dll'))
+TOP_KEYS={'schemaVersion','kindCode','diagnosticOnly','acceptance','productionBudgetChanged','resultCode',
+          'productionQualified','observedComplete','knownUnavailable','majorSupported',
+          'sourceHeadWords','nativeHostMachine','sourceCount','sourcePinsBeforeAfterEqual','selectionStable',
+          'cacheUsed','discoveryRequests','versionRequestsTotal','totalLimitMs','workLimitMs','elapsedMs',
+          'pendingHandleCount','tools','stages','postPinResultCode','failureStageCode'}
+TOOL_KEYS={'present','presenceKnown','knownUnavailable','observedComplete','majorSupported','peVerified','resultCode','postPinResultCode',
+           'beforePinned','afterPinned','pinsEqual','statJoinMatched','bytes','machine','sha256Words',
+           'major','minor','versionExit','versionRequests','naturalJob','jobEmpty','handlesClosed',
+           'queryPid','queryCreationTime','queryNaturalExit','queryHandleClosed'}
+STAGE_KEYS={'stageCode','rootExit','natural','jobEmpty','handlesClosed','lastActive','queryCount','pid','creationTime'}
+
+class ProbeFailure(Exception):
+    def __init__(self,code):self.code=code
+
+def finite_environment(windows,temp):
+    windows,temp=prep._absolute(windows),prep._absolute(temp)
+    return dict(COMSPEC=str(windows/'System32/cmd.exe'),SystemRoot=str(windows),WINDIR=str(windows),
+                PATH=str(windows/'System32'),TEMP=str(temp),TMP=str(temp),
+                PYTHONUTF8='1',PYTHONDONTWRITEBYTECODE='1')
+
+class _Runtime(prep._Runtime):
+    def __init__(self,environment):
+        super().__init__()
+        self.environment=environment
+        self.processes=[]
+    def start(self,argv,folder):
+        assert Path(argv[0]) == Path(self.environment['COMSPEC']), 'Unexpected command host'
+        prep._absolute(Path(argv[0]))
+        process=self.native.OwnedOfficeProcess(argv,folder,environment=self.environment)
+        self.processes.append(process)
+        return process
+    def pending_handles(self):
+        return sum(bool(getattr(p,name,None)) for p in self.processes for name in ('handle','job'))
+
+def _tool_row():
+    return dict(present=False,presenceKnown=False,knownUnavailable=False,observedComplete=False,
+                majorSupported=None,peVerified=False,resultCode=None,postPinResultCode=0,
+                beforePinned=False,afterPinned=False,pinsEqual=False,statJoinMatched=False,
+                bytes=None,machine=None,sha256Words=[None]*8,major=None,minor=None,versionExit=None,
+                versionRequests=0,naturalJob=False,jobEmpty=False,handlesClosed=False,
+                queryPid=None,queryCreationTime=None,queryNaturalExit=False,queryHandleClosed=False)
+
+def _stage_numbers(row,code):
+    samples=row.get('samples',[])
+    last=samples[-1] if samples else {}
+    root=last.get('root',{})
+    empty=False
+    if last.get('querySucceeded') is True and type(last.get('returnLength')) is int and last['returnLength']==48:
+        raw=last.get('rawHex')
+        if type(raw) is str and re.fullmatch('[0-9a-f]{96}',raw):
+            total,active,terminated=struct.unpack_from('<III',bytes.fromhex(raw),36)
+            empty=(type(last.get('activeProcesses')) is int and active==last['activeProcesses']==0
+                   and type(last.get('totalProcesses')) is int and total==last['totalProcesses']
+                   and type(last.get('terminatedProcesses')) is int and terminated==last['terminatedProcesses'])
+    identity=row.get('identity',{})
+    return dict(stageCode=code,rootExit=root.get('exitCode'),natural=row.get('natural') is True,
+                jobEmpty=empty,handlesClosed=row.get('handlesClosed') is True and not row.get('cleanupErrors'),
+                lastActive=last.get('activeProcesses'),queryCount=row.get('queryCount',0),
+                pid=identity.get('pid'),creationTime=identity.get('creationTime'))
+
+def _qualified(row,code):
+    value=_stage_numbers(row,code)
+    assert value['natural'] and value['jobEmpty'] and value['handlesClosed']
+    assert type(value['rootExit']) is int and value['rootExit']==0
+    assert type(row['samples'][-1]['root']['waitResult']) is int and row['samples'][-1]['root']['waitResult']==0
+    assert type(row['cleanupErrors']) is list and not row['cleanupErrors']
+    assert 'forcedOwnedJobCleanup' not in row and 'error' not in row
+    assert type(value['queryCount']) is int and 1 <= value['queryCount'] <= prep.QUERY_CAP
+    assert type(value['pid']) is int and value['pid']>0
+    assert type(value['creationTime']) is int and value['creationTime']>0
+    return value
+
+def _stat_join(facts,pin):
+    assert type(facts) is dict and set(facts)=={'pathBefore','fdBefore','fdAfter','pathAfter'}
+    for snapshot in facts.values():
+        assert type(snapshot) is dict and set(snapshot)==set(STAT_FIELDS)
+        assert all(type(v) is int and v.bit_length()<=256 for v in snapshot.values())
+        assert snapshot['st_size']==pin['bytes']
+    assert facts['pathBefore']==facts['pathAfter'] and facts['fdBefore']==facts['fdAfter']
+    assert all(facts['pathBefore'][k]==facts['fdBefore'][k] for k in ('st_dev','st_ino','st_size'))
+
+def _sources(check):
+    result={}
+    for name in prep.SOURCES:
+        check();result[name]=prep._pin(prep.SOURCE_ROOT/name);check()
+    return result
+
+def _private_json(path,value,limit=8192):
+    raw=(json.dumps(value,sort_keys=True,allow_nan=False)+'\n').encode('ascii')
+    assert len(raw)<=limit
+    with Path(path).open('xb') as stream:stream.write(raw)
+
+def _query(runtime,folder,budget,record,kind,tool,host_python):
+    assert not any(p.name.casefold() in SYSTEM_DLL_NAMES for p in folder.iterdir())
+    request=folder/('query-'+str(kind)+'.request.private.json')
+    result=folder/('query-'+str(kind)+'.result.private.json')
+    _private_json(request,dict(schemaVersion=1,kindCode=kind,tool=str(tool),deadline=budget.work_deadline))
+    script=folder/('discover.cmd' if kind==0 else 'compile.cmd')
+    expected=('@echo off\n"%~1" "%~2" --request "%~3" --result "%~4"\nexit /b %errorlevel%\n').encode('ascii')
+    if not script.exists():script.write_bytes(expected)
+    assert script.read_bytes()==expected
+    helper=Path(__file__).with_name('vs_bundled_clang_version.py').resolve()
+    request_pin=prep._pin(request)
+    helper_pin=prep._pin(helper)
+    try:
+        _run_stage(runtime,folder,('probe-discovery','probe-clang-version','probe-lld-version')[kind],script,budget,record,
+                   [Path(host_python),helper,request,result])
+        _qualified(record['stages'][-1],kind)
+    except BaseException:
+        raise ProbeFailure(5)
+    budget.now()
+    assert prep._pin(request)==request_pin and prep._pin(helper)==helper_pin
+    raw=prep._selection_read(result,8192,budget.now)
+    value=json.loads(raw)
+    assert type(value) is dict and set(value)==helper_module.RESULT_KEYS
+    assert type(value['schemaVersion']) is int and value['schemaVersion']==1
+    assert type(value['kindCode']) is int and value['kindCode']==kind
+    assert type(value['resultCode']) is int and 0<=value['resultCode']<=8
+    for key in ('timedOut','outputCapReached','imageMatched','naturalExit','handlesClosed'):
+        assert type(value[key]) is bool
+    for key in ('stdoutBytes','stderrBytes'):
+        assert type(value[key]) is int and 0<=value[key]<=(32768 if key=='stdoutBytes' and kind==0 else 4096)
+    for key,maximum in (('pid',0xffffffff),('creationTime',0xffffffffffffffff)):
+        assert value[key] is None or type(value[key]) is int and 0<value[key]<=maximum
+    assert value['exitCode'] is None or type(value['exitCode']) is int and -0x80000000<=value['exitCode']<=0xffffffff
+    if value['resultCode']==0:
+        assert value['exitCode']==0 and all(value[k] is True for k in ('imageMatched','naturalExit','handlesClosed'))
+    if kind:
+        assert value['selectedRoot'] is None
+        if value['resultCode']==0 or value['major'] is not None or value['minor'] is not None:
+            assert type(value['major']) is int and 0<value['major']<=999
+            assert type(value['minor']) is int and 0<=value['minor']<=999
+    else:
+        assert value['major'] is None and value['minor'] is None
+        if value['resultCode']==0:
+            assert type(value['selectedRoot']) is str and len(value['selectedRoot'])<=4096
+            assert Path(value['selectedRoot']).is_absolute()
+    budget.now()
+    return value
+
+def _require_query_success(value):
+    if value['resultCode']!=0:raise ProbeFailure(6 if value['resultCode'] in (5,8) else 5)
+
+def _cached_selection(path,budget,source_pins):
+    path=prep._absolute(path)
+    value=json.loads(prep._selection_read(path,1024*1024,budget.now))
+    assert value['kind']=='ascii-message-observer-preparation' and value['architecture']=='x64'
+    assert value['sourcePins']==source_pins and set(value['sourcePins'])==set(prep.SOURCES)
+    _qualified(value['stages'][0],0)
+    assert value['compiler']['mode']=='msvc'
+    raw=prep._selection_read(path.parent/'discovery.stdout',32768,budget.now)
+    found=raw.decode('utf-8-sig').strip()
+    assert '\n' not in found and '\r' not in found
+    selection,_=prep._msvc_selection(found,'x64',budget.now)
+    assert selection==value['compiler']['selection']
+    return selection
+
+def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_source_commit,
+              cached_preparation=None,runtime_factory=None,budget=None):
+    assert type(expected_suite_source_commit) is str and re.fullmatch('[0-9a-f]{40}',expected_suite_source_commit)
+    budget=prep._Budget() if budget is None else budget
+    assert budget.deadline==budget.started+30. and budget.work_deadline==budget.deadline-3.
+    output,report,suite=map(prep._absolute,(output,report,suite))
+    assert suite.is_dir() and not output.is_relative_to(suite) and not suite.is_relative_to(output)
+    assert not report.is_relative_to(suite) and not report.is_relative_to(output)
+    output.mkdir(parents=True,exist_ok=False)
+    report.parent.mkdir(parents=True,exist_ok=True)
+    temp=output/'temp';temp.mkdir()
+    words=[int(expected_suite_source_commit[i:i+8],16) for i in range(0,40,8)]
+    result=dict(schemaVersion=1,kindCode=1,diagnosticOnly=True,acceptance=False,productionQualified=False,
+                productionBudgetChanged=False,observedComplete=False,knownUnavailable=False,majorSupported=None,
+                resultCode=0,sourceHeadWords=words,nativeHostMachine=None,sourceCount=4,
+                sourcePinsBeforeAfterEqual=False,selectionStable=False,cacheUsed=False,discoveryRequests=0,
+                versionRequestsTotal=0,totalLimitMs=30000,workLimitMs=27000,elapsedMs=0,pendingHandleCount=0,
+                tools=[_tool_row(),_tool_row()],stages=[],postPinResultCode=0,failureStageCode=0)
+    record={'stages':[]}
+    runtime=None;source_pins=None;before_pins={};before_stats={};selection=None;paths=[]
+    phase_code=1;step_code=1
+    def fail(code,stage):
+        if result['resultCode']==0:
+            result['resultCode']=code;result['failureStageCode']=stage
+    def code_for(error,default):
+        if time.monotonic()>=budget.work_deadline:return 9
+        return error.code if isinstance(error,ProbeFailure) else default
+    try:
+        budget.now()
+        observed=prep.native_arch.validate_native_architecture(prep.native_arch.observe_native_architecture(),'x64')
+        result['nativeHostMachine']=observed['nativeMachine']
+        assert Path(host_python)==Path(sys.executable)
+        prep._absolute(host_python)
+        phase_code=11;step_code=2
+        source_pins=_sources(budget.now)
+        runtime=(_Runtime if runtime_factory is None else runtime_factory)(finite_environment(windows,temp))
+        phase_code=2;step_code=3
+        if cached_preparation is not None:
+            result['cacheUsed']=True;phase_code=13
+            selection=_cached_selection(cached_preparation,budget,source_pins)
+        else:
+            vswhere=prep._absolute(vswhere)
+            assert vswhere.name=='vswhere.exe' and vswhere.is_file()
+            before_discovery=prep._pin(vswhere)
+            result['discoveryRequests']=1
+            value=_query(runtime,output,budget,record,0,vswhere,host_python)
+            _require_query_success(value)
+            assert prep._pin(vswhere)==before_discovery
+            selection,_=prep._msvc_selection(value['selectedRoot'],'x64',budget.now)
+        tool_root=prep._absolute(Path(selection['installationRoot'])/'VC/Tools/Llvm/x64/bin')
+        paths=[tool_root/name for name in TOOLS]
+        phase_code=4;step_code=4
+        for row,path in zip(result['tools'],paths):
+            budget.now()
+            row['present']=path.is_file();row['presenceKnown']=True
+            row['knownUnavailable']=not row['present']
+            if not row['present']:
+                row['resultCode']=3;fail(3,4)
+                continue
+            try:
+                facts={};pin=pin_native_tool(path,'x64',check=budget.now,facts=facts)
+                _stat_join(facts,pin)
+                before_pins[path.name],before_stats[path.name]=pin,facts
+                row.update(beforePinned=True,peVerified=True,bytes=pin['bytes'],machine=pin['machine'],
+                    sha256Words=[int(pin['sha256'][i:i+8],16) for i in range(0,64,8)])
+            except BaseException as error:
+                row['resultCode']=code_for(error,4);fail(row['resultCode'],4)
+        for kind,(row,path) in enumerate(zip(result['tools'],paths),1):
+            if not row['beforePinned']:continue
+            phase_code=5;step_code=4+kind
+            try:
+                budget.now()
+                row['versionRequests']=1;result['versionRequestsTotal']+=1
+                try:value=_query(runtime,output,budget,record,kind,path,host_python)
+                except AssertionError:raise ProbeFailure(6)
+                row.update(major=value['major'],minor=value['minor'],versionExit=value['exitCode'],
+                    queryPid=value['pid'],queryCreationTime=value['creationTime'],
+                    queryNaturalExit=value['naturalExit'],queryHandleClosed=value['handlesClosed'])
+                _require_query_success(value)
+                row['resultCode']=0 if row['major']>=22 else 7
+                if row['resultCode']:fail(row['resultCode'],step_code)
+            except BaseException as error:
+                row['resultCode']=code_for(error,5);fail(row['resultCode'],step_code)
+            finally:
+                matching=[x for x in record['stages'] if x['stage']==('probe-clang-version' if kind==1 else 'probe-lld-version')]
+                if matching:
+                    stage=_stage_numbers(matching[-1],kind)
+                    row.update(naturalJob=stage['natural'],jobEmpty=stage['jobEmpty'],handlesClosed=stage['handlesClosed'])
+            # A failed Job/close boundary stops further process starts. A missing,
+            # old or naturally failed tool never becomes a compiler fallback.
+            if row['versionRequests'] and not all(row[k] for k in ('naturalJob','jobEmpty','handlesClosed')):
+                break
+            if runtime.pending_handles() or time.monotonic()>=budget.work_deadline:break
+    except BaseException as error:
+        fail(code_for(error,phase_code),step_code)
+    finally:
+        for row,path in zip(result['tools'],paths):
+            if path.name not in before_pins:continue
+            try:
+                facts={};pin=pin_native_tool(path,'x64',check=budget.now,facts=facts)
+                _stat_join(facts,pin)
+                row['afterPinned']=True;row['pinsEqual']=pin==before_pins[path.name]
+                row['statJoinMatched']=facts==before_stats[path.name]
+                assert row['pinsEqual'] and row['statJoinMatched']
+            except BaseException:
+                row['postPinResultCode']=9 if time.monotonic()>=budget.work_deadline else 8
+                if result['postPinResultCode']==0:result['postPinResultCode']=row['postPinResultCode']
+                if row['resultCode'] in (None,0):row['resultCode']=row['postPinResultCode']
+                fail(row['postPinResultCode'],7)
+        if selection is not None:
+            try:
+                result['selectionStable']=prep._msvc_selection(selection['installationRoot'],'x64',budget.now)[0]==selection
+                assert result['selectionStable']
+            except BaseException:
+                if result['postPinResultCode']==0:result['postPinResultCode']=9 if time.monotonic()>=budget.work_deadline else 8
+                fail(result['postPinResultCode'],7)
+        stage_codes={'probe-discovery':0,'probe-clang-version':1,'probe-lld-version':2}
+        result['stages']=[_stage_numbers(row,stage_codes[row['stage']]) for row in record['stages']]
+        if runtime is not None:result['pendingHandleCount']=runtime.pending_handles()
+        if result['pendingHandleCount']:fail(10,9)
+        if source_pins is not None:
+            try:
+                result['sourcePinsBeforeAfterEqual']=_sources(budget.now)==source_pins
+                if not result['sourcePinsBeforeAfterEqual']:fail(11,8)
+            except BaseException:
+                result['sourcePinsBeforeAfterEqual']=False;fail(9,8)
+        stable=result['sourcePinsBeforeAfterEqual'] and result['selectionStable'] and result['pendingHandleCount']==0
+        for row in result['tools']:
+            lifecycle=(row['beforePinned'] and row['afterPinned'] and row['pinsEqual'] and row['statJoinMatched']
+                and row['naturalJob'] and row['jobEmpty'] and row['handlesClosed'] and row['queryNaturalExit'] and row['queryHandleClosed'])
+            row['observedComplete']=bool(stable and (row['knownUnavailable'] or lifecycle))
+            if row['observedComplete'] and lifecycle and row['versionExit']==0 and type(row['major']) is int:
+                row['majorSupported']=row['major']>=22
+        result['knownUnavailable']=any(row['knownUnavailable'] for row in result['tools'])
+        result['observedComplete']=all(row['observedComplete'] for row in result['tools'])
+        if all(type(row['majorSupported']) is bool for row in result['tools']):
+            result['majorSupported']=all(row['majorSupported'] for row in result['tools'])
+        result['elapsedMs']=max(0,int((time.monotonic()-budget.started)*1000))
+        validate_report(result)
+        _private_json(report,result)
+    return result
+
+def validate_report(value):
+    assert type(value) is dict and set(value)==TOP_KEYS
+    assert type(value['schemaVersion']) is int and value['schemaVersion']==1
+    assert type(value['kindCode']) is int and value['kindCode']==1
+    assert value['diagnosticOnly'] is True and value['acceptance'] is False and value['productionQualified'] is False and value['productionBudgetChanged'] is False
+    for key in ('observedComplete','knownUnavailable','sourcePinsBeforeAfterEqual','selectionStable','cacheUsed'):assert type(value[key]) is bool
+    assert value['majorSupported'] is None or type(value['majorSupported']) is bool
+    for key,maximum in (('resultCode',14),('postPinResultCode',9),('failureStageCode',9),('discoveryRequests',1),('versionRequestsTotal',2),('elapsedMs',60000),('pendingHandleCount',6)):
+        assert type(value[key]) is int and 0<=value[key]<=maximum
+    assert value['totalLimitMs']==30000 and type(value['totalLimitMs']) is int
+    assert value['workLimitMs']==27000 and type(value['workLimitMs']) is int
+    assert value['sourceCount']==4 and type(value['sourceCount']) is int
+    assert value['nativeHostMachine'] is None or type(value['nativeHostMachine']) is int and value['nativeHostMachine']==0x8664
+    assert type(value['sourceHeadWords']) is list and len(value['sourceHeadWords'])==5
+    assert all(type(x) is int and 0<=x<=0xffffffff for x in value['sourceHeadWords'])
+    assert type(value['tools']) is list and len(value['tools'])==2
+    stable=value['sourcePinsBeforeAfterEqual'] and value['selectionStable'] and value['pendingHandleCount']==0
+    for tool in value['tools']:
+        assert type(tool) is dict and set(tool)==TOOL_KEYS
+        for key in ('present','presenceKnown','knownUnavailable','observedComplete','peVerified','beforePinned','afterPinned','pinsEqual','statJoinMatched','naturalJob','jobEmpty','handlesClosed','queryNaturalExit','queryHandleClosed'):
+            assert type(tool[key]) is bool
+        for key,maximum in (('bytes',512*1024*1024),('machine',0xffff),('major',999),('minor',999),('queryPid',0xffffffff),('queryCreationTime',0xffffffffffffffff)):
+            assert tool[key] is None or type(tool[key]) is int and 0<=tool[key]<=maximum
+        assert tool['versionExit'] is None or type(tool['versionExit']) is int and -0x80000000<=tool['versionExit']<=0xffffffff
+        assert type(tool['versionRequests']) is int and tool['versionRequests'] in (0,1)
+        assert type(tool['sha256Words']) is list and len(tool['sha256Words'])==8
+        assert all(x is None for x in tool['sha256Words']) or all(type(x) is int and 0<=x<=0xffffffff for x in tool['sha256Words'])
+        if tool['beforePinned']:
+            assert tool['present'] and tool['bytes'] is not None and tool['bytes']>0 and tool['machine']==0x8664
+            assert all(type(x) is int for x in tool['sha256Words'])
+        else:
+            assert tool['bytes'] is None and tool['machine'] is None and all(x is None for x in tool['sha256Words'])
+        assert not tool['afterPinned'] or tool['beforePinned']
+        assert not tool['pinsEqual'] or tool['afterPinned']
+        assert not tool['statJoinMatched'] or tool['afterPinned']
+        assert (tool['major'] is None)==(tool['minor'] is None)
+        assert tool['majorSupported'] is None or type(tool['majorSupported']) is bool
+        assert tool['resultCode'] is None or type(tool['resultCode']) is int and tool['resultCode'] in (0,3,4,5,6,7,8,9)
+        assert type(tool['postPinResultCode']) is int and tool['postPinResultCode'] in (0,8,9)
+        assert tool['knownUnavailable']==(tool['presenceKnown'] and not tool['present'])
+        assert not tool['present'] or tool['presenceKnown']
+        assert tool['peVerified']==tool['beforePinned']
+        lifecycle=(tool['beforePinned'] and tool['afterPinned'] and tool['pinsEqual'] and tool['statJoinMatched']
+            and tool['naturalJob'] and tool['jobEmpty'] and tool['handlesClosed'] and tool['queryNaturalExit'] and tool['queryHandleClosed'])
+        assert tool['observedComplete']==bool(stable and (tool['knownUnavailable'] or lifecycle))
+        expected_major=None
+        if tool['observedComplete'] and lifecycle and tool['versionExit']==0 and type(tool['major']) is int:
+            expected_major=tool['major']>=22
+        assert tool['majorSupported'] is expected_major
+        if tool['majorSupported'] is not None:
+            assert tool['observedComplete'] and tool['versionExit']==0 and type(tool['major']) is int
+            assert tool['majorSupported']==(tool['major']>=22)
+    assert value['observedComplete']==all(t['observedComplete'] for t in value['tools'])
+    assert value['knownUnavailable']==any(t['knownUnavailable'] for t in value['tools'])
+    expected_major=all(t['majorSupported'] for t in value['tools']) if all(type(t['majorSupported']) is bool for t in value['tools']) else None
+    assert value['majorSupported'] is expected_major
+    assert value['versionRequestsTotal']==sum(t['versionRequests'] for t in value['tools'])
+    assert value['resultCode'] in (0,1,2,3,4,5,6,7,8,9,10,11,13)
+    assert value['postPinResultCode'] in (0,8,9)
+    assert type(value['stages']) is list and len(value['stages'])<=3
+    for stage in value['stages']:
+        assert type(stage) is dict and set(stage)==STAGE_KEYS
+        for key in ('natural','jobEmpty','handlesClosed'):assert type(stage[key]) is bool
+        for key,maximum in (('stageCode',2),('lastActive',0xffffffff),('queryCount',prep.QUERY_CAP),('pid',0xffffffff),('creationTime',0xffffffffffffffff)):
+            assert stage[key] is None or type(stage[key]) is int and 0<=stage[key]<=maximum
+        assert stage['rootExit'] is None or type(stage['rootExit']) is int and -0x80000000<=stage['rootExit']<=0xffffffff
+    if value['resultCode']==0:
+        assert value['failureStageCode']==0 and value['postPinResultCode']==0
+        assert value['observedComplete'] and value['majorSupported'] is True and value['sourcePinsBeforeAfterEqual'] and value['selectionStable'] and value['pendingHandleCount']==0
+        assert all(t['major']>=22 and all(t[k] for k in ('beforePinned','afterPinned','pinsEqual','statJoinMatched','naturalJob','jobEmpty','handlesClosed','queryNaturalExit','queryHandleClosed')) and t['versionExit']==0 for t in value['tools'])
+    assert len((json.dumps(value,sort_keys=True,allow_nan=False)+'\n').encode('ascii'))<=8192
+
+def main(argv=None):
+    import argparse
+    class Parser(argparse.ArgumentParser):
+        def error(self,message):raise ValueError
+    arguments=list(sys.argv[1:] if argv is None else argv)
+    if len(arguments)==2 and arguments[0]=='--validate-report':
+        try:
+            path=prep._absolute(Path(arguments[1]))
+            validate_report(json.loads(prep._selection_read(path,8192,lambda:None)))
+            return 0
+        except BaseException:return 1
+    parser=Parser(add_help=False)
+    for name in ('output','report','suite','windows','vswhere','host-python','expected-suite-source-commit'):
+        parser.add_argument('--'+name,required=True)
+    parser.add_argument('--cached-preparation')
+    try:
+        args=parser.parse_args(arguments)
+        run_probe(Path(args.output),Path(args.report),suite=Path(args.suite),windows=Path(args.windows),
+            vswhere=Path(args.vswhere),host_python=Path(args.host_python),
+            expected_suite_source_commit=args.expected_suite_source_commit,
+            cached_preparation=Path(args.cached_preparation) if args.cached_preparation else None)
+        return 0
+    except BaseException:return 1
+
+if __name__=='__main__':raise SystemExit(main())

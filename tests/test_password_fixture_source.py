@@ -43,7 +43,7 @@ class PasswordFixtureSourceTests(unittest.TestCase):
         for name in FILES:
             (self.vendor / name).write_bytes(b'owned synthetic artifact')
         (self.vendor / 'rhwp_bg.wasm').write_bytes(b'\0asm\1\0\0\0')
-        self.package_version('0.9.0')
+        self.package_version('0.9.1')
 
     def package_version(self, version):
         (self.vendor / 'package.json').write_text(json.dumps({'version': version}))
@@ -63,7 +63,7 @@ class PasswordFixtureSourceTests(unittest.TestCase):
             }
             name = 'OPEN_GEUL_WASM.json'
         else:
-            value = {'version': '0.9.0', 'commit': 'c9095c5f67632e6721e800ccc7fb43ea49d26682',
+            value = {'version': '0.9.1', 'commit': '981ce66b4183b13c1a3b5907e04a8969c8c42034',
                      'artifacts': {key: {'sha256': sha} for key, sha in hashes.items()}}
             name = 'PROVENANCE.json'
         (self.vendor / name).write_text(json.dumps(value))
@@ -100,7 +100,7 @@ class PasswordFixtureSourceTests(unittest.TestCase):
         self.assertEqual(json.loads(output), {'qualification': 'final-source-bound'})
 
     def test_other_package_versions_cannot_reuse_a_valid_source_proof(self):
-        for version in ('0.8.7', '0.9.1', '1.0.0'):
+        for version in ('0.8.7', '0.9.0', '1.0.0'):
             with self.subTest(version=version):
                 self.package_version(version)
                 self.proof(True)

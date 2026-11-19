@@ -75,6 +75,7 @@ WRITER_SAME_ROOT_COMMAND = '        python suite/e2e/korean_ui_smoke.py --suite 
 def original_normal_oracle_text(normal):
     if type(normal) is not str:
         raise ValueError('Historical normal-job oracle requires text')
+    normal = _without_bundled_clang_probe(normal)
     changes = ((CURRENT_NORMAL_IF, '    if: github.event.repository.private == false\n'),
         (EXACT_SDK_SETUP, ''),
         (CURRENT_PILLOW_INSTALL, '        python -m pip install Pillow==12.3.0\n'),
@@ -93,3 +94,25 @@ def original_normal_oracle_text(normal):
         raise ValueError('Reviewed normal-job Writer failure-observation delta differs')
     normal = normal.replace(before, WRITER_SAME_ROOT_COMMAND + '\n', 1)
     return normal
+
+
+# One exact reviewed read-only probe block; no production or broad-name fallback.
+BUNDLED_CLANG_PROBE_START = '    - name: Observe the selected VS bundled Clang pair without changing acceptance\n'
+BUNDLED_CLANG_PROBE_AFTER = '    - name: 모든 검증을 통과한 Suite 개발 패키지 전달\n'
+BUNDLED_CLANG_PROBE_SHA256 = '3c881293771e83abb9909e4338c0b577df317cdde969a8af1d77c83acf8160cd'
+
+
+def _without_bundled_clang_probe(normal):
+    import hashlib
+    if BUNDLED_CLANG_PROBE_START not in normal:
+        return normal
+    if normal.count(BUNDLED_CLANG_PROBE_START) != 1 or normal.count(BUNDLED_CLANG_PROBE_AFTER) != 1:
+        raise ValueError('Reviewed bundled Clang observation delta differs')
+    start = normal.index(BUNDLED_CLANG_PROBE_START)
+    if normal.rfind('    - name:', 0, start) != normal.index(BUNDLED_CLANG_PROBE_AFTER):
+        raise ValueError('Reviewed bundled Clang observation must follow the final original step')
+    block = normal[start:]
+    if (hashlib.sha256(block.encode('utf-8')).hexdigest() != BUNDLED_CLANG_PROBE_SHA256 or
+            block.count('    - name:') != 3):
+        raise ValueError('Reviewed bundled Clang observation delta differs')
+    return normal[:start]

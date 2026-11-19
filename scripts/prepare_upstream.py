@@ -53,13 +53,13 @@ ASYNC_FONT_INPUT_SHA256 = {
 }
 FONT_TOOLBAR_TEST_SHA256 = 'e48357f3a39095b06800aa8b75fb9727a3367015f2857243ea6de0b57c2e5f5c'
 FONT_MAIN = 'apps/studio-host/src/main.ts'
-# rhwp 0.9.0 excludes this vendored crate from the workspace and never enables
+# rhwp 0.9.1 excludes this vendored crate from the workspace and never enables
 # its signatures feature, even through the root's --all-features graph. Its
 # standalone dependency unit tests refer to a certificate not shipped in Git.
 # This exact reviewed source/manifest pair is not a product or workspace test
 # target. Never fabricate the certificate or exempt another missing include.
 NON_TARGET_VENDOR_TEST_INPUTS = ({
-    'manifestSha256': 'f9b27a36d6feb82f66e456489398b6406b48e6ebbe1c8d2dc4c7f960edb5c505',
+    'manifestSha256': 'b00948c9aa1b8801d8731908d2c80a4e9174ddb9e292729dd0e5cca2166db81e',
     'source': 'vendor/rhwp-pdf-import-backend/src/signatures/pades/ess.rs',
     'sourceSha256': 'f53c1a9c85ea4f8d215ac4df293c97b9bd71f1305c6f66148de66443046dff4d',
     'input': 'vendor/rhwp-pdf-import-backend/tests/fixtures/test_signing_cert.pem',

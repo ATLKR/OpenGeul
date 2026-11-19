@@ -1,4 +1,5 @@
-"""COM의 고정 Windows 의존성만 추가하며 두 원래 잠금 그래프를 보존한다."""
+"""COM pins and original graphs survive only the reviewed rhwp 0.9.1 delta."""
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -29,6 +30,16 @@ NEW_WINDOWS = {
     ('windows-result', '0.3.4'): '56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6',
     ('windows-strings', '0.4.2'): '56e6c93f3a0c3b36176cb1327a4958a0353d5d166c2a35cb268ace15e91d3b57',
     ('windows-threading', '0.1.0'): 'b66463ad2e0ea3bbf808b7f1d371311c80e115c0b71d60efc142cafbcfb057a6',
+}
+RHWP091_UPDATES = {
+    'cfb':'0.16.0', 'read-fonts':'0.47.0', 'rhwp':'0.9.1',
+    'rhwp-codec-resource':'0.1.1', 'rhwp-ooxml-chart':'0.1.1',
+    'skera':'0.10.0', 'skrifa':'0.50.0', 'write-fonts':'0.56.0',
+}
+CLI_NATIVE_UPDATES = {
+    'rhwp-hayro-ccitt':'0.3.0-rhwp.2', 'rhwp-hayro-jbig2':'0.3.0-rhwp.2',
+    'rhwp-hayro-jpeg2000':'0.4.0-rhwp.2', 'rhwp-pdf-import-backend':'0.3.78-rhwp.2',
+    'rhwp-qcms':'0.3.0-rhwp.2', 'skia-bindings':'0.157.0', 'skia-safe':'0.157.0',
 }
 
 
@@ -65,33 +76,97 @@ class ComLocksTests(unittest.TestCase):
         self.assertEqual(len({(p['name'], p['version'], p.get('source')) for p in value['package']}), len(value['package']))
         return text, value['package']
 
+    def original_graph(self, name, packages):
+        # Keep the old independent identity/edge digests. Reverse only exact,
+        # reviewed Cargo update records before testing the original graph.
+        fixture = json.loads((ROOT/'tests/fixtures/rhwp-0.9.1-cargo-delta.json').read_text())
+        self.assertEqual(fixture['schemaVersion'], 1)
+        self.assertEqual(fixture['afterRhwpCommit'], json.loads((ROOT/'config/upstream.lock.json').read_text())['rhwp']['commit'])
+        delta = fixture['locks'][name]
+        allowed = {**RHWP091_UPDATES, **(CLI_NATIVE_UPDATES if name == 'cli-cargo.lock.toml' else {})}
+        self.assertEqual({p['name']:p['version'] for p in delta['added']}, allowed)
+        self.assertEqual([p['after']['name'] for p in delta['modified']],
+                         ['rhwp-native-ffi'] if name == 'cli-cargo.lock.toml' else [])
+        self.assertEqual(hashlib.sha256((ROOT/'overlay'/name).read_bytes()).hexdigest(), delta['afterSha256'])
+        key = lambda p: (p['name'], p['version'], p.get('source'))
+        projected = {key(p): copy.deepcopy(p) for p in packages}
+        for change in delta['modified']:
+            self.assertEqual(key(change['before']), key(change['after']))
+            self.assertEqual(projected[key(change['after'])], change['after'])
+            self.assertEqual(set(change['after']['dependencies'])-set(change['before']['dependencies']), {'rhwp-codec-resource'})
+            projected[key(change['before'])] = copy.deepcopy(change['before'])
+        for expected in delta['added']:
+            self.assertEqual(projected.pop(key(expected)), expected, 'Changed package bytes/edges require explicit review')
+        renames = {}
+        for previous in delta['removed']:
+            self.assertNotIn(key(previous), projected)
+            projected[key(previous)] = copy.deepcopy(previous)
+            current = [p for p in delta['added'] if p['name'] == previous['name']]
+            self.assertEqual(len(current), 1)
+            renames[(current[0]['name'], current[0]['version'])] = previous['version']
+        for package in projected.values():
+            edges = []
+            for edge in package.get('dependencies', []):
+                parts = edge.split(' ')
+                if len(parts) == 2 and tuple(parts) in renames:
+                    edge = parts[0]+' '+renames[tuple(parts)]
+                edges.append(edge)
+            if 'dependencies' in package:
+                package['dependencies'] = edges
+        return list(projected.values())
+
+    def test_reviewed_delta_does_not_admit_unrelated_edge_rebinding(self):
+        _, packages = self.read('desktop-cargo.lock.toml')
+        for name, old, new in (
+            ('iana-time-zone','windows-core 0.61.2','windows-core 0.62.2'),
+            ('tauri-utils','toml 0.9.12+spec-1.1.0','toml 1.2.1+spec-1.1.0'),
+        ):
+            changed = copy.deepcopy(packages)
+            node = resolve(changed, name)
+            self.assertEqual(node['dependencies'].count(old), 1)
+            node['dependencies'] = [new if edge == old else edge for edge in node['dependencies']]
+            projected = self.original_graph('desktop-cargo.lock.toml', changed)
+            self.assertNotEqual(dependency_edges(projected, projected), ORIGINAL_DESKTOP_EDGES)
+
+    def test_reviewed_delta_rejects_coherent_new_package_checksum_changes(self):
+        _, packages = self.read('cli-cargo.lock.toml')
+        changed = copy.deepcopy(packages)
+        resolve(changed, 'read-fonts 0.47.0')['checksum'] = '0'*64
+        with self.assertRaises(AssertionError):
+            self.original_graph('cli-cargo.lock.toml', changed)
+
     def test_both_rhwp_roots_bind_exact_windows_and_windows_core(self):
         for name in ('desktop-cargo.lock.toml', 'cli-cargo.lock.toml'):
             with self.subTest(lock=name):
                 _, packages = self.read(name)
                 root = resolve(packages, 'rhwp')
-                self.assertEqual(root['version'], '0.9.0')
+                self.assertEqual(root['version'], '0.9.1')
                 selected = [edge for edge in root['dependencies']
                             if (resolve(packages, edge)['name'], resolve(packages, edge)['version'])
                             in {('windows', '0.61.3'), ('windows-core', '0.61.2')}]
                 self.assertEqual(len(selected), 2, '원 CLI 루트의 두 native Windows 의존성 연결이 필요합니다')
                 actual = {(resolve(packages, edge)['name'], resolve(packages, edge)['version']) for edge in selected}
                 self.assertEqual(actual, {('windows', '0.61.3'), ('windows-core', '0.61.2')})
-                original_edges = [resolve(packages, edge) for edge in root['dependencies'] if edge not in selected]
+                original = self.original_graph(name, packages)
+                previous = resolve(original, 'rhwp')
+                original_edges = [resolve(original, edge) for edge in previous['dependencies']
+                                  if (resolve(original, edge)['name'], resolve(original, edge)['version'])
+                                  not in {('windows', '0.61.3'), ('windows-core', '0.61.2')}]
                 self.assertEqual(identities(original_edges), ORIGINAL_RHWP_EDGES[name],
                                  '두 native Windows 연결 외의 rhwp 루트 의존성을 보존해야 합니다')
 
     def test_desktop_keeps_all_original_package_versions_and_checksum_identities(self):
         text, packages = self.read('desktop-cargo.lock.toml')
-        self.assertEqual(len(packages), 769)
-        self.assertEqual(identities(packages), ORIGINAL_DESKTOP_IDENTITIES)
+        self.assertEqual(len(packages), 770)
+        self.assertEqual(identities(self.original_graph('desktop-cargo.lock.toml', packages)), ORIGINAL_DESKTOP_IDENTITIES)
         self.assertEqual(resolve(packages, 'hop-desktop')['version'], '0.5.3')
         self.assertEqual(native_activation.validate_lock(text), text)
 
     def test_cli_adds_only_nine_reviewed_windows_packages_and_keeps_all_original_420(self):
         _, packages = self.read('cli-cargo.lock.toml')
         additions = [p for p in packages if (p['name'], p['version']) in NEW_WINDOWS]
-        original = [p for p in packages if (p['name'], p['version']) not in NEW_WINDOWS]
+        projected = self.original_graph('cli-cargo.lock.toml', packages)
+        original = [p for p in projected if (p['name'], p['version']) not in NEW_WINDOWS]
         self.assertEqual(len(additions), len(NEW_WINDOWS))
         self.assertEqual(len(original), 420)
         self.assertEqual(identities(original), ORIGINAL_CLI_IDENTITIES)
@@ -110,14 +185,16 @@ class ComLocksTests(unittest.TestCase):
 
     def test_every_unaffected_desktop_dependency_edge_is_preserved(self):
         _, packages = self.read('desktop-cargo.lock.toml')
-        self.assertEqual(dependency_edges(packages, packages), ORIGINAL_DESKTOP_EDGES,
+        projected = self.original_graph('desktop-cargo.lock.toml', packages)
+        self.assertEqual(dependency_edges(projected, projected), ORIGINAL_DESKTOP_EDGES,
                          '기존 패키지 버전 외에 기존 패키지가 선택한 의존성 버전도 보존해야 합니다')
         self.assertIn('heck 0.5.0', resolve(packages, 'snafu-derive 0.9.0')['dependencies'])
 
     def test_every_unaffected_cli_dependency_edge_is_preserved_after_version_qualification(self):
         _, packages = self.read('cli-cargo.lock.toml')
-        original = [p for p in packages if (p['name'], p['version']) not in NEW_WINDOWS]
-        self.assertEqual(dependency_edges(packages, original), ORIGINAL_CLI_EDGES)
+        projected = self.original_graph('cli-cargo.lock.toml', packages)
+        original = [p for p in projected if (p['name'], p['version']) not in NEW_WINDOWS]
+        self.assertEqual(dependency_edges(projected, original), ORIGINAL_CLI_EDGES)
 
     def test_cli_preserves_original_windows62_graph_alongside_new_windows61(self):
         _, packages = self.read('cli-cargo.lock.toml')

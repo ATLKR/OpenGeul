@@ -1277,6 +1277,32 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 0
+    - name: Observe the selected VS bundled Clang pair without changing acceptance
+      id: bundled-clang-probe
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && matrix.architecture == 'x64' && steps.suite-unit-shell.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      shell: pwsh
+      timeout-minutes: 2
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+        $hostPython = (Get-Command python -ErrorAction Stop).Source
+        python -B suite/e2e/vs_bundled_clang_probe.py --suite ([IO.Path]::GetFullPath($env:SUITE_PACKAGE)) --windows $env:SystemRoot --vswhere $vswhere --host-python $hostPython --expected-suite-source-commit $env:GITHUB_SHA --output ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-private')) --report ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-public/report.numeric.json'))
+        if ($LASTEXITCODE -ne 0) { throw 'Read-only bundled compiler observation is incomplete; acceptance is unchanged.' }
+    - name: Validate the closed bundled Clang observation before upload
+      id: bundled-clang-report
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && matrix.architecture == 'x64' && steps.bundled-clang-probe.outcome != 'skipped'"
+      shell: pwsh
+      run: |
+        python -B suite/e2e/vs_bundled_clang_probe.py --validate-report ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-public/report.numeric.json'))
+        if ($LASTEXITCODE -ne 0) { throw 'Bundled compiler observation is absent or outside the numeric schema.' }
+    - name: Preserve only the closed bundled Clang numeric observation
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && matrix.architecture == 'x64' && steps.bundled-clang-report.outcome == 'success'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-bundled-clang-probe-x64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-bundled-clang-probe-public/report.numeric.json
+        retention-days: 1
+        if-no-files-found: warn
 
   writer-server-observer:
     if: >-

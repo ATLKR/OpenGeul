@@ -50,8 +50,8 @@ def admit_current(value, *, expected_source, run_id, attempt, expected_upstream,
     digest(value['sha256'])
     require(type(value['package']) is str and re.fullmatch(r'[A-Za-z0-9_.-]{1,180}\.msix', value['package']), 13)
     require(value['upstream'] == expected_upstream and type(expected_upstream) is dict
-            and expected_upstream.get('rhwp', {}).get('version') == '0.9.0'
-            and expected_upstream.get('rhwp', {}).get('commit') == 'c9095c5f67632e6721e800ccc7fb43ea49d26682', 13)
+            and expected_upstream.get('rhwp', {}).get('version') == '0.9.1'
+            and expected_upstream.get('rhwp', {}).get('commit') == '981ce66b4183b13c1a3b5907e04a8969c8c42034', 13)
     receipt = value['windowsComponents']
     shape(receipt, ('formatVersion', 'repository', 'commit', 'runId', 'runAttempt',
                     'sourceContractSha256', 'components'))

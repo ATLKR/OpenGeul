@@ -13,16 +13,16 @@ from frontend_dependencies import PREPARED_LOCK_SHA256 as REVIEWED_NPM_LOCK_SHA2
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST_SKIA_NAMES = {'skia-safe', 'skia-bindings'}
-RUST_SKIA_VERSION = '0.156.0'
-RUST_SKIA_COMMIT = 'ce6727ef251518df37bcfdde4865b71f7e3a4352'
+RUST_SKIA_VERSION = '0.157.0'
+RUST_SKIA_COMMIT = '30669978c3f39a73e8a7ac74eead8d414eb1891d'
 RUST_SKIA_SHA256 = '4b33ed5b329a3a79eb1243fd91373c68b0ae0b9df7503bfc50d0c5253adf1b9a'
-RUST_SKIA_NOTICE = ROOT / 'notices/rust-skia-0.156.0-LICENSE.txt'
-RHWP_SOURCE_COMMIT = 'c9095c5f67632e6721e800ccc7fb43ea49d26682'
+RUST_SKIA_NOTICE = ROOT / 'notices/rust-skia-0.157.0-LICENSE.txt'
+RHWP_SOURCE_COMMIT = '981ce66b4183b13c1a3b5907e04a8969c8c42034'
 # These source-package notices are not all at Cargo's package root. Keep their
 # exact origins in the review inventory without claiming that every asset ships.
 SUPPLEMENTAL_NOTICES = {
     'rhwp-pdf-import-backend': {
-        'version':'0.3.78-rhwp.1', 'license':'MIT OR Apache-2.0',
+        'version':'0.3.78-rhwp.2', 'license':'MIT OR Apache-2.0',
         'directory':'vendor/rhwp-pdf-import-backend',
         'files':{
             'src/fonts/assets/LICENSE-DejaVu':'5fe93f9ee914fc7c4f0cfc73b7b0e972167f1b8f89ba57f9ad55d6013eb8a8ac',
@@ -37,7 +37,7 @@ SUPPLEMENTAL_NOTICES = {
         'files':{'README.ijg':'75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6'},
     },
     'rhwp-hayro-jpeg2000': {
-        'version':'0.4.0-rhwp.1', 'license':'Apache-2.0 OR MIT',
+        'version':'0.4.0-rhwp.2', 'license':'Apache-2.0 OR MIT',
         'directory':'vendor/rhwp-hayro-jpeg2000',
         'files':{'assets/LICENSE.txt':'469d87b5fa48f8aaf69e25f4fcac3a309c97dbb7d561b917638abdb640e004d9'},
     },

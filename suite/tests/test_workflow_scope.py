@@ -119,11 +119,13 @@ class WorkflowScopeTests(unittest.TestCase):
         normal=self.scope().suite_workflow_sections((root/'.github/workflows/office-suite.yml').read_text())[1]
         expected=json.loads((root/'suite/tests/fixtures/writer-server-observer-normal-workflow.json').read_bytes())['normalJobTextSha256']
         for changed in (normal.replace('timeout-minutes: 150','timeout-minutes: 151'),
-                        normal.replace('run_unit_checks -s suite/tests','run_unit_checks -s another/tests'),
-                        normal+'    - run: unreviewed_gate\n'):
+                        normal.replace('run_unit_checks -s suite/tests','run_unit_checks -s another/tests')):
             with self.subTest():
                 self.assertNotEqual(changed,normal)
                 self.assertNotEqual(hashlib.sha256(original_normal_oracle_text(changed).encode()).hexdigest(),expected)
+        # The exact probe tail is sealed; appended steps fail before hashing.
+        with self.assertRaisesRegex(ValueError, 'Reviewed bundled Clang observation delta differs'):
+            original_normal_oracle_text(normal+'    - run: unreviewed_gate\n')
 
 
 if __name__=='__main__':unittest.main()

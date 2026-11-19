@@ -26,7 +26,7 @@ class ReviewedNoticeGapTests(unittest.TestCase):
         self.pins = {}
         self.run_number = 0
         for name in ['skia-safe', 'skia-bindings']:
-            self.add_cargo(name, '0.156.0', 'MIT')
+            self.add_cargo(name, '0.157.0', 'MIT')
         self.add_cargo('unreviewed-source', '1.0.0', None)
         for version in ['5.3.0', '6.0.0']:
             directory, item = self.add_cargo('r-efi', version, 'MIT OR Apache-2.0 OR LGPL-2.1-or-later')

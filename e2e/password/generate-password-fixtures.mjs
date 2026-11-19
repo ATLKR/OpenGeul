@@ -28,7 +28,7 @@ for (const name of artifactNames) {
   const info = lstatSync(join(wasmDir, name));
   assert(info.isFile() && !info.isSymbolicLink(), `regular artifact required: ${name}`);
 }
-assert.equal(JSON.parse(read('package.json').toString('utf8')).version, '0.9.0', 'package version');
+assert.equal(JSON.parse(read('package.json').toString('utf8')).version, '0.9.1', 'package version');
 
 // Final qualification requires the source-bound rebuild manifest and matching
 // bytes. A pristine upstream artifact can never silently acquire that label.
@@ -38,8 +38,8 @@ if (existsSync(join(wasmDir, 'OPEN_GEUL_WASM.json'))) {
   const lock = JSON.parse(readFileSync(resolve('config/upstream.lock.json'), 'utf8'));
   assert.equal(lock.hop?.version, '0.5.3');
   assert.equal(lock.hop?.commit, 'c298160120c9ffbfca7e72f13dc2e7060ddff7fe');
-  assert.equal(lock.rhwp?.version, '0.9.0');
-  assert.equal(lock.rhwp?.commit, 'c9095c5f67632e6721e800ccc7fb43ea49d26682');
+  assert.equal(lock.rhwp?.version, '0.9.1');
+  assert.equal(lock.rhwp?.commit, '981ce66b4183b13c1a3b5907e04a8969c8c42034');
   assert.deepEqual(provenance.upstream, lock, 'source-bound checkout upstream lock');
   assert.equal(provenance.namespaceHelper,
     sha256(readFileSync(resolve('overlay/hwpx_namespaces.rs'))), 'source-bound namespace helper');
@@ -54,8 +54,8 @@ const qualification = provenance ? 'final-source-bound' : 'preliminary-pinned-ve
 if (!provenance) {
   assert(existsSync(join(wasmDir, 'PROVENANCE.json')), 'verified engine provenance required');
   const upstream = JSON.parse(read('PROVENANCE.json').toString('utf8'));
-  assert.equal(upstream.version, '0.9.0');
-  assert.equal(upstream.commit, 'c9095c5f67632e6721e800ccc7fb43ea49d26682');
+  assert.equal(upstream.version, '0.9.1');
+  assert.equal(upstream.commit, '981ce66b4183b13c1a3b5907e04a8969c8c42034');
   for (const name of artifactNames) {
     assert.equal(sha256(read(name)), upstream.artifacts?.[name]?.sha256, `pinned vendor ${name}`);
   }

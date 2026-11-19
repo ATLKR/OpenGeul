@@ -15,13 +15,15 @@ class WasmArtifactsTests(unittest.TestCase):
         self.folder = Path(self.temp.name)/'wasm'; self.folder.mkdir()
         for name in wasm.FILES: (self.folder/name).write_bytes(b'content')
         (self.folder/'rhwp_bg.wasm').write_bytes(b'\0asm\1\0\0\0')
-        (self.folder/'package.json').write_text(json.dumps({'version':'0.9.0'}))
+        (self.folder/'package.json').write_text(json.dumps({'version':'0.9.1'}))
     def test_capture_rejects_non_wasm_binary(self):
         (self.folder/'rhwp_bg.wasm').write_bytes(b'not wasm')
         with self.assertRaises(ValueError): wasm.capture(self.folder)
     def test_capture_rejects_wrong_upstream_version(self):
-        (self.folder/'package.json').write_text('{"version":"9.9.9"}')
-        with self.assertRaises(ValueError): wasm.capture(self.folder)
+        for version in ('0.9.0','9.9.9'):
+            with self.subTest(version=version):
+                (self.folder/'package.json').write_text(json.dumps({'version':version}))
+                with self.assertRaisesRegex(ValueError,'^WASM version mismatch$'):wasm.capture(self.folder)
     def test_source_mismatch_fails_before_install(self):
         wasm.capture(self.folder)
         record=json.loads((self.folder/'OPEN_GEUL_WASM.json').read_text());record['namespaceHelper']='0'*64

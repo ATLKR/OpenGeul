@@ -192,6 +192,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
 
     private void OnWorkerCommand(WorkerCommand command)
     {
+        var hwpRouteObservation = ObserveHwpRouteReceived(command);
         var traceSave = command.Command is "save" or "saveAs";
         if (traceSave) TraceSave("command.received", new { commandSequence = command.DiagnosticSequence, command = command.Command });
         if (IsDisposed || Disposing || !IsHandleCreated)
@@ -215,7 +216,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 switch (command.Command)
                 {
                     case "open": open(this); break;
-                    case "new": create(command.Module ?? module.Id); break;
+                    case "new": ObserveHwpRoute(hwpRouteObservation, command, 3); create(command.Module ?? module.Id); break;
                     case "save": await SaveDocumentAsync(false, command.DiagnosticSequence); break;
                     case "saveAs": await SaveDocumentAsync(true, command.DiagnosticSequence); break;
                     case "close": Close(); break;
@@ -223,6 +224,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                     case "exit": exit(); break;
                 }
             });
+            ObserveHwpRoute(hwpRouteObservation, command, 2);
         }
         catch (InvalidOperationException e)
         {
@@ -804,6 +806,7 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         long child, int managedThread)
     {
         internal readonly OwnedEditorFocus Owner = owner;
+        internal readonly HwpCommandRouteObservation HwpRoute = new(owner, generation);
         internal readonly int Generation = generation, ManagedThread = managedThread;
         internal readonly long Form = form, Panel = panel, Child = child;
         internal int? WorkerPid;
@@ -915,6 +918,58 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
         counters.ObserveResult(result, pending);
     }
 
+    // Same retained context for all three stages; observation cannot change dispatch.
+    private InitialFocusCounters? ObserveHwpRouteReceived(WorkerCommand command)
+    {
+        InitialFocusCounters? counters = null;
+        try
+        {
+            if (command.Command != "new" || command.Module != "hwp") return null;
+            counters = Volatile.Read(ref initialFocusCounters);
+            ObserveHwpRoute(counters, command, 1);
+        }
+        catch (Exception) { /* Missing diagnostic context remains unknown. */ }
+        return counters;
+    }
+
+    private void ObserveHwpRoute(InitialFocusCounters? counters, WorkerCommand command, int stage)
+    {
+        if (counters is null) return;
+        try
+        {
+            var current = Volatile.Read(ref initialFocusCounters);
+            var owner = Volatile.Read(ref editorFocus);
+            var generation = Volatile.Read(ref initialFocusOwnerGeneration);
+            var same = ReferenceEquals(current, counters) && Volatile.Read(ref counters.Retired) == 0 &&
+                Volatile.Read(ref counters.DisposeReturned) == 0;
+            counters.HwpRoute.Observe(stage, command.DiagnosticSequence, same ? owner : null, generation);
+        }
+        catch (Exception)
+        {
+            try { counters.HwpRoute.MarkUpdateFailure(stage); }
+            catch (Exception) { /* Observer failure never escapes into the command. */ }
+        }
+    }
+
+    private static object? SnapshotHwpRoute(InitialFocusCounters counters)
+    {
+        try
+        {
+            var value = counters.HwpRoute.Snapshot();
+            return new
+            {
+                schemaVersion = 1, statusCode = value.StatusCode, ownerGeneration = value.OwnerGeneration,
+                cap = HwpCommandRouteObservation.CountCap, attemptCap = HwpCommandRouteObservation.AttemptCap,
+                overflowMask = value.OverflowMask, updateFailureMask = value.UpdateFailureMask, ownerMismatch = value.OwnerMismatch,
+                receivedCount = value.ReceivedCount, receivedLastSequence = value.ReceivedLastSequence,
+                enqueueReturnedCount = value.EnqueueReturnedCount, enqueueReturnedLastSequence = value.EnqueueReturnedLastSequence,
+                executeCount = value.ExecuteCount, executeLastSequence = value.ExecuteLastSequence,
+                coverageComplete = 0, eventCompletenessUnknown = 1, zeroCountsUsable = 0, acceptanceEligible = 0
+            };
+        }
+        catch (Exception) { return null; }
+    }
+
     private void WriteInitialFocusPrefix(InitialFocusCounters? counters)
     {
         // Copy this retained owner's counters only after the existing status
@@ -953,7 +1008,8 @@ internal sealed class OfficeDocumentForm : Form, IDocumentSession
                 availabilityMaskKnown = counters.MaskKnown, availabilitySourceCode = counters.AvailabilitySource,
                 evaluatedMask = counters.EvaluatedMask, trueMask = counters.TrueMask, firstRejectId = counters.FirstReject,
                 evaluationComplete = counters.EvaluationComplete,
-                postUncertain = count[11] == count[12] ? 0 : 1, callbackOutstanding = count[11] == count[14] ? 0 : 1
+                postUncertain = count[11] == count[12] ? 0 : 1, callbackOutstanding = count[11] == count[14] ? 0 : 1,
+                hwpCommandRoute = SnapshotHwpRoute(counters)
             }, counters.WorkerPid, counters.TraceId);
         }
         catch (Exception) { counters.UpdateFailed = 1; }

@@ -381,6 +381,12 @@ class WindowsComponentsTests(unittest.TestCase):
             'third_party/rhwp/src/serializer/hwpx_lineage_lines.rs',
             'third_party/rhwp/src/serializer/cfb_writer.rs',
             'third_party/rhwp/src/model/document.rs',
+            'third_party/rhwp/src/document_core/mod.rs',
+            'third_party/rhwp/src/model/bin_data.rs',
+            'third_party/rhwp/src/document_core/commands/bin_data_prune.rs',
+            'third_party/rhwp/src/parser/hwpx/mod.rs',
+            'third_party/rhwp/src/serializer/hwpx/context.rs',
+            'third_party/rhwp/src/parser/hwpx/content.rs',
         )
         self.assertEqual(hwpx_persistence_verification.SOURCE_FILES, expected)
         readonly = {
@@ -393,6 +399,10 @@ class WindowsComponentsTests(unittest.TestCase):
             'third_party/rhwp/src/serializer/hwpx_lineage_lines.rs',
             'third_party/rhwp/src/serializer/cfb_writer.rs',
             'third_party/rhwp/src/model/document.rs',
+            'third_party/rhwp/src/document_core/mod.rs',
+            'third_party/rhwp/src/model/bin_data.rs',
+            'third_party/rhwp/src/parser/hwpx/mod.rs',
+            'third_party/rhwp/src/serializer/hwpx/context.rs',
         }
         self.assertEqual({name for name in expected
                           if hwpx_persistence_verification.INPUT_SOURCE_SHA256[name]
@@ -1123,7 +1133,7 @@ class WindowsComponentsTests(unittest.TestCase):
         for folder, name in ((source, 'hop'), (core, 'rhwp')):
             subprocess.run(['git', 'init', '-q', str(folder)], check=True)
             (folder/'.git/HEAD').write_text(lock[name]['commit']+'\n')
-        original = '[package]\nname = "rhwp"\nversion = "0.9.0"\nautotests = false\n'
+        original = '[package]\nname = "rhwp"\nversion = "0.9.1"\nautotests = false\n'
         (core/'Cargo.toml').write_text(original, encoding='utf-8')
         for upstream, local in c.COPIED_OVERLAYS.items():
             if upstream.startswith('third_party/rhwp/src/opengeul_com_worker/'):continue
@@ -1146,7 +1156,7 @@ class WindowsComponentsTests(unittest.TestCase):
         for name in wasm_artifacts.FILES:
             (vendor/name).write_bytes(b'synthetic owned WASM fixture')
         (vendor/'rhwp_bg.wasm').write_bytes(b'\0asm\1\0\0\0')
-        (vendor/'package.json').write_text('{"version":"0.9.0"}')
+        (vendor/'package.json').write_text('{"version":"0.9.1"}')
         wasm_artifacts.capture(vendor)
         wasm = json.loads((vendor/'OPEN_GEUL_WASM.json').read_text())
         write_json(vendor/'PROVENANCE.json', {'originalUpstream': {}, 'opengeulRebuild': wasm})
