@@ -55,3 +55,11 @@ over-64-frame coordinates use source 0 and a null line. Lines are bounded to
 environment are read. A wrapped exception identifies only its own raise, not
 the original cause. Failure codes, ownership, original deadlines, cleanup and
 all false acceptance flags retain their existing meanings.
+
+The dedicated 9dea layout pins Python 3.13.17, matching the existing reviewed
+26.8.2.2 source contract and the authenticated diagnostic engine archive. T5
+stopped at prelaunch step 5 in RuntimeLayout validation before any launch; its
+old 3.13.15 requirement belonged to the earlier bf6ef source contract and that
+directory is absent from this pinned engine. A synthetic 3.13.17 tree must pass
+the unchanged layout checks and a legacy-only 3.13.15 tree must fail. This path
+correction does not qualify a runtime or prove Windows launch, focus or MSAA.

@@ -188,7 +188,7 @@ class Composed(unittest.TestCase):
                 self.assertEqual(c.api.calls, [])
 
     def test_individual_image_resolve_failures_preserve_exact_original_role(self):
-        names = ('OpenGeul.Office.exe', 'Office/program/python-core-3.13.15/bin/python.exe',
+        names = ('OpenGeul.Office.exe', 'Office/program/python-core-3.13.17/bin/python.exe',
                  'Office/program/soffice.bin', 'Office/program/soffice.exe')
         for index, name in enumerate(names):
             with self.subTest(role=index), tempfile.TemporaryDirectory() as folder:

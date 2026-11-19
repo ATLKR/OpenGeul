@@ -66,7 +66,7 @@ class Native:
         self.folder,self.clock,self.backend=folder,clock,backend
         self.calls=[];self.dead=False;self.fail_launch=False;self.late_launch=False;self.bad_role=False
         self.fail_close=None;self.helper_bad=False;self.helper_hang=False;self.extra=False
-        self.images={201:folder/'payload/OpenGeul.Office.exe',202:folder/'payload/Office/program/python-core-3.13.15/bin/python.exe',
+        self.images={201:folder/'payload/OpenGeul.Office.exe',202:folder/'payload/Office/program/python-core-3.13.17/bin/python.exe',
             301:folder/'payload/Office/program/soffice.bin'}
     def retain_current_controller(self): self.calls.append('controller'); return 700,(701,801)
     def launch(self,argv,cwd,environment,*,controller_binding):
@@ -109,11 +109,11 @@ class Native:
 def setup(folder):
     root=Path(folder);root.mkdir(parents=True,exist_ok=True)
     root=root.resolve(strict=True)
-    for name in ('payload/Office/program/python-core-3.13.15/bin','payload/Office/program/python-core-3.13.15/lib/site-packages',
+    for name in ('payload/Office/program/python-core-3.13.17/bin','payload/Office/program/python-core-3.13.17/lib/site-packages',
                  'baseline','Windows/System32','host','source/e2e','user/AppData/Roaming','user/AppData/Local'):
         (root/name).mkdir(parents=True,exist_ok=True)
     for name in ('payload/OpenGeul.Office.exe','payload/Office/program/soffice.bin','payload/Office/program/soffice.exe',
-        'payload/Office/program/fundamental.ini','payload/Office/program/python-core-3.13.15/bin/python.exe',
+        'payload/Office/program/fundamental.ini','payload/Office/program/python-core-3.13.17/bin/python.exe',
         'host/python.exe','source/e2e/helper.py','source/e2e/writer_os_accessibility.py','source/e2e/writer_os_summary.py',
         'source/e2e/startup_smoke.py','source/e2e/windows_smoke.py','source/payload.py'):
         (root/name).write_bytes(b'SYNTHETIC')

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'e2e'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class Clock:
@@ -83,9 +84,9 @@ class Contracts(unittest.TestCase):
         budget = session.begin_runtime()
         self.assertEqual((budget.start_qpc, budget.deadline_qpc), (600000, 630000))
 
-    def layout(self, m, root):
+    def layout(self, m, root, *, python_version='3.13.17'):
         root = Path(root); payload = root / 'payload'; win = root / 'system'; temp = root / 'owned-temp'
-        program = payload / 'Office' / 'program'; core = program / 'python-core-3.13.15'
+        program = payload / 'Office' / 'program'; core = program / ('python-core-' + python_version)
         for p in (core / 'bin', core / 'lib' / 'site-packages', win / 'System32', temp, root / 'profile' / 'Roaming', root / 'profile' / 'Local'):
             p.mkdir(parents=True, exist_ok=True)
         (core / 'bin' / 'python.exe').touch(); (program / 'fundamental.ini').touch()
@@ -96,6 +97,22 @@ class Contracts(unittest.TestCase):
     def descriptor(self):
         # These small constructed tokens are synthetic grammar fixtures only.
         return ':'.join(('1', str(1 + 1), str(2 + 1), format(3 + 1, '016x'), '131328', 'OpenGeulWriterServerObserver'))
+
+    def test_dedicated_9dea_layout_accepts_the_exact_reviewed_new_python_tree(self):
+        from source_contracts import NEW
+        m = self.module()
+        self.assertEqual(NEW.python_version, '3.13.17')
+        self.assertEqual(NEW.core, '9dea406ab7695df6325b11b0e19fdca8db4b7276')
+        self.assertIs(NEW.qualifies_runtime, False)
+        with tempfile.TemporaryDirectory() as root:
+            layout, _ = self.layout(m, root, python_version='3.13.17')
+            self.assertEqual(layout.core, layout.program / ('python-core-' + NEW.python_version))
+
+    def test_dedicated_9dea_layout_rejects_a_legacy_only_python_tree(self):
+        m = self.module()
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(m.DiagnosticFailure):
+                self.layout(m, root, python_version='3.13.15')
 
     def test_environment_reads_only_named_nonsecret_bootstrap_keys(self):
         m = self.module()

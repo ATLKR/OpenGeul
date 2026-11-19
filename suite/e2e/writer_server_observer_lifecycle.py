@@ -347,7 +347,7 @@ class RuntimeLayout:
                 raise ValueError()
             payload, windows, temp = tuple(p.resolve(strict=True) for p in supplied)
             program = payload / 'Office' / 'program'
-            core = program / 'python-core-3.13.15'
+            core = program / 'python-core-3.13.17'
             directories = (payload, windows, temp, windows / 'System32', program,
                            core, core / 'bin', core / 'lib', core / 'lib' / 'site-packages')
             if not all(p.is_dir() and p.resolve(strict=True) == p for p in directories):
