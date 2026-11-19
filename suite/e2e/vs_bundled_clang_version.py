@@ -472,4 +472,151 @@ def main(argv=None):
     except BaseException:
         return 1
 
-if __name__ == '__main__':raise SystemExit(main())
+# compile-qualification:begin helpers
+NEGATIVE_SOURCE=b'#error OPENGeul compiler qualification negative\n'
+COMPILE_RESULT_KEYS={'schemaVersion','kindCode','resultCode','exitCode','stdoutBytes','stderrBytes',
+    'timedOut','outputCapReached','pid','creationTime','imageMatched','naturalExit','handlesClosed',
+    'captureObservation','sourcePinsBeforeAfterEqual','toolPinsBeforeAfterEqual','objectAbsent'}
+
+def validate_compile_result(value):
+    assert type(value) is dict and set(value)==COMPILE_RESULT_KEYS
+    assert type(value['schemaVersion']) is int and value['schemaVersion']==1
+    assert type(value['kindCode']) is int and value['kindCode']==3
+    assert type(value['resultCode']) is int and value['resultCode'] in (0,1,2,3,4,5,7)
+    assert value['exitCode'] is None or type(value['exitCode']) is int and -0x80000000<=value['exitCode']<=0xffffffff
+    for key in ('stdoutBytes','stderrBytes'):
+        assert type(value[key]) is int and 0<=value[key]<=VERSION_CAP
+    for key in ('timedOut','outputCapReached','imageMatched','naturalExit','handlesClosed',
+                'sourcePinsBeforeAfterEqual','toolPinsBeforeAfterEqual','objectAbsent'):
+        assert type(value[key]) is bool
+    for key,maximum in (('pid',0xffffffff),('creationTime',0xffffffffffffffff)):
+        assert value[key] is None or type(value[key]) is int and 0<value[key]<=maximum
+    validate_capture_observation(value['captureObservation'])
+    if value['resultCode']==1:
+        assert value['exitCode'] is value['pid'] is value['creationTime'] is None
+        assert value['stdoutBytes']==value['stderrBytes']==0
+        assert value['captureObservation']['observedMask']==0
+    if value['resultCode']==0:
+        assert type(value['exitCode']) is int and value['exitCode']!=0
+        assert value['pid'] is not None and value['creationTime'] is not None
+        assert all(value[key] is True for key in ('imageMatched','naturalExit','handlesClosed',
+            'sourcePinsBeforeAfterEqual','toolPinsBeforeAfterEqual','objectAbsent'))
+        assert value['timedOut'] is value['outputCapReached'] is False
+        assert not value['captureObservation']['observedMask']&2
+
+def compile_query(request,*,capture_call=capture,clock=time.monotonic):
+    import hashlib
+    import stat
+    result=dict(schemaVersion=1,kindCode=3,resultCode=1,exitCode=None,stdoutBytes=0,stderrBytes=0,
+        timedOut=False,outputCapReached=False,pid=None,creationTime=None,imageMatched=False,
+        naturalExit=False,handlesClosed=False,captureObservation=capture_observation(),
+        sourcePinsBeforeAfterEqual=False,toolPinsBeforeAfterEqual=False,objectAbsent=False)
+    try:
+        assert type(request) is dict and set(request)=={'schemaVersion','kindCode','tool','source','object','deadline','sourcePin','toolPin'}
+        assert type(request['schemaVersion']) is int and request['schemaVersion']==1
+        assert type(request['kindCode']) is int and request['kindCode']==3
+        deadline=request['deadline']
+        assert type(deadline) in (int,float) and math.isfinite(deadline)
+        last=clock();assert type(last) in (int,float) and math.isfinite(last) and 0<deadline-last<=30.
+        def check():
+            nonlocal last
+            now=clock();assert type(now) in (int,float) and math.isfinite(now) and last<=now<deadline
+            last=now
+        def absolute(value):
+            assert type(value) is str and 0<len(value)<=4093 and not any(c in value for c in '\0\r\n')
+            assert not value.replace('\\','/').startswith('//')
+            path=Path(value);assert path.is_absolute() and path.parent.is_dir()
+            assert path.parent.resolve(strict=True)==path.parent
+            for part in (path,*path.parents):
+                assert not part.is_symlink() and not getattr(part,'is_junction',lambda:False)()
+                if part.exists():assert not getattr(part.lstat(),'st_file_attributes',0)&0x400
+            return path
+        tool,source,obj=(absolute(request[key]) for key in ('tool','source','object'))
+        assert tuple(part.casefold() for part in tool.parts[-6:])==('vc','tools','llvm','x64','bin','clang-cl.exe')
+        assert source.name=='negative.cpp' and obj.name=='negative.obj' and obj.parent==source.parent
+        assert not obj.exists() and not obj.is_symlink()
+        from native_compiler_tools import pin_native_tool,validate_tool_pin
+        import native_suite_architecture as native_arch
+        native_arch.validate_native_architecture(native_arch.observe_native_architecture(),'x64')
+        validate_tool_pin(request['toolPin'],'x64','clang-cl.exe')
+        assert request['toolPin']['path']==str(tool)
+        expected=request['sourcePin']
+        assert type(expected) is dict and set(expected)=={'bytes','sha256'}
+        assert type(expected['bytes']) is int and expected['bytes']==len(NEGATIVE_SOURCE)
+        assert type(expected['sha256']) is str and expected['sha256']==hashlib.sha256(NEGATIVE_SOURCE).hexdigest()
+        def source_pin():
+            check();absolute(str(source));before=source.stat();assert stat.S_ISREG(before.st_mode)
+            assert before.st_size==len(NEGATIVE_SOURCE)
+            with source.open('rb') as stream:
+                held=os.fstat(stream.fileno());raw=stream.read(len(NEGATIVE_SOURCE)+1);after=os.fstat(stream.fileno())
+            current=source.stat();identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+            assert identity(before)==identity(current) and identity(held)==identity(after)
+            assert (before.st_dev,before.st_ino,before.st_size)==(held.st_dev,held.st_ino,held.st_size)
+            assert raw==NEGATIVE_SOURCE
+            value=dict(bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest());check();return value
+        def tool_pin():
+            facts={};value=pin_native_tool(tool,'x64',check=check,facts=facts)
+            assert all(facts['pathBefore'][key]==facts['fdBefore'][key] for key in ('st_dev','st_ino','st_size'))
+            return value,facts
+        before_source=source_pin();assert before_source==expected
+        before_tool,before_facts=tool_pin();assert before_tool==request['toolPin'];check()
+    except BaseException:
+        validate_compile_result(result);return result
+    result['resultCode']=7
+    try:
+        argv=[str(tool),'--no-default-config','--target=x86_64-pc-windows-msvc','/nologo','/c','/O2','/MT',
+            '/EHsc','/std:c++17','/W4','/WX','/utf-8',str(source),'/Fo'+str(obj)]
+        observed,out,err=capture_call(argv,deadline,VERSION_CAP)
+        assert type(out) is bytes and type(err) is bytes and len(out)<=VERSION_CAP and len(err)<=STDERR_CAP
+        assert type(observed['captureError']) is bool
+        projected=dict(result,**{key:observed[key] for key in ('exitCode','pid','creationTime','timedOut',
+            'outputCapReached','imageMatched','naturalExit','handlesClosed','captureObservation')},stdoutBytes=len(out),stderrBytes=len(err))
+        validate_compile_result(projected);result=projected
+        if observed['timedOut']:result['resultCode']=2
+        elif observed['outputCapReached']:result['resultCode']=3
+        elif (observed['captureError'] or observed['captureObservation']['observedMask']&2
+                or not all(observed[key] for key in ('imageMatched','naturalExit','handlesClosed'))
+                or observed['pid'] is None or observed['creationTime'] is None or observed['exitCode'] is None):result['resultCode']=7
+        else:result['resultCode']=0 if observed['exitCode']!=0 else 4
+    except BaseException:
+        result['resultCode']=7
+    try:result['sourcePinsBeforeAfterEqual']=source_pin()==before_source
+    except BaseException:pass
+    try:
+        after_tool,after_facts=tool_pin()
+        result['toolPinsBeforeAfterEqual']=after_tool==before_tool and after_facts==before_facts
+    except BaseException:pass
+    try:
+        check();absolute(str(obj));result['objectAbsent']=not obj.exists() and not obj.is_symlink();check()
+    except BaseException:pass
+    if result['resultCode']==0 and not all(result[key] for key in ('sourcePinsBeforeAfterEqual','toolPinsBeforeAfterEqual','objectAbsent')):
+        result['resultCode']=5
+    validate_compile_result(result);return result
+
+def compile_main(argv=None):
+    args=list(sys.argv[1:] if argv is None else argv)
+    if len(args)!=4 or args[0]!='--compile-request' or args[2]!='--result':return 1
+    try:
+        assert all(type(value) is str and not value.replace('\\','/').startswith('//') for value in (args[1],args[3]))
+        request_path,result_path=Path(args[1]),Path(args[3])
+        assert request_path.is_absolute() and result_path.is_absolute() and request_path.parent==result_path.parent
+        for path in (request_path,result_path):
+            assert path.parent.resolve(strict=True)==path.parent
+            for part in (path,*path.parents):
+                assert not part.is_symlink() and not getattr(part,'is_junction',lambda:False)()
+                if part.exists():assert not getattr(part.lstat(),'st_file_attributes',0)&0x400
+        assert request_path.is_file() and 0<request_path.stat().st_size<=8192
+        assert not result_path.exists()
+        with request_path.open('rb') as stream:raw=stream.read(8193)
+        assert len(raw)==request_path.stat().st_size<=8192
+        result=compile_query(json.loads(raw));validate_compile_result(result)
+        blob=(json.dumps(result,sort_keys=True,allow_nan=False)+'\n').encode('ascii');assert len(blob)<=8192
+        with result_path.open('xb') as stream:stream.write(blob)
+        return 0
+    except BaseException:return 1
+# compile-qualification:end helpers
+
+# compile-qualification:begin entry
+if __name__ == '__main__':
+    raise SystemExit(compile_main() if sys.argv[1:2]==['--compile-request'] else main())
+# compile-qualification:end entry

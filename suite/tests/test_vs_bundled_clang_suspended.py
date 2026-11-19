@@ -241,3 +241,143 @@ class SuspendedTests(unittest.TestCase):
                 self.assertEqual(ops.create_args[4:8],(True,4,None,None))
                 self.assertEqual(ops.handles,set());self.assertEqual(ops.fds,set())
                 self.assertTrue(all(n==1 for n in ops.close_calls.values()))
+
+# compile-qualification:begin tests
+class NegativeCompileTests(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        import struct
+        import tempfile
+        self.assertTrue(callable(getattr(h,'compile_query',None)), 'negative compile boundary missing')
+        self.assertTrue(callable(getattr(h,'validate_compile_result',None)), 'numeric compile validator missing')
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.source=self.root/'negative.cpp';self.obj=self.root/'negative.obj'
+        self.source.write_bytes(h.NEGATIVE_SOURCE)
+        self.tool=self.root/'VS/VC/Tools/Llvm/x64/bin/clang-cl.exe';self.tool.parent.mkdir(parents=True)
+        raw=bytearray(4096);raw[:2]=b'MZ';struct.pack_into('<I',raw,60,64);raw[64:68]=b'PE\0\0'
+        struct.pack_into('<HHIIIHH',raw,68,0x8664,1,0,0,0,240,2)
+        struct.pack_into('<H',raw,88,0x20b);struct.pack_into('<I',raw,196,16)
+        self.tool.write_bytes(raw)
+        spec=importlib.util.spec_from_file_location('negative_compile_native_tools',ROOT/'e2e/native_compiler_tools.py')
+        self.tools=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.tools)
+        self.native=dict(processMachine=0,nativeMachine=0x8664,processArchitecture='x64',nativeArchitecture='x64')
+        spec=importlib.util.spec_from_file_location('negative_compile_native_arch',ROOT/'e2e/native_suite_architecture.py')
+        self.arch=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.arch)
+        modules=patch.dict(h.sys.modules,{'native_compiler_tools':self.tools,'native_suite_architecture':self.arch})
+        modules.start();self.addCleanup(modules.stop)
+        observed=patch.object(self.arch,'observe_native_architecture',lambda:dict(self.native))
+        observed.start();self.addCleanup(observed.stop)
+        self.hash=lambda data:hashlib.sha256(data).hexdigest()
+        self.request=dict(schemaVersion=1,kindCode=3,tool=str(self.tool),source=str(self.source),object=str(self.obj),
+            deadline=104.,sourcePin=dict(bytes=len(h.NEGATIVE_SOURCE),sha256=self.hash(h.NEGATIVE_SOURCE)),
+            toolPin=dict(path=str(self.tool),bytes=len(raw),sha256=self.hash(raw),machine=0x8664))
+        self.calls=[];self.output=b'';self.error=b'synthetic negative diagnostics'
+        self.observed=dict(exitCode=1,pid=71,creationTime=13,imageMatched=True,naturalExit=True,handlesClosed=True,
+            timedOut=False,outputCapReached=False,captureError=False,captureObservation=h.capture_observation())
+        self.after=None
+    def capture(self,argv,deadline,cap):
+        self.calls.append((argv,deadline,cap))
+        if self.after:self.after()
+        return dict(self.observed),self.output,self.error
+    def query(self,request=None,clock=lambda:100.):
+        return h.compile_query(self.request if request is None else request,capture_call=self.capture,clock=clock)
+    def test_exact_pinned_negative_has_fixed_arguments_and_numeric_only_result(self):
+        result=self.query();h.validate_compile_result(result)
+        self.assertEqual(result['resultCode'],0);self.assertEqual(result['kindCode'],3)
+        self.assertEqual(self.calls,[([str(self.tool),'--no-default-config','--target=x86_64-pc-windows-msvc',
+            '/nologo','/c','/O2','/MT','/EHsc','/std:c++17','/W4','/WX','/utf-8',str(self.source),'/Fo'+str(self.obj)],104.,4096)])
+        self.assertEqual(result['stderrBytes'],len(self.error));self.assertFalse(self.obj.exists())
+        self.assertEqual(set(result),h.COMPILE_RESULT_KEYS)
+        def numeric(value):
+            if type(value) is dict:return all(numeric(v) for v in value.values())
+            return value is None or type(value) in (int,bool)
+        self.assertTrue(numeric(result))
+    def test_bad_request_source_or_tool_pin_never_captures(self):
+        import copy
+        variants=[]
+        for field,value in (('kindCode',True),('schemaVersion',True),('deadline',True),('deadline',100.),('deadline',float('inf'))):
+            bad=copy.deepcopy(self.request);bad[field]=value;variants.append(bad)
+        for field in ('sourcePin','toolPin'):
+            bad=copy.deepcopy(self.request);bad[field]['sha256']='0'*64;variants.append(bad)
+            bad=copy.deepcopy(self.request);bad[field]['bytes']=True;variants.append(bad)
+        bad=copy.deepcopy(self.request);bad['extra']=0;variants.append(bad)
+        bad=copy.deepcopy(self.request);bad['sourcePin']['extra']=0;variants.append(bad)
+        for bad in variants:
+            with self.subTest(index=len(self.calls)):
+                result=self.query(bad);self.assertEqual(result['resultCode'],1);h.validate_compile_result(result)
+        self.assertEqual(self.calls,[])
+    def test_foreign_controller_or_forged_foreign_executable_never_captures(self):
+        import struct
+        self.native['processMachine']=0x8664
+        self.assertEqual(self.query()['resultCode'],1)
+        self.native['processMachine']=0
+        raw=bytearray(self.tool.read_bytes());struct.pack_into('<H',raw,68,0xaa64);self.tool.write_bytes(raw)
+        self.request['toolPin']['sha256']=self.hash(raw)
+        self.assertEqual(self.query()['resultCode'],1);self.assertEqual(self.calls,[])
+    def test_wrong_names_existing_object_and_linked_source_never_capture(self):
+        import copy
+        for field,value in (('source',str(self.source.with_name('other.cpp'))),('object',str(self.obj.with_name('other.obj'))),
+                ('object',str(self.root/'nested/negative.obj')),('tool',str(self.tool.with_name('lld-link.exe')))):
+            bad=copy.deepcopy(self.request);bad[field]=value;self.assertEqual(self.query(bad)['resultCode'],1)
+        self.obj.write_bytes(b'existing');self.assertEqual(self.query()['resultCode'],1);self.obj.unlink()
+        original=self.source.read_bytes();self.source.unlink();self.source.symlink_to(self.tool)
+        self.assertEqual(self.query()['resultCode'],1);self.source.unlink();self.source.write_bytes(original)
+        self.assertEqual(self.calls,[])
+    def test_deadline_expiring_during_pins_never_captures(self):
+        ticks=iter((100.,100.,100.,104.))
+        result=self.query(clock=lambda:next(ticks,104.))
+        self.assertEqual(result['resultCode'],1);self.assertEqual(self.calls,[])
+    def test_capture_must_be_nonzero_natural_closed_and_untruncated(self):
+        for mutation,code in ((dict(exitCode=0),4),(dict(timedOut=True),2),(dict(outputCapReached=True),3),
+                (dict(captureError=True),7),(dict(imageMatched=False),7),(dict(naturalExit=False),7),(dict(handlesClosed=False),7)):
+            with self.subTest(code=code):
+                original=dict(self.observed);self.observed.update(mutation)
+                result=self.query();self.assertEqual(result['resultCode'],code);h.validate_compile_result(result)
+                self.observed=original
+    def test_post_capture_source_drift_and_created_object_cannot_qualify(self):
+        self.after=lambda:self.source.write_bytes(b'changed')
+        result=self.query();self.assertEqual(result['resultCode'],5);self.assertFalse(result['sourcePinsBeforeAfterEqual'])
+        self.source.write_bytes(h.NEGATIVE_SOURCE);self.after=lambda:self.obj.write_bytes(b'new output')
+        result=self.query();self.assertEqual(result['resultCode'],5);self.assertFalse(result['objectAbsent'])
+    def test_post_capture_tool_drift_cannot_qualify(self):
+        self.after=lambda:self.tool.write_bytes(self.tool.read_bytes()+b'changed')
+        result=self.query();self.assertEqual(result['resultCode'],5);self.assertFalse(result['toolPinsBeforeAfterEqual'])
+    def test_pure_validator_rejects_accepted_zero_exit_and_missing_custody(self):
+        import copy
+        result=self.query()
+        for field,value in (('exitCode',0),('exitCode',True),('naturalExit',False),('handlesClosed',False),
+                ('sourcePinsBeforeAfterEqual',False),('toolPinsBeforeAfterEqual',False),('objectAbsent',False),('stdoutBytes','private')):
+            bad=copy.deepcopy(result);bad[field]=value
+            with self.subTest(field=field),self.assertRaises(AssertionError):h.validate_compile_result(bad)
+    def test_compile_main_records_numeric_preflight_rejection_with_outer_zero(self):
+        import contextlib
+        request=self.root/'request.json';result=self.root/'result.json'
+        request.write_text(h.json.dumps(dict(self.request,kindCode=2)))
+        out,err=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+            code=h.compile_main(['--compile-request',str(request),'--result',str(result)])
+        self.assertEqual(code,0);value=h.json.loads(result.read_bytes());h.validate_compile_result(value)
+        self.assertEqual(value['resultCode'],1);self.assertEqual(out.getvalue(),err.getvalue());self.assertEqual(out.getvalue(),'')
+        self.assertEqual(h.compile_main(['--compile-request',str(request),'--unexpected',str(result)]),1)
+    def test_unc_genuine_file_aliases_never_reach_capture(self):
+        import copy
+        unc=lambda path:'/'+str(path)
+        variants=[]
+        request=copy.deepcopy(self.request);request['tool']=unc(self.tool);request['toolPin']['path']=unc(self.tool);variants.append(request)
+        request=copy.deepcopy(self.request);request['source']=unc(self.source);request['object']=unc(self.obj);variants.append(request)
+        # Linux resolves //tmp to /tmp. Preserve the canonical UNC spelling as
+        # Windows does, while the fixture still addresses the genuine files.
+        with patch.object(h.Path,'resolve',lambda path,*args,**kwargs:path):
+            for request in variants:
+                result=self.query(request)
+                self.unc_result_code=result['resultCode'];self.unc_capture_attempts=len(self.calls)
+                self.assertEqual(result['resultCode'],1)
+        self.assertEqual(self.calls,[])
+    def test_compile_main_rejects_unc_request_and_result_before_file_access(self):
+        request=self.root/'unc-request.json';result=self.root/'unc-result.json'
+        request.write_text(h.json.dumps(dict(self.request,kindCode=2)))
+        with patch.object(h.Path,'resolve',lambda path,*args,**kwargs:path):
+            code=h.compile_main(['--compile-request','/'+str(request),'--result','/'+str(result)])
+        self.unc_main_exit=code
+        self.assertEqual(code,1);self.assertFalse(result.exists());self.assertEqual(self.calls,[])
+# compile-qualification:end tests

@@ -19,7 +19,7 @@ INPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '25b49e6c9989
  'third_party/rhwp/src/serializer/hwpx/section.rs': 'f22a4a41e6a381028b927167d7dbab537693c9bad044c1dd045c200b4c37675c',
  'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs': 'fffb404df94819fbb2f427280ae89a51b8dac37c35535015feb95cf4fd928936'}
 OUTPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '183109289587ad200d3bd24c08c06cba4ca62745883e939f93a64670c52343c3',
- 'third_party/rhwp/src/parser/hwpx/section.rs': '81326287d5ed1dde4ce01afdadcbbd175addebe2fe139d8d5955e18ea9824381',
+ 'third_party/rhwp/src/parser/hwpx/section.rs': '1770dc23d779af301135c44e977b4a090f8168ca45242b0911c270ba3df8e7e5',
  'third_party/rhwp/src/serializer/hwpx/section.rs': '795206e3d38124490e5bf8c6ebdbd9eb1e9abca14fcbe67caa636fbc4aadc346',
  'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs': '83028d89330c646f316e0dc67a0dd28e280754d5c3c78f8827c8c71262b6820f'}
 
@@ -51,8 +51,7 @@ _AFTER_1 = """    // OpenGeul: an implementation bit in actual stored bytes is n
     // non-placeholder imported rows; replacement/reflow clears this origin.
     if !para.line_segs.is_empty()
         && para.line_segs.iter().all(|s| {
-            s.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
-                && s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0
+            s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0
                 && s.line_height > 0
                 && s.text_height > 0
         })

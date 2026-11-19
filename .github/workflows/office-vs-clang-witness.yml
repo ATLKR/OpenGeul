@@ -1,4 +1,4 @@
-name: OpenGeul read-only VS tool witness diagnostic
+name: OpenGeul VS bundled Clang static qualification diagnostic
 'on':
   push:
     branches: [work/opengeul-vs-clang-witness-3527]
@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
-      - name: Observe only fresh discovery and tool version witnesses
+      - name: Qualify one fresh x64 compiler pair with positive and negative compilation
         id: observe
         shell: pwsh
         timeout-minutes: 2
@@ -39,9 +39,20 @@ jobs:
           $report = Join-Path $base 'public/report.numeric.json'
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           $hostPython = (Get-Command python -ErrorAction Stop).Source
-          # The checkout is a protected read-only root; no Suite package is supplied or qualified.
-          python -B suite/e2e/vs_bundled_clang_probe.py --suite ([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)) --windows $env:SystemRoot --vswhere $vswhere --host-python $hostPython --expected-suite-source-commit $env:GITHUB_SHA --output $private --report $report
-          if ($LASTEXITCODE -ne 0) { throw 'Tool witness observation did not produce a closed numeric report.' }
+          if (Test-Path -LiteralPath $base) { throw 'Preserve existing diagnostic evidence; a fresh run directory is required.' }
+          New-Item -ItemType Directory -Path $base -ErrorAction Stop | Out-Null
+          $intent = Join-Path $base 'source-intent.private.json'
+          $pins = [ordered]@{
+            'ascii_message_observer.cpp' = [ordered]@{ bytes = 27329; sha256 = '0da709eaf99f8c88e292706dc920131e6145769a89e5f07971f3029fd5d35c5e' }
+            'ascii_message_protocol.h' = [ordered]@{ bytes = 4685; sha256 = '98014837e245c09e2fe6e164e0edd8700b0711bd06fc8983c29e653b0b06f4c3' }
+            'bounded_plugin_origin_windows.h' = [ordered]@{ bytes = 2347; sha256 = 'b6613b6990b1f8be36e974b9f0e39d6263935026f55814cc19241ddfe01c71f5' }
+            'bounded_stack_windows.h' = [ordered]@{ bytes = 3019; sha256 = '181826b4cc01bf2557d464425899799b73ef4d89f473bb9f43eaa44d6e1588c4' }
+          }
+          [IO.File]::WriteAllText($intent, ($pins | ConvertTo-Json -Depth 3 -Compress), [Text.UTF8Encoding]::new($false))
+          # The checkout stays protected; only the original observer sources are compiled off-tree.
+          # This single call owns fresh discovery, both versions and both compilations under work27/absolute30.
+          python -B suite/e2e/vs_bundled_clang_probe.py --qualify-compiler --suite ([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)) --windows $env:SystemRoot --vswhere $vswhere --host-python $hostPython --expected-suite-source-commit $env:GITHUB_SHA --output $private --report $report --source-pins $intent
+          if ($LASTEXITCODE -ne 0) { throw 'Compiler qualification did not produce a closed numeric report.' }
       - name: Validate the one closed report
         id: validate
         if: success() && steps.observe.outcome == 'success'
@@ -50,13 +61,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $base = Join-Path $env:RUNNER_TEMP "opengeul-vs-clang-witness-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $report = Join-Path $base 'public/report.numeric.json'
-          python -B suite/e2e/vs_bundled_clang_probe.py --validate-report $report
-          if ($LASTEXITCODE -ne 0) { throw 'The tool witness report is absent or invalid.' }
+          python -B suite/e2e/vs_bundled_clang_probe.py --validate-qualification-report $report
+          if ($LASTEXITCODE -ne 0) { throw 'The compiler qualification report is absent or invalid.' }
       - name: Retain only the validated numeric report
         if: success() && steps.validate.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: opengeul-vs-clang-witness-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          name: opengeul-vs-clang-qualification-x64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/opengeul-vs-clang-witness-${{ github.run_id }}-${{ github.run_attempt }}/public/report.numeric.json
           retention-days: 1
           if-no-files-found: error

@@ -700,6 +700,15 @@ class HelperTests(unittest.TestCase):
 
     def original_capture_source(self):
         source=(ROOT/'e2e/vs_bundled_clang_version.py').read_text()
+        # compile-qualification:begin reverse
+        if '# compile-qualification:begin helpers\n' in source:
+            self.assertEqual(source.count('# compile-qualification:begin helpers\n'),1)
+            self.assertEqual(source.count('# compile-qualification:begin entry\n'),1)
+            source=re.sub(r'(?ms)^# compile-qualification:begin helpers\n.*?^# compile-qualification:end helpers\n\n','',source)
+            source=re.sub(r'(?ms)^# compile-qualification:begin entry\n.*?^# compile-qualification:end entry\n',
+                lambda _:"if __name__ == '__main__':raise SystemExit(main())\n",source)
+            self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'238ef057d6cf31a6bb9d0aba6329d2894cecd58952cd9df23c52b42ab9c33ae6')
+        # compile-qualification:end reverse
         suspended=re.findall(r'(?m)^\s*# suspended-witness:begin ([a-z-]+)$',source)
         if suspended:
             self.assertEqual(set(suspended),{'launcher','resume','cleanup','close-primary'})
@@ -1119,5 +1128,230 @@ class ReviewedNormalWorkflowTests(unittest.TestCase):
             mutated['jobs']['windows-suite']['steps'][index]['continue-on-error']='true'
             with self.subTest(step=index),self.assertRaises(ValueError):
                 policy.audit(mutated,workflow_path='.github/workflows/office-suite.yml')
+
+# compile-qualification:begin tests
+def qualification_pe(*, exports=None, normal=(), delay=(), machine=0x8664, clr=False):
+    names=list(exports if exports is not None else (
+        'HookCall','HookGet','HookReturn','StateSize','EventSize','EventsOffset',
+        'ReadinessSampleSize','ReadinessOffset','ReadWord','PublishWord','ReadQuad','CompareExchangeWord'))
+    data=bytearray(0x1200);data[:2]=b'MZ';struct.pack_into('<I',data,60,0x80)
+    data[0x80:0x84]=b'PE\0\0';struct.pack_into('<HHIIIHH',data,0x84,machine,3,0,0,0,240,0x2002)
+    optional=0x98;struct.pack_into('<H',data,optional,0x20b)
+    struct.pack_into('<I',data,optional+16,0x1000);struct.pack_into('<II',data,optional+32,0x1000,0x200)
+    struct.pack_into('<II',data,optional+56,0x4000,0x200);struct.pack_into('<H',data,optional+68,2)
+    struct.pack_into('<I',data,optional+108,16);directory=optional+112
+    for index,(label,rva,size,raw,flags) in enumerate(((b'.text',0x1000,0x200,0x200,0x60000020),(b'.edata',0x2000,0x800,0x400,0x40000040),(b'.idata',0x3000,0x600,0xc00,0x40000040))):
+        row=optional+240+40*index;data[row:row+len(label)]=label
+        struct.pack_into('<IIII',data,row+8,size,rva,size,raw);struct.pack_into('<I',data,row+36,flags)
+    struct.pack_into('<II',data,directory,0x2000,0x600)
+    struct.pack_into('<IIIIII',data,0x400+12,0x2080,1,len(names),len(names),0x2100,0x2140)
+    struct.pack_into('<I',data,0x400+36,0x2180)
+    module=b'ascii-message-observer.dll\0';data[0x480:0x480+len(module)]=module
+    cursor=0x2200
+    for index,name in enumerate(names):
+        struct.pack_into('<I',data,0x500+4*index,0x1000+index)
+        struct.pack_into('<I',data,0x540+4*index,cursor);struct.pack_into('<H',data,0x580+2*index,index)
+        raw=name.encode()+b'\0';offset=cursor-0x2000+0x400;data[offset:offset+len(raw)]=raw;cursor+=len(raw)
+    for number,modules,rva,width,name_rva in ((1,normal,0x3000,20,0x3080),(13,delay,0x3100,32,0x3180)):
+        if not modules:continue
+        struct.pack_into('<II',data,directory+number*8,rva,width*(len(modules)+1))
+        for index,name in enumerate(modules):
+            offset=rva-0x3000+0xc00+index*width;encoded=name.encode()+b'\0'
+            if number==1:struct.pack_into('<IIIII',data,offset,0x3400,0,0,name_rva,0x3450)
+            else:struct.pack_into('<IIIIIIII',data,offset,1,name_rva,0x3480,0x3500,0x3580,0,0,0)
+            raw_offset=name_rva-0x3000+0xc00;data[raw_offset:raw_offset+len(encoded)]=encoded;name_rva+=len(encoded)
+    if clr:struct.pack_into('<II',data,directory+14*8,0x1000,72)
+    return bytes(data)
+
+
+class CompileQualificationTests(unittest.TestCase):
+    # These tests exercise the new coordinator and genuine on-disk PE readers.
+    # Only process execution/native-host observation is synthetic on Linux.
+    def setUp(self):
+        ProbeTests.setUp(self)
+        for name in m.prep.SOURCES:(self.source/name).write_bytes((ROOT/'e2e'/name).read_bytes())
+        self.expected={name:m.prep._pin(self.source/name) for name in m.prep.SOURCES}
+        self.compile_starts=[];self.qual_counter=0;self.pe_bytes=qualification_pe(normal=('kernel32.dll','user32.dll'))
+        self.negative_exit=1;self.negative_mutation=None;self.after_positive=None;self.after_negative=None
+        self.pending=0;self.runtime.pending_handles=lambda:self.pending
+
+    def stage(self,runtime,folder,stage,script,budget,receipt,arguments):
+        if stage.startswith('probe-'):return ProbeTests.stage(self,runtime,folder,stage,script,budget,receipt,arguments)
+        budget.now();self.compile_starts.append(stage)
+        row=dict(stage=stage,identity=dict(pid=90,creationTime=134395652231767531),queryCount=1,
+            natural=True,handlesClosed=True,cleanupErrors=[],samples=[dict(querySucceeded=True,returnLength=48,
+                activeProcesses=0,totalProcesses=3,terminatedProcesses=0,
+                rawHex=(bytes(36)+struct.pack('<III',3,0,0)).hex(),root=dict(waitResult=0,exitCode=0))])
+        receipt['stages'].append(row)
+        if stage=='qualify-positive':
+            (folder/'ascii-message-observer.dll').write_bytes(self.pe_bytes)
+            if self.after_positive:self.after_positive(row)
+        else:
+            request=json.loads(Path(arguments[2]).read_bytes())
+            value=dict(schemaVersion=1,kindCode=3,resultCode=0 if self.negative_exit else 4,exitCode=self.negative_exit,
+                stdoutBytes=0,stderrBytes=96,timedOut=False,outputCapReached=False,pid=190,creationTime=134395652231767531,
+                imageMatched=True,naturalExit=True,handlesClosed=True,captureObservation=m.helper_module.capture_observation(),
+                sourcePinsBeforeAfterEqual=True,toolPinsBeforeAfterEqual=True,objectAbsent=True)
+            if self.negative_mutation:self.negative_mutation(value)
+            Path(arguments[3]).write_text(json.dumps(value))
+            self.negative_request=request
+            if self.after_negative:self.after_negative(row)
+
+    def qualify(self,**kwargs):
+        api=getattr(m,'run_compile_qualification',None)
+        self.assertTrue(callable(api),'missing fresh compile qualification coordinator')
+        self.qual_counter+=1
+        self.qual_output=self.root/('qualification-'+str(self.qual_counter));self.qual_report=self.root/('closed-'+str(self.qual_counter)+'.json')
+        return api(self.qual_output,self.qual_report,suite=self.suite,windows=self.windows,vswhere=self.vswhere,
+            host_python=self.host,expected_suite_source_commit='2fb399913b60617e7e1a7270e93378de787a609d',
+            expected_source_pins=self.expected,runtime_factory=lambda environment:self.runtime,**kwargs)
+
+    def test_fresh_pair_positive_negative_and_genuine_pe_share_original_budget(self):
+        value=self.qualify();self.assertTrue(value['compilerQualified']);self.assertEqual(value['resultCode'],0)
+        self.assertFalse(value['acceptance']);self.assertFalse(value['productionQualified'])
+        self.assertEqual([x['kindCode'] for x in self.calls],[0,1,2])
+        self.assertEqual(self.compile_starts,['qualify-positive','qualify-negative'])
+        self.assertEqual((value['workLimitMs'],value['totalLimitMs']),(27000,30000))
+        self.assertEqual(value['negative']['exitCode'],1);self.assertTrue(value['pe']['exportsMatch'])
+        self.assertEqual(value['pe']['dynamicCrtImportCount'],0);self.assertEqual(value['pendingHandleCount'],0)
+        script=(self.qual_output/'positive/compile.cmd').read_text()
+        for flag in ('--target=x86_64-pc-windows-msvc','--no-default-config','/MT','/W4 /WX','/MACHINE:X64'):
+            self.assertIn(flag,script)
+        self.assertNotIn('.log',script);self.assertNotIn('compiler.stdout',script)
+        self.assertEqual(json.loads(self.qual_report.read_bytes()),value);m.validate_qualification_report(value)
+
+    def test_source_pin_mismatch_rejects_before_discovery_and_compile(self):
+        self.expected[m.prep.SOURCES[0]]['sha256']='0'*64
+        value=self.qualify();self.assertFalse(value['compilerQualified']);self.assertEqual(self.calls,[]);self.assertEqual(self.compile_starts,[])
+
+    def test_fresh_selection_uses_same_call_state_without_report_replay(self):
+        original_probe=m.run_probe;original_read=m.prep._selection_read;after_pair=False
+        def observe(*args,**kwargs):
+            nonlocal after_pair
+            result=original_probe(*args,**kwargs);after_pair=True;return result
+        def read(path,*args):
+            if after_pair and Path(path).name=='query-0.result.private.json':raise AssertionError('private report is not a selection capability')
+            return original_read(path,*args)
+        with patch.object(m,'run_probe',side_effect=observe),patch.object(m.prep,'_selection_read',side_effect=read):value=self.qualify()
+        self.assertTrue(value['compilerQualified'])
+
+    def test_selected_tool_pin_cannot_alias_global_llvm(self):
+        self.assertIn('_selection_sink',inspect.signature(m.run_probe).parameters,'missing same-call private selection seam')
+        original=m.run_probe
+        def observe(*args,**kwargs):
+            result=original(*args,**kwargs)
+            kwargs['_selection_sink']['toolPins']['clang-cl.exe']['path']=str(self.root/'Program Files/LLVM/bin/clang-cl.exe')
+            return result
+        with patch.object(m,'run_probe',side_effect=observe):value=self.qualify()
+        self.assertFalse(value['compilerQualified']);self.assertEqual(self.compile_starts,[])
+
+    def test_foreign_host_rejects_before_any_child(self):
+        with patch.object(m.prep.native_arch,'observe_native_architecture',return_value=dict(processMachine=0,nativeMachine=0xaa64,processArchitecture='arm64',nativeArchitecture='arm64')):
+            value=self.qualify()
+        self.assertFalse(value['compilerQualified']);self.assertEqual(self.calls,[]);self.assertEqual(self.compile_starts,[])
+
+    def test_wrong_tool_native_pin_never_starts_compile(self):
+        (self.tools/'clang-cl.exe').write_bytes(executable(0xaa64))
+        value=self.qualify();self.assertFalse(value['compilerQualified']);self.assertEqual(self.compile_starts,[])
+
+    def test_pair_only_and_replayed_input_have_no_admission_parameter(self):
+        api=getattr(m,'run_compile_qualification',None);self.assertTrue(callable(api),'missing fresh compile qualification coordinator')
+        for key in ('pair_report','cached_preparation','prepared_descriptor'):
+            with self.subTest(key=key),self.assertRaises(TypeError):self.qualify(**{key:{'resultCode':0}})
+        self.assertEqual(self.calls,[]);self.assertEqual(self.compile_starts,[])
+
+    def test_negative_zero_exit_or_unclosed_inner_is_not_qualification(self):
+        self.negative_exit=0;value=self.qualify();self.assertFalse(value['compilerQualified'])
+        self.negative_exit=1;self.negative_mutation=lambda v:v.update(handlesClosed=False)
+        value=self.qualify();self.assertFalse(value['compilerQualified'])
+
+    def test_genuine_pe_rejects_wrong_arch_clr_exports_and_dynamic_crt(self):
+        cases=(qualification_pe(machine=0xaa64),qualification_pe(clr=True),qualification_pe(exports=['HookCall']),
+            qualification_pe(normal=('vcruntime140.dll',)),qualification_pe(delay=('ucrtbase.dll',)),
+            qualification_pe(normal=('api-ms-win-crt-runtime-l1-1-0.dll',)),qualification_pe(delay=('msvcrt.dll',)))
+        for raw in cases:
+            with self.subTest(case=len(self.compile_starts)):
+                self.pe_bytes=raw;value=self.qualify();self.assertFalse(value['compilerQualified'])
+                self.assertEqual(self.compile_starts[-1],'qualify-positive')
+
+    def test_output_size_bound_is_enforced_before_genuine_reader(self):
+        self.pe_bytes=b'x'*(8*1024*1024+1);value=self.qualify();self.assertFalse(value['compilerQualified'])
+        self.assertEqual(self.compile_starts,['qualify-positive'])
+
+    def test_post_compile_tool_and_source_drift_cannot_qualify(self):
+        self.after_positive=lambda _: (self.tools/'lld-link.exe').write_bytes(executable()+b'drift')
+        value=self.qualify();self.assertFalse(value['compilerQualified'])
+        self.after_positive=None;self.after_negative=lambda _: (self.source/m.prep.SOURCES[0]).write_bytes(b'drift')
+        value=self.qualify();self.assertFalse(value['compilerQualified'])
+
+    def test_work_deadline_prevents_negative_start_and_keeps_reserve(self):
+        self.after_positive=lambda _:setattr(self.clock,'value',127.)
+        value=self.qualify();self.assertFalse(value['compilerQualified']);self.assertEqual(self.compile_starts,['qualify-positive'])
+        self.assertEqual((value['workLimitMs'],value['totalLimitMs']),(27000,30000))
+
+    def test_cleanup_or_nonempty_job_never_qualifies(self):
+        self.after_positive=lambda row:row.update(handlesClosed=False)
+        value=self.qualify();self.assertFalse(value['compilerQualified']);self.assertEqual(self.compile_starts,['qualify-positive'])
+
+    def test_closed_numeric_report_rejects_pair_only_acceptance_and_string(self):
+        value=self.qualify();self.assertTrue(value['compilerQualified'])
+        for key,change in (('negative',None),('acceptance',True),('elapsedMs','2109')):
+            changed=copy.deepcopy(value);changed[key]=change
+            with self.subTest(key=key),self.assertRaises((AssertionError,ValueError)):m.validate_qualification_report(changed)
+
+    def test_success_report_requires_pair_jobs_tool_results_and_shared_elapsed(self):
+        value=self.qualify();self.assertTrue(value['compilerQualified'])
+        for mutation in ('missing','wrong-order','not-empty','not-closed','nonzero-root','tool-helper','tool-result','late-pair'):
+            changed=copy.deepcopy(value);stages=changed['pair']['stages']
+            if mutation=='missing':changed['pair']['stages']=[]
+            elif mutation=='wrong-order':stages.reverse()
+            elif mutation=='not-empty':stages[0]['jobEmpty']=False
+            elif mutation=='not-closed':stages[0]['handlesClosed']=False
+            elif mutation=='nonzero-root':stages[0]['rootExit']=1
+            elif mutation=='tool-helper':changed['pair']['tools'][0]['helperResultCode']=7
+            elif mutation=='tool-result':changed['pair']['tools'][0]['resultCode']=5
+            else:changed['pair']['elapsedMs']=60000
+            with self.subTest(mutation=mutation),self.assertRaises(AssertionError):m.validate_qualification_report(changed)
+
+    def test_explicit_pair_tool_failure_rejects_before_compile(self):
+        original=m.run_probe
+        def observe(*args,**kwargs):
+            result=original(*args,**kwargs);result['tools'][0]['helperResultCode']=7;return result
+        with patch.object(m,'run_probe',side_effect=observe):value=self.qualify()
+        self.assertFalse(value['compilerQualified']);self.assertEqual(self.compile_starts,[])
+
+    def test_negative_stage_cannot_change_the_positive_dll(self):
+        self.after_negative=lambda _: (self.qual_output/'positive/ascii-message-observer.dll').write_bytes(self.pe_bytes+b'drift')
+        value=self.qualify();self.assertFalse(value['compilerQualified'])
+
+    def test_unc_selected_root_stops_before_first_version(self):
+        original=m.prep._msvc_selection
+        def selection(found,architecture,check):
+            value,tools=original(str(self.install),architecture,check)
+            value['installationRoot']='//'+str(self.install).lstrip('/')
+            return value,tools
+        with patch.object(m.prep,'_msvc_selection',side_effect=selection):value=self.qualify()
+        self.assertFalse(value['compilerQualified']);self.assertEqual([r['kindCode'] for r in self.calls],[0])
+        self.assertEqual(self.compile_starts,[])
+
+    def test_qualification_cli_has_separate_validation_and_does_not_accept_pair_report(self):
+        api=getattr(m,'qualification_main',None);self.assertTrue(callable(api),'missing separate qualification entry')
+        value=self.qualify();self.assertTrue(value['compilerQualified'])
+        self.assertEqual(api(['--validate-qualification-report',str(self.qual_report)]),0)
+        self.assertEqual(api(['--validate-qualification-report',str(self.qual_output/'pair.numeric.json')]),1)
+
+    def test_qualification_cli_requires_exact_private_source_intent(self):
+        api=getattr(m,'qualification_main',None);self.assertTrue(callable(api),'missing separate qualification entry')
+        intent=self.root/'source-intent.json';intent.write_text(json.dumps(self.expected))
+        args=['--qualify-compiler']
+        for key,path in (('output',self.root/'cli-private'),('report',self.root/'cli-closed.json'),('suite',self.suite),
+                         ('windows',self.windows),('vswhere',self.vswhere),('host-python',self.host),('source-pins',intent)):
+            args.extend(['--'+key,str(path)])
+        args.extend(['--expected-suite-source-commit','2fb399913b60617e7e1a7270e93378de787a609d'])
+        original=m.run_compile_qualification
+        def run(*args,**kwargs):return original(*args,runtime_factory=lambda environment:self.runtime,**kwargs)
+        with patch.object(m,'run_compile_qualification',side_effect=run):self.assertEqual(api(args),0)
+        self.assertTrue(json.loads((self.root/'cli-closed.json').read_bytes())['compilerQualified'])
+# compile-qualification:end tests
 
 if __name__=='__main__':unittest.main()
