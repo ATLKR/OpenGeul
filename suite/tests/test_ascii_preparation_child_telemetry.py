@@ -20,7 +20,7 @@ class ChildTelemetryScopeTests(unittest.TestCase):
         lines = script.splitlines()
         self.assertEqual(lines[0], '@echo off')
         self.assertEqual(lines[1], 'set "VSCMD_SKIP_SENDTELEMETRY=1"')
-        self.assertEqual(lines[2], 'call "%~1" ' + architecture + ' >"%~2" 2>&1')
+        self.assertEqual(lines[2], 'call "%~1" ' + architecture + ' -vcvars_ver=14.50.35717 >"%~2" 2>&1')
         self.assertEqual(script.count('VSCMD_SKIP_SENDTELEMETRY'), 1)
         self.assertNotIn('VSCMD_SKIP_SENDTELEMETRY', (self.output / 'discover.cmd').read_text())
         self.assertNotIn('setx', script.casefold())

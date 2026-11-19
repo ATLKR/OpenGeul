@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 import time
@@ -276,6 +277,80 @@ def _write_json(path, value):
         os.fsync(stream.fileno())
 
 
+def _selection_read(path, limit, check):
+    """Read one fixed VS selection file with bounded, stable path and FD identity."""
+    check()
+    path = _absolute(path)
+    before = path.stat()
+    assert path.is_file() and 0 < before.st_size <= limit, 'Invalid MSVC selection file size'
+    check()
+    fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+    identity = lambda value: tuple(getattr(value, key) for key in fields)
+    with path.open('rb') as stream:
+        check()
+        fd_before = os.fstat(stream.fileno())
+        check()
+        raw = stream.read(limit + 1)
+        check()
+        fd_after = os.fstat(stream.fileno())
+        check()
+    after = path.stat()
+    check()
+    assert identity(before) == identity(after) and identity(fd_before) == identity(fd_after), 'MSVC selection file changed'
+    assert identity(before)[:3] == identity(fd_before)[:3], 'MSVC selection path/FD identity differs'
+    assert len(raw) == before.st_size <= limit, 'MSVC selection file exceeds bound'
+    return raw
+
+
+def _msvc_selection(found, architecture, check):
+    root = _absolute(Path(found))
+    check()
+    assert root.is_dir() and root.resolve(strict=True) == root, 'Canonical MSVC installation required'
+    check()
+    version_path = root / 'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt'
+    version_raw = _selection_read(version_path, 128, check)
+    version = version_raw.decode('ascii').strip()
+    assert re.fullmatch(r'[0-9]{2}\.[0-9]{2}\.[0-9]{4,6}', version), 'Invalid fixed MSVC toolset version'
+    vcvars = root / 'VC/Auxiliary/Build/vcvarsall.bat'
+    vcvars_raw = _selection_read(vcvars, 1024 * 1024, check)
+    def pin(path, raw):
+        return dict(path=str(path), bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    selection = dict(schemaVersion=1, installationRoot=str(root), architecture=architecture,
+                     hostArchitecture=architecture, toolsetVersion=version,
+                     versionFile=pin(version_path, version_raw), vcvars=pin(vcvars, vcvars_raw))
+    tools = root / 'VC/Tools/MSVC' / version / ('bin/Host' + architecture) / architecture
+    return selection, [tools / name for name in ('cl.exe', 'link.exe')]
+
+
+def _msvc_script(architecture, version):
+    # The version is validated numeric text from the fixed VS version file.
+    assert re.fullmatch(r'[0-9]{2}\.[0-9]{2}\.[0-9]{4,6}', version)
+    return ('@echo off\nset "VSCMD_SKIP_SENDTELEMETRY=1"\ncall "%~1"'
+            + (' arm64' if architecture == 'arm64' else ' x64')
+            + ' -vcvars_ver=' + version + ' >"%~2" 2>&1\nif errorlevel 1 exit /b 1\n'
+            + '"%~7" /nologo /c /O2 /MT /EHsc /std:c++17 /W4 /utf-8 "%~3"'
+            + ' /Foascii_message_observer.obj >"%~5" 2>"%~6"\nif errorlevel 1 exit /b 1\n'
+            + '"%~8" /NOLOGO /DLL /MACHINE:' + ('ARM64' if architecture == 'arm64' else 'X64')
+            + ' /OUT:"%~4" /IMPLIB:ascii_message_observer.lib ascii_message_observer.obj user32.lib kernel32.lib'
+            + ' >>"%~5" 2>>"%~6"\nexit /b %errorlevel%\n')
+
+
+def _validate_msvc_stat_facts(facts, pins):
+    from native_compiler_tools import STAT_FIELDS
+    assert type(facts) is dict and set(facts) == {'before', 'after'}
+    for phase in ('before', 'after'):
+        assert type(facts[phase]) is dict and set(facts[phase]) == {'cl.exe', 'link.exe'}
+        for name, row in facts[phase].items():
+            assert type(row) is dict and set(row) == {'pathBefore', 'fdBefore', 'fdAfter', 'pathAfter'}
+            for snap in row.values():
+                assert type(snap) is dict and set(snap) == set(STAT_FIELDS)
+                assert all(type(value) is int and value.bit_length() <= 256 for value in snap.values())
+            assert all(snap['st_size'] == pins[name]['bytes'] for snap in row.values()), 'MSVC compiler stat size differs from its hash witness'
+            assert row['pathBefore'] == row['pathAfter'] and row['fdBefore'] == row['fdAfter']
+            assert all(row['pathBefore'][key] == row['fdBefore'][key] for key in ('st_dev', 'st_ino', 'st_size'))
+    assert facts['before'] == facts['after'], 'MSVC compiler stat identity changed during preparation'
+
+
 def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', budget=None):
     budget = _Budget() if budget is None else budget
     assert budget.deadline == budget.started + LIMIT and budget.work_deadline == budget.deadline - CLEANUP_RESERVE, 'Original preparation budget required'
@@ -336,11 +411,17 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', 
                 + ' /OUT:"%~4" /IMPLIB:ascii_message_observer.lib ascii_message_observer.obj user32.lib kernel32.lib'
                 + ' >>"%~5" 2>>"%~6"\nexit /b %errorlevel%\n', encoding='ascii')
         else:
-            compile_script.write_text('@echo off\nset "VSCMD_SKIP_SENDTELEMETRY=1"\ncall "%~1"' + (' arm64' if architecture == 'arm64' else ' x64')
-                + ' >"%~2" 2>&1\nif errorlevel 1 exit /b 1\n'
-                + 'cl.exe /nologo /LD /O2 /MT /EHsc /std:c++17 /W4 /utf-8 "%~3" /link /MACHINE:'
-                + ('ARM64' if architecture == 'arm64' else 'X64')
-                + ' /OUT:"%~4" user32.lib kernel32.lib >"%~5" 2>"%~6"\nexit /b %errorlevel%\n', encoding='ascii')
+            from native_compiler_tools import pin_native_tool
+            selection, tool_arguments = _msvc_selection(found, architecture, budget.now)
+            vcvars = Path(selection['vcvars']['path'])
+            receipt['compiler'] = dict(mode='msvc', selection=selection, before={}, after={})
+            receipt['compilerStatFacts'] = dict(before={}, after={})
+            for tool in tool_arguments:
+                facts = {}
+                receipt['compilerStatFacts']['before'][tool.name] = facts
+                receipt['compiler']['before'][tool.name] = pin_native_tool(
+                    tool, architecture, check=budget.now, facts=facts, compiler_mode='msvc')
+            compile_script.write_text(_msvc_script(architecture, selection['toolsetVersion']), encoding='ascii')
         _run_stage(runtime, folder, 'compile', compile_script, budget, receipt,
                    [vcvars, folder / 'environment.log', folder / SOURCES[0], library,
                     folder / 'compiler.stdout', folder / 'compiler.stderr', *tool_arguments])
@@ -348,8 +429,13 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', 
             for tool in tool_arguments:
                 facts = {}
                 receipt['compilerStatFacts']['after'][tool.name] = facts
-                receipt['compiler']['after'][tool.name] = pin_native_tool(tool, architecture, check=budget.now, facts=facts)
+                receipt['compiler']['after'][tool.name] = (pin_native_tool(tool, architecture, check=budget.now, facts=facts)
+                    if compiler_mode == 'clang-lld' else pin_native_tool(
+                        tool, architecture, check=budget.now, facts=facts, compiler_mode='msvc'))
             assert receipt['compiler']['before'] == receipt['compiler']['after'], 'Native compiler tools changed during preparation'
+        if compiler_mode == 'msvc':
+            assert _msvc_selection(found, architecture, budget.now)[0] == selection, 'MSVC selection changed during preparation'
+            _validate_msvc_stat_facts(receipt['compilerStatFacts'], receipt['compiler']['before'])
         native_arch.require_native_pe(library, architecture)
         receipt['library'] = dict(path=str(library), **_pin(library))
         for name in SOURCES:
@@ -393,14 +479,34 @@ def require_prepared_library(descriptor, *, architecture=None):
         ('ascii-message-observer-preparation', 1, selected, True)
     assert type(receipt['schemaVersion']) is int and receipt['success'] is True and receipt['library'] == descriptor['library']
     assert receipt['sourcePins'] == descriptor['sourcePins'] and set(receipt['sourcePins']) == set(SOURCES)
-    if 'compiler' in receipt or 'compiler' in descriptor:
-        from native_compiler_tools import validate_tool_pin
-        compiler = receipt['compiler']
-        assert compiler == descriptor['compiler'] and set(compiler) == {'mode', 'before', 'after'}
-        assert compiler['mode'] == 'clang-lld' and compiler['before'] == compiler['after']
+    from native_compiler_tools import validate_tool_pin
+    assert 'compiler' in receipt and 'compiler' in descriptor, 'Compiler witness is required'
+    compiler = receipt['compiler']
+    assert type(compiler) is dict and compiler == descriptor['compiler']
+    assert compiler['before'] == compiler['after']
+    if compiler['mode'] == 'clang-lld':
+        assert set(compiler) == {'mode', 'before', 'after'}
         assert set(compiler['before']) == {'clang-cl.exe', 'lld-link.exe'}
         for name, value in compiler['before'].items(): validate_tool_pin(value, selected, name)
         assert receipt['stages'][1]['command'][-2:] == [compiler['before'][name]['path'] for name in ('clang-cl.exe', 'lld-link.exe')]
+    else:
+        assert compiler['mode'] == 'msvc' and set(compiler) == {'mode', 'selection', 'before', 'after'}
+        assert type(compiler['before']) is dict and set(compiler['before']) == {'cl.exe', 'link.exe'}
+        raw = _selection_read(library.parent / 'discovery.stdout', 32768, lambda: None)
+        found = raw.decode('utf-8-sig').strip()
+        assert '\n' not in found and '\r' not in found, 'Ambiguous MSVC installation'
+        selection, tools = _msvc_selection(found, selected, lambda: None)
+        assert compiler['selection'] == selection, 'Prepared MSVC selection changed'
+        for tool in tools:
+            value = compiler['before'][tool.name]
+            validate_tool_pin(value, selected, tool.name, compiler_mode='msvc')
+            assert value['path'] == str(tool), 'Compiler is outside the selected native MSVC toolset'
+        _validate_msvc_stat_facts(receipt['compilerStatFacts'], receipt['compiler']['before'])
+        script = _selection_read(library.parent / 'compile.cmd', 8192, lambda: None)
+        assert script.replace(b'\r\n', b'\n') == _msvc_script(selected, selection['toolsetVersion']).encode('ascii'), 'Prepared MSVC recipe changed'
+        assert receipt['stages'][1]['command'][1:] == ['/d', '/c', 'compile.cmd', selection['vcvars']['path'],
+            str(library.parent / 'environment.log'), str(library.parent / SOURCES[0]), str(library),
+            str(library.parent / 'compiler.stdout'), str(library.parent / 'compiler.stderr'), *map(str, tools)]
     native_arch.validate_native_architecture(receipt['nativeArchitecture'], selected)
     times = [receipt[key] for key in ('startedAt', 'finishedAt', 'workDeadline', 'deadline')]
     assert all(type(value) in (int, float) and math.isfinite(value) for value in times)

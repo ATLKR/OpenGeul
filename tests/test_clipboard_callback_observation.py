@@ -579,6 +579,43 @@ def calls(tree, name):
              or isinstance(node.func, ast.Attribute) and node.func.attr == name)]
 
 
+def without_warning_location_sidecar(tree):
+    """Remove only the reviewed opt-in delta, then retain the original v2 hash."""
+    tree=copy.deepcopy(tree)
+    additions={
+        '_cb_native_dict':'f9c19d927447cd5d6a3fad201dfd4ddafdd6805f80de4c72d54bfdcb1d0efe44',
+        '_cb_cached_warning_location':'06068432bf7f9195b568a907aed87fd70bdae6219052faea49273116282f8506',
+        '_cb_record_warning_location':'a4eba77ecd917e830a30e41984ca121b6e0eb8955b22311b16d70c75fb44de26',
+        '_cb_write_warning_locations':'f884d96755e3106084bf9b74cc119248db94ef21052293cd31c4132cdcacdf04',
+    }
+    for name,digest in additions.items():
+        matches=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name==name]
+        assert len(matches)==1 and ast_digest(matches[0])==digest
+        tree.body.remove(matches[0])
+    for source in ('import sys as _cb_sys','import types as _cb_types'):
+        expected=ast.parse(source).body[0]
+        matches=[node for node in tree.body if same_ast(node,expected)]
+        assert len(matches)==1
+        tree.body.remove(matches[0])
+    init=method(tree,'ClipboardCallbackObservation','__init__')
+    wanted=ast.parse('def f(self,session,page,transport_code,owner,writer,*,clock=time.monotonic,enabled=False,location_writer=None): pass').body[0].args
+    assert same_ast(init.args,wanted)
+    init.args.kwonlyargs.pop();init.args.kw_defaults.pop()
+    for source in reversed(('self._location_writer=location_writer','self._warning_locations=[]')):
+        assert same_ast(init.body[-1],ast.parse(source).body[0])
+        init.body.pop()
+    finalizer=method(tree,'ClipboardCallbackObservation','__exit__')
+    writes=[node for node in ast.walk(finalizer) if isinstance(node,ast.FunctionDef) and node.name=='write_packet']
+    assert len(writes)==1 and same_ast(writes[0].body[-1],ast.parse('_cb_write_warning_locations(self)').body[0])
+    writes[0].body.pop()
+    forwards=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='_forward_clipboard_callback']
+    assert len(forwards)==1
+    expected=ast.parse('if kind==1 and code==19 and sink._location_writer is not None:\n    _cb_record_warning_location(sink,event)').body[0]
+    assert same_ast(forwards[0].body[0].body[-1],expected)
+    forwards[0].body[0].body.pop()
+    return tree
+
+
 def actual_wait_fragment():
     current = method(source_tree('native_clipboard_cases.py'), 'NativeClipboardCases', '_external_case')
     wrapper = next(node for node in ast.walk(current) if isinstance(node, ast.With)
@@ -717,6 +754,10 @@ class SourceContractTests(unittest.TestCase):
         new_enabled = ast.parse("kind=='bitmap' and observe_callbacks is True and current.page is self.page", mode='eval').body
         self.assertTrue(same_ast(enabled.value, new_enabled))
         enabled.value = ast.parse("kind=='bitmap' and getattr(self,'observe_clipboard_callbacks',False)is True and current.page is self.page", mode='eval').body
+        locations=[item for item in constructors[0].keywords if item.arg=='location_writer']
+        wanted_location=ast.parse("lambda packet:self._native_input_receipt(f'{kind}-{transport}-warning-location.numeric.json',packet)",mode='eval').body
+        self.assertTrue(len(locations)==1 and same_ast(locations[0].value,wanted_location))
+        constructors[0].keywords.remove(locations[0])
         bitmap = method(normalized, 'NativeClipboardCases', 'test_supported_external_os_bitmap_menu_keyboard_atomic_roundtrip')
         invocations = calls(bitmap, '_external_case')
         wanted = ast.parse("self._external_case('bitmap',transport,observe_callbacks=True)", mode='eval').body
@@ -728,7 +769,7 @@ class SourceContractTests(unittest.TestCase):
         self.assertTrue(ast_digest(html) == BASE_HTML_METHOD_AST_SHA256)
         for name, expected_sha in V2_UNCHANGED_FILE_SHA256.items():
             self.assertTrue(hashlib.sha256((E2E / name).read_bytes()).hexdigest() == expected_sha)
-        normalized_helper = copy.deepcopy(source_tree('native_clipboard.py'))
+        normalized_helper = without_warning_location_sidecar(source_tree('native_clipboard.py'))
         init = method(normalized_helper, 'ClipboardCallbackObservation', '__init__')
         index = next(i for i, argument in enumerate(init.args.kwonlyargs) if argument.arg == 'enabled')
         self.assertTrue(isinstance(init.args.kw_defaults[index], ast.Constant)

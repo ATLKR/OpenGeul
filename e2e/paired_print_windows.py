@@ -349,10 +349,17 @@ class WindowsPort:
             self.profile_observations.append({'roleCode': role, 'caseCode': code, **profile})
             return lease
 
-        report, primary, retirement = invoke_print(self.printer, exe, source, case, folder,
-                                                   admission, self.oracle_error)
+        try:
+            report, primary, retirement = invoke_print(self.printer, exe, source, case, folder,
+                                                       admission, self.oracle_error)
+        except BaseException as error:
+            try:error.pairedFailureCase = code
+            except BaseException:pass
+            raise
         if primary is not None:
-            try:primary.pairedRole = role
+            try:
+                primary.pairedRole = role
+                primary.pairedFailureCase = code
             except BaseException:pass
         if primary is not None and self.primary is None:
             self.primary = primary
@@ -400,9 +407,11 @@ class WindowsPort:
                 'pdfCreated': True, 'spoolerCompleted': True, 'paperValidated': True,
                 'originalOraclePassed': primary is None, 'primaryErrorCode': int(primary is not None),
                 'raster': raster, 'cleanupMayBeForced': True, **retirement, **artifacts}
-        except BaseException:
+        except BaseException as error:
             if primary is not None:
                 raise primary
+            try:error.pairedFailureCase = code
+            except BaseException:pass
             raise
 
     def raise_original_oracle(self):

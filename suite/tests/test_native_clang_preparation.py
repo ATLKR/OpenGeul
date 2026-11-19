@@ -250,8 +250,9 @@ class NativeClangPreparationTests(unittest.TestCase):
     def test_explicit_msvc_does_not_consult_llvm_installation(self):
         for file in self.bin.iterdir(): file.unlink()
         self.prepare()
-        self.assertNotIn('compiler', self.proof())
-        self.assertIn('\ncl.exe ', (self.output / 'compile.cmd').read_text())
+        self.assertEqual(self.proof()['compiler']['mode'], 'msvc')
+        self.assertEqual(set(self.proof()['compiler']['before']), {'cl.exe', 'link.exe'})
+        self.assertIn('\n"%~7" /nologo /c ', (self.output / 'compile.cmd').read_text())
 
     def test_missing_or_emulated_llvm_is_fatal_without_msvc_fallback(self):
         (self.bin / 'clang-cl.exe').write_bytes(executable(0xaa64))

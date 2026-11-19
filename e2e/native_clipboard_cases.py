@@ -68,7 +68,9 @@ class NativeClipboardCases:
                     lambda packet:self._native_input_receipt(
                         f'{kind}-{transport}-callback-observation.numeric.json',packet),
                     enabled=(kind=='bitmap' and observe_callbacks is True
-                        and current.page is self.page))
+                        and current.page is self.page),
+                    location_writer=lambda packet:self._native_input_receipt(
+                        f'{kind}-{transport}-warning-location.numeric.json',packet))
                 with observation:
                     if transport=='menu':
                         from native_document_policy import double_checked_action

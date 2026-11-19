@@ -244,6 +244,8 @@ def run(args):
         try:
             if 'pairedRole' not in BaseException.__getattribute__(error, '__dict__') and port.attempts:
                 error.pairedRole = port.attempts[-1][0]
+            error.pairedFailureBinding = (expected_pair['harnessSourceCommit'],
+                expected_pair['harnessRunId'], expected_pair['harnessRunAttempt'])
         except BaseException:pass
         raise
 
@@ -252,6 +254,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-paired-print', action='store_true')
     parser.add_argument('--acquire-legacy', action='store_true')
+    parser.add_argument('--failure-numeric-sidecar', action='store_true')
     for name in ('legacy-cache', 'legacy-runtime', 'current-runtime', 'package', 'wasm',
                  'inputs', 'fixtures', 'work', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
@@ -266,6 +269,12 @@ def main():
         # No exception arguments, source path, URL, request, document or console.
         try: result = project_failure(error)
         except BaseException: result = _empty_failure()
+        if args.failure_numeric_sidecar:
+            try:
+                from paired_print_failure_sidecar import write_sidecar
+                write_sidecar(error, result)
+            except BaseException:
+                pass  # Optional evidence cannot replace the original failure.
         try: print(json.dumps(result, sort_keys=True))
         except BaseException: pass
         return 1

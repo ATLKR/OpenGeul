@@ -414,6 +414,8 @@ class WindowsClipboardProvider:
 # Optional host-only callback statistics. Existing clipboard/provider code above
 # is unchanged; this seam neither subscribes to events nor reads their payload.
 import math as _cb_math
+import sys as _cb_sys
+import types as _cb_types
 
 _CB_CONSOLE_TYPES = ('assert','clear','count','debug','dir','dirxml','endGroup',
     'error','info','log','profile','profileEnd','startGroup','startGroupCollapsed',
@@ -427,7 +429,7 @@ _CB_ERROR_CODES = {name:index for index,name in enumerate(_CB_ERROR_NAMES,1)}
 
 class ClipboardCallbackObservation:
     """One optional original-page reference; callback delivery is not mutation proof."""
-    def __init__(self,session,page,transport_code,owner,writer,*,clock=time.monotonic,enabled=False):
+    def __init__(self,session,page,transport_code,owner,writer,*,clock=time.monotonic,enabled=False,location_writer=None):
         self.session,self.page,self.transport_code=session,page,transport_code
         self._owner_input,self._writer,self._clock=owner,writer,clock
         self._enabled=enabled is True
@@ -438,6 +440,8 @@ class ClipboardCallbackObservation:
         self._window_ms=None;self._wait_ms=None;self._closed=False
         self._events=[];self._console=[0]*20;self._errors=[0]*16
         self._optional=[];self._overflow=False;self._error_overflow=False
+        self._location_writer=location_writer
+        self._warning_locations=[]
 
     def _fault(self,site,error=None):
         kind={TypeError:1,ValueError:2,RuntimeError:3,OSError:4,PermissionError:5,
@@ -521,6 +525,7 @@ class ClipboardCallbackObservation:
             if len(json.dumps(packet,sort_keys=True,separators=(',',':'),allow_nan=False).encode('ascii'))>8192:
                 raise ValueError()
             self._writer(packet);self.write_known=True
+            _cb_write_warning_locations(self)
         for site,action in ((4,finish_window),(5,lambda:self._detach(primary=effective_primary)),(6,write_packet)):
             try:action()
             except BaseException as failure:
@@ -557,6 +562,8 @@ def _forward_clipboard_callback(session,page,event,kind,attribute,codes):
             code=0;sink._fault(3,error)
         sink._events.append([kind,code,code!=0])
         (sink._console if kind==1 else sink._errors)[code]+=1
+        if kind==1 and code==19 and sink._location_writer is not None:
+            _cb_record_warning_location(sink,event)
     except Exception:
         pass  # Optional forwarding never replaces the existing handler outcome.
 
@@ -567,3 +574,71 @@ def forward_clipboard_console(session,page,message):
 
 def forward_clipboard_pageerror(session,page,error):
     _forward_clipboard_callback(session,page,error,2,'name',_CB_ERROR_CODES)
+
+
+def _cb_native_dict(value,expected):
+    if type(expected) is not type or type(value) is not expected:return None
+    lineage=type.__getattribute__(expected,'__mro__')
+    if type(lineage) is not tuple or len(lineage)>8:return None
+    for base in lineage:
+        if type(base) is not type:return None
+        descriptor=type.__getattribute__(base,'__dict__').get('__dict__')
+        if descriptor is not None:
+            if (type(descriptor) is not _cb_types.GetSetDescriptorType
+                    or descriptor.__objclass__ is not base):return None
+            result=object.__getattribute__(value,'__dict__')
+            return result if type(result) is dict else None
+    return None
+
+
+def _cb_cached_warning_location(event):
+    """Read only cached integers; unsupported package/cache shapes remain unknown."""
+    try:
+        modules=_cb_sys.modules
+        if type(modules) is not dict:return None
+        classes=[]
+        for name in ('playwright.sync_api._generated','playwright._impl.console_message'):
+            module=dict.get(modules,name)
+            if type(module) is not _cb_types.ModuleType:return None
+            namespace=_cb_types.ModuleType.__getattribute__(module,'__dict__')
+            if type(namespace) is not dict:return None
+            classes.append(dict.get(namespace,'ConsoleMessage'))
+        wrapper=_cb_native_dict(event,classes[0])
+        if wrapper is None:return None
+        implementation=_cb_native_dict(dict.get(wrapper,'_impl_obj'),classes[1])
+        if implementation is None:return None
+        cached=dict.get(implementation,'_event')
+        if type(cached) is not dict:return None
+        coordinates=dict.get(cached,'location')
+        if type(coordinates) is not dict:return None
+        line=dict.get(coordinates,'lineNumber');column=dict.get(coordinates,'columnNumber')
+        if not all(type(value) is int and 0<=value<=2147483647 for value in (line,column)):return None
+        return line,column
+    except BaseException:
+        return None
+
+
+def _cb_record_warning_location(sink,event):
+    location=None
+    try:location=_cb_cached_warning_location(event)
+    except BaseException:pass
+    sink._warning_locations.append([len(sink._events),location is not None,
+        location[0] if location is not None else None,location[1] if location is not None else None])
+
+
+def _cb_write_warning_locations(sink):
+    if sink._location_writer is None:return
+    try:
+        packet=dict(schemaVersion=1,sidecarType=1,packetSchemaVersion=1,diagnosticOnly=True,
+            acceptanceEligible=False,qualification=False,transportCode=sink.transport_code,
+            clipboardOwner=dict(sink._owner) if sink._owner is not None else None,
+            callbackWindowMs=sink._window_ms,dirtyWaitMs=sink._wait_ms,eventCount=len(sink._events),
+            warningLocations=[list(row) for row in sink._warning_locations],
+            installKnown=sink.install_known,installed=sink.installed,
+            pageIdentityKnown=sink.page_identity_known,pageIdentityMatched=sink.page_identity_matched,
+            cleanupKnown=sink.cleanup_known,ownReferenceReleased=sink.own_reference_released,
+            scriptIdentityKnown=False,warningOriginKnown=False,handlerSuccessKnown=False)
+        if len(json.dumps(packet,sort_keys=True,separators=(',',':'),allow_nan=False).encode('ascii'))>8192:return
+        sink._location_writer(packet)
+    except BaseException:
+        pass  # Optional sidecar cannot change the original packet or primary outcome.

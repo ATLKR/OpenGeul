@@ -106,6 +106,13 @@ class PreparationTests(unittest.TestCase):
         vcvars = self.install / 'VC/Auxiliary/Build/vcvarsall.bat'
         vcvars.parent.mkdir(parents=True)
         vcvars.write_bytes(b'fixture')
+        (vcvars.parent / 'Microsoft.VCToolsVersion.default.txt').write_bytes(b'14.50.35717\n')
+        for arch, machine in (('x64', 0x8664), ('arm64', 0xaa64)):
+            tools = self.install / ('VC/Tools/MSVC/14.50.35717/bin/Host' + arch) / arch
+            tools.mkdir(parents=True)
+            raw = bytearray(pe(machine))
+            struct.pack_into('<H', raw, 86, 2)
+            for name in ('cl.exe', 'link.exe'): (tools / name).write_bytes(raw)
         self.output = self.root / 'output'
         self.clock = Clock()
         self.runtime = Runtime(self)
@@ -116,7 +123,7 @@ class PreparationTests(unittest.TestCase):
                         patch.object(m.time, 'monotonic', self.clock),
                         patch.object(m.time, 'sleep', self.clock.sleep),
                         patch.object(m.native_arch, 'observe_native_architecture', side_effect=lambda: self.native),
-                        patch.dict(os.environ, {'ProgramFiles(x86)': str(self.programs)})):
+                        patch.object(os, 'environ', {'ProgramFiles(x86)': str(self.programs)})):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -163,7 +170,7 @@ class PreparationTests(unittest.TestCase):
         self.native.update(nativeMachine=0xaa64, processArchitecture='arm64', nativeArchitecture='arm64')
         self.runtime.machine = 0xaa64
         descriptor = self.prepare('arm64')
-        self.assertIn(' arm64 >', (self.output / 'compile.cmd').read_text())
+        self.assertIn(' arm64 -vcvars_ver=14.50.35717 >', (self.output / 'compile.cmd').read_text())
         self.assertIn('/MACHINE:ARM64', (self.output / 'compile.cmd').read_text())
         m.require_prepared_library(descriptor, architecture='arm64')
 
