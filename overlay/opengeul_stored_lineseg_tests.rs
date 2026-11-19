@@ -761,8 +761,17 @@ fn persistence_runtime_owner_policy_preserves_imported_rows_axes_and_suffix_boun
         assert_eq!(p.line_segs.len(),1);let original_row=p.line_segs[0].clone();p.hwpx_axis_shift=16;
         match case {
             0=>{},
-            1=>p.source_line_seg_vertical_pos=None,
-            2=>{p.source_line_seg_vertical_pos=None;let mut ordinary=original_row.clone();ordinary.tag&=!LineSeg::TAG_IMPLEMENTATION_PROPERTY;p.line_segs.push(ordinary);},
+            1=>{
+                p.source_line_seg_vertical_pos=None;
+                for row in &mut p.line_segs {row.tag|=LineSeg::TAG_IMPLEMENTATION_PROPERTY;}
+                assert!(p.line_segs.iter().all(|row|row.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY!=0),"case 1 fixture requires runtime-tagged rows before the empty-partition oracle");
+            },
+            2=>{
+                p.source_line_seg_vertical_pos=None;
+                for row in &mut p.line_segs {row.tag|=LineSeg::TAG_IMPLEMENTATION_PROPERTY;}
+                let mut ordinary=original_row.clone();ordinary.tag&=!LineSeg::TAG_IMPLEMENTATION_PROPERTY;p.line_segs.push(ordinary);
+                assert_eq!(p.line_segs.iter().map(|row|u32::from(row.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY!=0)).collect::<Vec<_>>(),vec![1,0],"case 2 fixture requires runtime then ordinary classifications before the mixed-partition oracle");
+            },
             3=>p.source_line_seg_vertical_pos=Some(Vec::new()),
             4=>{p.line_segs[0].line_height=0;p.line_segs[0].text_height=0;p.line_segs[0].tag|=LineSeg::TAG_EMPTY_SEGMENT;},
             5=>p.invalidate_layout_inputs(),
@@ -776,6 +785,22 @@ fn persistence_runtime_owner_policy_preserves_imported_rows_axes_and_suffix_boun
         else if case==2 {assert_eq!(actual.line_segs.len(),2,"mixed owned-axis rows cannot be blanket-dropped");}
         else {assert_eq!(actual.line_segs.len(),1);assert_eq!(tuples(actual),tuples(&original.sections[0].paragraphs[2]),"positive source row and serializable-prefix ownership retain all nine fields");}
     }
+}
+
+#[test]
+fn persistence_none_ordinary_rows_keep_all_nine_fields() {
+    let mut live=rhwp::parse_document(&persistence_owned_hwpx_input()).expect("owned ordinary stored HWPX");
+    let p=&mut live.sections[0].paragraphs[2];
+    assert_eq!(p.line_segs.len(),1,"the ordinary None control uses one actual stored row");
+    assert!(p.line_segs.iter().all(|row|row.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY==0),"the legacy control remains ordinary rather than runtime-tagged");
+    p.source_line_seg_vertical_pos=None;
+    let original=tuples(p);
+    let expected=rhwp::serializer::hwpx::roundtrip::hwpx_persistence_document(&live);
+    assert_eq!(tuples(&expected.sections[0].paragraphs[2]),original,"None alone cannot discard an ordinary stored partition or change any of its nine fields");
+    let bytes=rhwp::serializer::serialize_hwpx(&live).expect("ordinary None actual HWPX save");
+    let reopened=rhwp::parse_document(&bytes).expect("ordinary None independent HWPX reopen");
+    assert_eq!(tuples(&reopened.sections[0].paragraphs[2]),original,"ordinary None save/reopen preserves all nine stored fields");
+    assert_eq!(tuples(&live.sections[0].paragraphs[2]),original,"the independent persistence expectation cannot mutate the live row");
 }
 
 #[test]
