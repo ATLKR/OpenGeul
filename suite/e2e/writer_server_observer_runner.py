@@ -42,6 +42,45 @@ class RunnerFailure(RuntimeError):
         super().__init__('Writer runner failure code ' + str(int(self.code)))
 
 
+def _prelaunch_failure(error):
+    """Exact kind and deepest fixed-source coordinate, never exception data.
+
+    Coordinates diagnose this source snapshot; they grant no execution or
+    ownership authority. Wrapped errors expose only their own traceback.
+    Unknown sources or traces longer than 64 frames have no coordinate.
+    """
+    kind = 0
+    try:
+        from writer_server_observer_lifecycle import DiagnosticFailure
+        from writer_server_observer_msaa import WatchdogError
+        from writer_server_observer_win32 import NativeCallError
+        from writer_server_observer_capture import CaptureError
+        kinds = {AssertionError: 1, OSError: 2, FileNotFoundError: 3, PermissionError: 4,
+            ValueError: 5, TypeError: 6, RuntimeError: 7, TimeoutError: 8, ImportError: 9,
+            ModuleNotFoundError: 10, OverflowError: 11, UnicodeDecodeError: 12,
+            RunnerFailure: 13, DiagnosticFailure: 14, WatchdogError: 15,
+            NativeCallError: 16, CaptureError: 17}
+        kind = kinds.get(type(error), 0)
+        if not kind: return 0, 0, None
+        root = Path(__file__).parent
+        sources = {str(root / ('writer_server_observer_' + name + '.py')): index
+            for index, name in enumerate(('runner', 'lifecycle', 'msaa', 'win32', 'capture'), 1)}
+        frame = BaseException.__getattribute__(error, '__traceback__')
+        deepest, seen = None, 0
+        while frame is not None and seen < 64:
+            source = sources.get(frame.tb_frame.f_code.co_filename)
+            if source is not None:
+                line = frame.tb_lineno
+                if type(line) is not int or not 1 <= line <= 20000: return kind, 0, None
+                deepest = source, line
+            frame = frame.tb_next
+            seen += 1
+        if frame is not None or deepest is None: return kind, 0, None
+        return kind, *deepest
+    except BaseException:
+        return kind, 0, None
+
+
 class _Clock:
     def __init__(self, clock):
         self.clock, self.last, self.invalid = clock, None, False
@@ -295,7 +334,9 @@ _PREP_BOOL = ('started admissionVerified launchAttempted launchResumed rolesClas
     'hostExitObserved originalEngineExitObserved cleanupComplete').split()
 _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 'frequency': MAX_I64,
     'lastQpc': MAX_I64, 'classificationCount': 128, 'focusSampleCount': 4096, 'activationCount': 1,
-    'inputCount': 0, 'cleanupErrorCount': 64, 'pendingRetainedCount': 256}
+    'inputCount': 0, 'cleanupErrorCount': 64, 'pendingRetainedCount': 256,
+    'prelaunchStepCode': 14, 'prelaunchExceptionKindCode': 17,
+    'prelaunchExceptionSourceCode': 5, 'prelaunchExceptionLine': 20000}
 _ADMISSION_BOOL=('started consumerAttempted consumerReturned descriptorVerified completedWithinDeadline handoffComplete durationKnown').split()
 _ADMISSION_INT={'startQpc':MAX_I64,'deadlineQpc':MAX_I64,'frequency':MAX_I64,'lastObservedQpc':MAX_I64,
     'completedQpc':MAX_I64,'durationQpc':MAX_I64,'errorCode':13}
@@ -365,6 +406,19 @@ def validate_public_report(report):
     _section(report['preparation'], _PREP_BOOL, _PREP_INT)
     _section(report['admission'], _ADMISSION_BOOL, _ADMISSION_INT)
     admission,prep=report['admission'],report['preparation']
+    step = prep['prelaunchStepCode']
+    failure_kind, failure_source, failure_line = (prep[key] for key in
+        ('prelaunchExceptionKindCode', 'prelaunchExceptionSourceCode', 'prelaunchExceptionLine'))
+    if step is not None and (step == 0 or prep['started'] is not True or admission['handoffComplete'] is not True):
+        raise RunnerFailure(Code.NUMERIC)
+    if failure_kind is None:
+        if failure_source is not None or failure_line is not None: raise RunnerFailure(Code.NUMERIC)
+    elif (step is None or report['stageCode'] != 1 or report['failureCode'] == 0 or
+            report['captureIncomplete'] is not True or failure_source is None or
+            (failure_kind == 0 and (failure_source != 0 or failure_line is not None)) or
+            (failure_source == 0 and failure_line is not None) or
+            (failure_source != 0 and (failure_kind == 0 or failure_line is None or failure_line == 0))):
+        raise RunnerFailure(Code.NUMERIC)
     if admission['handoffComplete'] is True:
         if (admission['completedWithinDeadline'] is not True or admission['durationKnown'] is not True or
                 prep['started'] is not True or admission['completedQpc'] != prep['startQpc'] or
@@ -591,27 +645,39 @@ class DedicatedWriterRunner:
                 deadlineQpc=budget.deadline_qpc, frequency=budget.frequency, activationCount=0, inputCount=0,
                 classificationCount=0, focusSampleCount=0, cleanupErrorCount=0, pendingRetainedCount=0)
             prep['admissionVerified'] = True
+            prep['prelaunchStepCode'] = 1
             work = Path(inputs.work_root)
             budget.check(observation=True)
             if not work.is_absolute() or work.exists() or work.parent.resolve(strict=True) != work.parent:
                 raise RunnerFailure(Code.INPUT)
+            prep['prelaunchStepCode'] = 2
             output = Path(inputs.output).resolve(strict=True)
+            prep['prelaunchStepCode'] = 3
             baseline = Path(inputs.baseline).resolve(strict=True)
             if work.is_relative_to(output) or work.is_relative_to(baseline): raise RunnerFailure(Code.INPUT)
+            prep['prelaunchStepCode'] = 4
             work.mkdir(mode=0o700)
+            prep['prelaunchStepCode'] = 5
             layout = self._checked(budget, c.Layout.validated, output, inputs.windows, work)
+            prep['prelaunchStepCode'] = 6
             host_runtime = self._checked(budget, c.HostRuntime.validated, inputs.host_python, inputs.helper_script,
                 inputs.windows, work, layout.program)
             images = {'host': output/'OpenGeul.Office.exe', 'worker': layout.core/'bin'/'python.exe',
                 'engine': layout.program/'soffice.bin', 'launcher': layout.program/'soffice.exe'}
-            images = {key: self._checked(budget, path.resolve, strict=True) for key,path in images.items()}
+            for step, (key, path) in enumerate(images.items(), 7):
+                prep['prelaunchStepCode'] = step
+                images[key] = self._checked(budget, path.resolve, strict=True)
+            prep['prelaunchStepCode'] = 11
             budget.check(observation=True)
             controller, identity = c.api.retain_current_controller()
             budget.check(observation=True)
+            prep['prelaunchStepCode'] = 12
             nonce = self.nonce if self.nonce is not None else secrets.randbelow((1 << 64)-1)+1
             private_descriptor = c.Descriptor(*identity, nonce)
             binding = (controller, identity, private_descriptor.nonce)
+            prep['prelaunchStepCode'] = 13
             environment = self._checked(budget, c.environment, self.read_value, layout, private_descriptor.environment_value())
+            prep['prelaunchStepCode'] = 14
             report['stageCode'] = 2; prep['launchAttempted'] = True
             # Never discard a returned partial launch before the post-call deadline check.
             budget.check(observation=True)
@@ -707,6 +773,10 @@ class DedicatedWriterRunner:
                 # Keep the original object; do not retry or query its library.
                 self._private_pending.append(retained_backend)
             self._fault(report, exc.code if type(exc) is RunnerFailure else Code.INTERNAL)
+            if report['stageCode'] == 1 and prep['started'] is True:
+                kind, source, line = _prelaunch_failure(exc)
+                prep.update(prelaunchExceptionKindCode=kind, prelaunchExceptionSourceCode=source,
+                    prelaunchExceptionLine=line)
             if admission is not None and not report['admission']['handoffComplete']:
                 report['admission']['errorCode']=report['failureCode']
         finally:

@@ -37,3 +37,21 @@ absolute directory without command expansion, parent traversal or linked/reparse
 ancestors. The native environment encoder admits that one additional fixed name;
 the observation helper still uses its original five-key bootstrap and restricted
 PATH. No environment values are published by this diagnostic.
+
+The closed preparation report records the last entered prelaunch step: 1 work
+validation, 2 output resolve, 3 baseline resolve and containment, 4 work mkdir,
+5 runtime layout, 6 helper runtime, 7 host image, 8 worker image, 9 engine image,
+10 launcher image, 11 retained controller, 12 nonce/descriptor, 13 launch
+environment, and 14 ready for the existing launch boundary. Entering a step does
+not prove that it completed. These fields remain null before admission handoff.
+
+Only a caught prelaunch failure also records an exact exception-kind code and
+the deepest coordinate in the fixed runner/lifecycle/msaa/win32/capture sources
+(source codes 1 through 5). Kind codes 1 through 12 retain the atomic diagnostic's
+builtin ordering; 13 through 17 identify RunnerFailure, DiagnosticFailure,
+WatchdogError, NativeCallError and CaptureError. Unknown kinds use 0; unknown or
+over-64-frame coordinates use source 0 and a null line. Lines are bounded to
+1 through 20000. No exception arguments, message, locals, cause, context or
+environment are read. A wrapped exception identifies only its own raise, not
+the original cause. Failure codes, ownership, original deadlines, cleanup and
+all false acceptance flags retain their existing meanings.
