@@ -50,6 +50,7 @@ class ProbeTests(unittest.TestCase):
         self.root=Path(self.temp.name).resolve()
         self.windows=self.root/'Windows';(self.windows/'System32').mkdir(parents=True)
         (self.windows/'System32/cmd.exe').write_bytes(executable())
+        self.program_data=self.root/'ProgramData';self.program_data.mkdir()
         self.suite=self.root/'Suite';self.suite.mkdir()
         self.host=self.root/'python.exe';self.host.write_bytes(executable())
         self.vswhere=self.root/'programs/Microsoft Visual Studio/Installer/vswhere.exe'
@@ -72,7 +73,8 @@ class ProbeTests(unittest.TestCase):
                   patch.object(m.prep.native_arch,'observe_native_architecture',return_value=dict(processMachine=0,nativeMachine=0x8664,processArchitecture='x64',nativeArchitecture='x64')),
                   patch.object(m,'_run_stage',side_effect=self.stage),
                   patch.object(m.sys,'executable',str(self.host)),
-                  patch.object(os,'environ',{'COMSPEC':str(self.windows/'System32/cmd.exe')})):
+                  patch.object(os,'environ',{'COMSPEC':str(self.windows/'System32/cmd.exe'),
+                                           'ProgramData':str(self.program_data)})):
             p.start();self.addCleanup(p.stop)
 
     def stage(self,runtime,folder,stage,script,budget,receipt,arguments):
@@ -206,17 +208,55 @@ class ProbeTests(unittest.TestCase):
             with self.subTest(rawKind=len(raw)),self.assertRaises(AssertionError):h.parse_version(raw,1)
 
     def test_environment_is_explicit_and_does_not_copy_real_mapping(self):
+        seen=[];program_data=str(self.program_data)
         class Sentinel(dict):
             def copy(self):raise AssertionError('real copy')
             def keys(self):raise AssertionError('real keys')
             def items(self):raise AssertionError('real items')
             def __iter__(self):raise AssertionError('real iteration')
-            def get(self,*_):raise AssertionError('real get')
+            def __getitem__(self,*_):raise AssertionError('other environment read')
+            def get(self,key):
+                if key!='ProgramData':raise AssertionError('other environment read')
+                seen.append(key);return program_data
         temp=self.root/'temp';temp.mkdir()
         with patch.object(os,'environ',Sentinel()):
             value=m.finite_environment(self.windows,temp)
-        self.assertEqual(set(value),{'COMSPEC','SystemRoot','WINDIR','PATH','TEMP','TMP','PYTHONUTF8','PYTHONDONTWRITEBYTECODE'})
+        self.assertEqual(seen,['ProgramData'])
+        self.assertEqual(set(value),{'COMSPEC','SystemRoot','WINDIR','PATH','TEMP','TMP','PYTHONUTF8','PYTHONDONTWRITEBYTECODE','ProgramData'})
         self.assertEqual(value['PATH'],str(self.windows/'System32'))
+        self.assertEqual(value['ProgramData'],program_data)
+
+    def test_program_data_invalid_values_fail_before_any_child_query(self):
+        values=(None,'',True,1,b'/synthetic',self.program_data,'relative',
+            '\\\\server\\share','//server/share','\\\\?\\C:\\ProgramData','\\\\.\\C:\\ProgramData',
+            str(self.root/'missing-program-data'),str(self.host),'bad\0path')
+        for index,value in enumerate(values):
+            with self.subTest(case=index),patch.object(os,'environ',{'ProgramData':value}):
+                self.assertRaises((AssertionError,OSError),m.finite_environment,self.windows,self.root)
+        with patch.object(os,'environ',{}):
+            self.assertRaises(AssertionError,m.finite_environment,self.windows,self.root)
+        self.assertEqual(self.calls,[])
+
+    def test_program_data_canonical_directory_rejects_link_and_other_reparse(self):
+        child=self.program_data/'child';child.mkdir()
+        with patch.object(os,'environ',{'ProgramData':str(child/'..')}):
+            value=m.finite_environment(self.windows,self.root)
+        self.assertEqual(value['ProgramData'],str(self.program_data))
+        with patch.object(Path,'resolve',return_value=Path('//server/share')):
+            self.assertRaises(AssertionError,m.finite_environment,self.windows,self.root)
+        original_symlink=Path.is_symlink
+        def linked(path):return path==self.program_data or original_symlink(path)
+        with patch.object(Path,'is_symlink',linked):
+            self.assertRaises(AssertionError,m.finite_environment,self.windows,self.root)
+        original=Path.lstat;seen=[]
+        def reparse(path,*args,**kwargs):
+            if path==self.program_data:
+                seen.append('reparse');return SimpleNamespace(st_mode=0o40700,st_file_attributes=0x400)
+            return original(path,*args,**kwargs)
+        with patch.object(Path,'lstat',reparse):
+            self.assertRaises(AssertionError,m.finite_environment,self.windows,self.root)
+        self.assertTrue(seen)
+        self.assertEqual(self.calls,[])
 
     def cached(self):
         folder=self.root/'cached';folder.mkdir()
@@ -997,11 +1037,44 @@ class ReviewedNormalWorkflowTests(unittest.TestCase):
     def test_exact_tail_removal_restores_independent_full_workflow_hash(self):
         workflow=(ROOT.parent/'.github/workflows/office-suite.yml').read_text()
         def restored_hash(text):
+            pinned=' comtypes==1.5.0'
+            exact_installs=(
+                '    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n'
+                '      shell: pwsh\n'
+                '      run: |\n'
+                '        python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n'
+                "        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }\n",
+                "        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic') {\n"
+                '          python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n'
+                "          if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }\n"
+                '        }\n',
+            )
+            if text.count(pinned)!=2:raise ValueError('Reviewed UI dependency pin differs')
+            for exact in exact_installs:
+                if text.count(exact)!=1:raise ValueError('Reviewed UI dependency pin differs')
+                text=text.replace(exact,exact.replace(pinned,'',1),1)
             before,body=text.split('jobs:\n',1)
             normal,after=body.split('\n  writer-server-observer:',1)
             restored=before+'jobs:\n'+self.oracle._without_bundled_clang_probe(normal)+'\n  writer-server-observer:'+after
             return hashlib.sha256(restored.encode()).hexdigest()
         expected='1c2331d324d18ce60286c2c24726079481a3745c010f22130916b1846efab982'
+        pinned=' comtypes==1.5.0'
+        install='python -m pip install pywinauto==0.6.9'+pinned
+        pin_mutants=(
+            workflow.replace(pinned,'',1),
+            workflow.replace('          '+install,'          '+install.replace(pinned,''),1),
+            workflow.replace(pinned,' comtypes==1.4.17',1),
+            workflow.replace(pinned,pinned+pinned,1),
+            workflow.replace(pinned,pinned+' --pre',1),
+            workflow.replace("if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic')", "if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'acceptance')",1),
+            workflow.replace('    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n','    - name: Different dependency route\n',1),
+            workflow.replace('    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n',
+                '    - name: Extra dependency route\n      run: '+install+'\n    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n',1),
+        )
+        for index,changed in enumerate(pin_mutants):
+            with self.subTest(pin_mutation=index):
+                self.assertNotEqual(changed,workflow)
+                with self.assertRaises(ValueError):restored_hash(changed)
         self.assertEqual(restored_hash(workflow),expected)
         for before,after in (
                 ('  contents: read','  contents: write'),

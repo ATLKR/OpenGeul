@@ -14,6 +14,17 @@ EXACT_SDK_SETUP = ("    - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd
 CURRENT_PILLOW_INSTALL = "        python -m pip install Pillow==13.0.0\n"
 EXACT_YAML_SETUP = ("        python -m pip install PyYAML==6.0.3\n"
     "        if ($LASTEXITCODE -ne 0) { throw 'Pinned YAML workflow tooling installation failed.' }\n")
+EXACT_UI_READINESS_INSTALL = (
+    '    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n'
+    '      shell: pwsh\n'
+    '      run: |\n'
+    '        python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n'
+    "        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }\n")
+EXACT_READER_CONSOLE_INSTALL = (
+    "        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic') {\n"
+    '          python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n'
+    "          if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }\n"
+    '        }\n')
 
 # These are exact source-only reader deltas, not a generic legacy fallback.
 # Each prologue must remain adjacent to its one original command. Missing,
@@ -79,7 +90,9 @@ def original_normal_oracle_text(normal):
     changes = ((CURRENT_NORMAL_IF, '    if: github.event.repository.private == false\n'),
         (EXACT_SDK_SETUP, ''),
         (CURRENT_PILLOW_INSTALL, '        python -m pip install Pillow==12.3.0\n'),
-        (EXACT_YAML_SETUP, ''))
+        (EXACT_YAML_SETUP, ''),
+        (EXACT_UI_READINESS_INSTALL, EXACT_UI_READINESS_INSTALL.replace(' comtypes==1.5.0', '', 1)),
+        (EXACT_READER_CONSOLE_INSTALL, EXACT_READER_CONSOLE_INSTALL.replace(' comtypes==1.5.0', '', 1)))
     for before, after in changes:
         if normal.count(before) != 1:
             raise ValueError('Reviewed normal-job dependency delta differs')

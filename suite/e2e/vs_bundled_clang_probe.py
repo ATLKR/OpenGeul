@@ -40,9 +40,19 @@ class ProbeFailure(Exception):
 
 def finite_environment(windows,temp):
     windows,temp=prep._absolute(windows),prep._absolute(temp)
+    program_data=os.environ.get('ProgramData')
+    assert type(program_data) is str and 0<len(program_data)<=4096
+    assert not program_data.replace('\\','/').startswith('//') and not any(c in program_data for c in '\0\r\n')
+    program_data=prep._absolute(program_data)
+    for part in (program_data,*program_data.parents):
+        assert not getattr(part.lstat(),'st_file_attributes',0)&0x400, 'Reparse ProgramData path'
+    assert program_data.is_dir(), 'ProgramData directory required'
+    program_data=program_data.resolve(strict=True)
+    assert not str(program_data).replace('\\','/').startswith('//')
+    program_data=prep._absolute(program_data)
     return dict(COMSPEC=str(windows/'System32/cmd.exe'),SystemRoot=str(windows),WINDIR=str(windows),
                 PATH=str(windows/'System32'),TEMP=str(temp),TMP=str(temp),
-                PYTHONUTF8='1',PYTHONDONTWRITEBYTECODE='1')
+                PYTHONUTF8='1',PYTHONDONTWRITEBYTECODE='1',ProgramData=str(program_data))
 
 class _Runtime(prep._Runtime):
     def __init__(self,environment):

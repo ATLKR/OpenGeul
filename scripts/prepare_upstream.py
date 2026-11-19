@@ -9,6 +9,7 @@ import posixpath
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -849,6 +850,71 @@ BASELINE_SOURCE_SHA256={
 }
 
 
+# c909 enclosed-pua.ts imports this tracked JSON outside the selected Node trees.
+# Restore its exact Git blob, never the surrounding font directory or a current
+# overlay. No generator/install script produces this original baseline input.
+BASELINE_NODE_INPUTS={
+    'assets/fonts/enclosed-pua-metrics.json':(
+        2412,'c2b3049172cf20f9065506b51804b0e12f08af98ab5c364a050c2f0e2f4902a1',
+        '1902fb1401222137a2e0f639ca3d7adacd96e188'),
+}
+
+
+def restore_original_baseline_node_inputs(destination: Path) -> None:
+    destination=Path(destination)
+    if not destination.is_absolute() or '..' in destination.parts:
+        raise ValueError('Original Node input requires its absolute checkout')
+
+    def directory_identity(path):
+        info=path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or getattr(info,'st_file_attributes',0)&0x400):
+            raise ValueError('Original Node input parent has a path alias')
+        return info.st_dev,info.st_ino
+
+    parents={path:directory_identity(path) for path in (destination,*destination.parents)}
+    def recheck_parents():
+        if any(directory_identity(path)!=identity for path,identity in parents.items()):
+            raise ValueError('Original Node input parent changed')
+
+    for name,(size,digest,blob) in BASELINE_NODE_INPUTS.items():
+        if (type(name)is not str or not name or '\\' in name or ':' in name or '\0' in name
+                or posixpath.isabs(name) or posixpath.normpath(name)!=name
+                or any(part in ('','.','..') for part in name.split('/'))):
+            raise ValueError('Original Node literal input path differs')
+        target=destination/name
+        parent=destination
+        for part in name.split('/')[:-1]:
+            recheck_parents()
+            parent=parent/part
+            try:parent.lstat()
+            except FileNotFoundError:parent.mkdir()
+            parents[parent]=directory_identity(parent)
+        try:target.lstat()
+        except FileNotFoundError:pass
+        else:raise ValueError('Refusing to replace an existing original Node input')
+        if (run('git','rev-parse','HEAD:'+name,cwd=destination)!=blob
+                or run('git','cat-file','-t',blob,cwd=destination)!='blob'
+                or run('git','cat-file','-s',blob,cwd=destination)!=str(size)):
+            raise ValueError('Original Node literal input object differs')
+        data=subprocess.check_output(['git','cat-file','blob',blob],cwd=destination)
+        if len(data)!=size or hashlib.sha256(data).hexdigest()!=digest:
+            raise ValueError('Original Node literal input bytes differ')
+        recheck_parents()
+        # Exclusive creation also rejects a leaf introduced after lstat. Never
+        # truncate, follow a leaf alias, or delete a pre-existing target on error.
+        with target.open('xb') as stream:
+            opened=os.fstat(stream.fileno())
+            stream.write(data)
+        recheck_parents()
+        final=target.lstat()
+        if (not stat.S_ISREG(final.st_mode) or stat.S_ISLNK(final.st_mode)
+                or getattr(final,'st_file_attributes',0)&0x400 or final.st_nlink!=1
+                or (final.st_dev,final.st_ino)!=(opened.st_dev,opened.st_ino)
+                or final.st_size!=size):
+            raise ValueError('Original Node literal output identity differs')
+
+
 def checkout_original_baseline(destination: Path, repository: str, commit: str) -> None:
     """Keep original Node/studio inputs; Rust is built only from the current tree."""
     if (repository!='https://github.com/edwardkim/rhwp.git'
@@ -871,6 +937,7 @@ def checkout_original_baseline(destination: Path, repository: str, commit: str) 
     run('git','sparse-checkout','init','--cone',cwd=destination)
     run('git','sparse-checkout','set',*roots,cwd=destination)
     run('git','checkout','--detach','FETCH_HEAD',cwd=destination)
+    restore_original_baseline_node_inputs(destination)
 
 
 def original_baseline_rhwp(source: Path, lock: dict) -> dict:
