@@ -1,7 +1,8 @@
 """Original HOP authentication must precede the separate rhwp upgrade."""
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import sys
 import tempfile
 import unittest
@@ -97,15 +98,33 @@ class OriginalUpstreamBaselineTests(unittest.TestCase):
 
     def test_baseline_checkout_keeps_node_and_font_trees_without_current_rust_restoration(self):
         calls=[]
+        checked_roots=[];selected_roots=[]
+        # c909 pdf-open.ts imports this real cross-root module. A reduced
+        # synthetic body tests retained-path resolution without executing PDF IO.
+        importer=PurePosixPath('rhwp-studio/src/core/pdf-open.ts')
+        shared=PurePosixPath(posixpath.normpath(str(importer.parent/'../../../rhwp-shared/pdf/import-session.js')))
+        self.assertEqual(shared,PurePosixPath('rhwp-shared/pdf/import-session.js'))
+        fixture={str(importer):b"import '../../../rhwp-shared/pdf/import-session.js';\n",
+                 str(shared):b'export const syntheticImportSession = true;\n'}
         def git(*args,cwd):
             calls.append(args)
             if args[:3]==('git','rev-parse','FETCH_HEAD'):return BASELINE
-            if args[:3]==('git','cat-file','-t'):return 'tree'
+            if args[:3]==('git','cat-file','-t'):
+                root=args[3].removeprefix('FETCH_HEAD:')
+                self.assertIn(root,('rhwp-studio','rhwp-shared','ttfs'))
+                checked_roots.append(root);return 'tree'
+            if args[:3]==('git','sparse-checkout','set'):
+                selected_roots.extend(args[3:])
+                for name,raw in fixture.items():
+                    if PurePosixPath(name).parts[0] in args[3:]:
+                        target=destination/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(raw)
             return ''
         destination=self.source.parent/'original-rhwp'
         with mock.patch.object(prepare,'run',side_effect=git),mock.patch.object(prepare,'restore_compile_inputs') as restore:
             prepare.checkout_original_baseline(destination,self.lock['rhwp']['repository'],BASELINE)
-        self.assertIn(('git','sparse-checkout','set','rhwp-studio','ttfs'),calls)
+        self.assertTrue((destination/str(shared)).is_file(),'Baseline studio must retain its actual cross-root import target')
+        self.assertEqual(checked_roots,selected_roots)
+        self.assertEqual(selected_roots,['rhwp-studio','rhwp-shared','ttfs'])
         self.assertIn(('git','fetch','--filter=blob:none','--depth=1','origin',BASELINE),calls)
         restore.assert_not_called()
         (destination/'owned.txt').write_bytes(b'synthetic original input')

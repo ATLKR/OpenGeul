@@ -864,11 +864,12 @@ def checkout_original_baseline(destination: Path, repository: str, commit: str) 
     run('git','fetch','--filter=blob:none','--depth=1','origin',commit,cwd=destination)
     if run('git','rev-parse','FETCH_HEAD',cwd=destination)!=commit:
         raise ValueError('Original baseline fetch differs')
-    for name in ('rhwp-studio','ttfs'):
+    roots=('rhwp-studio','rhwp-shared','ttfs')
+    for name in roots:
         if run('git','cat-file','-t','FETCH_HEAD:'+name,cwd=destination)!='tree':
             raise ValueError('Original Node/studio input tree differs')
     run('git','sparse-checkout','init','--cone',cwd=destination)
-    run('git','sparse-checkout','set','rhwp-studio','ttfs',cwd=destination)
+    run('git','sparse-checkout','set',*roots,cwd=destination)
     run('git','checkout','--detach','FETCH_HEAD',cwd=destination)
 
 
