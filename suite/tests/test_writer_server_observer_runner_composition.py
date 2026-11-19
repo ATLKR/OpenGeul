@@ -153,6 +153,51 @@ class Composition(unittest.TestCase):
     def setUp(self): runner._PENDING_CASES.clear();runner._CASE_STARTED=False
     def tearDown(self): runner._PENDING_CASES.clear();runner._CASE_STARTED=False
 
+    def test_original_typed_attachment_failure_is_closed_numeric_without_relabeling_runner_failure(self):
+        import writer_server_observer_prepare_native as prepare
+        with tempfile.TemporaryDirectory() as folder:
+            obj, inputs, c, _ = setup(folder)
+            def fail(*args, **kwargs):
+                error = prepare.PreparationError(prepare.PreparationCode.GENERATION)
+                try: exec(compile('\n' * 316 + 'raise error\n', prepare.__file__, 'exec'), {'error': error})
+                except prepare.PreparationError as captured: raise captured
+            c.prep.find_attachment_once = fail
+            report = obj.execute(inputs)
+        prep = report['preparation']
+        self.assertEqual(report['failureCode'], 13)
+        self.assertTrue('preparationFailureCode' in prep)
+        self.assertEqual(prep['preparationFailureCode'], 4)
+        self.assertEqual(prep['preparationFailureKindCode'], 18)
+        self.assertEqual(prep['preparationFailureSourceCode'], 6)
+        self.assertEqual(prep['preparationFailureLine'], 317)
+        self.assertEqual(prep['inputCount'], 0)
+        self.assertTrue(prep['cleanupComplete'])
+        self.assertTrue(prep['originalEngineExitObserved'])
+        self.assertNotIn('helper-launch', c.api.calls)
+
+    def test_preparation_failure_metadata_is_unknown_on_success_and_rejects_private_or_noninteger_fields(self):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            obj, inputs, c, _ = setup(folder); report = obj.execute(inputs)
+        fields = {'preparationFailureCode': 7, 'preparationFailureKindCode': 18,
+            'preparationFailureSourceCode': 7, 'preparationFailureLine': 20000}
+        self.assertTrue(fields.keys() <= report['preparation'].keys())
+        self.assertTrue(all(report['preparation'][key] is None for key in fields))
+        import writer_server_observer_prepare_native as prepare
+        with tempfile.TemporaryDirectory() as folder:
+            runner._CASE_STARTED = False
+            obj, inputs, c, _ = setup(folder)
+            def fail(*args, **kwargs): raise prepare.PreparationError(prepare.PreparationCode.GENERATION)
+            c.prep.find_attachment_once = fail
+            failure = obj.execute(inputs)
+        for key, maximum in fields.items():
+            for value in (True, -1, maximum + 1, 'SYNTHETIC_PRIVATE'):
+                altered = json.loads(json.dumps(failure)); altered['preparation'][key] = value
+                with self.subTest(field=list(fields).index(key)), self.assertRaises(runner.RunnerFailure):
+                    runner.validate_public_report(altered)
+        altered = json.loads(json.dumps(failure)); altered['preparation']['preparationFailurePrivate'] = 1
+        with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(altered)
+
     def test_fixture_canonicalizes_existing_parent_traversal_before_real_runner_preparation(self):
         with tempfile.TemporaryDirectory() as folder:
             base=Path(folder).resolve(strict=True)

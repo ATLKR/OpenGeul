@@ -129,3 +129,20 @@ preparation, observed release, original auxiliary exit and remaining handles.
 These are diagnostic observations, not signature, parentage or normal acceptance
 proofs. Preparation still uses its original 55/60-second interval and runtime its
 original 25/30-second interval. Prelaunch step 15 identifies console preparation.
+
+Failures in preparation stages 3 through 5 additionally retain four closed
+numeric fields: `preparationFailureCode` (the exact typed PreparationCode 1–7,
+otherwise null), `preparationFailureKindCode` (0 unknown, existing kinds 1–17,
+18 PreparationError), `preparationFailureSourceCode`, and `preparationFailureLine`.
+The existing prelaunch five-source mapping remains unchanged. This separate
+source scope uses those same codes 1–5 plus 6 prepare_native and 7 cohort.
+Only exact fixed source filenames and lines 1–20000 are retained, from at most
+64 traceback frames; no arguments, messages, locals, cause or raw trace is read.
+
+Only the prepare adapter's known `_call` and `_check` frames are skipped when
+choosing the deepest original caller statement. Wrapper-only traces remain
+unknown. A callback rethrow carries just the numeric origin of the error it
+actually rethrows. If the Enum post-check first throws a separate error, its
+primary caller coordinate remains primary, even when its code equals a stored
+callback error. Existing runner failure codes, exception propagation order,
+native queries, ownership checks, input count and original deadlines are unchanged.

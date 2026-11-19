@@ -7,6 +7,7 @@ outside the original retained host thread. Windows/SDK execution is unverified.
 import ctypes as C
 from dataclasses import dataclass, field
 from enum import IntEnum
+from pathlib import Path
 import sys
 
 
@@ -28,10 +29,63 @@ class PreparationCode(IntEnum):
 
 
 class PreparationError(RuntimeError):
-    def __init__(self, code):
+    def __init__(self, code, *, origin=None):
         self.code = PreparationCode(code)
+        self._numeric_origin = _checked_origin(origin)
         super().__init__('writer_observer_preparation_' + self.code.name.lower())
     def __repr__(self):return '<PreparationError ' + self.code.name + '>'
+
+
+def _checked_origin(value):
+    if type(value) is not tuple or len(value) != 3: return None
+    kind, source, line = value
+    if type(kind) is not int or not 0 <= kind <= 18 or type(source) is not int or not 0 <= source <= 7:
+        return None
+    if source == 0:
+        return value if line is None else None
+    return value if kind != 0 and type(line) is int and 1 <= line <= 20000 else None
+
+
+def failure_origin(error):
+    """Closed diagnostic kind and caller coordinate; never exception content.
+
+    Only this module's _call/_check wrapper frames are skipped. A wrapped-only
+    trace is unknown. Callback rethrows carry just this numeric tuple.
+    """
+    kind = 0
+    try:
+        from writer_server_observer_runner import RunnerFailure
+        from writer_server_observer_lifecycle import DiagnosticFailure
+        from writer_server_observer_msaa import WatchdogError
+        from writer_server_observer_win32 import NativeCallError
+        from writer_server_observer_capture import CaptureError
+        kinds = {AssertionError: 1, OSError: 2, FileNotFoundError: 3, PermissionError: 4,
+            ValueError: 5, TypeError: 6, RuntimeError: 7, TimeoutError: 8, ImportError: 9,
+            ModuleNotFoundError: 10, OverflowError: 11, UnicodeDecodeError: 12,
+            RunnerFailure: 13, DiagnosticFailure: 14, WatchdogError: 15,
+            NativeCallError: 16, CaptureError: 17, PreparationError: 18}
+        kind = kinds.get(type(error), 0)
+        if not kind: return 0, 0, None
+        if type(error) is PreparationError:
+            saved = _checked_origin(BaseException.__getattribute__(error, '_numeric_origin'))
+            if saved is not None: return saved
+        root = Path(__file__).parent
+        sources = {str(root / ('writer_server_observer_' + name + '.py')): index for index, name in
+            enumerate(('runner', 'lifecycle', 'msaa', 'win32', 'capture', 'prepare_native', 'cohort'), 1)}
+        frame = BaseException.__getattribute__(error, '__traceback__')
+        seen, deepest = 0, None
+        while frame is not None and seen < 64:
+            source = sources.get(frame.tb_frame.f_code.co_filename)
+            wrapper = source == 6 and frame.tb_frame.f_code.co_name in ('_call', '_check')
+            if source is not None and not wrapper:
+                line = frame.tb_lineno
+                if type(line) is not int or not 1 <= line <= 20000: return kind, 0, None
+                deepest = source, line
+            frame = frame.tb_next; seen += 1
+        if frame is not None or deepest is None: return kind, 0, None
+        return kind, *deepest
+    except BaseException:
+        return kind, 0, None
 
 
 class Rect(C.Structure):
@@ -225,11 +279,12 @@ class PreparationNativeApi:
                 if value is not None:candidates.append(value)
                 return 1
             except BaseException as exc:
-                error.append(exc.code if isinstance(exc,PreparationError) else PreparationCode.NATIVE)
+                error.append((exc.code if isinstance(exc,PreparationError) else PreparationCode.NATIVE,
+                    failure_origin(exc)))
                 return 0  # Never let Python exceptions escape a ctypes callback.
         callback = self._callback(visit)
         enumerated = self._call(check,self._enumerate,thread,callback,0)
-        if error:raise PreparationError(error[0])
+        if error:raise PreparationError(error[0][0], origin=error[0][1])
         if not enumerated:raise PreparationError(PreparationCode.NATIVE)
         if self._launch(launch)!=facts or self.thread_id(facts[1],check=check)!=thread:
             raise PreparationError(PreparationCode.GENERATION)

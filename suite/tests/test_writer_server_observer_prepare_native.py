@@ -216,6 +216,71 @@ class PreparationContracts(unittest.TestCase):
         with self.assertRaises(M.PreparationError):self.attachment(api,s)
         self.assertEqual(s.events[-1],'property')
 
+    def origin(self, error):
+        project = getattr(M, 'failure_origin', None)
+        self.assertTrue(callable(project))
+        return project(error)
+
+    def test_callback_guard_preserves_original_read_coordinate_and_typed_code(self):
+        api, s = self.fixture()
+        p, t, _, root = s.facts[s.child]; s.facts[s.child] = (p, t, s.document, root)
+        with self.assertRaises(M.PreparationError) as caught: self.attachment(api, s)
+        kind, source, line = self.origin(caught.exception)
+        self.assertEqual(caught.exception.code, M.PreparationCode.ATTACHMENT)
+        self.assertEqual((kind, source), (18, 6))
+        self.assertGreaterEqual(line, api._read.__code__.co_firstlineno)
+        self.assertLess(line, api.find_attachment_once.__code__.co_firstlineno)
+
+    def test_wrapped_native_and_budget_errors_report_the_actual_propagated_callsite(self):
+        for expired in (False, True):
+            with self.subTest(expired=expired):
+                api, s = self.fixture()
+                checked_errors = []
+                original_check = api._check
+                def check(*args):
+                    try: return original_check(*args)
+                    except M.PreparationError as captured: checked_errors.append(captured); raise
+                api._check = check
+                if expired: s.expire_after = 'property'
+                else:
+                    def fail(*args): raise OSError()
+                    s.user.GetPropW.call = fail
+                try: self.attachment(api, s)
+                except M.PreparationError as error:
+                    primary = error
+                    kind, source, line = self.origin(error)
+                else: self.fail('Original preparation error was not propagated')
+                self.assertEqual(primary.code, M.PreparationCode.BUDGET if expired else M.PreparationCode.NATIVE)
+                self.assertEqual((kind, source), (18, 6))
+                self.assertEqual(line, api.find_attachment_once.__code__.co_firstlineno + 16 if expired else api._read.__code__.co_firstlineno + 6)
+                if expired: self.assertIs(primary, checked_errors[-1])
+
+    def test_numeric_origin_never_formats_exception_arguments_and_bounds_unknown_traces(self):
+        project = getattr(M, 'failure_origin', None); self.assertTrue(callable(project))
+        touched = []
+        class Poison:
+            def reject(self): touched.append(1); raise AssertionError()
+            __str__ = __repr__ = reject
+        def raised(line, error):
+            try: exec(compile('\n' * (line - 1) + 'raise error\n', str(SOURCE), 'exec'), {'error': error})
+            except BaseException as captured: return captured
+        self.assertEqual(project(raised(317, ValueError(Poison()))), (5, 6, 317))
+        self.assertEqual(project(raised(20001, ValueError())), (5, 0, None))
+        class Derived(ValueError): pass
+        self.assertEqual(project(raised(317, Derived())), (0, 0, None))
+        try:
+            exec(compile('def recur(n):\n if n: return recur(n-1)\n raise ValueError()\nrecur(70)\n', str(SOURCE), 'exec'), {})
+        except ValueError as error: self.assertEqual(project(error), (5, 0, None))
+        self.assertEqual(touched, [])
+
+    def test_only_fixed_prepare_wrapper_names_are_skipped_and_wrapper_only_is_unknown(self):
+        api, s = self.fixture()
+        try: api._check(lambda: 0)
+        except M.PreparationError as error: self.assertEqual(self.origin(error), (18, 0, None))
+        path = SOURCE.parent / 'writer_server_observer_cohort.py'
+        try: exec(compile('def _call():\n raise ValueError()\n_call()\n', str(path), 'exec'), {})
+        except ValueError as error: self.assertEqual(self.origin(error), (5, 7, 2))
+
     def test_owned_focus_is_numeric_only_and_does_not_activate_or_input(self):
         api,s = self.fixture();attachment = self.attachment(api,s)
         result = api.focus_snapshot(s.launch,attachment,check=s.check)

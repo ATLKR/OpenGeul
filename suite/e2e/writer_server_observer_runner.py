@@ -377,7 +377,9 @@ _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 
     'classificationUnknownImageNameHash2': 0xffffffff, 'classificationUnknownImageNameHash3': 0xffffffff,
     'classificationUnknownImageNameHash4': 0xffffffff, 'classificationUnknownImageNameHash5': 0xffffffff,
     'classificationUnknownImageNameHash6': 0xffffffff, 'classificationUnknownImageNameHash7': 0xffffffff,
-    'classificationAuxiliaryCount': 1, 'classificationAuxiliaryCurrent': 1, 'consolePendingHandleCount': 2}
+    'classificationAuxiliaryCount': 1, 'classificationAuxiliaryCurrent': 1, 'consolePendingHandleCount': 2,
+    'preparationFailureCode': 7, 'preparationFailureKindCode': 18,
+    'preparationFailureSourceCode': 7, 'preparationFailureLine': 20000}
 _CLASSIFICATION_FIELDS = ('classificationAttemptCount', 'classificationReasonCode',
     'classificationCensusCount', 'classificationMatchedRoleMask', 'classificationCurrentRoleCode',
     'classificationHistoricalRoleCode', 'classificationWaitResult', 'classificationExitCode',
@@ -527,6 +529,14 @@ def validate_public_report(report):
     if prep['consoleFileReleased'] is False and (report['captureIncomplete'] is not True or
             report['pendingRetainedCount'] == 0 or prep['cleanupComplete'] is True):
         raise RunnerFailure(Code.NUMERIC)
+    native_code, native_kind, native_source, native_line = (prep[key] for key in
+        ('preparationFailureCode', 'preparationFailureKindCode', 'preparationFailureSourceCode', 'preparationFailureLine'))
+    if any(value is not None for value in (native_code, native_kind, native_source, native_line)):
+        if (report['stageCode'] not in (3, 4, 5) or report['failureCode'] == 0 or report['captureIncomplete'] is not True or
+                native_kind is None or native_source is None or native_code == 0 or
+                (native_source == 0 and native_line is not None) or
+                (native_source != 0 and (native_kind == 0 or native_line is None or native_line == 0))):
+            raise RunnerFailure(Code.NUMERIC)
     if admission['handoffComplete'] is True:
         if (admission['completedWithinDeadline'] is not True or admission['durationKnown'] is not True or
                 prep['started'] is not True or admission['completedQpc'] != prep['startQpc'] or
@@ -940,6 +950,12 @@ class DedicatedWriterRunner:
                 # Keep the original object; do not retry or query its library.
                 self._private_pending.append(retained_backend)
             self._fault(report, exc.code if type(exc) is RunnerFailure else Code.INTERNAL)
+            if report['stageCode'] in (3, 4, 5):
+                from writer_server_observer_prepare_native import PreparationError, PreparationCode, failure_origin
+                kind, source, line = failure_origin(exc)
+                code = BaseException.__getattribute__(exc, 'code') if type(exc) is PreparationError else None
+                prep.update(preparationFailureCode=int(code) if type(code) is PreparationCode else None,
+                    preparationFailureKindCode=kind, preparationFailureSourceCode=source, preparationFailureLine=line)
             if report['stageCode'] == 1 and prep['started'] is True:
                 kind, source, line = _prelaunch_failure(exc)
                 prep.update(prelaunchExceptionKindCode=kind, prelaunchExceptionSourceCode=source,
