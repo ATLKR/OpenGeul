@@ -207,7 +207,10 @@ def _cached_selection(path,budget,source_pins):
     return selection
 
 def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_source_commit,
-              cached_preparation=None,runtime_factory=None,budget=None):
+              cached_preparation=None,runtime_factory=None,budget=None,_selection_sink=None):
+    # compile-qualification:begin sink-preflight
+    assert _selection_sink is None or type(_selection_sink) is dict and not _selection_sink
+    # compile-qualification:end sink-preflight
     assert type(expected_suite_source_commit) is str and re.fullmatch('[0-9a-f]{40}',expected_suite_source_commit)
     budget=prep._Budget() if budget is None else budget
     assert budget.deadline==budget.started+30. and budget.work_deadline==budget.deadline-3.
@@ -262,6 +265,10 @@ def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_s
             _require_query_success(value)
             assert prep._pin(vswhere)==before_discovery
             selection,_=prep._msvc_selection(value['selectedRoot'],'x64',budget.now)
+        # compile-qualification:begin sink-path
+        if _selection_sink is not None:
+            assert not str(selection['installationRoot']).replace('\\','/').startswith('//')
+        # compile-qualification:end sink-path
         tool_root=prep._absolute(Path(selection['installationRoot'])/'VC/Tools/Llvm/x64/bin')
         paths=[tool_root/name for name in TOOLS]
         phase_code=4;step_code=4
@@ -354,6 +361,10 @@ def run_probe(output,report,*,suite,windows,vswhere,host_python,expected_suite_s
         result['elapsedMs']=max(0,int((time.monotonic()-budget.started)*1000))
         validate_report(result)
         _private_json(report,result)
+    # compile-qualification:begin sink-export
+    if _selection_sink is not None and result['resultCode']==0:
+        _selection_sink.update(selection=selection,toolPins=before_pins,statFacts=before_stats)
+    # compile-qualification:end sink-export
     return result
 
 def validate_report(value):
@@ -486,4 +497,283 @@ def main(argv=None):
         return 0
     except BaseException:return 1
 
-if __name__=='__main__':raise SystemExit(main())
+# compile-qualification:begin helpers
+QUALIFICATION_KEYS={'schemaVersion','kindCode','diagnosticOnly','acceptance','productionQualified',
+    'compilerQualified','resultCode','failureStageCode','sourceHeadWords','nativeHostMachine','pair',
+    'positive','negative','negativeStage','pe','sourcePinsBeforeAfterEqual','supportPinsBeforeAfterEqual',
+    'toolPinsBeforeAfterEqual','selectionStable','pendingHandleCount','elapsedMs','workLimitMs','totalLimitMs'}
+QUALIFICATION_PE_KEYS={'bytes','machine','optionalMagic','isDll','executable','clrAbsent','exportsMatch',
+    'entryMappedExecutable','normalImportCount','delayImportCount','vcCrtImportCount','dynamicCrtImportCount','sha256Words'}
+
+
+def _qualification_words(digest):
+    assert type(digest) is str and re.fullmatch('[0-9a-f]{64}',digest)
+    return [int(digest[i:i+8],16) for i in range(0,64,8)]
+
+
+def _qualification_source_contract(expected,check):
+    assert type(expected) is dict and set(expected)==set(prep.SOURCES)
+    for pin in expected.values():
+        assert type(pin) is dict and set(pin)=={'bytes','sha256'}
+        assert type(pin['bytes']) is int and 0<pin['bytes']<=8*1024*1024
+        _qualification_words(pin['sha256'])
+    actual=_sources(check)
+    assert actual==expected
+    return actual
+
+
+def _qualification_support_pins(check):
+    root=Path(__file__).resolve().parents[1]
+    paths=(Path(__file__),Path(helper_module.__file__),Path(prep.__file__),
+        root/'e2e/native_compiler_tools.py',root/'e2e/native_suite_architecture.py',
+        root/'payload.py',root/'pe_imports.py',root/'crt.py')
+    pins=[]
+    for path in paths:
+        check();pins.append(prep._pin(prep._absolute(path)));check()
+    return pins
+
+
+def _qualification_recipe(version):
+    assert type(version) is str and re.fullmatch(r'[0-9]{2}\.[0-9]{2}\.[0-9]{4,6}',version)
+    return ('@echo off\nset "VSCMD_SKIP_SENDTELEMETRY=1"\ncall "%~1" x64 -vcvars_ver='+version
+        +' >NUL 2>NUL\nif errorlevel 1 exit /b 1\n'
+        +'"%~4" --no-default-config --target=x86_64-pc-windows-msvc /nologo /c /O2 /MT /EHsc /std:c++17 /W4 /WX /utf-8 "%~2"'
+        +' /Foascii_message_observer.obj >NUL 2>NUL\nif errorlevel 1 exit /b 1\n'
+        +'"%~5" /NOLOGO /DLL /WX /MACHINE:X64 /OUT:"%~3" /IMPLIB:ascii_message_observer.lib'
+        +' ascii_message_observer.obj user32.lib kernel32.lib >NUL 2>NUL\nexit /b %errorlevel%\n')
+
+
+def _qualification_pe(library,source,check):
+    # Reuse the retained-file PE reader, not an executable dumpbin or LoadLibrary.
+    root=Path(__file__).resolve().parents[1]
+    spec=importlib.util.spec_from_file_location('qualification_payload',root/'payload.py')
+    payload=importlib.util.module_from_spec(spec);spec.loader.exec_module(payload)
+    spec=importlib.util.spec_from_file_location('qualification_crt',root/'crt.py')
+    crt=importlib.util.module_from_spec(spec);spec.loader.exec_module(crt)
+    check();before=prep._pin(library);check()
+    sys.path.insert(0,str(root))
+    try:binary=payload._source_companion_pe(library)
+    finally:sys.path.remove(str(root))
+    check();assert prep._pin(library)==before;check()
+    expected=re.findall(r'extern "C" __declspec\(dllexport\)[^{;]+?\b([A-Za-z_]\w*)\s*\(',source.read_text())
+    assert len(expected)==len(set(expected))==12
+    imports=binary['imports'];names=set(imports['normal'])|set(imports['delay'])
+    vc=sum(bool(crt._VC_IMPORT.fullmatch(name)) for name in names)
+    # This is a CRT-family rejection, not a new general DLL import allowlist.
+    dynamic=sum(bool(crt._VC_IMPORT.fullmatch(name)) or bool(re.fullmatch(r'(?:ucrtbase|msvcrt)d?\.dll',name))
+        or name.startswith('api-ms-win-crt-') for name in names)
+    value=dict(bytes=binary['size'],machine=binary['machine'],optionalMagic=binary['optionalMagic'],
+        isDll=binary['isDll'],executable=binary['executable'],clrAbsent=binary['clrRva']==binary['clrSize']==0,
+        exportsMatch=binary['exports']==sorted(expected) and binary['exportModule']=='ascii-message-observer.dll',
+        entryMappedExecutable=binary['entryMappedExecutable'],normalImportCount=len(imports['normal']),
+        delayImportCount=len(imports['delay']),vcCrtImportCount=vc,dynamicCrtImportCount=dynamic,
+        sha256Words=_qualification_words(binary['sha256']))
+    assert value['bytes']==before['bytes'] and value['sha256Words']==_qualification_words(before['sha256'])
+    assert value['machine']==0x8664 and value['optionalMagic']==0x20b
+    assert all(value[k] is True for k in ('isDll','executable','clrAbsent','exportsMatch','entryMappedExecutable'))
+    assert dynamic==vc==0
+    check();return value
+
+
+def _qualification_pair(pair,head_words):
+    validate_report(pair)
+    assert pair['sourceHeadWords']==head_words and pair['nativeHostMachine']==0x8664
+    assert pair['cacheUsed'] is False and pair['resultCode']==pair['failureStageCode']==pair['postPinResultCode']==0
+    assert pair['discoveryRequests']==1 and pair['versionRequestsTotal']==2
+    assert pair['discoveryHelperResultCode']==0 and pair['discoveryParseStage']==5 and pair['elapsedMs']<27000
+    assert [stage['stageCode'] for stage in pair['stages']]==[0,1,2]
+    for stage in pair['stages']:
+        assert stage['rootExit']==0 and stage['lastActive']==0
+        assert all(stage[k] for k in ('natural','jobEmpty','handlesClosed'))
+        assert stage['pid'] and stage['creationTime'] and stage['queryCount']
+    for tool in pair['tools']:
+        assert tool['helperResultCode']==tool['resultCode']==tool['postPinResultCode']==tool['versionExit']==0
+        assert tool['versionRequests']==1
+
+
+def validate_qualification_report(value):
+    def numeric(v):
+        if type(v) is dict:return all(type(k) is str and numeric(x) for k,x in v.items())
+        if type(v) is list:return all(numeric(x) for x in v)
+        return v is None or type(v) in (int,bool)
+    assert numeric(value) and type(value) is dict and set(value)==QUALIFICATION_KEYS
+    assert type(value['schemaVersion']) is int and value['schemaVersion']==1
+    assert type(value['kindCode']) is int and value['kindCode']==2
+    assert value['diagnosticOnly'] is True and value['acceptance'] is value['productionQualified'] is False
+    for key in ('compilerQualified','sourcePinsBeforeAfterEqual','supportPinsBeforeAfterEqual','toolPinsBeforeAfterEqual','selectionStable'):
+        assert type(value[key]) is bool
+    for key,maximum in (('resultCode',10),('failureStageCode',9),('pendingHandleCount',12),('elapsedMs',60000)):
+        assert type(value[key]) is int and 0<=value[key]<=maximum
+    assert type(value['workLimitMs']) is int and value['workLimitMs']==27000
+    assert type(value['totalLimitMs']) is int and value['totalLimitMs']==30000
+    assert type(value['sourceHeadWords']) is list and len(value['sourceHeadWords'])==5
+    assert all(type(n) is int and 0<=n<=0xffffffff for n in value['sourceHeadWords'])
+    assert value['nativeHostMachine'] is None or type(value['nativeHostMachine']) is int and value['nativeHostMachine']==0x8664
+    pair=value['pair']
+    if pair is not None:
+        validate_report(pair)
+        assert pair['sourceHeadWords']==value['sourceHeadWords'] and pair['cacheUsed'] is False
+    for key,code in (('positive',3),('negativeStage',4)):
+        stage=value[key]
+        if stage is None:continue
+        assert type(stage) is dict and set(stage)==STAGE_KEYS and type(stage['stageCode']) is int and stage['stageCode']==code
+        for name in ('natural','jobEmpty','handlesClosed'):assert type(stage[name]) is bool
+        for name,limit in (('lastActive',0xffffffff),('queryCount',prep.QUERY_CAP),('pid',0xffffffff),('creationTime',0xffffffffffffffff)):
+            assert stage[name] is None or type(stage[name]) is int and 0<=stage[name]<=limit
+        assert stage['rootExit'] is None or type(stage['rootExit']) is int and -0x80000000<=stage['rootExit']<=0xffffffff
+    if value['negative'] is not None:helper_module.validate_compile_result(value['negative'])
+    pe=value['pe']
+    if pe is not None:
+        assert type(pe) is dict and set(pe)==QUALIFICATION_PE_KEYS
+        for key in ('isDll','executable','clrAbsent','exportsMatch','entryMappedExecutable'):assert type(pe[key]) is bool
+        for key,maximum in (('bytes',8*1024*1024),('machine',0xffff),('optionalMagic',0xffff),('normalImportCount',8192),('delayImportCount',8192),('vcCrtImportCount',16384),('dynamicCrtImportCount',16384)):
+            assert type(pe[key]) is int and 0<=pe[key]<=maximum
+        assert type(pe['sha256Words']) is list and len(pe['sha256Words'])==8 and all(type(n) is int and 0<=n<=0xffffffff for n in pe['sha256Words'])
+    if value['compilerQualified']:
+        assert value['resultCode']==value['failureStageCode']==0 and value['elapsedMs']<27000
+        assert value['nativeHostMachine']==0x8664 and value['pendingHandleCount']==0
+        assert all(value[k] for k in ('sourcePinsBeforeAfterEqual','supportPinsBeforeAfterEqual','toolPinsBeforeAfterEqual','selectionStable'))
+        assert pair is not None
+        _qualification_pair(pair,value['sourceHeadWords'])
+        assert pair['elapsedMs']<=value['elapsedMs']
+        for key in ('positive','negativeStage'):
+            stage=value[key];assert stage is not None and stage['rootExit']==0 and stage['lastActive']==0
+            assert all(stage[k] for k in ('natural','jobEmpty','handlesClosed'))
+            assert stage['pid'] and stage['creationTime'] and stage['queryCount']
+        negative=value['negative'];assert negative is not None and negative['resultCode']==0
+        assert type(negative['exitCode']) is int and negative['exitCode']!=0
+        assert pe is not None and pe['bytes']>0 and pe['machine']==0x8664 and pe['optionalMagic']==0x20b
+        assert all(pe[k] for k in ('isDll','executable','clrAbsent','exportsMatch','entryMappedExecutable'))
+        assert pe['vcCrtImportCount']==pe['dynamicCrtImportCount']==0
+    else:assert value['resultCode']>0 and value['failureStageCode']>0
+    assert len((json.dumps(value,sort_keys=True,allow_nan=False)+'\n').encode('ascii'))<=8192
+
+
+def run_compile_qualification(output,report,*,suite,windows,vswhere,host_python,expected_suite_source_commit,
+                              expected_source_pins,runtime_factory=None,budget=None):
+    # No pair report/cache/descriptor is accepted. Only this call can create its
+    # fresh observation directory, and all subsequent steps retain its budget.
+    budget=prep._Budget() if budget is None else budget
+    assert budget.deadline==budget.started+30. and budget.work_deadline==budget.deadline-3.
+    assert type(expected_suite_source_commit) is str and re.fullmatch('[0-9a-f]{40}',expected_suite_source_commit)
+    output,report,suite=map(prep._absolute,(output,report,suite))
+    assert suite.is_dir() and not output.is_relative_to(suite) and not suite.is_relative_to(output)
+    assert not report.is_relative_to(suite) and not report.is_relative_to(output)
+    assert all(not str(p).replace('\\','/').startswith('//') for p in (output,report,suite))
+    output.mkdir(parents=True,exist_ok=False);report.parent.mkdir(parents=True,exist_ok=True)
+    value=dict(schemaVersion=1,kindCode=2,diagnosticOnly=True,acceptance=False,productionQualified=False,
+        compilerQualified=False,resultCode=0,failureStageCode=0,
+        sourceHeadWords=[int(expected_suite_source_commit[i:i+8],16) for i in range(0,40,8)],nativeHostMachine=None,
+        pair=None,positive=None,negative=None,negativeStage=None,pe=None,sourcePinsBeforeAfterEqual=False,
+        supportPinsBeforeAfterEqual=False,toolPinsBeforeAfterEqual=False,selectionStable=False,
+        pendingHandleCount=0,elapsedMs=0,workLimitMs=27000,totalLimitMs=30000)
+    record={'stages':[]};holder=[];phase=1;sources=None;support=None;selection=None;pins={};facts={};tools=[]
+    def fail(code,stage):
+        if value['resultCode']==0:value.update(resultCode=code,failureStageCode=stage)
+    try:
+        budget.now()
+        value['nativeHostMachine']=prep.native_arch.validate_native_architecture(prep.native_arch.observe_native_architecture(),'x64')['nativeMachine']
+        assert Path(host_python)==Path(sys.executable)
+        sources=_qualification_source_contract(expected_source_pins,budget.now)
+        support=_qualification_support_pins(budget.now)
+        def runtime_for(environment):
+            runtime=(_Runtime if runtime_factory is None else runtime_factory)(environment);holder.append(runtime);return runtime
+        phase=2
+        selected_state={}
+        pair=run_probe(output/'observe',output/'pair.numeric.json',suite=suite,windows=windows,vswhere=vswhere,
+            host_python=host_python,expected_suite_source_commit=expected_suite_source_commit,runtime_factory=runtime_for,budget=budget,
+            _selection_sink=selected_state)
+        value['pair']=pair;_qualification_pair(pair,value['sourceHeadWords'])
+        assert pair['sourceHeadWords']==value['sourceHeadWords'] and len(holder)==1
+        runtime=holder[0];assert runtime.pending_handles()==0
+        # Only the successful fresh call above can fill this process-local sink.
+        assert type(selected_state) is dict and set(selected_state)=={'selection','toolPins','statFacts'}
+        selection=selected_state['selection']
+        assert prep._msvc_selection(selection['installationRoot'],'x64',budget.now)[0]==selection
+        root=prep._absolute(Path(selection['installationRoot']))
+        assert not str(root).replace('\\','/').startswith('//')
+        tools=[root/'VC/Tools/Llvm/x64/bin'/name for name in TOOLS]
+        for tool,row in zip(tools,pair['tools']):
+            budget.now();pin=selected_state['toolPins'][tool.name];observed=selected_state['statFacts'][tool.name]
+            from native_compiler_tools import validate_tool_pin
+            validate_tool_pin(pin,'x64',tool.name);assert pin['path']==str(tool);_stat_join(observed,pin)
+            assert pin['bytes']==row['bytes'] and _qualification_words(pin['sha256'])==row['sha256Words'] and pin['machine']==row['machine']
+            pins[tool.name]=pin;facts[tool.name]=observed
+        phase=3
+        positive=output/'positive';positive.mkdir()
+        for name in prep.SOURCES:
+            budget.now();raw=(prep.SOURCE_ROOT/name).read_bytes();(positive/name).write_bytes(raw)
+            assert prep._pin(positive/name)==sources[name];budget.now()
+        script=positive/'compile.cmd';script.write_text(_qualification_recipe(selection['toolsetVersion']),encoding='ascii')
+        script_pin=prep._pin(script)
+        _run_stage(runtime,positive,'qualify-positive',script,budget,record,
+            [Path(selection['vcvars']['path']),positive/prep.SOURCES[0],positive/'ascii-message-observer.dll',*tools])
+        value['positive']=_qualified(record['stages'][-1],3)
+        assert prep._pin(script)==script_pin and runtime.pending_handles()==0
+        phase=4;value['pe']=_qualification_pe(positive/'ascii-message-observer.dll',positive/prep.SOURCES[0],budget.now)
+        phase=5;budget.now();negative=output/'negative';negative.mkdir()
+        source=negative/'negative.cpp';source.write_bytes(helper_module.NEGATIVE_SOURCE)
+        request=negative/'request.private.json';result=negative/'result.private.json'
+        _private_json(request,dict(schemaVersion=1,kindCode=3,tool=str(tools[0]),source=str(source),object=str(negative/'negative.obj'),
+            deadline=budget.work_deadline,sourcePin=prep._pin(source),toolPin=pins[tools[0].name]))
+        request_pin=prep._pin(request);helper=Path(helper_module.__file__);helper_pin=prep._pin(helper)
+        script=negative/'compile.cmd';script.write_text('@echo off\n"%~1" "%~2" --compile-request "%~3" --result "%~4"\nexit /b %errorlevel%\n',encoding='ascii')
+        script_pin=prep._pin(script)
+        _run_stage(runtime,negative,'qualify-negative',script,budget,record,[Path(host_python),helper,request,result])
+        value['negativeStage']=_qualified(record['stages'][-1],4)
+        assert prep._pin(request)==request_pin and prep._pin(helper)==helper_pin and prep._pin(script)==script_pin
+        observed_negative=json.loads(prep._selection_read(result,8192,budget.now))
+        helper_module.validate_compile_result(observed_negative)
+        value['negative']=observed_negative
+        assert value['negative']['resultCode']==0 and runtime.pending_handles()==0
+        phase=6
+        for tool in tools:
+            observed={};pin=pin_native_tool(tool,'x64',check=budget.now,facts=observed);_stat_join(observed,pin)
+            assert pin==pins[tool.name] and observed==facts[tool.name]
+        value['toolPinsBeforeAfterEqual']=True
+        value['selectionStable']=prep._msvc_selection(selection['installationRoot'],'x64',budget.now)[0]==selection
+        assert value['selectionStable']
+        budget.now()
+        assert prep._pin(positive/'ascii-message-observer.dll')==dict(bytes=value['pe']['bytes'],
+            sha256=''.join(f'{word:08x}' for word in value['pe']['sha256Words']))
+        budget.now()
+        for name in prep.SOURCES:assert prep._pin(positive/name)==sources[name]
+        value['sourcePinsBeforeAfterEqual']=_qualification_source_contract(expected_source_pins,budget.now)==sources
+        value['supportPinsBeforeAfterEqual']=_qualification_support_pins(budget.now)==support
+        assert value['sourcePinsBeforeAfterEqual'] and value['supportPinsBeforeAfterEqual']
+        budget.now();value['compilerQualified']=True
+    except BaseException:
+        fail(9 if time.monotonic()>=budget.work_deadline else phase,phase)
+    finally:
+        if holder:value['pendingHandleCount']=holder[0].pending_handles()
+        if value['pendingHandleCount']:fail(10,9);value['compilerQualified']=False
+        value['elapsedMs']=max(0,int((time.monotonic()-budget.started)*1000))
+        if value['elapsedMs']>=27000:fail(9,8);value['compilerQualified']=False
+        validate_qualification_report(value);_private_json(report,value)
+    return value
+def qualification_main(argv=None):
+    import argparse
+    class Parser(argparse.ArgumentParser):
+        def error(self,message):raise ValueError
+    args=list(sys.argv[1:] if argv is None else argv)
+    try:
+        if len(args)==2 and args[0]=='--validate-qualification-report':
+            value=json.loads(prep._selection_read(Path(args[1]),8192,lambda:None))
+            validate_qualification_report(value);return 0
+        if not args or args.pop(0)!='--qualify-compiler':return 1
+        parser=Parser(add_help=False)
+        for name in ('output','report','suite','windows','vswhere','host-python','expected-suite-source-commit','source-pins'):
+            parser.add_argument('--'+name,required=True)
+        selected=parser.parse_args(args);budget=prep._Budget()
+        pins=json.loads(prep._selection_read(Path(selected.source_pins),8192,budget.now))
+        run_compile_qualification(Path(selected.output),Path(selected.report),suite=Path(selected.suite),windows=Path(selected.windows),
+            vswhere=Path(selected.vswhere),host_python=Path(selected.host_python),expected_suite_source_commit=selected.expected_suite_source_commit,
+            expected_source_pins=pins,budget=budget)
+        return 0  # Report generation does not imply compiler/product qualification.
+    except BaseException:return 1
+# compile-qualification:end helpers
+
+# compile-qualification:begin entry
+if __name__=='__main__':
+    raise SystemExit(qualification_main() if sys.argv[1:2] in (['--qualify-compiler'],['--validate-qualification-report']) else main())
+# compile-qualification:end entry
