@@ -85,6 +85,81 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
             self.assertFalse(hasattr(probe, 'provider_timeout_verified'))
             self.assertEqual(probe.provider_client.operations, [])
 
+    def test_window_style_export_is_bound_and_retained_before_first_use(self):
+        with sdk_probe() as probe:
+            function = vars(probe.user).get('GetWindowLongW')
+            self.assertIsNotNone(function)
+            self.assertEqual(function.argtypes, (C.c_void_p, C.c_int32))
+            self.assertIs(function.restype, C.c_int32)
+            self.assertIs(function._objects['0'], probe.user)
+            self.assertTrue(probe._native_timeout_exempt(function, probe._call_record(0)))
+            self.assertEqual(function.calls, [])
+            self.assertEqual(probe.provider_client.operations, [])
+
+    def test_popup_style_queries_keep_the_retained_signature_without_uia_setup(self):
+        class EInvalidArg(Exception):
+            hresult = -2147024809
+            def __str__(self): raise AssertionError('Exception text must not be read')
+        class RejectTimeout(Provider):
+            def __setattr__(self, name, value):
+                if name in ('ConnectionTimeout', 'TransactionTimeout'): raise EInvalidArg()
+                super().__setattr__(name, value)
+        with sdk_probe() as probe:
+            probe.clock.value = 4.812
+            probe.provider_client = RejectTimeout(probe.clock)
+            binding = dict(document=100, parent=200, child=300, officePid=9)
+            child = dict(pid=9, rootHwnd=100, threadId=11)
+            popup = dict(pid=9, rootHwnd=400, threadId=11, visible=True,
+                enabled=True, iconic=False, cloaked=0, rectangle=[0, 0, 10, 10])
+            continuity = []
+            probe._menu_classification_context = ({'binding': binding}, lambda: continuity.append(1))
+            probe.attachment_snapshot = lambda value: {'valid': value is binding}
+            def window(hwnd):
+                self.assertIn(hwnd, (300, 400))
+                return child if hwnd == 300 else popup
+            probe.window_snapshot = window
+            probe._owners = lambda hit, value: [400, 300]
+            probe.foreground = lambda: 100
+            probe.native_focus = lambda thread: dict(focusPid=9, focusRootHwnd=100,
+                captureHwnd=0, menuOwnerHwnd=0)
+            probe.user.WindowFromPhysicalPoint.result = 400
+            name = probe.user.GetClassNameW
+            name.result = 14
+            name.effect = lambda: setattr(name.calls[-1][1], 'value', 'SALTMPSUBFRAME')
+            function = probe.user.GetWindowLongW
+            signature = function.argtypes
+            function.effect = lambda: setattr(function, 'result',
+                -2147483648 if function.calls[-1][1] == -16 else 128)
+            try:
+                value = probe._popup_exposure(binding, (5, 5), [1, 1, 9, 9])
+            except EInvalidArg:
+                self.fail('Owned Win32 popup style query reached the UIA timeout setter')
+            self.assertEqual((value['style'], value['extendedStyle']), (0x80000000, 0x80))
+            self.assertEqual(function.calls, [(400, -16), (400, -20)])
+            self.assertIs(function.argtypes, signature)
+            self.assertEqual((continuity, probe.provider_client.operations), ([1, 1], []))
+            self.assertEqual((probe.clock.value, probe.deadline), (4.812, 5))
+            self.assert_native_record(probe)
+
+    def test_window_style_export_keeps_all_retained_identity_guards(self):
+        for kind in ('library', 'cached-export', 'deleted-export', 'owner', 'argtypes',
+                     'restype', 'flags', 'errcheck', 'call-wrapper'):
+            with self.subTest(kind=kind), sdk_probe() as probe:
+                library, function = probe.user, probe.user.GetWindowLongW
+                self.assertTrue(probe._native_timeout_exempt(function, probe._call_record(0)))
+                if kind == 'library': probe.user = Library('user32', use_last_error=True)
+                elif kind == 'cached-export': library.GetWindowLongW = library['GetWindowLongW']
+                elif kind == 'deleted-export': del library.GetWindowLongW
+                elif kind == 'owner': function._objects['0'] = object()
+                elif kind == 'argtypes': function.argtypes = list(function.argtypes)
+                elif kind == 'restype': function.restype = C.c_uint64
+                elif kind == 'flags': type(function)._flags_ = 0
+                elif kind == 'errcheck': function.errcheck = lambda value, *args: value
+                elif kind == 'call-wrapper': type(function).__call__ = lambda self, *args: 1
+                self.assertFalse(probe._native_timeout_exempt(function, probe._call_record(0)))
+                probe._call(function, 400, -16)
+                self.assertEqual(len(probe.provider_client.operations), 4)
+
     def test_nonzero_and_unknown_api_contexts_keep_provider_setup(self):
         class Integer(int):
             pass
@@ -111,7 +186,7 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
                     'foreign-dwm-library': Library('dwmapi', use_last_error=True)['DwmGetWindowAttribute'],
                     'other-dll': Library('ole32', use_last_error=True)['IsWindow'],
                     'new-object': probe.user['IsWindow'],
-                    'late-export': probe.user.GetWindowLongW,
+                    'late-export': probe.user.GetWindowPlacement,
                     'callback': C.CFUNCTYPE(C.c_int)(lambda: 1),
                 }
                 probe._call(candidates[kind])
@@ -162,10 +237,12 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
             self.assertIn('providerBudget', call)
 
     def test_actual_uia_code_four_and_five_paths_keep_setup_for_same_native_object(self):
-        for code in (4, 5):
-            with self.subTest(code=code), sdk_probe() as probe:
+        for code, name in ((4, 'IsWindow'), (5, 'IsWindow'),
+                           (4, 'GetWindowLongW'), (5, 'GetWindowLongW')):
+            with self.subTest(code=code, name=name), sdk_probe() as probe:
                 probe._uia = object()
-                probe._uia_call(code, probe.user.IsWindow, 7)
+                args = (7,) if name == 'IsWindow' else (400, -16)
+                probe._uia_call(code, getattr(probe.user, name), *args)
                 self.assertEqual(len(probe.provider_client.operations), 4)
                 self.assertEqual(probe.interop['lastCall']['apiCode'], code)
                 self.assertIsNone(probe._observed_call)
@@ -364,7 +441,7 @@ class NativeOnlyCallTimeoutTests(unittest.TestCase):
 class ActualWinDllAdmissionTests(unittest.TestCase):
     def test_cached_sdk_export_ownership_is_admitted_without_invoking_it(self):
         probe = menu.NativeMenuProbe(5, Clock())
-        for library, name in ((probe.user, 'IsWindow'), (probe.kernel, 'GetProcessId'),
+        for library, name in ((probe.user, 'IsWindow'), (probe.user, 'GetWindowLongW'), (probe.kernel, 'GetProcessId'),
                               (probe.dwm, 'DwmGetWindowAttribute')):
             function = vars(library)[name]
             self.assertIs(type(function), vars(library)['_FuncPtr'])

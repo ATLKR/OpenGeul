@@ -1071,6 +1071,7 @@ class NativeMenuProbe(NativeControlProbe):
         H,D,B=C.c_void_p,C.c_uint32,C.c_int32
         signatures=[('GetWindow',(H,D),H),('GetWindowTextW',(H,C.c_wchar_p,B),B),
             ('GetClassNameW',(H,C.c_wchar_p,B),B),('IsChild',(H,H),B),('GetPropW',(H,C.c_wchar_p),H),
+            ('GetWindowLongW',(H,B),B),
             ('GetMenuBarInfo',(H,B,B,C.POINTER(MenuBarInfo)),B),
             ('GetGUIThreadInfo',(D,C.POINTER(GuiThreadInfo)),B)]
         for name,args,result in signatures:
@@ -1891,7 +1892,6 @@ class NativeMenuProbe(NativeControlProbe):
         class_code=int(type(count) is int and 0<count<len(name) and name.value=='SALTMPSUBFRAME')
         assert class_code==1, 'Physical menu popup class is unconfirmed'
         function=self.user.GetWindowLongW
-        function.argtypes,function.restype=(C.c_void_p,C.c_int32),C.c_int32
         style=self._call(function,hit,-16)&0xffffffff
         extended=self._call(function,hit,-20)&0xffffffff
         assert style&0x80000000 and not style&0x40000000 and extended&0x80
