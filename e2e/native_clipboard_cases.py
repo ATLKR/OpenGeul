@@ -7,7 +7,7 @@ from pathlib import Path
 import json
 import os
 
-from native_clipboard import WindowsClipboardProvider,clipboard_payloads
+from native_clipboard import WindowsClipboardProvider,clipboard_payloads,ClipboardCallbackObservation
 from windows_ime import WindowsKeyboard
 
 
@@ -43,7 +43,7 @@ class NativeClipboardCases:
         until(target.is_file);self.document=target
         return target
 
-    def _external_case(self,kind,transport):
+    def _external_case(self,kind,transport,*,observe_callbacks=False):
         from driver import digest,menu
         from test_editor import FIXTURES
         from supported_feature_oracle import text_fixture,inspect_supported_hwpx,assert_style,assert_checkerboard
@@ -63,15 +63,30 @@ class NativeClipboardCases:
             with WindowsClipboardProvider(payloads,source_root=source_root) as provider:
                 before=provider.readback()
                 self._native_input_receipt(f'{kind}-{transport}-before-os-clipboard.json',before)
-                if transport=='menu':
-                    from native_document_policy import double_checked_action
-                    double_checked_action(current._ready,lambda observed:menu(current.page,'edit:paste',category='edit'))
-                else:keyboard.send(['CTRL+v'])
-                self._native_input_receipt(f'{kind}-{transport}-input-request.json',{
-                    'beforeClipboard':before,'OSKeys':keyboard.entries,'transport':transport,'sourceQualified':False})
-                # Initial document is clean. Dirty publication follows the actual
-                # production paste mutation, including asynchronous image decode.
-                self.page.wait_for_function('document.title.startsWith("• ")',timeout=30000)
+                observation=ClipboardCallbackObservation(self.session,current.page,
+                    1 if transport=='menu' else 2,before.get('owner'),
+                    lambda packet:self._native_input_receipt(
+                        f'{kind}-{transport}-callback-observation.numeric.json',packet),
+                    enabled=(kind=='bitmap' and observe_callbacks is True
+                        and current.page is self.page))
+                with observation:
+                    if transport=='menu':
+                        from native_document_policy import double_checked_action
+                        double_checked_action(current._ready,lambda observed:menu(current.page,'edit:paste',category='edit'))
+                    else:keyboard.send(['CTRL+v'])
+                    self._native_input_receipt(f'{kind}-{transport}-input-request.json',{
+                        'beforeClipboard':before,'OSKeys':keyboard.entries,'transport':transport,'sourceQualified':False})
+                    # Initial document is clean. Dirty publication follows the actual
+                    # production paste mutation, including asynchronous image decode.
+                    observation.begin_wait()
+                    wait_primary=None
+                    try:
+                        self.page.wait_for_function('document.title.startsWith("• ")',timeout=30000)
+                    except BaseException as wait_error:
+                        wait_primary=wait_error
+                        raise
+                    finally:
+                        observation.end_wait(primary=wait_primary)
                 first=self._clipboard_save_as(f'{kind}-{transport}-after.hwpx',current)
                 result=inspect_supported_hwpx(first)
                 if kind=='html':
@@ -127,7 +142,7 @@ class NativeClipboardCases:
 
     def test_supported_external_os_bitmap_menu_keyboard_atomic_roundtrip(self):
         for transport in ('menu','keyboard'):
-            with self.subTest(transport=transport):self._external_case('bitmap',transport)
+            with self.subTest(transport=transport):self._external_case('bitmap',transport,observe_callbacks=True)
 
     def probe_office_rtf_transport(self):
         """Produces actual transport evidence only; RTF support remains unqualified."""

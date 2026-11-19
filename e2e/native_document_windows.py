@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from native_clipboard import forward_clipboard_console, forward_clipboard_pageerror
 
 from native_document_policy import (EDITOR_CLASSES, IDENTITY, choose_editor_hwnd,
     require_editor, require_hit, require_focus_map, require_owned_dialog,
@@ -111,9 +112,14 @@ class OwnedDocumentWindows:
             parent.menu('file:new-window')
         page = event.value
         page.set_default_timeout(15000)
-        page.on('console', lambda message: self.session.messages.append(
-            {'type': message.type, 'text': message.text, 'pageKey': key}))
-        page.on('pageerror', lambda error: self.session.errors.append(f'{key}: {error}'))
+        def clipboard_console_handler(message,bound_page=page):
+            self.session.messages.append({'type': message.type, 'text': message.text, 'pageKey': key})
+            forward_clipboard_console(self.session,bound_page,message)
+        def clipboard_pageerror_handler(error,bound_page=page):
+            self.session.errors.append(f'{key}: {error}')
+            forward_clipboard_pageerror(self.session,bound_page,error)
+        page.on('console', clipboard_console_handler)
+        page.on('pageerror', clipboard_pageerror_handler)
         page.on('request', lambda request: self.session.requests.append(request.url))
         # Unexpected web alert/confirm is a failure, never auto-consented.
         page.on('dialog', self._unexpected_web_dialog(key))
