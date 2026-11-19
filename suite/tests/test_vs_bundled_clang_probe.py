@@ -91,7 +91,8 @@ class ProbeTests(unittest.TestCase):
         value=dict(schemaVersion=1,kindCode=kind,resultCode=0,exitCode=0,major=major,minor=minor,
                    selectedRoot=str(self.install) if kind==0 else None,stdoutBytes=64,stderrBytes=0,
                    timedOut=False,outputCapReached=False,pid=180+kind,creationTime=134395652231767531,
-                   imageMatched=True,naturalExit=True,handlesClosed=True,captureObservation=m.helper_module.capture_observation())
+                   imageMatched=True,naturalExit=True,handlesClosed=True,captureObservation=m.helper_module.capture_observation(),
+                   discoveryParseStage=5 if kind==0 else 0)
         if self.helper_mutation:self.helper_mutation(value,kind)
         Path(arguments[3]).write_text(json.dumps(value))
         if self.after_query:self.after_query(kind)
@@ -420,9 +421,9 @@ class ProbeTests(unittest.TestCase):
                 self.report=self.root/('discovery-failure-'+str(helper_code)+'.numeric.json')
                 def fail(value,kind):
                     if kind==0:
-                        value.update(resultCode=helper_code,selectedRoot=None)
+                        value.update(resultCode=helper_code,selectedRoot=None,discoveryParseStage=0 if helper_code==7 else 1)
                         if helper_code==7:
-                            value.update(exitCode=None,pid=None,creationTime=None,imageMatched=False,naturalExit=False)
+                            value.update(exitCode=None,pid=None,creationTime=None,imageMatched=False,naturalExit=False,stdoutBytes=0)
                             value['captureObservation'].update(observedMask=3,phaseCode=2,exceptionKindCode=2)
                 self.helper_mutation=fail
                 value=self.run_probe()
@@ -467,6 +468,44 @@ class ProbeTests(unittest.TestCase):
         rejected=self.run_probe()
         self.assertEqual(rejected['resultCode'],6)
         self.assertIsNone(rejected['tools'][0]['helperResultCode'])
+
+    def test_discovery_query_zero_bytes_are_observed_and_cached_fields_stay_unknown(self):
+        def empty(value,kind):
+            if kind==0:value.update(resultCode=8,selectedRoot=None,stdoutBytes=0,stderrBytes=0,discoveryParseStage=1)
+        self.helper_mutation=empty
+        value=self.run_probe()
+        self.assertEqual((value['resultCode'],value['failureStageCode']),(6,3))
+        self.assertEqual(value['discoveryParseStage'],1)
+        self.assertEqual(value['discoveryQuery'],dict(stdoutBytes=0,stderrBytes=0,exitCode=0,
+            imageMatched=True,naturalExit=True,handlesClosed=True,pid=180,creationTime=134395652231767531))
+        self.helper_mutation=None;self.output=self.root/'cached-followup';self.report=self.root/'cached-followup.json'
+        cached=self.run_probe(cached_preparation=self.cached())
+        self.assertIsNone(cached['discoveryQuery']);self.assertIsNone(cached['discoveryParseStage'])
+        self.assertIsNone(cached['discoveryHelperResultCode']);self.assertEqual(cached['discoveryRequests'],0)
+        for key in ('discoveryQuery','discoveryParseStage'):
+            changed=copy.deepcopy(cached);changed[key]=value[key]
+            with self.subTest(key=key),self.assertRaises(AssertionError):m.validate_report(changed)
+
+    def test_discovery_query_schema_and_parse_success_correlations_fail_closed(self):
+        value=self.run_probe();self.assertEqual(value['resultCode'],0)
+        self.assertEqual(value['discoveryParseStage'],5)
+        for mutation in ('stage-zero','stage-boolean','stage-incomplete','exception','bytes-boolean','bytes-zero',
+                'bytes-over-bound','extra','exit','image','natural','closed','pid','birth','parse-failure-complete'):
+            changed=copy.deepcopy(value);query=changed['discoveryQuery']
+            if mutation=='stage-zero':changed['discoveryParseStage']=0
+            elif mutation=='stage-boolean':changed['discoveryParseStage']=True
+            elif mutation=='stage-incomplete':changed['discoveryParseStage']=3
+            elif mutation=='exception':changed['discoveryCaptureObservation'].update(observedMask=3,phaseCode=2,exceptionKindCode=2)
+            elif mutation=='bytes-boolean':query['stdoutBytes']=True
+            elif mutation=='bytes-zero':query['stdoutBytes']=0
+            elif mutation=='bytes-over-bound':query['stderrBytes']=4097
+            elif mutation=='extra':query['rawRoot']='synthetic forbidden extra'
+            elif mutation=='exit':query['exitCode']=17
+            elif mutation in ('image','natural','closed'):query[{'image':'imageMatched','natural':'naturalExit','closed':'handlesClosed'}[mutation]]=False
+            elif mutation=='pid':query['pid']=None
+            elif mutation=='birth':query['creationTime']=None
+            else:changed.update(resultCode=6,failureStageCode=3,discoveryHelperResultCode=8)
+            with self.subTest(mutation=mutation),self.assertRaises(AssertionError):m.validate_report(changed)
 
 class HelperTests(unittest.TestCase):
     def setUp(self):self.helper=m.helper_module
@@ -621,6 +660,13 @@ class HelperTests(unittest.TestCase):
 
     def original_capture_source(self):
         source=(ROOT/'e2e/vs_bundled_clang_version.py').read_text()
+        discovery=r'(?ms)^[ \t]*# discovery-observation:begin ([a-z-]+)\n.*?^[ \t]*# discovery-observation:end \1\n'
+        names=re.findall(r'(?m)^\s*# discovery-observation:begin ([a-z-]+)$',source)
+        if names:
+            self.assertEqual(set(names),{'parse-init','parse-length','parse-decode','parse-crlf','parse-complete','parse-return'})
+            self.assertEqual(len(names),6)
+            source=re.sub(discovery,'',source).replace("{'captureObservation','discoveryParseStage'}","{'captureObservation'}").replace('and (discovery_stage:=4) and Path(root).is_absolute()','and Path(root).is_absolute()')
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'d866d10b5d9f523086fe238859c27b7b0dcbe21616566c62fbbe55cca00f2422')
         pattern=r'(?ms)^[ \t]*# capture-observation:begin ([a-z-]+)\n.*?^[ \t]*# capture-observation:end \1\n'
         names=re.findall(r'(?m)^\s*# capture-observation:begin ([a-z-]+)$',source)
         self.assertEqual(set(names),{'imports','schema','helpers','capture-init','capture-expired',
@@ -755,6 +801,61 @@ class HelperTests(unittest.TestCase):
                 self.assertEqual(observation['phaseCode'],2)
                 if kind==2:self.assertEqual(observation['errno'],5)
                 else:self.assertEqual(observation['observedMask']&12,0)
+
+    def test_discovery_parse_stages_preserve_predicate_calls_and_assertion_args(self):
+        space={'__name__':'original_discovery_query','__file__':str(ROOT/'e2e/vs_bundled_clang_version.py')}
+        exec(compile(self.original_capture_source(),space['__file__'],'exec'),space)
+        original=SimpleNamespace(**space)
+        def attempt(module,case):
+            calls=[];assertions=[];sentinel=RuntimeError();sentinel_seen=[]
+            class RootText(str):
+                def strip(self):calls.append('strip');return self
+                def __contains__(self,item):calls.append('lf' if item=='\n' else 'cr');return str.__contains__(self,item)
+            class Output(bytes):
+                def __len__(self):calls.append('length');return bytes.__len__(self)
+                def __contains__(self,item):calls.append('nul');return bytes.__contains__(self,item)
+                def decode(self,encoding):
+                    self_encoding=encoding;calls.append('decode');self_test=self_encoding=='utf-8-sig'
+                    if not self_test:raise AssertionError()
+                    if case=='utf8':raise UnicodeDecodeError('utf-8',b'\xff',0,1,'synthetic')
+                    return RootText('/VS\nextra' if case=='lf' else '/VS\rextra' if case=='cr' else 'relative' if case=='relative' else '/VS')
+            payload=b'' if case=='empty' else b'x'*4097 if case=='large' else b'x\0' if case=='nul' else b'x'
+            out=Output(payload)
+            def paths(value):
+                if type(value) is RootText:
+                    calls.append('path')
+                    if case=='path-error':raise sentinel
+                    def absolute():calls.append('absolute');return case!='relative'
+                    return SimpleNamespace(is_absolute=absolute)
+                return Path(value)
+            def trace(frame,event,arg):
+                if event=='exception' and frame.f_code is module.query.__code__:
+                    if arg[0] is AssertionError:assertions.append(BaseException.args.__get__(arg[1]))
+                    if arg[1] is sentinel:sentinel_seen.append(True)
+                return trace
+            globals_map=module.query.__globals__;before_path=globals_map['Path'];previous=sys.gettrace()
+            globals_map['Path']=paths
+            try:
+                sys.settrace(trace)
+                request=dict(schemaVersion=1,kindCode=0,tool=str(Path.cwd()/'programs/Microsoft Visual Studio/Installer/vswhere.exe'),deadline=m.time.monotonic()+4)
+                value=module.query(request,capture_call=lambda *_:(self.observed(),out,b''))
+            finally:sys.settrace(previous);globals_map['Path']=before_path
+            for args in assertions:self.assertEqual(args,())
+            return value,calls,assertions,sentinel_seen
+        stages={'empty':1,'large':1,'nul':1,'utf8':2,'lf':3,'cr':3,'relative':4,'path-error':4,'success':5}
+        for case,stage in stages.items():
+            with self.subTest(case=case):
+                before,old_calls,old_args,old_sentinel=attempt(original,case)
+                after,new_calls,new_args,new_sentinel=attempt(self.helper,case)
+                self.assertEqual(after['discoveryParseStage'],stage)
+                core=dict(after);core.pop('captureObservation');core.pop('discoveryParseStage')
+                self.assertEqual(core,before);self.assertEqual(new_calls,old_calls)
+                self.assertEqual(new_args,old_args);self.assertEqual(new_sentinel,old_sentinel)
+                if case=='lf':self.assertNotIn('cr',new_calls);self.assertNotIn('path',new_calls)
+                if case=='cr':self.assertNotIn('path',new_calls)
+        version=self.helper.query(dict(schemaVersion=1,kindCode=2,tool=str(Path.cwd()/'VS/VC/Tools/Llvm/x64/bin/lld-link.exe'),deadline=m.time.monotonic()+4),
+            capture_call=lambda *_:(self.observed(),b'LLD 22.1.7\n',b''))
+        self.assertEqual(version['discoveryParseStage'],0)
 
 class LegacyEnvironmentTests(unittest.TestCase):
     def functions(self):
