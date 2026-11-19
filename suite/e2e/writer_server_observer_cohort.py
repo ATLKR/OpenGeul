@@ -163,8 +163,18 @@ class RetainedCohort:
             if (self._api.identity(member.handle) != (member.pid, member.birth) or
                     self._api.member(member.handle, self._job) is not True):
                 raise DiagnosticFailure(FailureCode.GENERATION)
-            if require_alive and self._api.state(member.handle)[0] != 258:
-                raise DiagnosticFailure(FailureCode.GENERATION)
+            if require_alive:
+                state = self._api.state(member.handle)
+                if state[0] != 258:
+                    error = DiagnosticFailure(FailureCode.GENERATION)
+                    try:
+                        if (type(state) is tuple and len(state) == 2 and
+                                all(type(value) is int and 0 <= value <= 0xffffffff for value in state) and
+                                _identity((member.pid, member.birth))):
+                            error._member_state_origin = (member.pid, member.birth, *state)
+                    except BaseException:
+                        pass
+                    raise error
 
     def verify(self, budget=None):
         if not self.admitted or self._released:

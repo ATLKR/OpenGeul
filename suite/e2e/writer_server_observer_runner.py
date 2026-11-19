@@ -111,6 +111,38 @@ def _unknown_image_observation(image, roots):
         return unknown
 
 
+def _cohort_failure_observation(error, roles, auxiliary):
+    """Project only this raised retained-state error; private identities stay local."""
+    unknown = (None, None, None)
+    try:
+        from writer_server_observer_lifecycle import DiagnosticFailure, FailureCode
+        from writer_server_observer_cohort import RetainedProcess
+        if (type(error) is not DiagnosticFailure or
+                BaseException.__getattribute__(error, 'code') is not FailureCode.GENERATION):
+            return unknown
+        origin = BaseException.__getattribute__(error, '_member_state_origin')
+        if (type(origin) is not tuple or len(origin) != 4 or
+                any(type(value) is not int for value in origin) or
+                not 0 < origin[0] <= 0xffffffff or not 0 < origin[1] <= 0xffffffffffffffff or
+                not 0 <= origin[2] <= 0xffffffff or origin[2] == 258 or
+                not 0 <= origin[3] <= 0xffffffff):
+            return unknown
+        if type(roles) is not dict or not roles.keys() <= _ROLE_CODES.keys(): return unknown
+        matches = []
+        for name, identity in roles.items():
+            if (type(identity) is not tuple or len(identity) != 2 or
+                    type(identity[0]) is not int or not 0 < identity[0] <= 0xffffffff or
+                    type(identity[1]) is not int or not 0 < identity[1] <= 0xffffffffffffffff):
+                return unknown
+            if identity == origin[:2]: matches.append(_ROLE_CODES[name])
+        if auxiliary is not None:
+            if type(auxiliary) is not RetainedProcess: return unknown
+            if (auxiliary.pid, auxiliary.birth) == origin[:2]: matches.append(5)
+        return (matches[0] if len(matches) == 1 else 0, origin[2], origin[3])
+    except BaseException:
+        return unknown
+
+
 class _Clock:
     def __init__(self, clock):
         self.clock, self.last, self.invalid = clock, None, False
@@ -379,7 +411,8 @@ _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 
     'classificationUnknownImageNameHash6': 0xffffffff, 'classificationUnknownImageNameHash7': 0xffffffff,
     'classificationAuxiliaryCount': 1, 'classificationAuxiliaryCurrent': 1, 'consolePendingHandleCount': 2,
     'preparationFailureCode': 7, 'preparationFailureKindCode': 18,
-    'preparationFailureSourceCode': 7, 'preparationFailureLine': 20000}
+    'preparationFailureSourceCode': 7, 'preparationFailureLine': 20000,
+    'cohortFailureRoleCode': 5, 'cohortFailureWaitResult': 0xffffffff, 'cohortFailureExitCode': 0xffffffff}
 _CLASSIFICATION_FIELDS = ('classificationAttemptCount', 'classificationReasonCode',
     'classificationCensusCount', 'classificationMatchedRoleMask', 'classificationCurrentRoleCode',
     'classificationHistoricalRoleCode', 'classificationWaitResult', 'classificationExitCode',
@@ -536,6 +569,17 @@ def validate_public_report(report):
                 native_kind is None or native_source is None or native_code == 0 or
                 (native_source == 0 and native_line is not None) or
                 (native_source != 0 and (native_kind == 0 or native_line is None or native_line == 0))):
+            raise RunnerFailure(Code.NUMERIC)
+    member_role, member_wait, member_exit = (prep[key] for key in
+        ('cohortFailureRoleCode', 'cohortFailureWaitResult', 'cohortFailureExitCode'))
+    if any(value is not None for value in (member_role, member_wait, member_exit)):
+        if (any(value is None for value in (member_role, member_wait, member_exit)) or
+                report['stageCode'] not in (3, 4, 5) or report['failureCode'] != int(Code.INTERNAL) or
+                report['captureIncomplete'] is not True or member_wait == 258 or
+                native_code is not None or native_kind != 14 or native_source not in (0, 7) or
+                (member_role in (1, 2, 3, 4) and (prep['classificationMatchedRoleMask'] is None or
+                    not prep['classificationMatchedRoleMask'] & (1 << (member_role - 1)))) or
+                (member_role == 5 and prep['consoleAuxiliaryBound'] is not True)):
             raise RunnerFailure(Code.NUMERIC)
     if admission['handoffComplete'] is True:
         if (admission['completedWithinDeadline'] is not True or admission['durationKnown'] is not True or
@@ -956,6 +1000,9 @@ class DedicatedWriterRunner:
                 code = BaseException.__getattribute__(exc, 'code') if type(exc) is PreparationError else None
                 prep.update(preparationFailureCode=int(code) if type(code) is PreparationCode else None,
                     preparationFailureKindCode=kind, preparationFailureSourceCode=source, preparationFailureLine=line)
+                role, waited, exited = _cohort_failure_observation(exc, roles,
+                    None if console is None else console.auxiliary)
+                prep.update(cohortFailureRoleCode=role, cohortFailureWaitResult=waited, cohortFailureExitCode=exited)
             if report['stageCode'] == 1 and prep['started'] is True:
                 kind, source, line = _prelaunch_failure(exc)
                 prep.update(prelaunchExceptionKindCode=kind, prelaunchExceptionSourceCode=source,

@@ -146,3 +146,15 @@ actually rethrows. If the Enum post-check first throws a separate error, its
 primary caller coordinate remains primary, even when its code equals a stored
 callback error. Existing runner failure codes, exception propagation order,
 native queries, ownership checks, input count and original deadlines are unchanged.
+
+When the existing retained-member live guard rejects its single original
+`state` result, that same raised DiagnosticFailure privately retains only a
+validated PID/birth/wait/exit tuple. The runner matches its exact generation to
+the roles already classified, then publishes `cohortFailureRoleCode` (0 unknown,
+1 host, 2 worker, 3 engine, 4 launcher, 5 original console auxiliary),
+`cohortFailureWaitResult` and `cohortFailureExitCode` (unsigned 32-bit). All three
+are null for missing or malformed origin data, a different primary exception,
+or success. The failed guard still rejects every non-258 wait result; this
+observation does not permit an exited member or change any role or deadline.
+Raw process identities remain private. The numeric state remains useful when
+the independent bounded source-coordinate projection is unknown.

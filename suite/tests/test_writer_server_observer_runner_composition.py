@@ -153,6 +153,113 @@ class Composition(unittest.TestCase):
     def setUp(self): runner._PENDING_CASES.clear();runner._CASE_STARTED=False
     def tearDown(self): runner._PENDING_CASES.clear();runner._CASE_STARTED=False
 
+    def test_actual_retained_guard_reports_each_original_role_and_state_without_admission_changes(self):
+        import test_writer_server_observer_console as console_fixture
+        for target, role in ((201, 1), (202, 2), (301, 3), (305, 4), (303, 5)):
+            for waited in (0, 0xffffffff):
+                runner._CASE_STARTED = False
+                with tempfile.TemporaryDirectory() as folder:
+                    obj, inputs, c, profile, _, _ = console_fixture.Console().composed(folder)
+                    identity, member, opened, census = c.api.identity, c.api.member, c.api.open_initial_member, c.api.census
+                    c.api.images[305] = inputs.output / 'Office/program/soffice.exe'
+                    c.api.identity = lambda handle: (601, 611) if handle == 305 else identity(handle)
+                    c.api.member = lambda handle, job: job == 1000 if handle == 305 else member(handle, job)
+                    c.api.open_initial_member = lambda pid, job: 305 if pid == 601 else opened(pid, job)
+                    c.api.census = lambda job: census(job) + ((601,) if job == 1000 and not c.api.dead else ())
+                    original_state = c.api.state; checking = [False]
+                    def state(handle):
+                        if checking[0] and not c.api.dead and handle == target: return waited, 0xffffffff
+                        return original_state(handle)
+                    c.api.state = state
+                    base = c.Cohort
+                    class FaultCohort(base):
+                        def verify(self, budget=None):
+                            checking[0] = True
+                            return super().verify(budget)
+                    c.Cohort = FaultCohort
+                    report = obj.execute(inputs)
+                prep = report['preparation']
+                self.assertEqual(report['stageCode'], 4)
+                self.assertEqual(report['failureCode'], 13)
+                self.assertEqual(tuple(prep.get(key) for key in ('cohortFailureRoleCode',
+                    'cohortFailureWaitResult', 'cohortFailureExitCode')), (role, waited, 0xffffffff))
+                truncated = json.loads(json.dumps(report))
+                truncated['preparation'].update(preparationFailureSourceCode=0, preparationFailureLine=None)
+                runner.validate_public_report(truncated)
+                self.assertTrue(prep['cohortAdmitted']); self.assertTrue(prep['cleanupComplete'])
+                self.assertTrue(prep['originalEngineExitObserved']); self.assertTrue(prep['consoleAuxiliaryExitObserved'])
+                self.assertEqual(report['pendingRetainedCount'], 0); self.assertEqual(prep['inputCount'], 0)
+                self.assertFalse(report['normalAcceptance']); self.assertNotIn('helper-launch', c.api.calls)
+
+    def test_member_failure_projection_is_exact_typed_and_bound_to_the_actual_exception(self):
+        from writer_server_observer_lifecycle import DiagnosticFailure, FailureCode
+        from writer_server_observer_cohort import RetainedProcess
+        roles = {'host': (1, 11), 'worker': (2, 12), 'engine': (3, 13), 'launcher': (4, 14)}
+        aux = RetainedProcess(object(), 5, 15)
+        for origin, expected in (((3, 13, 0, 42), (3, 0, 42)), ((5, 15, 0xffffffff, 1), (5, 0xffffffff, 1)),
+                ((3, 99, 0, 42), (0, 0, 42)), ((6, 16, 0, 42), (0, 0, 42))):
+            error = DiagnosticFailure(FailureCode.GENERATION); error._member_state_origin = origin
+            self.assertEqual(runner._cohort_failure_observation(error, roles, aux), expected)
+            self.assertEqual(runner._cohort_failure_observation(DiagnosticFailure(FailureCode.GENERATION), roles, aux),
+                (None, None, None))
+        class Poison:
+            def __str__(self): raise AssertionError()
+            def __repr__(self): raise AssertionError()
+            def __iter__(self): raise AssertionError()
+        for origin in (Poison(), [3, 13, 0, 42], (3, 13, 0), (True, 13, 0, 42),
+                (3, True, 0, 42), (3, 13, False, 42), (3, 13, 0, True), (3, 13, 0, 1 << 32),
+                (1 << 32, 13, 0, 42), (3, 1 << 64, 0, 42), (3, 13, 258, 259)):
+            error = DiagnosticFailure(FailureCode.GENERATION); error._member_state_origin = origin
+            self.assertEqual(runner._cohort_failure_observation(error, roles, aux), (None, None, None))
+        error = DiagnosticFailure(FailureCode.NATIVE); error._member_state_origin = (3, 13, 0, 42)
+        self.assertEqual(runner._cohort_failure_observation(error, roles, aux), (None, None, None))
+
+    def test_actual_member_failure_rejects_typed_preparation_code_or_relabelled_first_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            obj, inputs, c, _ = setup(folder)
+            original = c.api.state; checking = [False]
+            c.api.state = lambda handle: (0, 42) if checking[0] and not c.api.dead and handle == 201 else original(handle)
+            base = c.Cohort
+            class FaultCohort(base):
+                def verify(self, budget=None):
+                    checking[0] = True
+                    return super().verify(budget)
+            c.Cohort = FaultCohort
+            report = obj.execute(inputs)
+        self.assertEqual(report['preparation']['cohortFailureRoleCode'], 1)
+        self.assertIsNone(report['preparation']['preparationFailureCode'])
+        self.assertEqual(report['failureCode'], 13)
+        runner.validate_public_report(report)
+        for scope, field, value in (('preparation', 'preparationFailureCode', 4), (None, 'failureCode', 6)):
+            altered = json.loads(json.dumps(report))
+            (altered if scope is None else altered[scope])[field] = value
+            with self.subTest(field=field), self.assertRaises(runner.RunnerFailure):
+                runner.validate_public_report(altered)
+
+    def test_member_failure_report_is_closed_nullable_and_rejects_impossible_correlations(self):
+        fields = {'cohortFailureRoleCode': 5, 'cohortFailureWaitResult': 0xffffffff, 'cohortFailureExitCode': 0xffffffff}
+        with tempfile.TemporaryDirectory() as folder:
+            obj, inputs, c, _ = setup(folder); success = obj.execute(inputs)
+        self.assertTrue(fields.keys() <= success['preparation'].keys())
+        self.assertTrue(all(success['preparation'][key] is None for key in fields))
+        runner._CASE_STARTED = False
+        with tempfile.TemporaryDirectory() as folder:
+            obj, inputs, c, _ = setup(folder)
+            def fail(*args, **kwargs): raise RuntimeError()
+            c.prep.find_attachment_once = fail
+            report = obj.execute(inputs)
+        for key, maximum in fields.items():
+            for value in (True, -1, maximum + 1, 'SYNTHETIC_PRIVATE'):
+                altered = json.loads(json.dumps(report)); altered['preparation'][key] = value
+                with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(altered)
+        for values in ((1, None, None), (None, 0, 42), (1, 258, 259)):
+            altered = json.loads(json.dumps(report)); altered['preparation'].update(zip(fields, values))
+            with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(altered)
+        altered = json.loads(json.dumps(success)); altered['preparation'].update(zip(fields, (1, 0, 42)))
+        with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(altered)
+        altered = json.loads(json.dumps(report)); altered['preparation']['cohortFailurePrivate'] = 1
+        with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(altered)
+
     def test_original_typed_attachment_failure_is_closed_numeric_without_relabeling_runner_failure(self):
         import writer_server_observer_prepare_native as prepare
         with tempfile.TemporaryDirectory() as folder:

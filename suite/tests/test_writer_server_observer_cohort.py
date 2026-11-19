@@ -46,6 +46,45 @@ class Kernel:
 
 
 class CohortContracts(unittest.TestCase):
+    def test_only_failed_retained_state_attaches_exact_numeric_origin_with_one_query(self):
+        m = self.module()
+        for index in range(3):
+            for waited in (0, 0xffffffff):
+                kernel, _, cohort = self.fixture(m); cohort.admit()
+                target = kernel.handles[index]; original = kernel.state; calls = []
+                def state(handle):
+                    calls.append(handle)
+                    return (waited, 0xffffffff) if handle is target else original(handle)
+                kernel.state = state
+                with self.assertRaises(m.DiagnosticFailure) as caught: cohort.verify()
+                self.assertEqual(caught.exception.code, m.FailureCode.GENERATION)
+                self.assertEqual(getattr(caught.exception, '_member_state_origin', None),
+                    (*kernel.identities[target], waited, 0xffffffff))
+                self.assertEqual(calls, [kernel.controller, *kernel.handles[:index + 1]])
+
+    def test_retained_prefix_failure_never_adds_state_query_or_member_origin(self):
+        m = self.module()
+        for identity_failure in (False, True):
+            kernel, _, cohort = self.fixture(m); cohort.admit()
+            target = kernel.handles[0]; calls = []; original = kernel.state
+            kernel.state = lambda handle: calls.append(handle) or original(handle)
+            if identity_failure: kernel.identities[target] = (1, 999)
+            else: kernel.foreign.add(target)
+            with self.assertRaises(m.DiagnosticFailure) as caught: cohort.verify()
+            self.assertIsNone(getattr(caught.exception, '_member_state_origin', None))
+            self.assertEqual(calls, [kernel.controller])
+
+    def test_malformed_retained_state_keeps_original_rejection_without_numeric_origin(self):
+        m = self.module()
+        for value in ((False, 0), (0, True), (0, -1), (0, 1 << 32), [0, 0], (0,), ()):
+            kernel, _, cohort = self.fixture(m); cohort.admit()
+            target = kernel.handles[0]; original = kernel.state
+            kernel.state = lambda handle: value if handle is target else original(handle)
+            with self.assertRaises(m.DiagnosticFailure) as caught: cohort.verify()
+            self.assertEqual(caught.exception.code,
+                m.FailureCode.NATIVE if value == () else m.FailureCode.GENERATION)
+            self.assertIsNone(getattr(caught.exception, '_member_state_origin', None))
+
     def module(self):
         try: return importlib.import_module('writer_server_observer_cohort')
         except ModuleNotFoundError: self.fail('cohort implementation absent')
