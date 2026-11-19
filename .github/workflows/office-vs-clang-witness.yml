@@ -1,0 +1,63 @@
+name: OpenGeul read-only VS tool witness diagnostic
+'on':
+  push:
+    branches: [work/opengeul-vs-clang-witness-3527]
+permissions:
+  contents: read
+concurrency:
+  group: vs-clang-witness-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  tool-witness:
+    if: github.event.repository.private == false && (github.repository == 'ATLKR/OpenGeul' && github.ref == 'refs/heads/work/opengeul-vs-clang-witness-3527' && github.event_name == 'push')
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - name: Preserve exact source bytes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Observe only fresh discovery and tool version witnesses
+        id: observe
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Exact diagnostic source commit is required.' }
+          $base = Join-Path $env:RUNNER_TEMP "opengeul-vs-clang-witness-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $private = Join-Path $base 'private'
+          $report = Join-Path $base 'public/report.numeric.json'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $hostPython = (Get-Command python -ErrorAction Stop).Source
+          # The checkout is a protected read-only root; no Suite package is supplied or qualified.
+          python -B suite/e2e/vs_bundled_clang_probe.py --suite ([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)) --windows $env:SystemRoot --vswhere $vswhere --host-python $hostPython --expected-suite-source-commit $env:GITHUB_SHA --output $private --report $report
+          if ($LASTEXITCODE -ne 0) { throw 'Tool witness observation did not produce a closed numeric report.' }
+      - name: Validate the one closed report
+        id: validate
+        if: success() && steps.observe.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Join-Path $env:RUNNER_TEMP "opengeul-vs-clang-witness-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $report = Join-Path $base 'public/report.numeric.json'
+          python -B suite/e2e/vs_bundled_clang_probe.py --validate-report $report
+          if ($LASTEXITCODE -ne 0) { throw 'The tool witness report is absent or invalid.' }
+      - name: Retain only the validated numeric report
+        if: success() && steps.validate.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengeul-vs-clang-witness-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/opengeul-vs-clang-witness-${{ github.run_id }}-${{ github.run_attempt }}/public/report.numeric.json
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 9
