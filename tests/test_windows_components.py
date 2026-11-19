@@ -825,9 +825,9 @@ class WindowsComponentsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Native integration test is not correctly registered'):
             c.source_contract(source, c.configured())
 
-    def test_stored_line_origin_four_compiled_sources_and_public_proof_are_mandatory(self):
+    def test_stored_line_origin_five_compiled_sources_and_public_proof_are_mandatory(self):
         source = self.source(); c = self.helper()
-        self.assertEqual(len(stored_lineseg_origin.SOURCE_FILES), 4)
+        self.assertEqual(len(stored_lineseg_origin.SOURCE_FILES), 5)
         self.assertTrue(set(stored_lineseg_origin.SOURCE_FILES) <= set(c.SOURCE_FILES))
         _, contract = c.source_contract(source, c.configured())
         for name in stored_lineseg_origin.SOURCE_FILES:
