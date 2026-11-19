@@ -33,6 +33,7 @@ import stored_lineseg_origin
 import picture_line_segment_owner
 import virtual_picture_layout_admission
 import hwpx_persistence_verification
+import renderer_font_candidates
 
 from buildkit import ROOT, audit_payload, package_version
 from releasekit import REPOSITORY, pe_machine
@@ -81,7 +82,7 @@ COPIED_OVERLAYS = {
     'third_party/rhwp/src/parser/hwpx/opengeul_namespaces.rs': 'overlay/hwpx_namespaces.rs',
     'third_party/rhwp/rhwp-studio/src/engine/opengeul-composition-final.ts': 'overlay/composition-final.ts',
 }
-SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(pdf_font_resolution.SOURCE_FILES) | set(equation_dialog_focus.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | set(picture_line_segment_owner.SOURCE_FILES) | set(virtual_picture_layout_admission.SOURCE_FILES) | set(hwpx_persistence_verification.SOURCE_FILES) | {
+SOURCE_FILES = tuple(sorted(set(COPIED_OVERLAYS) | set(pdf_search_text.SOURCE_FILES) | set(pdf_font_resolution.SOURCE_FILES) | set(equation_dialog_focus.SOURCE_FILES) | set(menu_clipboard.SOURCE_FILES) | set(shape_creation_history.SOURCE_FILES) | set(nested_line_navigation.SOURCE_FILES) | set(stored_lineseg_origin.SOURCE_FILES) | set(picture_line_segment_owner.SOURCE_FILES) | set(virtual_picture_layout_admission.SOURCE_FILES) | set(hwpx_persistence_verification.SOURCE_FILES) | set(renderer_font_candidates.SOURCE_FILES) | {
     com_source_contract.LEDGER_PATH,
     'third_party/rhwp/src/main.rs', 'third_party/rhwp/src/mcp_serve.rs',
     native_source_contract.LEDGER_PATH,
@@ -429,6 +430,10 @@ def validate_ledger(ledger: dict, contract: dict, config: dict) -> None:
     if any(contract['coreSourceFiles'].get(name) != contract['preparedFiles'].get(name)
            for name in virtual_picture_layout_admission.SOURCE_FILES):
         raise ValueError('Virtual picture layout admission complete core source mismatch')
+    renderer_proof = contract.get('rendererFontCandidates')
+    if not isinstance(renderer_proof, dict) or ledger.get('rendererFontCandidates') != renderer_proof:
+        raise ValueError('Renderer font candidates source/ledger proof mismatch')
+    renderer_font_candidates.validate_contract(renderer_proof, contract['preparedFiles'], config['helpers'])
     persistence_proof = contract.get('hwpxPersistenceVerification')
     if not isinstance(persistence_proof, dict) or ledger.get('hwpxPersistenceVerification') != persistence_proof:
         raise ValueError('HWPX persistence verification source/ledger proof mismatch')
@@ -506,6 +511,7 @@ def source_contract(source: Path, config: dict) -> tuple[bytes, dict]:
                 'pictureLineSegmentOwner':ledger.get('pictureLineSegmentOwner'),
                 'virtualPictureLayoutAdmission':ledger.get('virtualPictureLayoutAdmission'),
                 'hwpxPersistenceVerification':ledger.get('hwpxPersistenceVerification'),
+                'rendererFontCandidates':ledger.get('rendererFontCandidates'),
                 'nativeActivation': native_source_contract.capture(source, files, config,
                     read_json=read_json, tree=tree, sha=sha),
                 'comWorker': com_source_contract.capture(source, files, native, config,
@@ -717,7 +723,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
         payload = {name.removeprefix('payload/'): record for name, record in content.items() if name.startswith('payload/')}
         validate_payload(folder/'payload', role, payload, architecture)
     contract = value['source']
-    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','pdfFontResolution','equationDialogFocus','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin','pictureLineSegmentOwner','virtualPictureLayoutAdmission','hwpxPersistenceVerification'}
+    if (not isinstance(contract, dict) or set(contract) != {'ledgerSha256','preparedFiles','coreSourceFiles','nativeTests','namespacePatch','wasmRebuild','compositionTextSha256','nativeActivation','comWorker','pdfSearchText','pdfFontResolution','equationDialogFocus','menuClipboardPaste','shapeCreationHistory','nestedLineNavigation','storedLineSegmentOrigin','pictureLineSegmentOwner','virtualPictureLayoutAdmission','hwpxPersistenceVerification','rendererFontCandidates'}
             or any(not isinstance(contract[key], str) or not SHA.fullmatch(contract[key]) for key in ('ledgerSha256','compositionTextSha256'))):
         raise ValueError('Invalid prepared source contract')
     _hashes(contract['preparedFiles'], set(SOURCE_FILES) | set(NATIVE_FILES))
@@ -747,6 +753,7 @@ def validate_component(folder: Path, role: str, current: dict, config: dict, *, 
     picture_line_segment_owner.validate_contract(contract['pictureLineSegmentOwner'], contract['preparedFiles'], config['helpers'])
     virtual_picture_layout_admission.validate_contract(contract['virtualPictureLayoutAdmission'], contract['preparedFiles'], config['helpers'])
     hwpx_persistence_verification.validate_contract(contract['hwpxPersistenceVerification'], contract['preparedFiles'], config['helpers'])
+    renderer_font_candidates.validate_contract(contract['rendererFontCandidates'], contract['preparedFiles'], config['helpers'])
     native = contract['nativeTests']
     if (not isinstance(native, dict) or set(native) != {'targets','originalManifestSha256'}
             or native['targets'] != {name: config['helpers']['overlay/'+local] for name, local in TARGETS.items()}

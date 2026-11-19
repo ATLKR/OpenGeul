@@ -50,6 +50,10 @@ class PrepareNativeManifestTests(unittest.TestCase):
         self.pdf_font = pdf_font.start()
         self.pdf_font.return_value = {'testFixture': 'installed PDF base-family selection'}
         self.addCleanup(pdf_font.stop)
+        renderer = patch.object(prepare_upstream, 'apply_renderer_font_candidates')
+        self.renderer = renderer.start()
+        self.renderer.return_value = {'testFixture': 'renderer candidates'}
+        self.addCleanup(renderer.stop)
         equation_focus = patch.object(prepare_upstream, 'apply_equation_dialog_focus', create=True)
         self.equation_focus = equation_focus.start()
         self.equation_focus.return_value = {'testFixture': 'owned equation initial focus'}
@@ -281,6 +285,18 @@ pub fn layer_trees_to_pdf_with_annotations(
         self.assertEqual(ledger['shapeCreationHistory'], self.shape_creation.return_value)
         self.assertEqual(ledger['nestedLineNavigation'], self.nested_navigation.return_value)
         self.assertEqual(observed, ['pdf', 'menu', 'shape', 'nested'])
+
+    def test_renderer_font_candidates_is_a_required_final_source_proof(self):
+        prepare_upstream.patch(self.source, '1.0.0')
+        self.renderer.assert_called_once_with(self.source)
+        ledger=json.loads((self.source/'.opengeul-overlay.json').read_text())
+        self.assertEqual(ledger['rendererFontCandidates'], self.renderer.return_value)
+
+    def test_renderer_font_candidates_failure_cannot_publish_a_source_ledger(self):
+        self.renderer.side_effect=ValueError('owned renderer candidates failure')
+        with self.assertRaisesRegex(ValueError,'owned renderer candidates failure'):
+            prepare_upstream.patch(self.source, '1.0.0')
+        self.assertFalse((self.source/'.opengeul-overlay.json').exists())
 
     def test_equation_dialog_focus_is_prepared_before_source_ledger(self):
         with patch.object(prepare_upstream, 'apply_equation_dialog_focus', create=True) as focus:

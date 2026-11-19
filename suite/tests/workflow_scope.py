@@ -48,3 +48,23 @@ def normal_suite_source(source):
     header,normal=suite_workflow_sections(source)
     marker=source[len(header):].splitlines(keepends=True)[0]
     return header+marker+normal
+
+
+def original_acceptance_source(source):
+    """Test-only view of original gates after the exact reviewed probe tail.
+
+    Keep the full normal reader unchanged. Only this sealed observation tail
+    may disappear, and the independent original-job oracle must still match.
+    """
+    import hashlib
+    from suite.tests.reviewed_normal_workflow import (
+        BUNDLED_CLANG_PROBE_START, _without_bundled_clang_probe,
+        original_normal_oracle_text)
+    header,normal=suite_workflow_sections(source)
+    if normal.count(BUNDLED_CLANG_PROBE_START)!=1:
+        raise ValueError('Exactly one reviewed observation tail is required')
+    original=_without_bundled_clang_probe(normal)
+    if hashlib.sha256(original_normal_oracle_text(original).encode('utf-8')).hexdigest()!=('af42f45cd2930ffa6d7f322a7b1e561bd199c1c8374897f33598785d19f5566f'):
+        raise ValueError('Original acceptance job differs from the independent oracle')
+    marker=source[len(header):].splitlines(keepends=True)[0]
+    return header+marker+original

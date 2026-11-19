@@ -128,4 +128,55 @@ class WorkflowScopeTests(unittest.TestCase):
             original_normal_oracle_text(normal+'    - run: unreviewed_gate\n')
 
 
+
+class OriginalAcceptanceViewTests(unittest.TestCase):
+    def setUp(self):
+        self.scope=importlib.import_module('suite.tests.workflow_scope')
+        self.view=getattr(self.scope,'original_acceptance_source',None)
+        self.assertTrue(callable(self.view),'Closed original-acceptance test view is absent')
+        root=Path(__file__).resolve().parents[2]
+        self.source=(root/'.github/workflows/office-suite.yml').read_text()
+
+    def test_exact_tail_view_restores_original_delivery_without_changing_full_view(self):
+        from suite.tests.reviewed_normal_workflow import BUNDLED_CLANG_PROBE_START
+        header,normal=self.scope.suite_workflow_sections(self.source)
+        original=normal[:normal.index(BUNDLED_CLANG_PROBE_START)]
+        self.assertEqual(self.view(self.source),header+'jobs:\n'+original)
+        self.assertEqual(self.scope.normal_suite_source(self.source),header+'jobs:\n'+normal)
+        self.assertEqual(normal.count('    - name:' )-original.count('    - name:'),3)
+        self.assertTrue(original.rstrip().endswith('compression-level: 0'))
+        from suite.tests.test_calc_matrix_workflow import workflow_source
+        from suite.tests.test_home_routes_workflow import steps,MATRIX
+        self.assertEqual(workflow_source(),self.view(self.source))
+        self.assertIn('path: ${{ env.SUITE_ARCHIVE }}',steps(MATRIX)[-1])
+
+    def test_unknown_missing_modified_duplicate_or_moved_tail_is_rejected(self):
+        from suite.tests.reviewed_normal_workflow import BUNDLED_CLANG_PROBE_START
+        header,normal=self.scope.suite_workflow_sections(self.source)
+        start=normal.index(BUNDLED_CLANG_PROBE_START);tail=normal[start:]
+        prefix=normal[:start]
+        for changed in (
+                header+'jobs:\n'+prefix,
+                self.source.replace(BUNDLED_CLANG_PROBE_START,BUNDLED_CLANG_PROBE_START.replace('selected','unknown'),1),
+                self.source.replace('path: .work/suite-bundled-clang-probe-public/report.numeric.json','path: .work/unknown-private',1),
+                self.source.replace(BUNDLED_CLANG_PROBE_START,BUNDLED_CLANG_PROBE_START+tail,1),
+                header+'jobs:\n'+prefix.replace('    - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기\n',tail+'    - name: Enter 없이 실제 Calc Ctrl+S·저장·독립 재열기\n',1),
+                self.source.replace(BUNDLED_CLANG_PROBE_START,BUNDLED_CLANG_PROBE_START+'      continue-on-error: true\n',1),
+                header+'jobs:\n'+normal+'    - name: unknown extra step\n      run: exit 0\n',
+                self.source+'  unknown-job:\n    steps: []\n',
+                self.source.replace('  windows-suite:\n','  windows-suite:\n  windows-suite:\n',1)):
+            with self.subTest(),self.assertRaises(ValueError):self.view(changed)
+
+    def test_original_acceptance_mutations_cannot_be_hidden_by_tail_removal(self):
+        for before,after in (
+                ('runner: windows-2025','runner: synthetic-runner'),
+                ('timeout-minutes: 150','timeout-minutes: 151'),
+                ('      id: calc-save\n','      id: calc-save\n      continue-on-error: true\n'),
+                ('--output .work/suite-calc-save @sourceReaderArgs','--output .work/suite-calc-save --skip @sourceReaderArgs'),
+                ("success() && steps.home-routes.outcome == 'success'","success() || steps.home-routes.outcome == 'success'"),
+                ('path: ${{ env.SUITE_ARCHIVE }}','path: .work/foreign.zip')):
+            with self.subTest(mutation=before):
+                changed=self.source.replace(before,after,1);self.assertNotEqual(changed,self.source)
+                with self.assertRaises(ValueError):self.view(changed)
+
 if __name__=='__main__':unittest.main()

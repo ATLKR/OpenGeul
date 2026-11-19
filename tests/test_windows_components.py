@@ -34,6 +34,7 @@ import stored_lineseg_origin
 import picture_line_segment_owner
 import virtual_picture_layout_admission
 import hwpx_persistence_verification
+import renderer_font_candidates
 
 FOCUS_SOURCES = (
     'third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts',
@@ -79,7 +80,8 @@ class WindowsComponentsTests(unittest.TestCase):
         helpers = self.helper().configured()['helpers']
         self.assertTrue(name in helpers, 'Native advanced input stager must be included in component helpers')
         self.assertEqual(helpers[name], digest(ROOT/name))
-        self.assertEqual(len(helpers), 105)
+        self.assertEqual(len(helpers), 106)
+        self.assertEqual(helpers[renderer_font_candidates.HELPER], digest(ROOT/renderer_font_candidates.HELPER))
         for frontend_helper in ('scripts/frontend_dependencies.py', 'overlay/frontend-pnpm-lock.txt'):
             self.assertEqual(helpers[frontend_helper], digest(ROOT/frontend_helper))
         budget_helper = 'scripts/normal_distribution_budget.py'
@@ -537,6 +539,25 @@ class WindowsComponentsTests(unittest.TestCase):
                 write_json(folder/'provenance.json', value)
             with self.subTest(change=change):
                 self.assert_rejected_without_outputs(folders, 'HWPX persistence verification source/ledger proof mismatch')
+
+    def test_rehashed_public_ledger_cannot_omit_or_replace_renderer_font_candidates_proof(self):
+        folders = self.pair(); parity_path = folders['editor']/'source-parity.json'
+        original_parity = json.loads(parity_path.read_bytes())
+        original = {role:json.loads((folder/'provenance.json').read_bytes())
+                    for role, folder in folders.items()}
+        for change in ('missing', 'mismatch'):
+            parity = copy.deepcopy(original_parity)
+            if change == 'missing': parity.pop('rendererFontCandidates')
+            else: parity['rendererFontCandidates']['helperSha256'] = '0'*64
+            write_json(parity_path, parity)
+            for role, folder in folders.items():
+                value = copy.deepcopy(original[role]); value['source']['ledgerSha256'] = digest(parity_path)
+                if role == 'editor':
+                    value['files']['source-parity.json'] = {'size':parity_path.stat().st_size,
+                                                          'sha256':digest(parity_path)}
+                write_json(folder/'provenance.json', value)
+            with self.subTest(change=change):
+                self.assert_rejected_without_outputs(folders, 'Renderer font candidates source/ledger proof mismatch')
 
     def test_virtual_picture_layout_admission_compiled_source_is_mandatory(self):
         source = self.source(); c = self.helper()
@@ -1264,6 +1285,14 @@ class WindowsComponentsTests(unittest.TestCase):
         persistence_proof = {'beforeSha256':dict(hwpx_persistence_verification.INPUT_SOURCE_SHA256),
                              'afterSha256':persistence_output,
                              'helperSha256':digest(ROOT/hwpx_persistence_verification.HELPER)}
+        renderer_output = {name:digest(source/name) for name in renderer_font_candidates.SOURCE_FILES}
+        renderer_override = patch.object(renderer_font_candidates, 'OUTPUT_SOURCE_SHA256', renderer_output)
+        renderer_override.start(); self.addCleanup(renderer_override.stop)
+        self.renderer_reference_path = self.root/'renderer-font-fixture-reference.json'
+        write_json(self.renderer_reference_path, renderer_output)
+        renderer_proof = {'beforeSha256':dict(renderer_font_candidates.INPUT_SOURCE_SHA256),
+                          'afterSha256':renderer_output,
+                          'helperSha256':digest(ROOT/renderer_font_candidates.HELPER)}
         focus_output = {name:digest(source/name) for name in equation_dialog_focus.SOURCE_FILES}
         focus_override = patch.object(equation_dialog_focus, 'OUTPUT_SOURCE_SHA256', focus_output)
         focus_override.start(); self.addCleanup(focus_override.stop)
@@ -1293,6 +1322,7 @@ class WindowsComponentsTests(unittest.TestCase):
                   'pictureLineSegmentOwner': picture_proof,
                   'virtualPictureLayoutAdmission': virtual_proof,
                   'hwpxPersistenceVerification': persistence_proof,
+                  'rendererFontCandidates': renderer_proof,
                   'asyncClipboardGuard': {
                       'beforeSha256': {
                           'input-handler-keyboard.ts': '40e871f95d00415c289a1730c86222660ad32027229813531d6c1f2ae90beb87',
@@ -1370,7 +1400,7 @@ class WindowsComponentsTests(unittest.TestCase):
         # A subprocess cannot inherit a Python fixture constant. Substitute only
         # that immutable test input, then run the unchanged public argparse path.
         return [sys.executable, '-c',
-                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,pdf_font_resolution,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission,hwpx_persistence_verification,equation_dialog_focus;from pathlib import Path;"
+                "import json,runpy,sys,native_source_contract,com_source_contract,pdf_search_text,pdf_font_resolution,menu_clipboard,shape_creation_history,nested_line_navigation,stored_lineseg_origin,picture_line_segment_owner,virtual_picture_layout_admission,hwpx_persistence_verification,equation_dialog_focus,renderer_font_candidates;from pathlib import Path;"
                 "native_source_contract.REFERENCE=json.loads(Path(sys.argv[1]).read_text());"
                 "com_source_contract.REFERENCE=json.loads(Path(sys.argv[2]).read_text());"
                 "pdf_fixture=json.loads(Path(sys.argv[3]).read_text());"
@@ -1388,11 +1418,12 @@ class WindowsComponentsTests(unittest.TestCase):
                 "pdf_font_resolution.INPUT_SOURCE_SHA256=font_fixture['before'];"
                 "pdf_font_resolution.OUTPUT_SOURCE_SHA256=font_fixture['after'];"
                 "equation_dialog_focus.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[12]).read_text());"
-                "sys.argv=sys.argv[13:];runpy.run_path(sys.argv[0],run_name='__main__')",
+                "renderer_font_candidates.OUTPUT_SOURCE_SHA256=json.loads(Path(sys.argv[13]).read_text());"
+                "sys.argv=sys.argv[14:];runpy.run_path(sys.argv[0],run_name='__main__')",
                 str(self.native_reference_path),str(self.com_reference_path),str(self.pdf_reference_path),
                 str(self.menu_reference_path),str(self.shape_reference_path),str(self.nested_reference_path),
                 str(self.stored_reference_path),str(self.picture_reference_path),str(self.virtual_reference_path),
-                str(self.persistence_reference_path),str(self.pdf_font_reference_path),str(self.focus_reference_path),str(HELPER),*arguments]
+                str(self.persistence_reference_path),str(self.pdf_font_reference_path),str(self.focus_reference_path),str(self.renderer_reference_path),str(HELPER),*arguments]
 
     def payload(self, role, architecture='x64'):
         target = self.root/(role+'-payload')
