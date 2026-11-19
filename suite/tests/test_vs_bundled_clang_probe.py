@@ -700,6 +700,23 @@ class HelperTests(unittest.TestCase):
 
     def original_capture_source(self):
         source=(ROOT/'e2e/vs_bundled_clang_version.py').read_text()
+        suspended=re.findall(r'(?m)^\s*# suspended-witness:begin ([a-z-]+)$',source)
+        if suspended:
+            self.assertEqual(set(suspended),{'launcher','resume','cleanup','close-primary'})
+            self.assertEqual(len(suspended),4)
+            source=re.sub(r'(?ms)^# suspended-witness:begin launcher\n.*?^# suspended-witness:end launcher\n\n','',source)
+            source=source.replace('popen=_SuspendedProcess','popen=subprocess.Popen')
+            source=re.sub(r'(?ms)^[ \t]*# suspended-witness:begin resume\n.*?^[ \t]*# suspended-witness:end resume\n','',source)
+            pattern=r'(?ms)^            # suspended-witness:begin cleanup\n(.*?)^            # suspended-witness:end cleanup\n'
+            match=re.search(pattern,source);self.assertIsNotNone(match)
+            protected=match.group(1);self.assertTrue(protected.startswith('            try:\n'))
+            left,right=protected[len('            try:\n'):].split('            finally:\n',1)
+            original=''.join(line[4:] if line.strip() else line for line in (left+right).splitlines(True))
+            source=source[:match.start()]+original+source[match.end():]
+            pattern=r'(?ms)^([ \t]*)# suspended-witness:begin close-primary\n.*?^\1# suspended-witness:end close-primary\n'
+            source=re.sub(pattern,lambda m:''.join(m.group(1)+line+'\n' for line in
+                ('process.stdout.close()','process.stderr.close()','process._handle.Close()')),source)
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(),'a593598fb7590e2f1dd9e720b306711959113533d31b7130ce9850a07d485f5b')
         discovery=r'(?ms)^[ \t]*# discovery-observation:begin ([a-z-]+)\n.*?^[ \t]*# discovery-observation:end \1\n'
         names=re.findall(r'(?m)^\s*# discovery-observation:begin ([a-z-]+)$',source)
         if names:
