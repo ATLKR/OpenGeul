@@ -6,8 +6,9 @@ to be preemptible. No report contains the private launch/owner/provenance data.
 """
 from dataclasses import dataclass, field
 from enum import IntEnum
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -79,6 +80,35 @@ def _prelaunch_failure(error):
         return kind, *deepest
     except BaseException:
         return kind, 0, None
+
+
+def _unknown_image_observation(image, roots):
+    """Hash only the cached basename; cached scope is diagnostic, not identity.
+
+    All paths were validated before launch or queried by the original classifier.
+    No path rendering, filesystem/native query or exception data is needed here.
+    """
+    unknown = (None,) * 9
+    try:
+        if (not isinstance(image, PurePath) or type(roots) is not tuple or len(roots) != 3 or
+                any(not isinstance(root, PurePath) for root in roots)):
+            return unknown
+        windows = isinstance(image, PureWindowsPath)
+        if any(isinstance(root, PureWindowsPath) != windows for root in roots): return unknown
+        def key(path):
+            return tuple(part.lower() for part in path.parts) if windows else path.parts
+        image_key = key(image)
+        scope = next((index for index, root in enumerate(roots, 1)
+            if len(key(root)) <= len(image_key) and image_key[:len(key(root))] == key(root)), 4)
+        name = image.name
+        if type(name) is not str or not 0 < len(name) <= 32767: return unknown
+        encoded = name.casefold().encode('utf-8', 'strict')
+        if not 0 < len(encoded) <= 131068: return unknown
+        digest = hashlib.sha256(encoded).digest()
+        if type(digest) is not bytes or len(digest) != 32: return unknown
+        return (scope, *(int.from_bytes(digest[index:index + 4], 'big') for index in range(0, 32, 4)))
+    except BaseException:
+        return unknown
 
 
 class _Clock:
@@ -340,11 +370,21 @@ _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 
     'classificationAttemptCount': 4096, 'classificationReasonCode': 10,
     'classificationCensusCount': 128, 'classificationMatchedRoleMask': 15,
     'classificationCurrentRoleCode': 4, 'classificationHistoricalRoleCode': 4,
-    'classificationWaitResult': 0xffffffff, 'classificationExitCode': 0xffffffff}
+    'classificationWaitResult': 0xffffffff, 'classificationExitCode': 0xffffffff,
+    'classificationUnknownImageScopeCode': 4,
+    'classificationUnknownImageNameHash0': 0xffffffff, 'classificationUnknownImageNameHash1': 0xffffffff,
+    'classificationUnknownImageNameHash2': 0xffffffff, 'classificationUnknownImageNameHash3': 0xffffffff,
+    'classificationUnknownImageNameHash4': 0xffffffff, 'classificationUnknownImageNameHash5': 0xffffffff,
+    'classificationUnknownImageNameHash6': 0xffffffff, 'classificationUnknownImageNameHash7': 0xffffffff}
 _CLASSIFICATION_FIELDS = ('classificationAttemptCount', 'classificationReasonCode',
     'classificationCensusCount', 'classificationMatchedRoleMask', 'classificationCurrentRoleCode',
     'classificationHistoricalRoleCode', 'classificationWaitResult', 'classificationExitCode')
 _ROLE_CODES = {'host': 1, 'worker': 2, 'engine': 3, 'launcher': 4}
+_UNKNOWN_IMAGE_FIELDS = ('classificationUnknownImageScopeCode',
+    'classificationUnknownImageNameHash0', 'classificationUnknownImageNameHash1',
+    'classificationUnknownImageNameHash2', 'classificationUnknownImageNameHash3',
+    'classificationUnknownImageNameHash4', 'classificationUnknownImageNameHash5',
+    'classificationUnknownImageNameHash6', 'classificationUnknownImageNameHash7')
 _ADMISSION_BOOL=('started consumerAttempted consumerReturned descriptorVerified completedWithinDeadline handoffComplete durationKnown').split()
 _ADMISSION_INT={'startQpc':MAX_I64,'deadlineQpc':MAX_I64,'frequency':MAX_I64,'lastObservedQpc':MAX_I64,
     'completedQpc':MAX_I64,'durationQpc':MAX_I64,'errorCode':13}
@@ -457,6 +497,12 @@ def validate_public_report(report):
                     prep['classificationCensusCount'] != mask.bit_count() or
                     prep['classificationCount'] != mask.bit_count() or prep['classificationWaitResult'] != 258):
                 raise RunnerFailure(Code.NUMERIC)
+    image_witness = tuple(prep[key] for key in _UNKNOWN_IMAGE_FIELDS)
+    if any(value is not None for value in image_witness):
+        if (any(value is None for value in image_witness) or image_witness[0] == 0 or
+                prep['classificationReasonCode'] != 6 or prep['classificationCurrentRoleCode'] != 0 or
+                prep['classificationWaitResult'] != 258):
+            raise RunnerFailure(Code.NUMERIC)
     if admission['handoffComplete'] is True:
         if (admission['completedWithinDeadline'] is not True or admission['durationKnown'] is not True or
                 prep['started'] is not True or admission['completedQpc'] != prep['startQpc'] or
@@ -590,12 +636,13 @@ class DedicatedWriterRunner:
         self.pause(min(.05, budget.remaining_ms(observation=True) / 1000))
         budget.check(observation=True)
 
-    def _classify(self, launch, images, budget, prep, previous_roles):
+    def _classify(self, launch, images, budget, prep, previous_roles, image_roots):
         api, handles, roles = self.c.api, [], {}
         prep['classificationAttemptCount'] += 1
         prep.update(classificationReasonCode=0, classificationCensusCount=None,
             classificationMatchedRoleMask=0, classificationCurrentRoleCode=0,
             classificationHistoricalRoleCode=0, classificationWaitResult=None, classificationExitCode=None)
+        for key in _UNKNOWN_IMAGE_FIELDS: prep[key] = None
         def reject(reason):
             prep['classificationReasonCode'] = reason
             raise RunnerFailure(Code.CLASSIFICATION)
@@ -631,7 +678,9 @@ class DedicatedWriterRunner:
                     image = Path(self.c.prep.process_image(handle, check=budget.check)).resolve(strict=True)
                     role = next((name for name, expected in images.items() if image == expected), None)
                     prep['classificationCurrentRoleCode'] = _ROLE_CODES.get(role, 0)
-                    if role is None: reject(6)
+                    if role is None:
+                        prep.update(zip(_UNKNOWN_IMAGE_FIELDS, _unknown_image_observation(image, image_roots)))
+                        reject(6)
                     if role in roles: reject(7)
                     if (role == 'host') != (handle == launch.host): reject(8)
                     if role == 'host' and identity != launch.identity: reject(9)
@@ -728,6 +777,7 @@ class DedicatedWriterRunner:
             for step, (key, path) in enumerate(images.items(), 7):
                 prep['prelaunchStepCode'] = step
                 images[key] = self._checked(budget, path.resolve, strict=True)
+            classification_roots = (layout.program, output, layout.windows / 'System32')
             prep['prelaunchStepCode'] = 11
             budget.check(observation=True)
             controller, identity = c.api.retain_current_controller()
@@ -750,7 +800,7 @@ class DedicatedWriterRunner:
             prep['classificationAttemptCount'] = 0
             roles = {}
             for _ in range(4096):
-                roles = self._classify(launch, images, budget, prep, roles)
+                roles = self._classify(launch, images, budget, prep, roles, classification_roots)
                 prep['classificationCount'] = len(roles)
                 if {'host','worker','engine'} <= roles.keys(): break
                 self._pause(budget)

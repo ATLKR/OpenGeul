@@ -1,8 +1,9 @@
 """Numeric classification observations over the original synthetic native ports."""
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from test_writer_server_observer_runner_composition import setup, runner
 
@@ -11,6 +12,13 @@ FIELDS = {'classificationAttemptCount': 4096, 'classificationReasonCode': 10,
     'classificationCensusCount': 128, 'classificationMatchedRoleMask': 15,
     'classificationCurrentRoleCode': 4, 'classificationHistoricalRoleCode': 4,
     'classificationWaitResult': 0xffffffff, 'classificationExitCode': 0xffffffff}
+IMAGE_FIELDS = ('classificationUnknownImageScopeCode',
+    'classificationUnknownImageNameHash0', 'classificationUnknownImageNameHash1',
+    'classificationUnknownImageNameHash2', 'classificationUnknownImageNameHash3',
+    'classificationUnknownImageNameHash4', 'classificationUnknownImageNameHash5',
+    'classificationUnknownImageNameHash6', 'classificationUnknownImageNameHash7')
+SOFFICE_WORDS = (1892473228, 3217378448, 1465766935, 612280029,
+    926173717, 1805456213, 3266411349, 1442435742)
 
 
 def record_classification_calls(instance, components):
@@ -227,6 +235,151 @@ class Classification(unittest.TestCase):
             report = json.loads(json.dumps(good)); report['preparation'].update(values)
             with self.subTest(field_count=len(values)):
                 with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(report)
+
+
+class UnknownImage(unittest.TestCase):
+    def setUp(self):
+        runner._PENDING_CASES.clear(); runner._CASE_STARTED = False
+
+    def tearDown(self):
+        runner._PENDING_CASES.clear(); runner._CASE_STARTED = False
+
+    def projector(self):
+        function = getattr(runner, '_unknown_image_observation', None)
+        self.assertTrue(callable(function))
+        return function
+
+    def test_cached_windows_scope_and_public_basename_hash_have_fixed_big_endian_words(self):
+        project = self.projector()
+        roots = tuple(PureWindowsPath(p) for p in
+            ('C:/SYNTHETIC_PRIVATE/Payload/Office/program', 'C:/SYNTHETIC_PRIVATE/Payload', 'C:/Windows/System32'))
+        cases = (('c:/synthetic_private/payload/OFFICE/PROGRAM/SOFFICE.EXE', 1),
+            ('C:/SYNTHETIC_PRIVATE/Payload/program-old/SoFfIcE.ExE', 2),
+            ('c:/WINDOWS/system32/SOFFICE.EXE', 3),
+            ('C:/SYNTHETIC_PRIVATE/Payload-other/SOFFICE.EXE', 4))
+        for name, scope in cases:
+            with self.subTest(scope=scope):
+                self.assertEqual(project(PureWindowsPath(name), roots), (scope, *SOFFICE_WORDS))
+        self.assertTrue(all(type(word) is int and 0 <= word <= 0xffffffff for word in SOFFICE_WORDS))
+
+    def test_projection_reads_no_files_environment_or_fullpath_string(self):
+        project = self.projector()
+        touched = []
+        class CachedPath(PureWindowsPath):
+            def reject(self, *args, **kwargs): touched.append(1); raise AssertionError()
+            __str__ = __repr__ = reject
+        class Unreadable:
+            def reject(self, *args, **kwargs): touched.append(2); raise AssertionError()
+            __getitem__ = get = __iter__ = keys = items = values = copy = __len__ = reject
+        roots = tuple(CachedPath(p) for p in ('C:/PRIVATE/Office/program', 'C:/PRIVATE', 'C:/Windows/System32'))
+        image = CachedPath('C:/PRIVATE/Office/program/SOFFICE.EXE')
+        original = runner.hashlib.sha256
+        seen = []
+        def digest(data): seen.append(data); return original(data)
+        with patch.object(runner.os, 'environ', Unreadable()), patch.object(runner.hashlib, 'sha256', digest), \
+                patch.object(Path, 'resolve', side_effect=AssertionError()), \
+                patch.object(Path, 'stat', side_effect=AssertionError()), \
+                patch.object(Path, 'lstat', side_effect=AssertionError()), \
+                patch.object(Path, 'open', side_effect=AssertionError()):
+            self.assertEqual(project(image, roots), (1, *SOFFICE_WORDS))
+        self.assertEqual(seen, [b'soffice.exe'])
+        self.assertEqual(touched, [])
+
+    def unknown_report(self, folder, *, fail_close=False):
+        obj, inputs, c, _ = setup(folder)
+        unknown = inputs.output / 'synthetic-unknown.exe'; unknown.touch()
+        c.api.images[301] = unknown
+        if fail_close: c.api.fail_close = 301
+        return obj.execute(inputs), c
+
+    def test_unknown_image_remains_rejected_with_only_its_cached_numeric_witness(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report, c = self.unknown_report(folder)
+        prep = report['preparation']
+        self.assertTrue(all(key in prep for key in IMAGE_FIELDS))
+        self.assertEqual(report['failureCode'], 6)
+        self.assertEqual(prep['classificationReasonCode'], 6)
+        self.assertEqual(prep['classificationCurrentRoleCode'], 0)
+        self.assertEqual(prep[IMAGE_FIELDS[0]], 2)
+        self.assertTrue(all(type(prep[key]) is int for key in IMAGE_FIELDS[1:]))
+        self.assertIsNone(prep['cohortAdmitted'])
+        self.assertIsNone(prep['runtimeEntered'])
+        self.assertIsNone(prep['originalEngineExitObserved'])
+        self.assertNotIn('helper-launch', c.api.calls)
+        self.assertFalse(report['acceptanceEligible'])
+
+    def test_hash_fault_or_unencodable_name_has_no_witness_and_cannot_replace_code6(self):
+        project = self.projector()
+        roots = tuple(PureWindowsPath(p) for p in ('C:/Office/program', 'C:/', 'C:/Windows/System32'))
+        self.assertEqual(project(PureWindowsPath('C:/Office/program/\ud800.exe'), roots), (None,) * 9)
+        touched = []
+        class Poison:
+            def reject(self): touched.append(1); raise AssertionError()
+            __str__ = __repr__ = reject
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(runner.hashlib, 'sha256', side_effect=RuntimeError(Poison())):
+            report, _ = self.unknown_report(folder)
+        prep = report['preparation']
+        self.assertEqual(report['failureCode'], 6)
+        self.assertEqual(prep['classificationReasonCode'], 6)
+        self.assertTrue(all(prep[key] is None for key in IMAGE_FIELDS))
+        self.assertTrue(prep['cleanupComplete'])
+        self.assertEqual(touched, [])
+
+    def test_completed_and_preclassification_packets_have_no_unknown_image_witness(self):
+        empty = runner.empty_report()['preparation']
+        self.assertTrue(all(key in empty for key in IMAGE_FIELDS))
+        self.assertTrue(all(empty[key] is None for key in IMAGE_FIELDS))
+        with tempfile.TemporaryDirectory() as folder:
+            obj, inputs, c, _ = setup(folder)
+            original_census = c.api.census; polls = [0]
+            def census(job):
+                polls[0] += 1
+                return (101, 301) if polls[0] == 1 else original_census(job)
+            c.api.census = census
+            original_classify = obj._classify
+            def classify(*args, **kwargs):
+                result = original_classify(*args, **kwargs)
+                if polls[0] == 1:
+                    args[3].update(dict(zip(IMAGE_FIELDS, (2, *SOFFICE_WORDS))))
+                return result
+            obj._classify = classify
+            report = obj.execute(inputs)
+        self.assertEqual(report['failureCode'], 0)
+        self.assertEqual(report['preparation']['classificationAttemptCount'], 2)
+        self.assertTrue(all(report['preparation'][key] is None for key in IMAGE_FIELDS))
+
+    def test_witness_survives_a_cleanup_failure_without_granting_retirement_or_roles(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report, _ = self.unknown_report(folder, fail_close=True)
+        prep = report['preparation']
+        self.assertTrue(all(key in prep for key in IMAGE_FIELDS))
+        self.assertEqual(report['failureCode'], 10)
+        self.assertEqual(prep['classificationReasonCode'], 6)
+        self.assertTrue(all(prep[key] is not None for key in IMAGE_FIELDS))
+        self.assertGreater(report['pendingRetainedCount'], 0)
+        self.assertIsNone(prep['rolesClassified'])
+        self.assertIsNone(prep['originalEngineExitObserved'])
+        self.assertFalse(report['acceptanceEligible'])
+
+    def test_closed_witness_requires_exactly_eight_uint32_words_and_a_reason6_scope(self):
+        with tempfile.TemporaryDirectory() as folder:
+            good, _ = self.unknown_report(folder)
+        self.assertTrue(all(key in good['preparation'] for key in IMAGE_FIELDS))
+        cases = ({IMAGE_FIELDS[0]: 0}, {IMAGE_FIELDS[0]: 5}, {IMAGE_FIELDS[1]: None},
+            {IMAGE_FIELDS[1]: True}, {IMAGE_FIELDS[1]: -1}, {IMAGE_FIELDS[1]: 0x100000000},
+            {'classificationUnknownImageNameHash8': 0}, {'classificationCurrentRoleCode': 1})
+        for index, values in enumerate(cases):
+            report = json.loads(json.dumps(good)); report['preparation'].update(values)
+            with self.subTest(case=index):
+                with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(report)
+        report = json.loads(json.dumps(good)); del report['preparation'][IMAGE_FIELDS[1]]
+        with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(report)
+        with tempfile.TemporaryDirectory() as folder:
+            runner._CASE_STARTED = False
+            obj, inputs, c, _ = setup(folder); successful = obj.execute(inputs)
+        successful['preparation'].update({key: good['preparation'][key] for key in IMAGE_FIELDS})
+        with self.assertRaises(runner.RunnerFailure): runner.validate_public_report(successful)
 
 
 if __name__ == '__main__': unittest.main()

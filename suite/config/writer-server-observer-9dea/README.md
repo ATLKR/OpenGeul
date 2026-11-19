@@ -80,3 +80,22 @@ cap. Reason 0 means no explicit classification guard has rejected the current
 attempt; it does not prove success if another call failed. Values not observed
 remain null. No additional native query, process role, cleanup PID reopen,
 deadline or acceptance authority is introduced.
+
+Only an unknown current image can carry the nine-field cached-name witness.
+`classificationUnknownImageScopeCode` is 1 for the admitted Office program tree,
+2 for the remaining payload tree, 3 for validated Windows System32, or 4 for
+other locations. Code 0 is reserved for unknown; an unavailable projection
+leaves all nine fields null. Scope uses cached path components only, including
+Windows case rules, without a new resolve, file read, native query or PID reopen.
+The three private roots were validated before the original launch.
+
+`classificationUnknownImageNameHash0` through `classificationUnknownImageNameHash7`
+are the eight BIG-endian uint32 words of
+`SHA256(basename.casefold().encode('utf-8', 'strict'))`. They hash the cached leaf
+name, not the file or full path. Projection failure preserves the original
+unknown-image rejection and leaves every witness field null. The witness is
+reset at each classification attempt and remains absent for other outcomes.
+These deterministic values are not anonymization: a public-name dictionary can
+identify a basename. A name/hash/scope match proves no image identity, signature,
+provenance, process ownership or accepted role; same-name files and collisions
+remain possible. This observation never grants launch or acceptance authority.
