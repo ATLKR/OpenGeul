@@ -81,6 +81,18 @@ REVIEWED_SOURCE_NOTICES = {
         'packageProvenance':{
             'archiveUrl':'https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz',
             'archiveIntegrity':'sha512-bWvlMpFKiTfDKfnK7FC2MPgPeWCf/Kpwsq49ApdW+FQaBZb6O6dZ4MAPbPUjp7hYQrw/RobqCzn64BRrQecGHw==',
+            'archiveMember':'package/THIRD-PARTY-LICENSE'}},
+        '1.2.19': {
+        'license':'MIT',
+        'manifestSha256':'73ea5ca898ac22574e23d66e54dc9c5b3714f9d8c1be934412824d62f25e21fc',
+        'sourcePath':'THIRD-PARTY-LICENSE',
+        'sourceSha256':'a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c',
+        'noticeSha256':'a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c',
+        'packageLicenseText':False,
+        'sourceUrl':'https://registry.npmjs.org/rolldown/-/rolldown-1.2.19.tgz',
+        'packageProvenance':{
+            'archiveUrl':'https://registry.npmjs.org/rolldown/-/rolldown-1.2.19.tgz',
+            'archiveIntegrity':'sha512-QIiV1J9d0pzN4jeeTH4sjPy0AZ6cAy2cG0ExeoE1+U8Rvj+hR3gYkokx0YbeUNGlZqiQJJ2utcETe0oKXwzsuA==',
             'archiveMember':'package/THIRD-PARTY-LICENSE'}}},
     ('npm', 'stackback'): {'0.0.2': {
         'license':'MIT',
@@ -97,14 +109,14 @@ REVIEWED_SOURCE_NOTICES = {
             'archiveMember':'package/formatstack.js'}}},
 }
 
-# pnpm's isolated graph from HOP c2981601 plus the reviewed Tauri npm overlay. These two
+# pnpm's isolated graph from HOP c2981601 plus the reviewed Tauri/rhwp frontend overlay. These two
 # source packages have no peer suffix. This adapter selects additional notices
 # only; it does not change the over-inclusive dependency inventory below.
 REVIEWED_NPM_ROOTS = {
-    ('rolldown', '1.2.16'): {
-        'slot': 'rolldown@1.2.16', 'callerSlot': 'vite@8.3.6',
-        'callerName': 'vite', 'callerVersion': '8.3.6',
-        'callerManifestSha256': 'c190c4c3dadb457bedc5d756a2269cd648b134a293da9f4d873c01fc66f4186c'},
+    ('rolldown', '1.2.19'): {
+        'slot': 'rolldown@1.2.19', 'callerSlot': 'vite@8.3.8',
+        'callerName': 'vite', 'callerVersion': '8.3.8',
+        'callerManifestSha256': '149cf436b89044371ae3cb35ac0e687ee75c6e8412962c7ce671f3d1a4a09d82'},
     ('stackback', '0.0.2'): {
         'slot': 'stackback@0.0.2', 'callerSlot': 'why-is-node-running@2.3.0',
         'callerName': 'why-is-node-running', 'callerVersion': '2.3.0',

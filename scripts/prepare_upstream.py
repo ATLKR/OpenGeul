@@ -841,13 +841,65 @@ def port_windows_contract_test(dest: Path) -> None:
                  "const relativePath = relative(studioRoot, file).replaceAll('\\\\', '/');")
 
 
+BASELINE_HOP_COMMIT='c298160120c9ffbfca7e72f13dc2e7060ddff7fe'
+BASELINE_SOURCE_SHA256={
+    'config/rhwp-upstream.json':'e749f290a9cea63182ddcc0bee9731039a2cdd9a75ed9010103c30eafccf78a8',
+    'tests/rhwp-baseline.test.mjs':'d55c4ddc456f87748ccf20f0dd646c57d4b921f4d1f76c74d960cd98148aae79',
+    'tests/rhwp-boundary.test.mjs':'23203f09dd48bec95b5ec8994be7a2afc6c5f56a14ea37734a464d03d461ad1c',
+}
+
+
+def checkout_original_baseline(destination: Path, repository: str, commit: str) -> None:
+    """Keep original Node/studio inputs; Rust is built only from the current tree."""
+    if (repository!='https://github.com/edwardkim/rhwp.git'
+            or commit!='c9095c5f67632e6721e800ccc7fb43ea49d26682'):
+        raise ValueError('Unreviewed original baseline checkout')
+    if destination.is_symlink() or (destination.exists() and any(destination.iterdir())):
+        raise ValueError('Refusing to replace an original baseline checkout')
+    destination.mkdir(parents=True,exist_ok=True)
+    run('git','init','--quiet',str(destination),cwd=ROOT)
+    run('git','config','core.autocrlf','false',cwd=destination)
+    run('git','config','core.longpaths','true',cwd=destination)
+    run('git','remote','add','origin',repository,cwd=destination)
+    run('git','fetch','--filter=blob:none','--depth=1','origin',commit,cwd=destination)
+    if run('git','rev-parse','FETCH_HEAD',cwd=destination)!=commit:
+        raise ValueError('Original baseline fetch differs')
+    for name in ('rhwp-studio','ttfs'):
+        if run('git','cat-file','-t','FETCH_HEAD:'+name,cwd=destination)!='tree':
+            raise ValueError('Original Node/studio input tree differs')
+    run('git','sparse-checkout','init','--cone',cwd=destination)
+    run('git','sparse-checkout','set','rhwp-studio','ttfs',cwd=destination)
+    run('git','checkout','--detach','FETCH_HEAD',cwd=destination)
+
+
+def original_baseline_rhwp(source: Path, lock: dict) -> dict:
+    """Authenticate HOP's own baseline without claiming it qualifies the upgrade."""
+    from frontend_dependencies import _read
+    if lock['hop']['commit']!=BASELINE_HOP_COMMIT:
+        raise ValueError('Unreviewed HOP baseline source')
+    original={name:_read(source/name) for name in BASELINE_SOURCE_SHA256}
+    if any(hashlib.sha256(raw).hexdigest()!=BASELINE_SOURCE_SHA256[name]
+           for name,raw in original.items()):
+        raise ValueError('Original HOP baseline source changed')
+    baseline=json.loads(original['config/rhwp-upstream.json'])
+    if (baseline['source']!='https://github.com/edwardkim/rhwp'
+            or lock['rhwp']['repository']!='https://github.com/edwardkim/rhwp.git' or baseline['version']!='0.9.0'
+            or baseline['tag']!='v0.9.0'
+            or baseline['commit']!='c9095c5f67632e6721e800ccc7fb43ea49d26682'):
+        raise ValueError('Original HOP baseline metadata differs')
+    return {'repository':lock['rhwp']['repository'],'version':baseline['version'],'commit':baseline['commit']}
+
+
 def main() -> None:
     parser=argparse.ArgumentParser()
     parser.add_argument('--directory',type=Path,default=ROOT/'.work/hop')
     parser.add_argument('--fetch-only',action='store_true')
     parser.add_argument('--patch-only',action='store_true')
+    parser.add_argument('--baseline-only',action='store_true')
     args=parser.parse_args();dest=args.directory.resolve()
-    if args.fetch_only and args.patch_only:raise ValueError('Select one preparation mode')
+    if sum((args.fetch_only,args.patch_only,args.baseline_only))>1:raise ValueError('Select one preparation mode')
+    if args.baseline_only and dest==(ROOT/'.work/hop').resolve():
+        raise ValueError('Original baseline requires a separate source directory')
     lock=json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8'))
     version=json.loads((ROOT/'config/product.json').read_text(encoding='utf-8'))['version']
     if not args.patch_only:
@@ -860,20 +912,24 @@ def main() -> None:
         run('git','remote','add','origin',lock['hop']['repository'],cwd=dest)
         run('git','-c','core.autocrlf=false','fetch','--depth=1','origin',lock['hop']['commit'],cwd=dest)
         run('git','-c','core.autocrlf=false','checkout','--detach','FETCH_HEAD',cwd=dest)
+    if run('git','rev-parse','HEAD',cwd=dest)!=lock['hop']['commit']:raise ValueError('HOP commit mismatch')
+    selected=original_baseline_rhwp(dest,lock) if args.baseline_only else lock['rhwp']
+    if not args.patch_only:
         # The locked rhwp tree contains gigabytes of development screenshots and
         # reference PDFs. Native ARM runners have 14 GiB; retain all source,
         # samples, tests and literal compile inputs without fetching those blobs.
         run('git', 'submodule', 'init', 'third_party/rhwp', cwd=dest)
-        checkout_rhwp(dest/'third_party/rhwp', lock['rhwp']['repository'], lock['rhwp']['commit'])
-    if run('git','rev-parse','HEAD',cwd=dest)!=lock['hop']['commit']:raise ValueError('HOP commit mismatch')
-    if run('git','rev-parse','HEAD',cwd=dest/'third_party/rhwp')!=lock['rhwp']['commit']:raise ValueError('rhwp submodule mismatch')
+        checkout=checkout_original_baseline if args.baseline_only else checkout_rhwp
+        checkout(dest/'third_party/rhwp', selected['repository'], selected['commit'])
+    if run('git','rev-parse','HEAD',cwd=dest/'third_party/rhwp')!=selected['commit']:raise ValueError('rhwp submodule mismatch')
     if not args.patch_only:port_windows_contract_test(dest)
     # Corepack reads this before the first Windows pnpm install. Changing it
     # only in patch() leaves .modules.yaml on the old upstream installer.
     pin_package_manager(dest, lock['pnpm'])
-    pin_frontend_dependencies(dest)
-    if not args.fetch_only:patch(dest,version)
-    print(f'Prepared {dest}; fetch_only={args.fetch_only}. Compilation and runtime verification are separate gates.')
+    pin_frontend_dependencies(dest,baseline=args.baseline_only)
+    if not (args.fetch_only or args.baseline_only):patch(dest,version)
+    phase='original HOP baseline' if args.baseline_only else 'OpenGeul current source'
+    print(f'Prepared {phase}: HOP {lock["hop"]["commit"]}; rhwp {selected["commit"]}; {dest}. Compilation and runtime verification are separate gates.')
 
 if __name__=='__main__':
     try:main()

@@ -77,6 +77,7 @@ foreach ($tool in $tools) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Missing prerequisite: $tool" }
 }
 $source = Join-Path $root '.work/hop'
+$baselineSource = Join-Path $root '.work/hop-baseline'
 $stage = Join-Path $root '.work/payload'
 $output = Join-Path $root 'dist'
 if ($Phase -eq 'Editor' -and $EditorStage -in @('NativeTests','Release')) {
@@ -112,7 +113,9 @@ if ($IdentityFile) { $manifestArgs += @('--identity',(Resolve-Path $IdentityFile
 if ($Store) { $manifestArgs += '--store' }
 & python @manifestArgs
 }
-python scripts/prepare_upstream.py --fetch-only
+# Authenticate c298/c909 and its original vendor/lock metadata in an isolated
+# source directory. Its results do not qualify the separate rhwp upgrade.
+python scripts/prepare_upstream.py --baseline-only --directory $baselineSource
 rustup toolchain install "$($lock.rust)-$target" --profile minimal --target $target
 }
 $env:RUSTUP_TOOLCHAIN = "$($lock.rust)-$target"
@@ -126,11 +129,16 @@ Set-EditorCargoParallelism
 rustc --target $target --edition=2021 --test overlay/font_policy.rs -o .work/font-policy-tests.exe
 & .work/font-policy-tests.exe
 corepack enable
-Push-Location $source
+Push-Location $baselineSource
 try {
     pnpm install --frozen-lockfile
     pnpm run test:upstream
     pnpm run test:studio
+} finally { Pop-Location }
+python scripts/prepare_upstream.py --fetch-only
+Push-Location $source
+try {
+    pnpm install --frozen-lockfile
 } finally { Pop-Location }
 # Observe the original unsupported HWPX save failing before changing production code.
 python scripts/prepare_hwpx.py $source --red-probe

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "source": "https://github.com/edwardkim/rhwp",
+  "version": "0.9.0",
+  "tag": "v0.9.0",
+  "commit": "c9095c5f67632e6721e800ccc7fb43ea49d26682",
+  "rustToolchain": "1.93.1",
+  "wasmPackVersion": "0.14.0",
+  "cargoPatches": {}
+}

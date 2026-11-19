@@ -18,14 +18,15 @@ class PnpmInstallOrderTests(unittest.TestCase):
             source = Path(td) / 'hop'
             original = {'name': 'hop', 'version': lock['hop']['version'],
                         'packageManager': 'pnpm@10.33.0',
-                        'dependencies': {'synthetic-package': '1.0.0'},
+                        'dependencies': {'synthetic-package': '1.0.0','@noble/hashes':'^2.4.0'},
                         'scripts': {'test:upstream': 'synthetic-test'}}
             def git(*args, cwd):
                 if args[:2] == ('git', 'init'):
                     (source / 'package.json').write_text(json.dumps(original))
                     for name, value in {
                         'apps/desktop/package.json': {'name':'hop-desktop','devDependencies':{'@tauri-apps/cli':'^2.0.0'}},
-                        'apps/studio-host/package.json': {'name':'@golbin/hop-studio-host','dependencies':{'@tauri-apps/api':'^2.10.1'}},
+                        'apps/studio-host/package.json': {'name':'@golbin/hop-studio-host','dependencies':{'@tauri-apps/api':'^2.10.1'},'devDependencies':{'canvaskit-wasm':'^0.42.0','typescript':'^7.0.2','vite':'^8.3.5'}},
+                        'third_party/rhwp/rhwp-studio/package.json':{'name':'rhwp-studio','version':'0.9.1','dependencies':{'@noble/hashes':'^2.4.0','canvaskit-wasm':'^0.42.0'},'devDependencies':{'typescript':'^7.0.2','vite':'^8.3.8'}},
                     }.items():
                         path=source/name;path.parent.mkdir(parents=True,exist_ok=True)
                         path.write_text(json.dumps(value))
