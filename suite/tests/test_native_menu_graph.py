@@ -1,5 +1,6 @@
 """Synthetic physical File header admission; no actual UI or input."""
 import unittest
+from unittest.mock import patch
 
 import test_owned_native_menu as boundaries
 
@@ -24,6 +25,116 @@ class NativeMenuGraphTests(unittest.TestCase):
         original=probe.uia.iuia.ElementFromHandle
         probe.uia.iuia.ElementFromHandle=lambda hwnd:calls.append(('handle',hwnd)) or original(hwnd)
         return module,probe,boundary,clock,binding,calls
+
+    def test_retained_self_false_cannot_be_reclassified_as_another_role(self):
+        module,probe,boundary,clock,binding,calls=self.fixture()
+        retained=probe._identity_refs['file'];bar=probe._identity_refs['bar'];compared=[]
+        def compare(left,right):
+            compared.append((left,right))
+            return left is retained and right is bar
+        probe.uia.iuia.CompareElements=compare
+        with self.assertRaises(AssertionError):probe._role(retained)
+        self.assertEqual(compared,[(retained,retained)])
+        self.assertEqual(probe.interop['lastRoleComparisons'],[
+            dict(roleCode=1,areSame=False,samePythonObject=True)])
+
+    def test_retained_self_false_stops_before_a_later_com_exception(self):
+        module,probe,boundary,clock,binding,calls=self.fixture()
+        class Failure(Exception):
+            def __str__(self):raise AssertionError('Exception text must not be read')
+            def __repr__(self):raise AssertionError('Exception representation must not be read')
+        primary=Failure();retained=probe._identity_refs['file'];compared=[]
+        def compare(left,right):
+            compared.append((left,right))
+            if right is retained:return False
+            raise primary
+        probe.uia.iuia.CompareElements=compare
+        caught=None
+        try:probe._role(retained)
+        except BaseException as error:caught=error
+        self.assertIs(type(caught),AssertionError)
+        self.assertEqual(compared,[(retained,retained)])
+        self.assertEqual(boundary.native.calls,[])
+
+    def test_retained_and_fresh_positive_keep_all_original_com_comparisons(self):
+        for fresh in (False,True):
+            with self.subTest(fresh=fresh):
+                module,probe,boundary,clock,binding,calls=self.fixture()
+                originals=list(probe._identity_refs.values());retained=originals[0]
+                element=boundary.Node('file') if fresh else retained
+                compared=[];original=boundary.compare
+                def compare(left,right):compared.append((left,right));return original(left,right)
+                probe.uia.iuia.CompareElements=compare;probe._uses_comparison=True
+                self.assertEqual(probe._role(element),'file')
+                self.assertEqual(compared,[(element,right) for right in originals])
+                self.assertIs(probe._uses_comparison,True)
+                rows=probe.interop['lastRoleComparisons']
+                self.assertEqual([row['areSame'] for row in rows],[True,False,False,False])
+                self.assertEqual([row.get('samePythonObject') for row in rows],
+                    [not fresh,False,False,False])
+
+    def test_fresh_proxy_never_gets_a_role_from_python_identity_observation(self):
+        module,probe,boundary,clock,binding,calls=self.fixture()
+        element=boundary.Node('file');originals=list(probe._identity_refs.values());compared=[]
+        def compare(left,right):compared.append((left,right));return False
+        probe.uia.iuia.CompareElements=compare;probe._uses_comparison=False
+        with self.assertRaises(AssertionError):probe._role(element)
+        self.assertEqual(compared,[(element,right) for right in originals])
+        self.assertIs(probe._uses_comparison,False)
+        self.assertEqual([row.get('samePythonObject') for row in probe.interop['lastRoleComparisons']],
+            [False,False,False,False])
+
+    def test_retained_self_invalid_bool_and_primary_exception_keep_original_failure(self):
+        class Failure(Exception):
+            def __str__(self):raise AssertionError('Exception text must not be read')
+            def __repr__(self):raise AssertionError('Exception representation must not be read')
+        for mode in ('invalid-bool','com-error'):
+            with self.subTest(mode=mode):
+                module,probe,boundary,clock,binding,calls=self.fixture()
+                primary=Failure();element=probe._identity_refs['file'];compared=[]
+                def compare(left,right):
+                    compared.append((left,right))
+                    if mode=='com-error':raise primary
+                    return 2**32
+                probe.uia.iuia.CompareElements=compare
+                caught=None
+                try:probe._role(element)
+                except BaseException as error:caught=error
+                if mode=='com-error':self.assertIs(caught,primary)
+                else:self.assertIs(type(caught),AssertionError)
+                self.assertEqual(compared,[(element,element)])
+                self.assertEqual(probe.interop['lastRoleComparisons'],[])
+
+    def test_controller_self_false_is_terminal_before_input_and_keeps_handle_cleanup(self):
+        owner=boundaries.OwnedNativeMenuTests(methodName='runTest');self.addCleanup(owner.doCleanups)
+        module,api,process,record,clock,boundary=owner.real_chrome_fixture()
+        probe=boundary.probe;role=probe._role;original=boundary.compare
+        state=dict(inRole=False,selfFalseCount=0,laterQueries=0)
+        class Failure(Exception):
+            def __str__(self):raise AssertionError('Exception text must not be read')
+            def __repr__(self):raise AssertionError('Exception representation must not be read')
+        primary=Failure()
+        def in_role(element):
+            state['inRole']=True
+            try:return role(element)
+            finally:state['inRole']=False
+        def compare(left,right):
+            if state['inRole'] and left.key=='file':
+                if left is right:
+                    state['selfFalseCount']+=1;return False
+                state['laterQueries']+=1;raise primary
+            return original(left,right)
+        probe._role=in_role;probe.uia.iuia.CompareElements=compare;caught=None
+        with patch.object(module.time,'sleep',side_effect=clock.pause):
+            try:module.click_native_menu_action(api,process,11,record,'save',probe=probe,clock=clock)
+            except BaseException as error:caught=error
+        self.assertIs(type(caught),AssertionError)
+        self.assertEqual((state['selfFalseCount'],state['laterQueries']),(1,0))
+        self.assertEqual([row for row in boundary.native.calls if type(row) is tuple and row[0] in ('click','key')],[])
+        self.assertIn(('close',9),boundary.native.calls)
+        self.assertIn('dpi-restore',boundary.native.calls)
+        self.assertIs(record['nativeMenuActions'][-1]['engineHandleReleased'],True)
+        self.assertIs(record['nativeMenuActions'][-1]['success'],False)
 
     def test_refresh_starts_at_fresh_global_file_and_walks_to_original_peer(self):
         module,probe,boundary,clock,binding,calls=self.fixture()

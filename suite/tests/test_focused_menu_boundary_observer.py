@@ -228,8 +228,22 @@ class FocusedBoundaryTests(unittest.TestCase):
                         result['.'.join(path)]=hashlib.sha256(ast.dump(child,include_attributes=False).encode()).hexdigest()
                     visit(child,path)
             tree=ast.parse(text)
+            probe,=[node for node in tree.body if isinstance(node,ast.ClassDef) and node.name=='NativeMenuProbe']
+            role,=[node for node in probe.body if isinstance(node,ast.FunctionDef) and node.name=='_role']
+            loop,=[node for node in role.body if isinstance(node,ast.For)]
+            # Reverse only the exact reviewed self-FALSE rejection and numeric
+            # observation. The original comparison and whole _role hash stay fixed.
+            reviewed_role=ast.parse(
+                "same=self._same(element,original);same_python_object=element is original\n"
+                "rows.append(dict(roleCode=IDENTITY_ROLES.index(role)+1,areSame=same,samePythonObject=same_python_object))\n"
+                "assert not same_python_object or same, 'Retained native menu self comparison failed'").body
+            self.assertEqual([ast.dump(node,include_attributes=False) for node in loop.body[:4]],
+                [ast.dump(node,include_attributes=False) for node in reviewed_role])
+            loop.body[:4]=ast.parse(
+                "same=self._same(element,original)\n"
+                "rows.append(dict(roleCode=IDENTITY_ROLES.index(role)+1,areSame=same))").body
             run,=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='_run']
-            # The sole reviewed behavior change skips an unused initial Save
+            # The other reviewed behavior change skips an unused initial Save
             # snapshot for normal open-escape; diagnostic profile 3 keeps it.
             # Reverse exactly that elif into the original else. The immutable
             # whole-body ledger must then match; no new _run hash is admitted.
@@ -253,6 +267,14 @@ class FocusedBoundaryTests(unittest.TestCase):
         })
         source=(BASE/'suite/e2e/owned_native_menu.py').read_text()
         self.assertEqual(expected,functions(source))
+        for before,after in (
+                ('assert not same_python_object or same,','assert same_python_object or same,'),
+                ('assert not same_python_object or same,','assert True,'),
+                ('same_python_object=element is original','same_python_object=True'),
+                ('same=self._same(element,original)','same=self._same(element,element)')):
+            with self.subTest(rejectedRoleMutation=before):
+                self.assertEqual(source.count(before),1)
+                with self.assertRaises(AssertionError):functions(source.replace(before,after,1))
         condition="elif operation!='open-escape' or diagnostic:"
         self.assertEqual(source.count(condition),1)
         for wrong in ("elif operation!='open-escape':","elif True:"):
