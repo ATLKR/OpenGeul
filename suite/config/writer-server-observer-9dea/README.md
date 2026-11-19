@@ -99,3 +99,33 @@ These deterministic values are not anonymization: a public-name dictionary can
 identify a basename. A name/hash/scope match proves no image identity, signature,
 provenance, process ownership or accepted role; same-name files and collisions
 remain possible. This observation never grants launch or acceptance authority.
+
+The dedicated `writer_server_observer_runner.main` now explicitly supplies a
+`ConsoleProfile`; the phase wrapper's existing `observe` route reaches that
+entry. Direct `DedicatedWriterRunner` callers default to the original strict
+profile. Request JSON, producer inputs, normal payload locks and NativeApi flags
+are unchanged. This opt-in is only for the diagnostic's original creation Job.
+
+Before launch, the profile reuses `_SystemConsoleHost`'s authoritative native
+System32 query, exact conhost file, original open/share/reparse flags, bounded
+prelaunch SHA and stable FileID/final-path witness. A Writer-only close adapter
+retains a failed file HANDLE rather than losing it or retrying the close. Only
+that exact cached file path can bind one auxiliary after the existing process
+identity, Job membership and live-state checks. Other images and a second helper
+are rejected. The original aux process HANDLE survives polling and transfers to
+the cohort without a PID reopen. Cohort admission matches the complete classified
+PID/birth census; the original engine alone remains the capture/MSAA owner.
+
+`classificationAuxiliaryCount` and `classificationAuxiliaryCurrent` are separate
+0/1 observations, not extra engine-role bits. Success requires census count to
+equal ordinary role count plus auxiliary count. Reason 11 reports a missing or
+changed original auxiliary binding. The explicit profile joins all member exits
+and empty Job in the same original retirement deadline; default cohort behavior
+is unchanged. Unconfirmed exits or failed closes retain original handles and
+make cleanup incomplete. `consoleProfileEnabled`, `consoleFileVerified`,
+`consoleFileReleased`, `consoleAuxiliaryBound`, `consoleAuxiliaryExitObserved`,
+`consoleJobEmptyObserved` and `consolePendingHandleCount` distinguish file
+preparation, observed release, original auxiliary exit and remaining handles.
+These are diagnostic observations, not signature, parentage or normal acceptance
+proofs. Preparation still uses its original 55/60-second interval and runtime its
+original 25/30-second interval. Prelaunch step 15 identifies console preparation.

@@ -54,7 +54,8 @@ def _identity(value):
 
 
 class RetainedCohort:
-    def __init__(self, api, launch, *, expected_worker, expected_engine):
+    def __init__(self, api, launch, *, expected_worker, expected_engine,
+                 auxiliary=None, expected_members=None, require_all_exit=False):
         self._api, self._launch, self._job = api, launch, launch.job
         self._host_handle, self._thread = launch.host, launch.thread
         self._host_identity = launch.identity
@@ -66,11 +67,22 @@ class RetainedCohort:
         self._admission_attempted, self.admitted, self._retired = False, False, False
         self._released = False
         self._original_engine = None
+        self.auxiliary, self._expected_members = auxiliary, expected_members
+        self._require_all_exit = require_all_exit
+        self.job_empty_observed = None
+        if type(auxiliary) is RetainedProcess: self._members[auxiliary.pid] = auxiliary
 
     def __repr__(self): return '<RetainedCohort private>'
 
     @property
     def original_engine(self): return self._original_engine
+
+    @property
+    def auxiliary_closed(self): return self.auxiliary is None or self.auxiliary.handle in self._closed_handles
+
+    @property
+    def auxiliary_exit_observed(self):
+        return None if self.auxiliary is None else self.auxiliary.handle in self._confirmed_exited
 
     def _controller(self):
         if (self._launch.job != self._job or self._launch.host != self._host_handle or
@@ -96,21 +108,37 @@ class RetainedCohort:
             expected = (self._host_identity, self._worker_identity, self._engine_identity)
             if not all(_identity(v) for v in expected) or len({v[0] for v in expected}) != 3:
                 raise DiagnosticFailure(FailureCode.GENERATION)
+            if (type(self._require_all_exit) is not bool or
+                    (self.auxiliary is not None and (self._require_all_exit is not True or self._expected_members is None or type(self.auxiliary) is not RetainedProcess or
+                    not _identity((self.auxiliary.pid, self.auxiliary.birth)) or self.auxiliary.pid in {v[0] for v in expected}))):
+                raise DiagnosticFailure(FailureCode.GENERATION)
             self._controller()
             pids = self._api.census(self._job)
             if (not isinstance(pids, tuple) or not 3 <= len(pids) <= 128 or len(set(pids)) != len(pids) or
                     any(type(p) is not int or not 0 < p <= 0xffffffff for p in pids) or
                     not {v[0] for v in expected}.issubset(pids)):
                 raise DiagnosticFailure(FailureCode.OWNERSHIP)
+            if self._expected_members is not None:
+                members = self._expected_members
+                if (type(members) is not tuple or not 3 <= len(members) <= 128 or
+                        not all(_identity(value) for value in members) or len({value[0] for value in members}) != len(members) or
+                        set(pids) != {value[0] for value in members} or not set(expected).issubset(members) or
+                        (self.auxiliary is not None and (self.auxiliary.pid, self.auxiliary.birth) not in members)):
+                    raise DiagnosticFailure(FailureCode.OWNERSHIP)
             for pid in pids:
-                handle = self._host_handle if pid == self._host_identity[0] else None
+                handle = self._host_handle if pid == self._host_identity[0] else (
+                    self.auxiliary.handle if self.auxiliary is not None and pid == self.auxiliary.pid else None)
                 try:
                     if handle is None:
                         handle = self._api.open_initial_member(pid, self._job)
                     value = self._api.identity(handle)
                     if not _identity(value) or value[0] != pid:
                         raise DiagnosticFailure(FailureCode.GENERATION)
-                    self._members[pid] = RetainedProcess(handle, *value)
+                    if self._expected_members is not None and value not in self._expected_members:
+                        raise DiagnosticFailure(FailureCode.GENERATION)
+                    if self.auxiliary is not None and pid == self.auxiliary.pid:
+                        if value != (self.auxiliary.pid, self.auxiliary.birth): raise DiagnosticFailure(FailureCode.GENERATION)
+                    else: self._members[pid] = RetainedProcess(handle, *value)
                 except Exception as exc:
                     retained = getattr(exc, 'retained_handle', None)
                     if retained is not None: self._orphan_handles.append(retained)
@@ -197,8 +225,9 @@ class RetainedCohort:
                         engine_exited, code_seen = waited == 0, True
                 empty = self._api.census(self._job) == ()
                 observed = budget.check(observation=False)
+                self.job_empty_observed = empty
                 retired = same and engine_exited and code_seen
-                if retired:
+                if retired and (not self._require_all_exit or (all_exited and empty)):
                     self._retired = True
                     self._confirmed_exited = exited_handles
                     return RetainedExitEvidence(original, same, engine_exited, code_seen,

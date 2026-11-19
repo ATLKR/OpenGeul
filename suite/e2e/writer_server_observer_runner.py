@@ -361,13 +361,14 @@ _RUNTIME_INT = {'external_release_attempted_count': 8, 'external_release_complet
     'first_failure_code': 7, 'stage_error_count': 64, 'late_or_invalid_clock_count': 64, 'last_completed_qpc': MAX_I64}
 _PREP_BOOL = ('started admissionVerified launchAttempted launchResumed rolesClassified cohortAdmitted '
     'attachmentBound focusReady helperPrepared runtimeEntered cleanupAttempted disposalRequested '
-    'hostExitObserved originalEngineExitObserved cleanupComplete').split()
+    'hostExitObserved originalEngineExitObserved cleanupComplete consoleProfileEnabled consoleFileVerified '
+    'consoleFileReleased consoleAuxiliaryBound consoleAuxiliaryExitObserved consoleJobEmptyObserved').split()
 _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 'frequency': MAX_I64,
     'lastQpc': MAX_I64, 'classificationCount': 128, 'focusSampleCount': 4096, 'activationCount': 1,
     'inputCount': 0, 'cleanupErrorCount': 64, 'pendingRetainedCount': 256,
-    'prelaunchStepCode': 14, 'prelaunchExceptionKindCode': 17,
+    'prelaunchStepCode': 15, 'prelaunchExceptionKindCode': 17,
     'prelaunchExceptionSourceCode': 5, 'prelaunchExceptionLine': 20000,
-    'classificationAttemptCount': 4096, 'classificationReasonCode': 10,
+    'classificationAttemptCount': 4096, 'classificationReasonCode': 11,
     'classificationCensusCount': 128, 'classificationMatchedRoleMask': 15,
     'classificationCurrentRoleCode': 4, 'classificationHistoricalRoleCode': 4,
     'classificationWaitResult': 0xffffffff, 'classificationExitCode': 0xffffffff,
@@ -375,10 +376,12 @@ _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 
     'classificationUnknownImageNameHash0': 0xffffffff, 'classificationUnknownImageNameHash1': 0xffffffff,
     'classificationUnknownImageNameHash2': 0xffffffff, 'classificationUnknownImageNameHash3': 0xffffffff,
     'classificationUnknownImageNameHash4': 0xffffffff, 'classificationUnknownImageNameHash5': 0xffffffff,
-    'classificationUnknownImageNameHash6': 0xffffffff, 'classificationUnknownImageNameHash7': 0xffffffff}
+    'classificationUnknownImageNameHash6': 0xffffffff, 'classificationUnknownImageNameHash7': 0xffffffff,
+    'classificationAuxiliaryCount': 1, 'classificationAuxiliaryCurrent': 1, 'consolePendingHandleCount': 2}
 _CLASSIFICATION_FIELDS = ('classificationAttemptCount', 'classificationReasonCode',
     'classificationCensusCount', 'classificationMatchedRoleMask', 'classificationCurrentRoleCode',
-    'classificationHistoricalRoleCode', 'classificationWaitResult', 'classificationExitCode')
+    'classificationHistoricalRoleCode', 'classificationWaitResult', 'classificationExitCode',
+    'classificationAuxiliaryCount', 'classificationAuxiliaryCurrent')
 _ROLE_CODES = {'host': 1, 'worker': 2, 'engine': 3, 'launcher': 4}
 _UNKNOWN_IMAGE_FIELDS = ('classificationUnknownImageScopeCode',
     'classificationUnknownImageNameHash0', 'classificationUnknownImageNameHash1',
@@ -484,17 +487,22 @@ def validate_public_report(report):
         if reason == 10 and attempt != 4096: raise RunnerFailure(Code.NUMERIC)
         if prep['classificationCensusCount'] is None and (
                 any(prep[key] != 0 for key in ('classificationMatchedRoleMask', 'classificationCurrentRoleCode',
-                    'classificationHistoricalRoleCode')) or
+                    'classificationHistoricalRoleCode', 'classificationAuxiliaryCount', 'classificationAuxiliaryCurrent')) or
                 any(prep[key] is not None for key in ('classificationWaitResult', 'classificationExitCode'))):
             raise RunnerFailure(Code.NUMERIC)
+        aux, current_aux = prep['classificationAuxiliaryCount'], prep['classificationAuxiliaryCurrent']
+        if aux is None or current_aux is None or current_aux > aux: raise RunnerFailure(Code.NUMERIC)
+        if aux and prep['consoleFileVerified'] is not True: raise RunnerFailure(Code.NUMERIC)
+        if current_aux and (prep['classificationCurrentRoleCode'] != 0 or reason not in (0, 10)): raise RunnerFailure(Code.NUMERIC)
         if (prep['classificationCensusCount'] is not None and
-                prep['classificationMatchedRoleMask'].bit_count() > prep['classificationCensusCount']):
+                prep['classificationMatchedRoleMask'].bit_count() + aux > prep['classificationCensusCount']):
             raise RunnerFailure(Code.NUMERIC)
         if reason == 5 and prep['classificationWaitResult'] == 258: raise RunnerFailure(Code.NUMERIC)
         if prep['rolesClassified'] is True:
             mask, current = prep['classificationMatchedRoleMask'], prep['classificationCurrentRoleCode']
-            if (reason != 0 or mask & 7 != 7 or current == 0 or mask & (1 << (current - 1)) == 0 or
-                    prep['classificationCensusCount'] != mask.bit_count() or
+            if (reason != 0 or mask & 7 != 7 or (current == 0 and current_aux != 1) or
+                    (current != 0 and mask & (1 << (current - 1)) == 0) or
+                    prep['classificationCensusCount'] != mask.bit_count() + aux or
                     prep['classificationCount'] != mask.bit_count() or prep['classificationWaitResult'] != 258):
                 raise RunnerFailure(Code.NUMERIC)
     image_witness = tuple(prep[key] for key in _UNKNOWN_IMAGE_FIELDS)
@@ -503,6 +511,22 @@ def validate_public_report(report):
                 prep['classificationReasonCode'] != 6 or prep['classificationCurrentRoleCode'] != 0 or
                 prep['classificationWaitResult'] != 258):
             raise RunnerFailure(Code.NUMERIC)
+    if prep['consoleProfileEnabled'] is not True:
+        if (any(prep[key] is not None for key in ('consoleFileVerified', 'consoleFileReleased',
+                'consoleAuxiliaryBound', 'consoleAuxiliaryExitObserved', 'consoleJobEmptyObserved', 'consolePendingHandleCount')) or
+                prep['classificationAuxiliaryCount'] not in (None, 0) or prep['classificationAuxiliaryCurrent'] not in (None, 0)):
+            raise RunnerFailure(Code.NUMERIC)
+    elif (any(prep[key] is None for key in ('consoleFileVerified', 'consoleFileReleased',
+            'consoleAuxiliaryBound', 'consolePendingHandleCount')) or
+            (prep['classificationAuxiliaryCount'] == 1 and prep['consoleAuxiliaryBound'] is not True) or
+            (prep['consoleAuxiliaryBound'] is False and prep['consoleAuxiliaryExitObserved'] is not None)):
+        raise RunnerFailure(Code.NUMERIC)
+    elif (prep['consolePendingHandleCount'] is not None and prep['consolePendingHandleCount'] > 0 and
+            (report['captureIncomplete'] is not True or report['pendingRetainedCount'] == 0)):
+        raise RunnerFailure(Code.NUMERIC)
+    if prep['consoleFileReleased'] is False and (report['captureIncomplete'] is not True or
+            report['pendingRetainedCount'] == 0 or prep['cleanupComplete'] is True):
+        raise RunnerFailure(Code.NUMERIC)
     if admission['handoffComplete'] is True:
         if (admission['completedWithinDeadline'] is not True or admission['durationKnown'] is not True or
                 prep['started'] is not True or admission['completedQpc'] != prep['startQpc'] or
@@ -558,6 +582,7 @@ class NativeComponents:
         from writer_server_observer_capture import Descriptor, OriginalOwnerBinding, PreparedCapture, NativeBackend
         from writer_server_observer_msaa import HostRuntime, PreparedMsaaHelper
         from writer_server_observer_prepare_native import PreparationNativeApi
+        from writer_server_observer_console import ConsoleProfile
         self.api = NativeApi()
         self.clock = QpcClock(self.api)
         self.prep = PreparationNativeApi(self.api)
@@ -565,6 +590,7 @@ class NativeComponents:
         self.Descriptor, self.Owner, self.Capture = Descriptor, OriginalOwnerBinding, PreparedCapture
         self.Backend, self.Layout, self.HostRuntime, self.Helper = NativeBackend, RuntimeLayout, HostRuntime, PreparedMsaaHelper
         self.environment = build_launch_environment
+        self.ConsoleProfile = ConsoleProfile
         script = Path(__file__).resolve().parents[1] / 'scripts' / 'stage-writer-server-observer.py'
         spec = importlib.util.spec_from_file_location('_writer_observer_stage', script)
         module = importlib.util.module_from_spec(spec)
@@ -614,11 +640,12 @@ _CASE_STARTED = False
 
 
 class DedicatedWriterRunner:
-    def __init__(self, components, *, read_value=None, pause=time.sleep, nonce=None):
+    def __init__(self, components, *, read_value=None, pause=time.sleep, nonce=None, console_profile=None):
         self.c = components
         self.read_value = read_value if read_value is not None else lambda key: os.environ.get(key)
         self.pause, self.nonce, self.attempted = pause, nonce, False
         self._private_pending = []
+        self.console_profile = console_profile
 
     def __repr__(self): return '<DedicatedWriterRunner private>'
 
@@ -638,10 +665,12 @@ class DedicatedWriterRunner:
 
     def _classify(self, launch, images, budget, prep, previous_roles, image_roots):
         api, handles, roles = self.c.api, [], {}
+        console = self.console_profile
         prep['classificationAttemptCount'] += 1
         prep.update(classificationReasonCode=0, classificationCensusCount=None,
             classificationMatchedRoleMask=0, classificationCurrentRoleCode=0,
-            classificationHistoricalRoleCode=0, classificationWaitResult=None, classificationExitCode=None)
+            classificationHistoricalRoleCode=0, classificationWaitResult=None, classificationExitCode=None,
+            classificationAuxiliaryCount=0, classificationAuxiliaryCurrent=0)
         for key in _UNKNOWN_IMAGE_FIELDS: prep[key] = None
         def reject(reason):
             prep['classificationReasonCode'] = reason
@@ -651,10 +680,12 @@ class DedicatedWriterRunner:
             if type(pids) is not tuple or len(pids) > 128 or len(set(pids)) != len(pids): reject(1)
             prep['classificationCensusCount'] = len(pids)
             if launch.identity[0] not in pids: reject(2)
+            if console is not None and console.auxiliary is not None and console.auxiliary.pid not in pids: reject(11)
             for pid in pids:
                 prep.update(classificationCurrentRoleCode=0, classificationHistoricalRoleCode=0,
-                    classificationWaitResult=None, classificationExitCode=None)
-                handle = launch.host if pid == launch.identity[0] else None
+                    classificationWaitResult=None, classificationExitCode=None, classificationAuxiliaryCurrent=0)
+                handle = launch.host if pid == launch.identity[0] else (
+                    console.auxiliary.handle if console is not None and console.auxiliary is not None and console.auxiliary.pid == pid else None)
                 try:
                     if handle is None:
                         budget.check(observation=True)
@@ -664,6 +695,8 @@ class DedicatedWriterRunner:
                     identity = self._checked(budget, api.identity, handle)
                     if (type(identity) is not tuple or len(identity) != 2 or identity[0] != pid or
                             not all(type(v) is int and v > 0 for v in identity)): reject(3)
+                    if console is not None and console.auxiliary is not None and handle == console.auxiliary.handle:
+                        if identity != (console.auxiliary.pid, console.auxiliary.birth): reject(11)
                     # Prior roles are metadata only. No historical value feeds
                     # the current image, liveness, membership or admission gate.
                     prep['classificationHistoricalRoleCode'] = next((_ROLE_CODES[name]
@@ -679,6 +712,9 @@ class DedicatedWriterRunner:
                     role = next((name for name, expected in images.items() if image == expected), None)
                     prep['classificationCurrentRoleCode'] = _ROLE_CODES.get(role, 0)
                     if role is None:
+                        if console is not None and console.matches(image, budget) and console.bind(handle, identity, launch.host):
+                            prep.update(classificationAuxiliaryCount=1, classificationAuxiliaryCurrent=1)
+                            continue
                         prep.update(zip(_UNKNOWN_IMAGE_FIELDS, _unknown_image_observation(image, image_roots)))
                         reject(6)
                     if role in roles: reject(7)
@@ -693,6 +729,7 @@ class DedicatedWriterRunner:
             return roles
         finally:
             for handle in handles:
+                if console is not None and console.auxiliary is not None and handle == console.auxiliary.handle: continue
                 try: closed = api.close(handle) is True
                 except Exception: closed = False
                 if not closed: self._private_pending.append(handle)
@@ -709,6 +746,7 @@ class DedicatedWriterRunner:
                 return validate_public_report(report)
             _CASE_STARTED = True
         prep = report['preparation']
+        console = self.console_profile
         admission = budget = session = launch = cohort = probe = backend = controller = capture = None
         runtime_entered = backend_transferred = controller_closed = False
         if _PENDING_CASES:
@@ -778,6 +816,12 @@ class DedicatedWriterRunner:
                 prep['prelaunchStepCode'] = step
                 images[key] = self._checked(budget, path.resolve, strict=True)
             classification_roots = (layout.program, output, layout.windows / 'System32')
+            if console is not None:
+                prep['consoleProfileEnabled'] = True
+                prep['consoleFileVerified'] = False
+                prep['prelaunchStepCode'] = 15
+                self._checked(budget, console.prepare, layout, budget)
+                prep['consoleFileVerified'] = True
             prep['prelaunchStepCode'] = 11
             budget.check(observation=True)
             controller, identity = c.api.retain_current_controller()
@@ -808,7 +852,12 @@ class DedicatedWriterRunner:
                 prep['classificationReasonCode'] = 10
                 raise RunnerFailure(Code.CLASSIFICATION)
             prep['rolesClassified'] = True
-            cohort = _CohortTap(c.Cohort(c.api, launch, expected_worker=roles['worker'], expected_engine=roles['engine']))
+            options = {}
+            if console is not None:
+                members = tuple(roles.values()) + (() if console.auxiliary is None else ((console.auxiliary.pid, console.auxiliary.birth),))
+                options = dict(auxiliary=console.auxiliary, expected_members=members, require_all_exit=True)
+            cohort = _CohortTap(c.Cohort(c.api, launch, expected_worker=roles['worker'], expected_engine=roles['engine'], **options))
+            if console is not None: console.transfer_to(cohort.cohort)
             self._checked(budget, cohort.cohort.admit)
             prep['cohortAdmitted'] = True
             attachment = None
@@ -845,6 +894,7 @@ class DedicatedWriterRunner:
             def verify_original():
                 active = session.budget if session.budget is not None else budget
                 active.check(observation=True)
+                if console is not None: console.verify_file(active)
                 if c.prep.recheck_attachment(launch, attachment, check=lambda: active.check(observation=True)) is not True:
                     return False
                 sample = c.prep.focus_snapshot(launch, attachment, check=lambda: active.check(observation=True))
@@ -861,7 +911,8 @@ class DedicatedWriterRunner:
             def release_controller():
                 nonlocal controller_closed
                 if (probe.pending_leases() or (cohort.release is not None and not cohort.release.complete) or
-                        (capture is not None and not capture.local_resources_released())):
+                        (capture is not None and not capture.local_resources_released()) or
+                        (console is not None and console.pending_count())):
                     self._private_pending.append((controller, self, probe, cohort)); return False
                 try: controller_closed = c.api.close(controller) is True
                 except Exception: controller_closed = False
@@ -872,7 +923,8 @@ class DedicatedWriterRunner:
             report['stageCode'] = 6; runtime_entered = True; prep['runtimeEntered'] = True
             receipt = session.execute(cohort=cohort, owner=owner, capture_factory=capture_factory,
                 verify_original=verify_original, original_call=probe.invoke_original,
-                external_releases=(probe.close_local, release_controller))
+                external_releases=(probe.close_local, release_controller) if console is None else
+                    (probe.close_local, lambda: console.close_file(session.budget or budget), release_controller))
             report['runtime'] = _section(receipt.numeric_projection(), _RUNTIME_BOOL, _RUNTIME_INT)
             report['captureIncomplete'] = receipt.capture_incomplete
             if capture is not None and capture.saved_snapshot is not None: report['snapshot'] = capture.saved_snapshot
@@ -938,6 +990,20 @@ class DedicatedWriterRunner:
                 self._private_pending.append(cohort)
             if capture is not None and not capture.local_resources_released():
                 self._private_pending.append(capture)
+            if console is not None and prep['consoleProfileEnabled'] is True:
+                active = session.budget if session is not None and session.budget is not None else budget
+                file_released = console.close_file(active)
+                prep['consoleFileReleased'] = file_released
+                prep['consoleAuxiliaryBound'] = console.auxiliary is not None
+                prep['consoleAuxiliaryExitObserved'] = (console.cohort.auxiliary_exit_observed
+                    if console.cohort is not None else console.auxiliary_exit_observed)
+                prep['consoleJobEmptyObserved'] = (console.cohort.job_empty_observed
+                    if console.cohort is not None else console.job_empty_observed)
+                prep['consolePendingHandleCount'] = console.pending_count()
+                if not file_released or console.pending_count():
+                    self._private_pending.append(console)
+                    if not runtime_entered: prep['cleanupComplete'] = False
+                    self._fault(report, Code.CLEANUP)
             if self._private_pending:
                 # Hold the whole original ownership graph; never stringify it.
                 _PENDING_CASES.append((self, launch, cohort, probe, capture, backend, controller, tuple(self._private_pending)))
@@ -962,6 +1028,10 @@ class DedicatedWriterRunner:
             return
         try: prep['disposalRequested'] = call(cohort.dispose_owned) is True if cohort is not None else call(api.terminate_job,launch.job) is True if launch.job is not None else False
         except Exception: errors += 1
+        if cohort is None and self.console_profile is not None:
+            try:
+                if not self.console_profile.retire_untransferred(api, launch, budget, self.pause): errors += 1
+            except BaseException: errors += 1
         # No work cutoff reset. Exit proof is from original retained objects only.
         if cohort is not None:
             if cohort.cohort.admitted:
@@ -1040,7 +1110,8 @@ def main(argv=None):
         inputs = RunnerInputs(*(Path(values[key]) for key in ('output','baseline','artifact','diagnostic_lock','source_lock')),
             args.expected_suite_source_commit, _json(args.prepared_library), Path(args.host_python),
             Path(args.helper_script), Path(args.windows), Path(args.work_root))
-        report = DedicatedWriterRunner(NativeComponents()).execute(inputs)
+        components = NativeComponents()
+        report = DedicatedWriterRunner(components, console_profile=components.ConsoleProfile()).execute(inputs)
     except Exception:
         report['failureCode'] = int(Code.INPUT)
     data = json.dumps(validate_public_report(report), separators=(',',':'), sort_keys=True)+'\n'
