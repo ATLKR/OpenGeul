@@ -99,7 +99,7 @@ def original_normal_oracle_text(normal):
 # One exact reviewed read-only probe block; no production or broad-name fallback.
 BUNDLED_CLANG_PROBE_START = '    - name: Observe the selected VS bundled Clang pair without changing acceptance\n'
 BUNDLED_CLANG_PROBE_AFTER = '    - name: 모든 검증을 통과한 Suite 개발 패키지 전달\n'
-BUNDLED_CLANG_PROBE_SHA256 = '3c881293771e83abb9909e4338c0b577df317cdde969a8af1d77c83acf8160cd'
+BUNDLED_CLANG_PROBE_SHA256 = '51775e3521c251a614b1cf6ff47e1163e0cabab6dfcba31207b27407203d12aa'
 
 
 def _without_bundled_clang_probe(normal):

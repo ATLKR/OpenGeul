@@ -569,6 +569,28 @@ class ReviewedNormalWorkflowTests(unittest.TestCase):
             'Preserve only the closed bundled Clang numeric observation'])
         self.assertTrue(all('continue-on-error' not in step for step in steps[-3:]))
 
+    def test_observation_reuses_exact_calc_discovery_cache_without_fresh_fallback(self):
+        workflow=(ROOT.parent/'.github/workflows/office-suite.yml').read_text()
+        policy=self.policy()
+        steps=policy.load_workflow(ROOT.parent/'.github/workflows/office-suite.yml')['jobs']['windows-suite']['steps']
+        command=steps[-3]['run']
+        option=" --cached-preparation ([IO.Path]::GetFullPath('.work/suite-calc-save/ascii-message-observer/preparation.json'))"
+        self.assertEqual(steps[-3]['id'],'bundled-clang-probe')
+        self.assertEqual(workflow.count('--cached-preparation'),1)
+        self.assertEqual(command.count(option),1)
+        for changed in (self.normal.replace(option,'',1),
+                        self.normal.replace(option,option+option,1),
+                        self.normal.replace(option,option.replace('suite-calc-save','foreign-preparation'),1)):
+            self.assertNotEqual(changed,self.normal)
+            with self.assertRaisesRegex(ValueError,'Reviewed bundled Clang observation delta differs'):
+                self.oracle.original_normal_oracle_text(changed)
+        # Exercise the existing cache rejection contract rather than duplicating
+        # its runtime model. A bad cache must start no fresh discovery/tool query.
+        cached=ProbeTests('test_invalid_cache_does_not_fall_back_to_fresh_discovery')
+        self.addCleanup(cached.doCleanups)
+        cached.setUp()
+        cached.test_invalid_cache_does_not_fall_back_to_fresh_discovery()
+
     def test_exact_tail_removal_restores_independent_full_workflow_hash(self):
         workflow=(ROOT.parent/'.github/workflows/office-suite.yml').read_text()
         def restored_hash(text):

@@ -1286,7 +1286,7 @@ jobs:
         $ErrorActionPreference = 'Stop'
         $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
         $hostPython = (Get-Command python -ErrorAction Stop).Source
-        python -B suite/e2e/vs_bundled_clang_probe.py --suite ([IO.Path]::GetFullPath($env:SUITE_PACKAGE)) --windows $env:SystemRoot --vswhere $vswhere --host-python $hostPython --expected-suite-source-commit $env:GITHUB_SHA --output ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-private')) --report ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-public/report.numeric.json'))
+        python -B suite/e2e/vs_bundled_clang_probe.py --suite ([IO.Path]::GetFullPath($env:SUITE_PACKAGE)) --windows $env:SystemRoot --vswhere $vswhere --host-python $hostPython --expected-suite-source-commit $env:GITHUB_SHA --output ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-private')) --report ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-public/report.numeric.json')) --cached-preparation ([IO.Path]::GetFullPath('.work/suite-calc-save/ascii-message-observer/preparation.json'))
         if ($LASTEXITCODE -ne 0) { throw 'Read-only bundled compiler observation is incomplete; acceptance is unchanged.' }
     - name: Validate the closed bundled Clang observation before upload
       id: bundled-clang-report
