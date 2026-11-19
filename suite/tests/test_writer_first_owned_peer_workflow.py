@@ -9,6 +9,7 @@ from unittest import mock
 
 from ci.policy import load_workflow
 import test_writer_preparation_failure_workflow as original_gate
+from test_writer_owned_caption_workflow import original_bytes as without_caption_profile
 
 BASE = Path(__file__).resolve().parents[2]
 SOURCE = BASE / '.github/workflows/office-suite.yml'
@@ -18,6 +19,7 @@ BASELINE_SHA256 = '62cc32acf7590ef50bf9aba3cde981df3d8b258f8cbcb6505fd3a6c8eac24
 
 
 def original_bytes(source):
+    source = without_caption_profile(source)
     marker = '\n      id: writer-observe\n'
     if source.count(marker) != 1 or source.count('--admission-profile') != 1 or source.count(OPTION) != 1:
         raise ValueError('Exact single observed-child profile required')
@@ -61,8 +63,9 @@ class FirstPeerWorkflow(unittest.TestCase):
         )
         for index, changed in enumerate(mutations):
             self.assertNotEqual(changed, source)
-            with self.subTest(index=index):
-                self.assertNotEqual(hashlib.sha256(original_bytes(changed).encode()).hexdigest(), BASELINE_SHA256)
+            try: accepted = hashlib.sha256(original_bytes(changed).encode()).hexdigest() == BASELINE_SHA256
+            except ValueError: accepted = False
+            with self.subTest(index=index): self.assertFalse(accepted)
 
     def test_legacy_hash_gate_accepts_only_the_exact_observe_opt_in(self):
         source = self.reviewed_source()

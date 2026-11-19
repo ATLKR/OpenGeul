@@ -287,7 +287,7 @@ class Composition(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             obj, inputs, c, _ = setup(folder); report = obj.execute(inputs)
         fields = {'preparationFailureCode': 7, 'preparationFailureKindCode': 18,
-            'preparationFailureSourceCode': 7, 'preparationFailureLine': 20000}
+            'preparationFailureSourceCode': 8, 'preparationFailureLine': 20000}
         self.assertTrue(fields.keys() <= report['preparation'].keys())
         self.assertTrue(all(report['preparation'][key] is None for key in fields))
         import writer_server_observer_prepare_native as prepare

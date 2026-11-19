@@ -5,6 +5,7 @@ from pathlib import Path
 import unittest
 
 from ci.policy import load_workflow
+from test_writer_owned_caption_workflow import original_run as without_caption_profile
 
 BASE = Path(__file__).resolve().parents[2]
 SCOPE = ("always() && !cancelled() && steps.writer-context.outcome == 'success' && steps.writer-stage.outcome == 'success'"
@@ -46,12 +47,15 @@ class PreparationFailureWorkflowTests(unittest.TestCase):
 
     def test_all_original_normal_and_writer_gates_are_unchanged(self):
         original = copy.deepcopy(self.workflow)
+        self.assertEqual(json.dumps(original).count('--activation-profile'), 1)
         original['jobs']['writer-server-observer']['steps'] = [s for s in original['jobs']['writer-server-observer']['steps']
             if s.get('id') not in ('writer-preparation-failure-validate', 'writer-preparation-failure-upload')]
         for step in original['jobs']['writer-server-observer']['steps']:
             if step.get('id') == 'atomic-prepare':
                 step['run'] = step['run'].replace(' --failure-origin-profile budget-deadline-caller-v1', '')
             if step.get('id') == 'writer-observe':
+                try: step['run'] = without_caption_profile(step['run'])
+                except ValueError: self.fail('Exact observed-child caption option required')
                 option = ' --admission-profile owned-peer-before-first-admission-v1'
                 self.assertEqual(step['run'].count(option), 1)
                 self.assertEqual(step['run'].count('--admission-profile'), 1)

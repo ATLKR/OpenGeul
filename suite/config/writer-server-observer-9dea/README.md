@@ -172,3 +172,47 @@ the first startup image encountered. Admission fixes the exact current PID/birth
 set, followed by retained verification and a recheck of the same peer. There is
 no replacement or restart allowance after admission. The default runner remains
 strict, and original runtime, input, cleanup and acceptance requirements remain.
+
+
+### Explicit owned-caption preparation (candidate after T13)
+
+The dedicated runner accepts `--activation-profile one-owned-caption-v1`.
+It is absent by default. The observe phase forwards runner arguments; a future
+reviewed dedicated run must opt in explicitly, alongside the unchanged
+`--admission-profile owned-peer-before-first-admission-v1`. This candidate selects that option exactly once in the dedicated observe
+child; removing it restores every T13 workflow byte. The request protocol is unchanged. It does not represent successful
+product auto-focus, actual Windows verification, or normal acceptance.
+
+After original-cohort admission and exact original-peer binding, the opt-in
+samples readiness first. An already ready or foreground-owned document receives
+no pointer/input. Otherwise it may make one physical caption click only after
+retained generation/Job, exact attachment, document geometry/DPI/visibility,
+both original GUI-thread states, held keys, exposed original-caption hit and
+same cursor point are verified. A selected different owned control, modal-like
+state, covered caption or changed binding fails without input. No foreground
+API, thread-input attachment, key shortcut, second click or late adoption is
+introduced. The old read-only focus loop remains after preparation.
+
+The original preparation interval remains 55 seconds for work and 60 seconds
+for cleanup. Runtime S still starts separately at 25/30 seconds. Native calls
+cannot be preempted: returned effect counts are recorded before the post-call
+clock check. A known one-event prefix permits at most one exact button-up only
+while the original work cutoff and the same ownership/point guards still hold.
+Unknown insertion or lost guards retain pending state; no replay or input after
+the cutoff is allowed. DPI restoration uses only the original cleanup reserve.
+Unknown DPI entry/restore outcomes remain pending. Incomplete preparation cleanup
+retains the original ownership graph and cannot become a clean report.
+
+`captionActivation` is an exact numeric section: seven nullable booleans and ten
+nullable integers. Disabled is entirely null; unobserved initial focus is null.
+Stage codes 1..8 are initial sample, DPI entry, owned geometry, pointer intent,
+primary input intent, primary return, prefix release intent, primary completion.
+Reason 0 means no failure/skip recorded, 1 already ready, 2 already foreground,
+3 preparation failure. The counts preserve actual primary/release insertion;
+unknown native returns leave `inputCount` null. `preparation.activationCount`
+counts the single primary native input call and `preparation.inputCount` counts
+inserted mouse events, including a known prefix release. Pending input/DPI or
+unverified cleanup forces capture-incomplete and global pending retention.
+Preparation failure source 8 names the fixed activation module only; it adds no
+exception content. Original failure codes, runtime/MSAA evidence and all normal
+acceptance flags retain their prior meaning.

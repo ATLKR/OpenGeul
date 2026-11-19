@@ -39,7 +39,7 @@ class PreparationError(RuntimeError):
 def _checked_origin(value):
     if type(value) is not tuple or len(value) != 3: return None
     kind, source, line = value
-    if type(kind) is not int or not 0 <= kind <= 18 or type(source) is not int or not 0 <= source <= 7:
+    if type(kind) is not int or not 0 <= kind <= 18 or type(source) is not int or not 0 <= source <= 8:
         return None
     if source == 0:
         return value if line is None else None
@@ -71,7 +71,7 @@ def failure_origin(error):
             if saved is not None: return saved
         root = Path(__file__).parent
         sources = {str(root / ('writer_server_observer_' + name + '.py')): index for index, name in
-            enumerate(('runner', 'lifecycle', 'msaa', 'win32', 'capture', 'prepare_native', 'cohort'), 1)}
+            enumerate(('runner', 'lifecycle', 'msaa', 'win32', 'capture', 'prepare_native', 'cohort', 'activation'), 1)}
         frame = BaseException.__getattribute__(error, '__traceback__')
         seen, deepest = 0, None
         while frame is not None and seen < 64:

@@ -4,6 +4,7 @@ import contextlib
 import copy
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 from pathlib import Path
@@ -26,6 +27,12 @@ def load(path, name):
 
 
 PROFILE = 'budget-deadline-caller-v1'
+
+
+def _phase_ast(node, *, dump=ast.dump):
+    # Python 3.13 omits empty fields by default; preserve the pinned 3.12 form.
+    options = {'show_empty': True} if 'show_empty' in inspect.signature(dump).parameters else {}
+    return dump(node, include_attributes=False, **options)
 
 
 class BudgetCallerProfileTests(unittest.TestCase):
@@ -80,12 +87,39 @@ class BudgetCallerProfileTests(unittest.TestCase):
         self.assertEqual(result, 0x5A000000 | (1 << 20) | (2 << 16) | 283)
         self.assertEqual(calls, [{'architecture': 'arm64', 'discovery_policy': 'installed-native'}])
 
+    def test_phase_ast_serialization_preserves_legacy_empty_fields_on_both_supported_signatures(self):
+        helper=globals().get('_phase_ast')
+        self.assertTrue(callable(helper),'Stable legacy AST serialization helper is absent')
+        tree=ast.parse((E2E/'writer_server_observer_phase.py').read_bytes())
+        run=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run_phase')
+        calls=[]
+        def old(node,*,include_attributes):
+            calls.append((0,include_attributes))
+            return helper(node)
+        def current(node,*,include_attributes,show_empty=False):
+            calls.append((1,include_attributes,show_empty))
+            return helper(node) if show_empty else 'synthetic-omitted-empty-fields'
+        for dump in (old,current):
+            self.assertEqual(hashlib.sha256(helper(run,dump=dump).encode()).hexdigest(),
+                'd4b19bab5440a50cf58a9a49657ffdb91dd11cc9cf02d8a88200aa3e4b5afecc')
+        self.assertEqual(calls,[(0,False),(1,False,True)])
+
+    def test_stable_phase_ast_still_rejects_an_actual_runtime_budget_mutation(self):
+        helper=globals().get('_phase_ast')
+        self.assertTrue(callable(helper),'Stable legacy AST serialization helper is absent')
+        tree=ast.parse((E2E/'writer_server_observer_phase.py').read_bytes())
+        run=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run_phase')
+        values=[n for n in ast.walk(run) if isinstance(n,ast.Constant) and type(n.value) is int and n.value==1200]
+        self.assertEqual(len(values),1);values[0].value=1201
+        self.assertNotEqual(hashlib.sha256(helper(run).encode()).hexdigest(),
+            'd4b19bab5440a50cf58a9a49657ffdb91dd11cc9cf02d8a88200aa3e4b5afecc')
+
     def test_generic_budget_and_original_phase_lifetime_ast_are_unchanged(self):
         expected = 'b497180853f4684b8caf90f70e7eca1b8a8ff57438cb1784e58823841d4426e1'
         self.assertEqual(hashlib.sha256((E2E / 'ascii_message_preparation.py').read_text().encode()).hexdigest(), expected)
         tree = ast.parse((E2E / 'writer_server_observer_phase.py').read_bytes())
         run = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_phase')
-        self.assertEqual(hashlib.sha256(ast.dump(run, include_attributes=False).encode()).hexdigest(), 'd4b19bab5440a50cf58a9a49657ffdb91dd11cc9cf02d8a88200aa3e4b5afecc')
+        self.assertEqual(hashlib.sha256(_phase_ast(run).encode()).hexdigest(), 'd4b19bab5440a50cf58a9a49657ffdb91dd11cc9cf02d8a88200aa3e4b5afecc')
 
 
 class PreparationFailureReaderTests(unittest.TestCase):

@@ -397,7 +397,7 @@ _PREP_BOOL = ('started admissionVerified launchAttempted launchResumed rolesClas
     'consoleFileReleased consoleAuxiliaryBound consoleAuxiliaryExitObserved consoleJobEmptyObserved').split()
 _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 'frequency': MAX_I64,
     'lastQpc': MAX_I64, 'classificationCount': 128, 'focusSampleCount': 4096, 'activationCount': 1,
-    'inputCount': 0, 'cleanupErrorCount': 64, 'pendingRetainedCount': 256,
+    'inputCount': 2, 'cleanupErrorCount': 64, 'pendingRetainedCount': 256,
     'prelaunchStepCode': 15, 'prelaunchExceptionKindCode': 17,
     'prelaunchExceptionSourceCode': 5, 'prelaunchExceptionLine': 20000,
     'classificationAttemptCount': 4096, 'classificationReasonCode': 11,
@@ -411,7 +411,7 @@ _PREP_INT = {'startQpc': MAX_I64, 'cutoffQpc': MAX_I64, 'deadlineQpc': MAX_I64, 
     'classificationUnknownImageNameHash6': 0xffffffff, 'classificationUnknownImageNameHash7': 0xffffffff,
     'classificationAuxiliaryCount': 1, 'classificationAuxiliaryCurrent': 1, 'consolePendingHandleCount': 2,
     'preparationFailureCode': 7, 'preparationFailureKindCode': 18,
-    'preparationFailureSourceCode': 7, 'preparationFailureLine': 20000,
+    'preparationFailureSourceCode': 8, 'preparationFailureLine': 20000,
     'cohortFailureRoleCode': 5, 'cohortFailureWaitResult': 0xffffffff, 'cohortFailureExitCode': 0xffffffff}
 _CLASSIFICATION_FIELDS = ('classificationAttemptCount', 'classificationReasonCode',
     'classificationCensusCount', 'classificationMatchedRoleMask', 'classificationCurrentRoleCode',
@@ -426,6 +426,8 @@ _UNKNOWN_IMAGE_FIELDS = ('classificationUnknownImageScopeCode',
 _ADMISSION_BOOL=('started consumerAttempted consumerReturned descriptorVerified completedWithinDeadline handoffComplete durationKnown').split()
 _ADMISSION_INT={'startQpc':MAX_I64,'deadlineQpc':MAX_I64,'frequency':MAX_I64,'lastObservedQpc':MAX_I64,
     'completedQpc':MAX_I64,'durationQpc':MAX_I64,'errorCode':13}
+from writer_server_observer_activation import BOOLS as _CAPTION_BOOL, INTS as _CAPTION_INT
+
 _FOCUS_BOOL = ('ready query_succeeded foreground_owned focus_within_child capture_clear menu_clear flags_clear').split()
 _FOCUS_INT = {'sampled_before_qpc':MAX_I64,'sampled_after_qpc':MAX_I64}
 _SNAP_BOOL = ('captureIncomplete admissionClosed captureGateClosed originalBindingMatches '
@@ -474,6 +476,7 @@ def empty_report():
         'runtime': {key: None for key in set(_RUNTIME_BOOL) | _RUNTIME_INT.keys()},
         'editorFocus': {key: None for key in set(_FOCUS_BOOL) | _FOCUS_INT.keys()},
         'msaa': {key: None for key in MSAA_KEYS}, 'snapshot': snapshot, 'pendingRetainedCount': 0, 'caseCount': 1}
+    report['captionActivation']={key:None for key in set(_CAPTION_BOOL)|_CAPTION_INT.keys()}
     report['admission']={key:None for key in set(_ADMISSION_BOOL)|_ADMISSION_INT.keys()}
     report['preparation']['started']=False
     return report
@@ -589,6 +592,47 @@ def validate_public_report(report):
                 not admission['startQpc'] <= admission['completedQpc'] < admission['deadlineQpc'] or
                 admission['durationQpc'] != admission['completedQpc']-admission['startQpc'] or
                 admission['deadlineQpc'] != admission['startQpc']+300*admission['frequency']):raise RunnerFailure(Code.NUMERIC)
+    a = _section(report['captionActivation'], _CAPTION_BOOL, _CAPTION_INT)
+    if native_source == 8 and (report['stageCode'] != 5 or a['enabled'] is not True):
+        raise RunnerFailure(Code.NUMERIC)
+    if a['enabled'] is None:
+        if any(value is not None for value in a.values()) or prep['activationCount'] not in (None,0) or prep['inputCount'] not in (None,0):
+            raise RunnerFailure(Code.NUMERIC)
+    elif a['enabled'] is not True:
+        raise RunnerFailure(Code.NUMERIC)
+    else:
+        if (prep['attachmentBound'] is not True or report['stageCode'] < 5 or
+                any(a[key] is None for key in a if key not in ('insertedInputs','releaseInsertedInputs','foregroundBefore','readyBefore')) or
+                prep['activationCount'] != a['inputCalls'] or
+                a['requestedInputs'] != 2*a['inputCalls'] or
+                a['releaseCalls'] > a['inputCalls'] or
+                a['releaseCalls'] and a['insertedInputs'] != 1 or
+                a['inputCalls'] and a['eligible'] is not True or
+                not a['inputCalls'] and (a['insertedInputs'] != 0 or a['releaseInsertedInputs'] != 0) or
+                a['dpiRestored'] and (not a['dpiEntered'] or a['pendingDpiContext'] != 0) or
+                a['pendingDpiContext'] and not a['dpiEntered'] and a['stageCode'] != 2):
+            raise RunnerFailure(Code.NUMERIC)
+        expected_pending = int(a['inputCalls'] == 1 and (a['insertedInputs'] is None or
+            a['insertedInputs'] == 1 and a['releaseInsertedInputs'] != 1))
+        if (a['stageCode'] == 0 or
+                (a['foregroundBefore'] is None) != (a['readyBefore'] is None) or
+                a['readyBefore'] is True and a['foregroundBefore'] is not True or
+                a['reasonCode'] == 1 and a['readyBefore'] is not True or
+                a['reasonCode'] == 2 and (a['foregroundBefore'] is not True or a['readyBefore'] is not False) or
+                a['foregroundBefore'] is True and (a['inputCalls'] or a['pointerMoves'] or a['dpiEntered']) or
+                a['inputCalls'] and (a['stageCode'] < 5 or a['dpiEntered'] is not True) or
+                not a['releaseCalls'] and a['releaseInsertedInputs'] != 0 or
+                a['pendingInputPrefix'] != expected_pending or
+                a['dpiEntered'] and a['pendingDpiContext'] != int(not a['dpiRestored']) or
+                not a['dpiEntered'] and a['pendingDpiContext'] and (a['stageCode'] != 2 or a['reasonCode'] != 3)):
+            raise RunnerFailure(Code.NUMERIC)
+        known = a['insertedInputs'] is not None and a['releaseInsertedInputs'] is not None
+        total = a['insertedInputs']+a['releaseInsertedInputs'] if known else None
+        if (prep['inputCount'] != total or
+                a['cleanupComplete'] is True and (a['pendingDpiContext'] or a['pendingInputPrefix']) or
+                (a['cleanupComplete'] is not True and (report['pendingRetainedCount'] == 0 or
+                    report['captureIncomplete'] is not True or prep['cleanupComplete'] is True))):
+            raise RunnerFailure(Code.NUMERIC)
     _section(report['runtime'], _RUNTIME_BOOL, _RUNTIME_INT)
     _section(report['editorFocus'], _FOCUS_BOOL, _FOCUS_INT)
     project_snapshot(report['snapshot'])
@@ -695,10 +739,14 @@ _CASE_STARTED = False
 
 class DedicatedWriterRunner:
     def __init__(self, components, *, read_value=None, pause=time.sleep, nonce=None, console_profile=None,
-                 admission_profile=None):
+                 admission_profile=None, activation_profile=None):
         if admission_profile is not None and (type(admission_profile) is not str or
                 admission_profile != 'owned-peer-before-first-admission-v1'):
             raise RunnerFailure(Code.INPUT)
+        from writer_server_observer_activation import OwnedCaptionPreparation
+        if activation_profile is not None and type(activation_profile) is not OwnedCaptionPreparation:
+            raise RunnerFailure(Code.INPUT)
+        self.activation_profile = activation_profile
         self.c = components
         self.read_value = read_value if read_value is not None else lambda key: os.environ.get(key)
         self.pause, self.nonce, self.attempted = pause, nonce, False
@@ -946,6 +994,8 @@ class DedicatedWriterRunner:
                 else: raise RunnerFailure(Code.ATTACHMENT)
             prep['attachmentBound'] = True
             report['stageCode'] = 5
+            if self.activation_profile is not None:
+                self.activation_profile.prepare(c,launch,cohort,attachment,budget,report)
             for _ in range(4096):
                 self._checked(budget, cohort.verify, budget)
                 focus = c.prep.focus_snapshot(launch, attachment, check=budget.check)
@@ -1089,6 +1139,10 @@ class DedicatedWriterRunner:
                     self._private_pending.append(console)
                     if not runtime_entered: prep['cleanupComplete'] = False
                     self._fault(report, Code.CLEANUP)
+            if report['captionActivation']['enabled'] is True and report['captionActivation']['cleanupComplete'] is not True:
+                self._private_pending.append(self.activation_profile)
+                prep['cleanupComplete'] = False
+                self._fault(report, Code.CLEANUP)
             if self._private_pending:
                 # Hold the whole original ownership graph; never stringify it.
                 _PENDING_CASES.append((self, launch, cohort, probe, capture, backend, controller, tuple(self._private_pending)))
@@ -1190,6 +1244,7 @@ def main(argv=None):
                     'prepared-library','host-python','helper-script','windows','work-root','report'):
             parser.add_argument('--'+key, required=True)
         parser.add_argument('--admission-profile', choices=('owned-peer-before-first-admission-v1',))
+        parser.add_argument('--activation-profile', choices=('one-owned-caption-v1',))
         args = parser.parse_args(argv)
         output = Path(args.report)
         values = vars(args)
@@ -1197,8 +1252,10 @@ def main(argv=None):
             args.expected_suite_source_commit, _json(args.prepared_library), Path(args.host_python),
             Path(args.helper_script), Path(args.windows), Path(args.work_root))
         components = NativeComponents()
+        from writer_server_observer_activation import OwnedCaptionPreparation
         report = DedicatedWriterRunner(components, console_profile=components.ConsoleProfile(),
-            admission_profile=args.admission_profile).execute(inputs)
+            admission_profile=args.admission_profile,
+            activation_profile=OwnedCaptionPreparation() if args.activation_profile is not None else None).execute(inputs)
     except Exception:
         report['failureCode'] = int(Code.INPUT)
     data = json.dumps(validate_public_report(report), separators=(',',':'), sort_keys=True)+'\n'
