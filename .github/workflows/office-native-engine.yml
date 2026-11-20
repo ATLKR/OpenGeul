@@ -176,3 +176,5 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           compression-level: 0
+
+# Renew the source-built diagnostic input for scoped Windows observations.
