@@ -1,0 +1,641 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Native Windows ARM64 embedded Firebird source-build candidate; not a release qualification",
+  "libreoffice": {
+    "version": "26.8.2.2",
+    "tag": "libreoffice-26.8.2.2",
+    "url": "https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz",
+    "sha256": "f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7",
+    "checksumUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz.sha256"
+  },
+  "firebird": {
+    "version": "3.0.14.33856-0",
+    "url": "https://github.com/FirebirdSQL/firebird/releases/download/v3.0.14/Firebird-3.0.14.33856-0.tar.bz2",
+    "size": 13343169,
+    "sha256": "dce3f26c0f015b3c40f36085f8cc21de58dd568e0f347fdd0fcc7942deda8cff",
+    "checksumSourceUrl": "https://github.com/LibreOffice/core/blob/9dea406ab7695df6325b11b0e19fdca8db4b7276/download.lst"
+  },
+  "sourceHook": {
+    "path": "external/firebird/UnpackedTarball_firebird.mk",
+    "sha256": "8b66548039e92e12ee5ad728a8da3d578633d45b49a5ee8255ffae38663e6555",
+    "afterSha256": "04604071304e918a94e18bf3328b8d08d36834ad18d6db9aae0552b406dacba3"
+  },
+  "portPatch": {
+    "filename": "firebird-windows-arm64.patch",
+    "sha256": "dccca2b44bbb12ce06b75c227fa9a8fb530e5d6607904484d9f75732ae4cd58e",
+    "strip": 0,
+    "appliesAfter": "All pinned LibreOffice Windows Firebird patches"
+  },
+  "upstreamWindowsPatches": [
+    {
+      "filename": "firebird-nbak-difference-file-access.patch.1",
+      "sha256": "bb9f73acbfefcd0f60c29317faa01154414c4b0d203a3bc13d82687690000d4f",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird-nbak-difference-file-access.patch.1"
+    },
+    {
+      "filename": "firebird.disable-ib-util-not-found.patch.1",
+      "sha256": "4128b2633f30e58551b50fc3fffb0962275bc593336ac15cd486b78edd049d11",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird.disable-ib-util-not-found.patch.1"
+    },
+    {
+      "filename": "firebird-Engine12.patch",
+      "sha256": "cc8d8f5f5e08032f549ee793239378771ffa385b694bb07ea58b917008cfefc7",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird-Engine12.patch"
+    },
+    {
+      "filename": "firebird-rpath.patch.0",
+      "sha256": "a22eb256dff3827cd6fd2a891624b3a2d86e6026c2d6d63964159827682a67e6",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird-rpath.patch.0"
+    },
+    {
+      "filename": "wnt-dbgutil.patch",
+      "sha256": "9842aff3949461d79f5bb4066989626629d65fc4a787c7a17728214cdb5365fd",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/wnt-dbgutil.patch"
+    },
+    {
+      "filename": "c++17.patch",
+      "sha256": "a19f105de72fe38bd9b9f98523c4f9382fd86ffa0e03f6e894bd933bc1d4e391",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/c++17.patch"
+    },
+    {
+      "filename": "ubsan.patch",
+      "sha256": "5d2ba079ae1546a3b90d785b24af92333793796431d380dbd4cbac77acba3662",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/ubsan.patch"
+    },
+    {
+      "filename": "asan.patch",
+      "sha256": "470a0f8095c69d23e967d1252bacf78fdcab762a5d201e114b6c59b872f33e60",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/asan.patch"
+    },
+    {
+      "filename": "firebird-tdf125284.patch.1",
+      "sha256": "55961f10507b6c9481bcda177267e0de39e8bad2c1c88768e96f999cc02af9f0",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird-tdf125284.patch.1"
+    },
+    {
+      "filename": "0001-Make-comparison-operator-member-functions-const.patch.1",
+      "sha256": "a91b2fb08e7245b7c6b77177868f6fb844eb53f52501656832bb829f161c5b42",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/0001-Make-comparison-operator-member-functions-const.patch.1"
+    },
+    {
+      "filename": "macos-arm64.patch.0",
+      "sha256": "3a72375919a1ea1892224623c6a20a626e820f3ebab5573732d43a383640e4ec",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/macos-arm64.patch.0"
+    },
+    {
+      "filename": "firebird-btyacc-add-explicit-rule.patch",
+      "sha256": "828f16458990c70e961c3647a17d5d3fbb14d1a4bafcdaec4c6698859e88b23f",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird-btyacc-add-explicit-rule.patch"
+    },
+    {
+      "filename": "firebird-307.patch.1",
+      "sha256": "8c1ec40878a776b92401fe050f237f4132b92209a3be5e2a9a03cec92e7d0187",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird-307.patch.1"
+    },
+    {
+      "filename": "0001-extern-cloop-Missing-dependency-of-BIN_DIR-cloop-on-.patch.1",
+      "sha256": "13b6f3d4583705e8a6fb886062bec6cc47e539a603c0d80742d4f7a5f31b2033",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/0001-extern-cloop-Missing-dependency-of-BIN_DIR-cloop-on-.patch.1"
+    },
+    {
+      "filename": "msvc.patch",
+      "sha256": "45e676ce24e7272a476935d7b56df5876cc1585907ca1aa8da9f08e964273f28",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/msvc.patch"
+    },
+    {
+      "filename": "wnt-per-process-trace-storage.patch.1",
+      "sha256": "a9a7fcfbfdb8e8b1dd8c40bed7ab2c7038c87f91ad53e4218bb1d37fca4e84ec",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/wnt-per-process-trace-storage.patch.1"
+    },
+    {
+      "filename": "Wincompatible-function-pointer-types.patch",
+      "sha256": "c65e5789404a71a911800beed42a477dbb60354ee643879db93db1fa18a38069",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/Wincompatible-function-pointer-types.patch"
+    },
+    {
+      "filename": "0001-Revert-Backported-fix-for-7122-Invalid-state-of-mapp.patch.1",
+      "sha256": "ca25cdd33f1da8e7d491c369b0209f210a571c6d7438f8dd0bdb3976c365e00a",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/0001-Revert-Backported-fix-for-7122-Invalid-state-of-mapp.patch.1"
+    },
+    {
+      "filename": "0001-Revert-Fix-for-most-cases-of-7522-7828.patch.1",
+      "sha256": "0aab74070278e410daccaa8c00ae22a03a39c68d1573b1d15e58cb4c45332e5b",
+      "strip": 1,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/0001-Revert-Fix-for-most-cases-of-7522-7828.patch.1"
+    },
+    {
+      "filename": "mold.patch",
+      "sha256": "c34d532a17b7adb50b4851418b02142ef2df7812e02de1cb660242a26a6ba0c6",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/mold.patch"
+    },
+    {
+      "filename": "c++26.patch",
+      "sha256": "f5909f7e86c56d5b76b17803c8c64f08d9f522520567475fc7619e34fb6e131a",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/c++26.patch"
+    },
+    {
+      "filename": "c++20.patch",
+      "sha256": "a40b1e01e4e4962d1c31afa369efc494c741050e1eb4eda359b7b256cec0b205",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/c++20.patch"
+    },
+    {
+      "filename": "firebird-cygwin-msvc.patch",
+      "sha256": "b987e9fd34286087e13e056480ac5643f619f3983adeddc3cdb9e82fdb552e80",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird-cygwin-msvc.patch"
+    },
+    {
+      "filename": "firebird-cygwin-msvc-warnings.patch",
+      "sha256": "cef159ffb8f05a0727c4d9d8245e48662054926c66d93e617ca711335bd0d6fd",
+      "strip": 0,
+      "url": "https://raw.githubusercontent.com/LibreOffice/core/9dea406ab7695df6325b11b0e19fdca8db4b7276/external/firebird/firebird-cygwin-msvc-warnings.patch"
+    }
+  ],
+  "configureOptions": [
+    "--build=aarch64-pc-cygwin",
+    "--host=aarch64-pc-cygwin",
+    "--with-distro=LibreOfficeWinArm64",
+    "--enable-firebird-sdbc",
+    "--without-system-firebird"
+  ],
+  "nativeBuildVerified": false,
+  "basePersistenceVerified": false,
+  "qualificationRequired": [
+    "Native ARM64 PE and process architecture of Office hosts, Firebird driver, ifbclient.dll, Engine12.dll and intl/fbintl.dll",
+    "Actual ARM64 embedded database create/insert/commit/save/close/reopen; verify persisted rows",
+    "Cross-architecture ODB round-trip with existing x64 runtime and isolated profiles",
+    "Full native module, GUI, Korean IME and lifecycle E2E after source-built runtime assembly"
+  ],
+  "configureSource": {
+    "path": "configure.ac",
+    "sha256": "a29d75952286370eb4b85b97d875b1a030207e17848c583df062eac54d50e3e2",
+    "afterSha256": "7142e6501b03026991aa9075143104031e7cd47f70b2b359e5f8514c40c2bd21"
+  },
+  "configurePatch": {
+    "filename": "libreoffice-enable-arm64-firebird.patch",
+    "sha256": "b279f950f2279372f2efe2b07cc4c7a77d5266f3032897142f1fc1b698db781f",
+    "strip": 0
+  },
+  "zstdSourceLinks": {
+    "path": "external/zstd/UnpackedTarball_zstd.mk",
+    "sha256": "3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909",
+    "afterSha256": "6e2dc4deb222a3bc5385153d51778701fce4eb9f45d7e5cf4c0b3ceea75766d8",
+    "archive": {
+      "filename": "zstd-1.5.7.tar.gz",
+      "size": 2434947,
+      "sha256": "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
+    },
+    "scope": "WNT_AARCH64 exact zstd UnpackedTarget only; all other make children retain strict native links"
+  },
+  "moduleBootstrap": {
+    "path": "bin/unpack-sources",
+    "sha256": "912e88972e7fc7f61eb0b373187d80d2f2ab6e7462378dce979254fa31792715",
+    "afterSha256": "5fbba07a0945cff9a3ce5ae56208c9e5ad7c713701d6ae32cf08950fef0ee6d4",
+    "change": "Exclude git-hooks while linking extracted source modules into the core root"
+  },
+  "msvcPlatformHeader": {
+    "path": "src/include/gen/autoconfig_msvc.h",
+    "archiveBytes": 9408,
+    "archiveSha256": "e9a17ae0ccace8a8153ca6d4e07246fb7273abcfa0945a478eb655bd7de06537",
+    "beforeBytes": 9443,
+    "beforeSha256": "18e03d9c4a7ceabd02bf0ee54cafc9418e63cbe68f99e7a47eade81dea05b0b9",
+    "afterBytes": 9679,
+    "afterSha256": "518774a3f491e134cfd811f97580aae8962eaa82ae6fc1f08bb35e91e104bd8a",
+    "upstreamHeaderPatches": [
+      "firebird-cygwin-msvc-warnings.patch"
+    ],
+    "beforeStage": "After all24 locked upstream Windows patches"
+  },
+  "remoteArchitecture": {
+    "upstreamCommit": "c02ba31824f5cee34cc8966fc44b38e6b395152a",
+    "identity": {
+      "name": "arch_winnt_arm64",
+      "value": 44
+    },
+    "beforeStage": "After all24 locked upstream Windows patches; neither remote header is changed by those patches",
+    "headers": [
+      {
+        "path": "src/remote/remote_def.h",
+        "beforeBytes": 3339,
+        "beforeSha256": "375df38ca00c2aa43f3fff3a28175d77ffb9b79c4aced9d130201308f9840ab3",
+        "afterBytes": 3425,
+        "afterSha256": "753dc75502e0696d20ebeca9def5104836f9d2a97f3e2596cbf01b940b06ebe5",
+        "upstreamUrl": "https://raw.githubusercontent.com/FirebirdSQL/firebird/c02ba31824f5cee34cc8966fc44b38e6b395152a/src/remote/remote_def.h",
+        "upstreamSha256": "b3524addff39577d5760859f88ff0f5d77ca5c79b5a89bc6420d9e8c27d64c35"
+      },
+      {
+        "path": "src/remote/protocol.h",
+        "beforeBytes": 20762,
+        "beforeSha256": "3c98b1e9cd49c10f593b74ca9ae52851cfecd49f973e902d1683f3e5b066aa5b",
+        "afterBytes": 20786,
+        "afterSha256": "6ff9f5138f68403c35c9f11f42c3968ca8389e712ef24ddd87ac58646636e2eb",
+        "upstreamUrl": "https://raw.githubusercontent.com/FirebirdSQL/firebird/c02ba31824f5cee34cc8966fc44b38e6b395152a/src/remote/protocol.h",
+        "upstreamSha256": "47566aa027acb25dcad56d2d2d4618cb401883b906acef9dfca6cc740557bc64"
+      }
+    ]
+  },
+  "commonArchiveRecipe": {
+    "path": "builds/posix/Makefile.in",
+    "beforeStage": "After all 24 locked upstream Windows patches",
+    "beforeSha256": "d6262fca2a4fa052a8f3627fa54a03ce87774d222a1003c3d2ea996fa72b0a36",
+    "afterSha256": "4a6d7da15a8461df25cf494082e83222cadb7d9b0dbffd71cbf5e5aa4bd49180",
+    "condition": "PLATFORM=win32 and CpuType=aarch64",
+    "librarian": "Explicit OPENGEUL_FIREBIRD_LIB from selected COMPATH/bin/Hostarm64/arm64/lib.exe"
+  },
+  "icuBuildPath": {
+    "path": "external/firebird/ExternalProject_firebird.mk",
+    "sha256": "416e06cd2b0210321c29f7ad2e8bece165641baa000ec5df9f6c8d5dc66ec3e4",
+    "afterSha256": "0712b1799ad5e8c0744ca7cbbc60229994e8b9c89fcc3e8adfe91a791f0ce334",
+    "change": "Use one Windows ARM64 loader-path helper call for ICU/source/lib and the actual Firebird Windows client DLL directory bin; other platforms retain the original expression"
+  },
+  "mddsEquality": {
+    "scope": "WNT_AARCH64 only; exact equality body relocated into class with const noexcept(nothrow_eq_comparable_v) unchanged",
+    "archive": {
+      "filename": "mdds-3.2.1.tar.xz",
+      "url": "https://dev-www.libreoffice.org/src/mdds-3.2.1.tar.xz",
+      "size": 648256,
+      "sha256": "673f5bb94612dbba581fc92b99b5e5dd1a53e29496a5dbc936432f6b0687c112"
+    },
+    "recipe": {
+      "path": "external/mdds/UnpackedTarball_mdds.mk",
+      "size": 645,
+      "sha256": "f315da733c95aeeae29656318289fae9a90bff2eab46478972a9d8472a10208a",
+      "afterSha256": "8b2c09e41163c700a87f18681df2d5f2543716448657f8e7850c8d63b50a936a"
+    },
+    "upstreamPatch": {
+      "filename": "gcc-12-silence-use-after-free.patch.1",
+      "sha256": "3411f0814815e06914ea1fbf50c5428af86cbed68c82c0481e09dd62bc8a22c6",
+      "strip": 1
+    },
+    "patch": {
+      "filename": "opengeul-arm64-equality.patch.1",
+      "size": 2362,
+      "sha256": "8bddef54230e818dadee067de53f0ab4971bf5c47764fdd2a05951144c92e8e3",
+      "strip": 1,
+      "appliesAfter": "gcc-12-silence-use-after-free.patch.1"
+    },
+    "headers": [
+      {
+        "path": "include/mdds/flat_segment_tree.hpp",
+        "beforeBytes": 29117,
+        "beforeSha256": "ad0e52219db6c8194cadee54b30cec34f55350c4b587a1bc1764d37701276fa8",
+        "afterBytes": 29794,
+        "afterSha256": "a3bac3e97208286097aa457cf884e0d14cda4e4e572450cb8ca3e09711423ef2"
+      },
+      {
+        "path": "include/mdds/flat_segment_tree_def.inl",
+        "beforeBytes": 27738,
+        "beforeSha256": "5afeba9fed6c8e821bb02c4dc654d29c18dcc23d51bffbc3f48986fc2b67b7b7",
+        "afterBytes": 26993,
+        "afterSha256": "49823be2452093155e6fd0cb3f3baf5f93e85ee0b3ae5746cc10ac299fdf095d"
+      }
+    ],
+    "nodeHeader": {
+      "path": "include/mdds/node.hpp",
+      "afterBytes": 13942,
+      "afterSha256": "6ea1f9515d843c298c4754a235957fae860c66f75411b2541d8929431970f9d8",
+      "stage": "Existing GCC12 patch; equality correction must leave unchanged"
+    }
+  },
+  "pythonNativeHost": {
+    "scope": "WNT_AARCH64 only; late import overrides CLToolPath and LinkToolPath only for Platform ARM64; authentic x64 freeze helper mapping unchanged",
+    "recipe": {
+      "path": "external/python3/ExternalProject_python3.mk",
+      "size": 10931,
+      "sha256": "b31e4d779484a4d153155b025daf8b03678e1984abde4fe5c6c038ccb7d43445",
+      "afterSize": 11076,
+      "afterSha256": "cb6c9996e5ee7be941a23bcce9884e5a4c6458b6a9ce06860d4e2e2a793c93de"
+    },
+    "targets": {
+      "filename": "opengeul-native-arm64-tools.targets",
+      "size": 347,
+      "sha256": "3f993bc582b10890ffdd4ec9bf1ab0d50de064c0889f57687d1f6b4b63fd1e22"
+    },
+    "diagnosticEvidence": {
+      "runId": 39084133996,
+      "candidateFeasible": true,
+      "originalSiteReproduced": false,
+      "causalCorrectionProven": false,
+      "engineQualified": false
+    }
+  },
+  "atlNativePaths": {
+    "scope": "ActiveX recipe only; WNT_AARCH64 and actual GNU make MAKE_HOST ending -cygwin; cygpath -lm quoted native include/library arguments; full atls.lib path bypasses T_LIBS word sorting via recipe-local ldflags; all other profiles and system libraries unchanged",
+    "recipe": {
+      "path": "extensions/Library_so_activex.mk",
+      "size": 1376,
+      "sha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c",
+      "afterSize": 2416,
+      "afterSha256": "454fd02b85c851f035d41731d2e889da03293e67c4e6bcdecb15aeba74caf9d8"
+    },
+    "diagnosticEvidence": {
+      "runId": 39098589144,
+      "nativePathCompileSucceeded": true,
+      "nativePathLinkSucceeded": true,
+      "allConsumedLibraryArchitectureVerified": false,
+      "engineQualified": false
+    }
+  },
+  "harfbuzzNativeMesonPaths": {
+    "scope": "HarfBuzz recipe only; WNT_AARCH64_MSC with OS_FOR_BUILD WNT, real GNU make MAKE_HOST ending -cygwin, equal build/host and no WSL, bundled Windows Python and internal Meson; native executable CC/CXX argv and native per-entry pkg-config list; other profiles/options/global make state unchanged",
+    "recipe": {
+      "path": "external/harfbuzz/ExternalProject_harfbuzz.mk",
+      "size": 3074,
+      "sha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+      "afterSize": 5921,
+      "afterSha256": "f959b6f564baf45777f531b588932b2e969bdfbf21ffdb41630874838415cfcb"
+    },
+    "diagnosticEvidence": {
+      "runId": 39100682885,
+      "sourceOnlyCauseEstablished": true,
+      "originalSiteReproduced": false,
+      "causalCorrectionProven": false,
+      "harfbuzzSetupSucceeded": false,
+      "harfbuzzCompileSucceeded": false,
+      "nativeEngineQualified": false,
+      "windowsControlRunId": null
+    }
+  },
+  "atlConsumerNativePaths": {
+    "scope": "Five remaining current gbuild ATL consumers only; WNT_AARCH64_MSC and real GNU make MAKE_HOST ending -cygwin; recipe-local quoted native include/resource/link arguments; only existing static ATL consumers bypass sorted T_LIBS through their existing ldflags; guarded native emser also forwards only its ATL link arguments to the authentic merged receiver when it is merged; no global ATL state, ActiveX hook, feature graph or other profiles changed",
+    "recipes": [
+      {
+        "path": "embedserv/Library_emser.mk",
+        "size": 1586,
+        "sha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef",
+        "afterSize": 3045,
+        "afterSha256": "b26faf7c9a4bc1141eb59af6690d76cfb14fd5ec11f80aa9814a0518d530abe2"
+      },
+      {
+        "path": "extensions/Library_oleautobridge.mk",
+        "size": 1639,
+        "sha256": "815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8",
+        "afterSize": 2989,
+        "afterSha256": "b369233d2eec07295ca7adeb3e91b9bde2498ed7be96cb296e95e6d27a3b26ed"
+      },
+      {
+        "path": "winaccessibility/Library_uacccom.mk",
+        "size": 2200,
+        "sha256": "d5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062",
+        "afterSize": 3409,
+        "afterSha256": "7ec1fed59fad36368739d5917f46bd74f6560d33460bc73ea9438592356de815"
+      },
+      {
+        "path": "winaccessibility/Library_winaccessibility.mk",
+        "size": 2478,
+        "sha256": "0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4",
+        "afterSize": 3394,
+        "afterSha256": "c99e623c082accaa84efebf254876ee083effc071a1bd8de63ee10bcf6f45e6d"
+      },
+      {
+        "path": "winaccessibility/WinResTarget_uacccom.mk",
+        "size": 803,
+        "sha256": "9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00",
+        "afterSize": 1719,
+        "afterSha256": "58637ccbabc74afb3a84f27526a26b47ffdce1bfa2c814e5d369b84f2b2aca5c"
+      }
+    ]
+  },
+  "winAccFocusOrder": {
+    "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+    "path": "winaccessibility/source/service/AccObjectWinManager.cxx",
+    "beforeBytes": 33670,
+    "sha256": "ab5ed31cac9b262461b1d7e45fbe4a5758fef852a0f51c08c0c6f8e25d1c9be0",
+    "afterBytes": 33670,
+    "afterSha256": "5e5f42a6b448c0d9c70a05bf762e86951565b5a96decaf050399f577dd38332b",
+    "patch": {
+      "filename": "winacc-focus-order.patch",
+      "size": 484,
+      "sha256": "968379ba427ac952c5c7df7f0c37ceabb495310acc224ee5380d51f523fb3ed7",
+      "strip": 1
+    },
+    "sources": [
+      {
+        "path": "winaccessibility/source/service/AccObjectWinManager.cxx",
+        "size": 33670,
+        "sha256": "ab5ed31cac9b262461b1d7e45fbe4a5758fef852a0f51c08c0c6f8e25d1c9be0",
+        "gitBlob": "364f51e19bbcb9f2990dd8ad3313338c20349031",
+        "url": "https://github.com/LibreOffice/core/blob/9dea406ab7695df6325b11b0e19fdca8db4b7276/winaccessibility/source/service/AccObjectWinManager.cxx"
+      },
+      {
+        "path": "winaccessibility/source/service/AccObject.cxx",
+        "size": 26374,
+        "sha256": "e0e27e04a32b28eb3883e3020a037baa858c5014d5b769e86f05417b32d66e8e",
+        "gitBlob": "589af9b18f27d8a0291a39a3f3239476b55ec7e4",
+        "url": "https://github.com/LibreOffice/core/blob/9dea406ab7695df6325b11b0e19fdca8db4b7276/winaccessibility/source/service/AccObject.cxx"
+      },
+      {
+        "path": "winaccessibility/source/UAccCOM/MAccessible.cxx",
+        "size": 90847,
+        "sha256": "98cb71a8b4c65683ad5ab891bff83a2fc6702bbff39c79d27b74d3a405a9ffad",
+        "gitBlob": "288f83904b5d37d1234a284759659b080e407d62",
+        "url": "https://github.com/LibreOffice/core/blob/9dea406ab7695df6325b11b0e19fdca8db4b7276/winaccessibility/source/UAccCOM/MAccessible.cxx"
+      }
+    ],
+    "change": "Clear a different previous focus before publishing the new focus; one moved call only",
+    "scope": "Windows WinAcc common source; current native source workflow builds ARM64 only; x64 build unverified",
+    "sourceRegression": {
+      "exactExtractedMethods": 10,
+      "originalExpectedFailures": [
+        "siblings_A_to_B_returns_B",
+        "deep_common_root_returns_new_leaf"
+      ],
+      "candidateExpectedPassedCases": 10
+    },
+    "initialLazySeedingChanged": false,
+    "currentCiRootCauseConfirmed": false,
+    "nativeBuildVerified": false,
+    "guiVerified": false
+  },
+  "nativeTargets": {
+    "filename": "native-targets.json",
+    "size": 1987,
+    "sha256": "ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc"
+  },
+  "nativeSourceRecipes": {
+    "windows-arm64-v1": {
+      "schemaVersion": 1,
+      "architecture": "arm64",
+      "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+      "hooks": [
+        "arm64Full",
+        "winAccFocusOrder",
+        "flexFatalCompatibility",
+        "dotnetProjectGraph"
+      ]
+    },
+    "windows-x64-common-v2": {
+      "schemaVersion": 1,
+      "architecture": "x64",
+      "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+      "hooks": [
+        "moduleBootstrap",
+        "firebirdLoaderPath",
+        "zstdSourceLinks",
+        "gpgBuildCompilerPath",
+        "atlNativePaths",
+        "harfbuzzNativeMesonPaths",
+        "cliPublisherPolicyPlatform",
+        "x86CompanionStaticRuntime",
+        "winAccFocusOrder",
+        "flexFatalCompatibility",
+        "dotnetProjectGraph"
+      ]
+    }
+  },
+  "windowsFirebirdLoaderPath": {
+    "path": "external/firebird/ExternalProject_firebird.mk",
+    "size": 4655,
+    "sha256": "416e06cd2b0210321c29f7ad2e8bece165641baa000ec5df9f6c8d5dc66ec3e4",
+    "afterSize": 4802,
+    "afterSha256": "c334e30d1dae985edebd4d09aa20a77d00e5f78f772fc93341fdb6b47b3144da",
+    "condition": "WNT_X86_64"
+  },
+  "windowsZstdSourceLinks": {
+    "path": "external/zstd/UnpackedTarball_zstd.mk",
+    "size": 779,
+    "sha256": "3d7f5ddeccdbebdd72cf34e6122e0c1d33093374d27b7779d6a6f81f76d55909",
+    "afterSize": 1078,
+    "afterSha256": "5edd0fe8a6048b6a0183557aa423ba44b047e7655f2235ac84c99791267101fc",
+    "condition": "WNT_X86_64"
+  },
+  "windowsGpgBuildCompilerPath": {
+    "path": "solenv/gbuild/platform/com_MSC_defs.mk",
+    "size": 10340,
+    "sha256": "c52a23dbfb16031731e12ddd44ede7838bd45d4a88d8fa2d316e6a11fc7a2f14",
+    "afterSize": 10480,
+    "afterSha256": "f122cf42e9e7ff28fde1ce01f8233c6250f028c7f57c5cb7a723205a9cb72d6b",
+    "condition": "WNT_X86_64 && BUILD_PLATFORM=%cygwin"
+  },
+  "windowsHarfbuzzNativeMesonPaths": {
+    "path": "external/harfbuzz/ExternalProject_harfbuzz.mk",
+    "size": 3074,
+    "sha256": "2e85211865e09766b1bc8b0664aa152a2e98277a0af572150902786b3ceefc50",
+    "afterSize": 5920,
+    "afterSha256": "5bd3e604b5b253b064a62899efc7231c16c415f5533503e1fcbb1c8b00d68327",
+    "condition": "WNT_X86_64_MSC_WNT && MAKE_HOST=%-cygwin"
+  },
+  "windowsAtlNativePaths": {
+    "condition": "WNT_X86_64_MSC && MAKE_HOST=%-cygwin",
+    "recipes": [
+      {
+        "path": "extensions/Library_so_activex.mk",
+        "size": 1376,
+        "sha256": "7da1d1e5798d99aa895c170e0c419a4b4d3595e38d177f754ddf8fd5b1b7a89c",
+        "afterSize": 2662,
+        "afterSha256": "d18d632cd8b3c412f4a4db7355c4bd34611e8f52c9c7436e7887f32b64ca16bf"
+      },
+      {
+        "path": "embedserv/Library_emser.mk",
+        "size": 1586,
+        "sha256": "00a83fb08008ccd00fb95d16c9bd3c682145393ebfc53a79883f51da6d8b46ef",
+        "afterSize": 3044,
+        "afterSha256": "b28ffc6d984789ce4dece3e075de45d00f895303d58816490918ea37d4e340de"
+      },
+      {
+        "path": "extensions/Library_oleautobridge.mk",
+        "size": 1639,
+        "sha256": "815234d7d766cc2953f7daa5e22cdd1852dfbf55a8793dc3ae1fb9d65532dbc8",
+        "afterSize": 2988,
+        "afterSha256": "ad7789e247b238f017166312bf7a7c5c16c75b8ef01dee2a6835db993a1f3633"
+      },
+      {
+        "path": "winaccessibility/Library_uacccom.mk",
+        "size": 2200,
+        "sha256": "d5175bb77d4df08e02c358d958bb027e753b1aca737f641e05d4cfbf577f7062",
+        "afterSize": 3408,
+        "afterSha256": "d2b826ed5c44957ba7fe633b284877ffef03074f0d8a3b3d1466cc8b4ff8d37f"
+      },
+      {
+        "path": "winaccessibility/Library_winaccessibility.mk",
+        "size": 2478,
+        "sha256": "0d488882bdd0bc4732ebd587c04d5a1199dc787740339a367b50a68b992961e4",
+        "afterSize": 3393,
+        "afterSha256": "b0cc4d11e536fe8ac7351f19ee9ae5724918779062350163db9d0e4d804fe483"
+      },
+      {
+        "path": "winaccessibility/WinResTarget_uacccom.mk",
+        "size": 803,
+        "sha256": "9e0b37d170ea2a47072abf4b2e107189cb0f81b14a7ab0ba2454b383c80d6c00",
+        "afterSize": 1718,
+        "afterSha256": "56894ac63dea26ace6629fbab6b7dcf04e640447b4a173045da2b7761fd265cb"
+      }
+    ]
+  },
+  "windowsCliPublisherPolicyPlatform": {
+    "afterSha256": "6519e9014c32f8323e3501f49d189e6da428b3d3b1f85d7ad96471aedcfd051f",
+    "afterSize": 1119,
+    "condition": "WNT_X86_64",
+    "path": "cli_ure/CliNativeLibrary_cli_cppuhelper.mk",
+    "sha256": "7c776454bb55e541da3a937c8edf44166cb3d3837789b95c0359ec52c8df9bba",
+    "size": 1009
+  },
+  "flexFatalCompatibility": {
+    "path": "connectivity/source/parse/sqlflex.l",
+    "size": 37027,
+    "sha256": "87e66cc9306322ca97c2e4ccbb41b0960fb8857aee4e536bf051c043ebf6c11a",
+    "afterSize": 37161,
+    "afterSha256": "f0890c54e65b52ac31a37a99b20a17fb9e9282985f25fa99ba4718490975200c",
+    "condition": "WNT"
+  },
+  "windowsDotnetProjectGraph": {
+    "schemaVersion": 1,
+    "coreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+    "sources": [
+      {
+        "path": "solenv/gbuild/DotnetLibrary.mk",
+        "size": 5315,
+        "sha256": "f4d2e54af51037267b4027461d7caa6c7a22d3660b99bedeb68f2160d46f476b",
+        "afterSize": 5728,
+        "afterSha256": "cc1e4a62d0d97681b1742ada794af15945e465af86d4d2f54b38b245c8889db3"
+      },
+      {
+        "path": "solenv/gbuild/DotnetTest.mk",
+        "size": 5154,
+        "sha256": "5391ab97bd1a43c71584afd2819499c1fca75ab95a2e35835dc7e10a02813272",
+        "afterSize": 5555,
+        "afterSha256": "09987ad29eb2afac9f2ff7a973bd2b7c32ccd54f286a4281610b5bc89fe939f7"
+      }
+    ]
+  },
+  "windowsX86CompanionStaticRuntime": {
+    "condition": "WNT_X86_64_MSC",
+    "sources": [
+      {
+        "path": "shell/Library_spsupp_x86.mk",
+        "size": 1444,
+        "sha256": "68a515669d5730ef7ce4d23def0c288110b259ba01e89aa3bb3275d33b496c56",
+        "afterSize": 1630,
+        "afterSha256": "5b1c4729b8861e72422ba08cc6d8af5b5adc69c721f5f877991c7c915fe486a3"
+      },
+      {
+        "path": "extensions/Executable_twain32shim.mk",
+        "size": 1235,
+        "sha256": "9dfc8323e9d5af2611a9330fd67d7244a248825af1ce73aa7bd9ecdea1d674c4",
+        "afterSize": 1425,
+        "afterSha256": "f669bc99d15f302aed5a6dd9af94c700ff9a0add204166a1e029d8f9093b1c61"
+      }
+    ]
+  }
+}

@@ -27,10 +27,9 @@ from wack_result import inspect
 from windows_arch import component_artifact_name, require_architecture
 from windows_components import identity, regular, sha, _ancestors
 from mcp_qualification import verify as verify_mcp
+from normal_distribution_budget import ARCH_LIMIT, PAIR_LIMIT
 
 ARCHES = ('x64', 'arm64')
-ARCH_LIMIT = 96 * 1024 * 1024
-PAIR_LIMIT = 192 * 1024 * 1024
 METADATA = ('AppxManifest.xml', 'provenance.json', 'SHA256SUMS.txt', 'rhwp-help.txt')
 WACK = {'install': 'install.json', 'report': 'wack.xml', 'summary': 'wack.json', 'context': 'wack-context.json'}
 COMMON = ('repository', 'commit', 'runId', 'runAttempt', 'version', 'sourceContractSha256')
@@ -94,6 +93,35 @@ def _names(package, provenance):
 
 def _flatten(name, arch):
     return Path(name).stem + '-' + arch + Path(name).suffix if name in METADATA else name
+
+
+def distribution_sizes(package: Path, architecture: str) -> dict[str, int]:
+    """Observe the fixed six normal output roles; never claim qualification."""
+    require_architecture(architecture)
+    _ancestors(package)
+    require(package.is_dir() and not package.is_symlink(), 'Invalid normal distribution directory')
+    paths = list(itertools.islice(package.iterdir(), 7))
+    require(len(paths) == 6, 'Normal distribution must contain exactly six roles')
+    provenance = read_json(package / 'provenance.json')
+    require(set(provenance) == PROVENANCE_KEYS and provenance['architecture'] == architecture
+            and provenance['unsigned'] is True and provenance['storeCertified'] is False,
+            'Normal distribution provenance differs')
+    names = _names(package, provenance)
+    require(len(names) == 6 and {path.name for path in paths} == names,
+            'Normal distribution roles differ')
+    portable = next(name for name in names if name.endswith('portable.zip'))
+    roles = {'msixBytes': provenance['package'], 'portableBytes': portable,
+             'manifestBytes': 'AppxManifest.xml', 'provenanceBytes': 'provenance.json',
+             'checksumBytes': 'SHA256SUMS.txt', 'cliHelpBytes': 'rhwp-help.txt'}
+    result = {'schemaVersion': 1, 'architectureCode': 1 if architecture == 'x64' else 2,
+              'fileCount': 6}
+    for role, name in roles.items():
+        path = package / name
+        regular(path)
+        result[role] = path.stat().st_size
+    total = sum(result[role] for role in roles)
+    result.update(totalBytes=total, capBytes=ARCH_LIMIT, withinBudget=int(total <= ARCH_LIMIT))
+    return result
 
 
 def _wack_names(arch):
@@ -180,7 +208,7 @@ def _architecture(package, wack, arch, expected=None):
                 require(stream_hash(stream) == record['sha256'], 'MSIX runtime과 producer 해시 불일치')
     if arch=='arm64':
         import native_wack_transport
-        _check_wack(wack,package_identity,msix_hash,arch,unsigned=msix,current=current,scope='source',original_files=native_wack_transport._files(package))
+        _check_wack(wack,package_identity,msix_hash,arch,unsigned=msix,current=current,scope='source',original_files=native_wack_transport._files(package,scope='source'))
     else:_check_wack(wack, package_identity, msix_hash, arch)
     installation = read_json(wack / 'install.json')
     proof = verify_mcp(installation.get('mcp'), arch, records['cli']['sha256'],
@@ -333,10 +361,22 @@ def source_fingerprint(directory):
 
 def main():
     parser = argparse.ArgumentParser(description='같은 소스의 x64·ARM64 전체 WACK 통과 원본 결합')
-    command = parser.add_subparsers(dest='command', required=True).add_parser('assemble')
+    commands = parser.add_subparsers(dest='command', required=True)
+    command = commands.add_parser('assemble')
     for name in ('x64', 'arm64', 'wack-x64', 'wack-arm64', 'output'):
         command.add_argument('--' + name, type=Path, required=True)
+    sizes = commands.add_parser('sizes')
+    sizes.add_argument('--package-directory', type=Path, required=True)
+    sizes.add_argument('--architecture', choices=ARCHES, required=True)
     args = parser.parse_args()
+    if args.command == 'sizes':
+        try:
+            result = distribution_sizes(args.package_directory, args.architecture)
+        except Exception:
+            print('Normal distribution size observation failed.', file=sys.stderr)
+            raise SystemExit(1) from None
+        print(json.dumps(result, sort_keys=True))
+        return
     assemble(args.x64, args.arm64, args.wack_x64, args.wack_arm64, args.output)
     print('x64·ARM64 원본 22파일과 전체 WACK PASS를 결합했습니다. Store 승인이 아닙니다.')
 

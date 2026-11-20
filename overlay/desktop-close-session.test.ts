@@ -3,13 +3,14 @@ import { TauriBridge } from './tauri-bridge';
 import { setupDesktopEvents } from './desktop-events';
 
 const boundary = vi.hoisted(() => ({
-  invoke: vi.fn(), message: vi.fn(), save: vi.fn(), fsOpen: vi.fn(),
+  invoke: vi.fn(), message: vi.fn(), save: vi.fn(), fsOpen: vi.fn(), setTitle: vi.fn(async () => undefined),
   handlers: new Map<string, (event: { payload: unknown }) => Promise<void>>(),
   close: null as null | ((event: { preventDefault(): void }) => Promise<void>),
   text: 'visible original document',
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: boundary.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => undefined }));
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ setTitle: boundary.setTitle }) }));
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({
   listen: async (name: string, callback: (event: { payload: unknown }) => Promise<void>) => {
     boundary.handlers.set(name, callback); return () => undefined;
@@ -78,6 +79,8 @@ describe('native close acceptance retains the actual document bridge', () => {
     });
     const bridge = new TauriBridge();
     await bridge.openDocumentByPath('/tmp/retained.hwp');
+    expect(document.title).toBe('retained.hwp - OpenGeul');
+    expect(boundary.setTitle).toHaveBeenLastCalledWith(document.title);
     await setupDesktopEvents({ bridge, dispatcher: { dispatch() {} } as never,
       eventBus: { emit() {} } as never, setMessage: (message) => messages.push(message), onUpdateState() {} });
     return { bridge, sessions, messages, writes, failDestroy: (n: number) => { rejects = n; },

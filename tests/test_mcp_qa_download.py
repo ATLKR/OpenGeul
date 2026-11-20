@@ -126,6 +126,25 @@ class McpQaDownloadTests(unittest.TestCase):
         self.assertEqual({p.relative_to(self.output).as_posix() for p in self.output.rglob('*') if p.is_file()},
                          mcp_fixtures.PAYLOAD_FILES|{mcp_fixtures.MANIFEST})
 
+    def test_scheduled_source_download_verifies_same_run_qa_without_release_authority(self):
+        self.run['event']='schedule';self.refresh()
+        receipt=self.download()
+        self.assertEqual(receipt['run']['event'],'schedule')
+        self.assertEqual(receipt['sourceCommit'],'a'*40)
+        self.assertTrue(mcp_fixtures.verify(self.output,self.binding,self.qa.wasm)['publicQaOnly'])
+        self.assertFalse(receipt['fullSourceQualified'])
+
+    def test_scheduled_source_retains_identity_and_unknown_event_rejection(self):
+        self.run['event']='schedule';self.refresh()
+        for changes in ({'id':124},{'head_sha':'b'*40},{'run_attempt':2},
+                        {'path':'.github/workflows/other.yml'},
+                        {'repository':{'full_name':'else/OpenGeul','private':False}},
+                        {'repository':{'full_name':'ATLKR/OpenGeul','private':True}},
+                        {'status':'completed','conclusion':'failure'},{'event':'issue_comment'}):
+            with self.subTest(changes=changes):
+                original=copy.deepcopy(self.run);self.run.update(changes);self.refresh()
+                self.rejected();self.run=original
+
     def test_current_pr_merge_preserves_source_sha_and_separately_proves_api_head(self):
         self.pr_context();self.download()
         self.assertTrue(mcp_fixtures.verify(self.output,self.binding,self.qa.wasm)['publicQaOnly'])
@@ -320,6 +339,20 @@ class McpQaDownloadTests(unittest.TestCase):
         receipt=self.module().download_store(store,source,'x64',self.output,backend=self.backend,env=env)
         self.assertEqual(receipt['sourceCommit'],'a'*40)
         self.assertTrue(mcp_fixtures.verify(self.output,self.binding,self.qa.wasm)['publicQaOnly'])
+
+    def test_store_rejects_scheduled_source_despite_successful_gates(self):
+        store,source,env=self.store_inputs()
+        self.assertFalse(store_package.release_allowed('ATLKR/OpenGeul','schedule','refs/heads/main'))
+        self.run['event']='schedule';self.refresh()
+        jobs=[{**self.job,'id':index+100,'name':name}
+              for index,name in enumerate(sorted(store_package.REQUIRED_JOBS))]
+        self.responses['actions/runs/123/attempts/1/jobs?per_page=100']={'total_count':len(jobs),'jobs':jobs}
+        module=self.module()
+        with self.assertRaises(ValueError) as caught:
+            module.download_store(store,source,'x64',self.output,backend=self.backend,env=env)
+        self.assertEqual(module._diagnostic(caught.exception)['stage'],'source-gates')
+        self.assertFalse(self.output.exists());self.assertFalse(self.output.with_name('mcp-qa-origin').exists())
+        self.assertNotIn(('zip',67),self.backend.calls)
 
     def test_store_rejects_incomplete_source_missing_gate_tag_and_wrong_source_bytes(self):
         store,source,env=self.store_inputs();module=self.module()

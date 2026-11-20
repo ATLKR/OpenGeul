@@ -43,7 +43,7 @@ JSON은 UTF-8이어야 하며 다음 여섯 필드를 모두 포함해야 합니
 
 ## 검증 범위
 
-`overlay/store-update-tests`는 앱에 복사하는 동일 Rust 정책·HTTP 모듈을 직접 컴파일합니다. 오프라인 잠금 검사에는 이전/같은/새 버전, 잘못된 공개 메타데이터, 크기 제한, 자동 OFF와 진행 중 요청, 버전별 닫기, 수동 오류·재시도, 동의한 고정 Store 링크, 상태/이벤트 순서, 설정 읽기·저장 실패와 실제 reqwest 로컬 HTTP fixture가 포함됩니다. TLS 버전은 rustls 0.23.45와 호환되는 rustls-webpki 0.103.14로 고정하며 reqwest 0.13.2의 기존 ring 경로를 사용합니다. 관련 rustls 보안 공지는 [GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc)입니다.
+`overlay/store-update-tests`는 앱에 복사하는 동일 Rust 정책·HTTP 모듈을 직접 컴파일합니다. 오프라인 잠금 검사에는 이전/같은/새 버전, 잘못된 공개 메타데이터, 크기 제한, 자동 OFF와 진행 중 요청, 버전별 닫기, 수동 오류·재시도, 동의한 고정 Store 링크, 상태/이벤트 순서, 설정 읽기·저장 실패와 실제 reqwest 로컬 HTTP fixture가 포함됩니다. 현재 후보의 TLS 버전은 rustls 0.23.46이며 reqwest 0.13.5의 기존 ring 경로를 사용합니다. 배포 선언과 독립 transport 테스트의 reqwest/tokio/rustls 버전을 함께 고정하고 실제 선택한 registry 체크섬은 각 Cargo.lock으로 확인합니다. 관련 rustls 보안 공지는 [GHSA-2mjx-qc3c-rqvc](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc)입니다.
 
 Linux의 정책·HTTP 검사나 Windows 대상 Cargo 메타데이터 해석만으로 전체 Windows 앱이 검증되었다고 판정하지 않습니다. 완성된 제품의 Windows 빌드, UI, 설치, 실제 배포된 공개 HTTPS endpoint와 Store 제출 검증은 해당 소스에 대한 별도 실제 CI 결과가 필요합니다.
 

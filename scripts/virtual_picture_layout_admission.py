@@ -6,8 +6,8 @@ import stat
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = 'scripts/virtual_picture_layout_admission.py'
 SOURCE_FILES = ('third_party/rhwp/src/document_core/commands/text_editing.rs',)
-INPUT_SOURCE_SHA256 = {'third_party/rhwp/src/document_core/commands/text_editing.rs': '12341f00051996a9f163cdd506a5111c3993eb9f107314272b3c0230f10df62c'}
-OUTPUT_SOURCE_SHA256 = {'third_party/rhwp/src/document_core/commands/text_editing.rs': '2c71b1ef4a3d35ab3387b5713e118fc4e60acbc91b110ae7cd76e4c9c4775755'}
+INPUT_SOURCE_SHA256 = {'third_party/rhwp/src/document_core/commands/text_editing.rs': '5c4d4870ce9ff2a02310bf9c83a178dad800c805989e504900ee6ae12d88550d'}
+OUTPUT_SOURCE_SHA256 = {'third_party/rhwp/src/document_core/commands/text_editing.rs': '9b5b579c5cb34ee0c0c3d8a701dade07e2473d79a3dc5812ba1d3eaaf7b04798'}
 REPLACEMENTS = (('        let section = self.document.sections.get(section_idx)?;\n        let host_index = (0..=para_idx).rev().find(|&index| {', "        let section = self.document.sections.get(section_idx)?;\n        // Only a real body paragraph can participate in this body's picture band.\n        // Public picture setters also address virtual Endnote paragraphs.\n        section.paragraphs.get(para_idx)?;\n        let host_index = (0..=para_idx).rev().find(|&index| {"),)
 
 def sha(path):

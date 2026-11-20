@@ -21,11 +21,11 @@ class NestedLineNavigationProofTests(unittest.TestCase):
 
     def test_pristine_input_and_distinct_output_are_fixed(self):
         self.assertEqual(nav.SOURCE_FILES,(nav.CURSOR,nav.BRIDGE))
-        self.assertEqual(nav.INPUT_SHA256,'42e7aaaea9e4d0da0be8dee9c419c11aa0e241e410e41afc1bc148caa2b28d97')
-        self.assertEqual(nav.OUTPUT_SHA256,'13d1c0d42fb80a54b2979e3ce98200eea5dd26afacd7a62eb809c3008e93fb20')
+        self.assertEqual(nav.INPUT_SHA256,'cf9f71bad5b9ec16e4b960ef02a2d913796c66ccadcd76e9c8a9b6e774d1ed58')
+        self.assertEqual(nav.OUTPUT_SHA256,'2bf6183f9adcd6f742125afb633214c305718ba08a84db6926ef4993591500ac')
         self.assertNotEqual(nav.INPUT_SHA256,nav.OUTPUT_SHA256)
-        self.assertEqual(nav.INPUT_SOURCE_SHA256[nav.BRIDGE],'f50c0ed04e6bf0953b6f41140ffb9d00a874550c8453894314fc865828e93c8e')
-        self.assertEqual(nav.OUTPUT_SOURCE_SHA256[nav.BRIDGE],'d16842afa5e37f673d587614c7b02094bb8f082280d347152ec8cf0b522f23a3')
+        self.assertEqual(nav.INPUT_SOURCE_SHA256[nav.BRIDGE],'49f08ccd2ee748fbe1989cdfa7cb453b7852b65d559b581c048fd4602adecb66')
+        self.assertEqual(nav.OUTPUT_SOURCE_SHA256[nav.BRIDGE],'3be41fa9c9aa8c65204185e625f84f50f5d39ff3a9761d4956286302953ca0db')
 
     def test_coordinated_unreviewed_or_legacy_after_bytes_cannot_qualify(self):
         for value in ('0'*64,nav.INPUT_SHA256):

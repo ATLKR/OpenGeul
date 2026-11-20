@@ -45,6 +45,18 @@ class PolicyTests(unittest.TestCase):
     def test_pinned_unapproved_action_is_not_implicitly_free(self):
         self.workflow['jobs']['test']['steps']=[{'uses':'external/paid-runner@'+'a'*40}]
         with self.assertRaises(ValueError):self.p.audit(self.workflow)
+    def test_exact_dotnet_sdk_setup_is_allowed_without_package_cache(self):
+        pin='0f4a354dd5547a28c70b7853dbd95d5b67886e73'
+        self.assertEqual(pin,self.p.ACTIONS.get('actions/setup-dotnet'))
+        self.workflow['jobs']['test']['steps']=[{'uses':'actions/setup-dotnet@'+pin,
+            'with':{'dotnet-version':'10.0.404','architecture':'arm64','skip-lts-prepass':True}}]
+        self.assertTrue(self.p.audit(self.workflow))
+    def test_dotnet_setup_keeps_exact_pin_and_no_cache_requirements(self):
+        pin='0f4a354dd5547a28c70b7853dbd95d5b67886e73'
+        for version,args in [('v6',{}),('a'*40,{}),(pin,{'cache':False}),(pin,{'cache':True})]:
+            self.workflow['jobs']['test']['steps']=[{'uses':'actions/setup-dotnet@'+version,'with':args}]
+            with self.subTest(version=version,args=args),self.assertRaises(ValueError):
+                self.p.audit(self.workflow)
     def test_moving_action_versions_fail(self):
         self.workflow['jobs']['test']['steps']=[{'uses':'actions/checkout@v6'}]
         with self.assertRaises(ValueError):self.p.audit(self.workflow)

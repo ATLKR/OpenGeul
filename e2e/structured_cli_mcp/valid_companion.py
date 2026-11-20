@@ -591,7 +591,7 @@ def main():
     shutil.copyfile(args.binding,args.out/'input-binding.json')
     proof={'formatVersion':1,'context':'portable','scope':SCOPE,'passed':False,'skippedCases':0,'architecture':args.architecture,**binding,'cliSha256':args.expected_sha256,'helperSha256':helper_map,'inputSha256':hashes,'generationSha256':hashes['generation.json'],'generatorSha256':generator_hash,'transportArtifact':{'path':'input-binding.json','sha256':digest(args.out/'input-binding.json'),'bytes':(args.out/'input-binding.json').stat().st_size},'preflight':[],'preflightArtifact':None,'_evidenceRoot':str(args.out.resolve()),'server':None,'worker':None,'setup':[],'cases':[],'framesSent':0,'framesReceived':0,'serverExited':False,'parentInstalled33Unchanged':True,'qaInventoryUnchanged':True,'fullFeatureCoverage':False}
     with tempfile.TemporaryDirectory(prefix='opengeul-structured-') as temp:
-        work=Path(temp);exe=private_runtime(args.exe.resolve(),work/'runtime');client=None
+        work=Path(temp);exe=private_runtime(args.exe.resolve(),work/'runtime',expected_sha256=args.expected_sha256);client=None
         try:
             client=McpClient([str(exe),'mcp-serve'],cwd=work);native=verify_process(client.process.pid,exe,args.architecture,handle=int(client.process._handle));watch=WorkerWatch(native,exe,args.expected_sha256,args.architecture,context='portable');native['createdFileTime']=watch.created(int(client.process._handle));proof['server']=native
             for name,method,params in (('initialize','initialize',{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'OpenGeul structured companion','version':'1'}}),('tools-list','tools/list',{})):
@@ -625,4 +625,17 @@ def main():
 
 if __name__=='__main__':
     try:main()
-    except Exception:raise SystemExit('Structured portable companion failed; no installed/full-feature success is claimed.') from None
+    except Exception as error:
+        try:
+            from bounded_failure_observer import emit_failure
+            source_codes = [(sys._getframe().f_code, 2), (main.__code__, 2), (require.__code__, 2)]
+            mcp_source = sys.modules.get('mcp_worker')
+            if mcp_source is not None:
+                source_codes.append((mcp_source.private_runtime.__code__, 1))
+            native_source = sys.modules.get('native_architecture')
+            if native_source is not None:
+                source_codes.extend(((native_source.verify_executable.__code__, 3), (native_source.verify_host.__code__, 3)))
+            emit_failure(error, 2, tuple(source_codes))
+        except BaseException:
+            pass
+        raise SystemExit('Structured portable companion failed; no installed/full-feature success is claimed.') from None

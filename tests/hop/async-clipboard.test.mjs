@@ -12,6 +12,7 @@ await native.default({module_or_path:readFileSync(resolve(hop,'apps/studio-host/
 const {WasmBridge}=await upstream('core/wasm-bridge.ts');
 const {EventBus}=await upstream('core/event-bus.ts');
 const {InputHandler}=await upstream('engine/input-handler.ts');
+const {ImeNavigationGuard}=await upstream('engine/ime-navigation-guard.ts');
 const {CursorState}=await upstream('engine/cursor.ts');
 const {CommandHistory}=await upstream('engine/history.ts');
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
@@ -36,7 +37,7 @@ function harness(t) {
     active:true,editMode:'edit',wasm,cursor,history,eventBus,
     viewportManager:{getZoom:()=>1},selectionRenderer:renderer,
     caret:renderer,fieldMarker:renderer,caretLayoutReveal:{requestFor:noop,clear:noop},
-    deferredPaginationRunner:{cancel:noop},_cellBlockLetterImeGuard:{reset:noop},
+    deferredPaginationRunner:{cancel:noop},_cellBlockLetterImeGuard:{reset:noop},_imeNavigationGuard:new ImeNavigationGuard(),
     _compositionFragment:null,textarea:{value:'',removeEventListener:noop,remove:noop,focus:noop},
     container:{removeEventListener:noop},rawTextMutationEffects:{reset:noop},
     flushDeferredPaginationIfNeeded:noop,cancelDeferredPaginationFlush:noop,
@@ -58,13 +59,14 @@ function harness(t) {
 }
 
 function browser(t,{decode=Promise.resolve(),rtfRead}={}) {
-  const originals=new Map(['Image','FileReader','document'].map((key)=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+  const originals=new Map(['Image','FileReader','document','window'].map((key)=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
   globalThis.Image=class {naturalWidth=1;naturalHeight=1;decode(){return decode;}};
   globalThis.FileReader=class {
     readAsDataURL(){const finish=()=>{this.result=`data:image/png;base64,${png.toString('base64')}`;this.onload();};
       if(rtfRead)rtfRead.promise.then(finish);else queueMicrotask(finish);}
   };
-  globalThis.document={removeEventListener(){}};
+  globalThis.window=new EventTarget();
+  globalThis.document={querySelector:()=>null,removeEventListener(){}};
   const create=URL.createObjectURL,revoke=URL.revokeObjectURL;
   let created=0,revoked=0;
   URL.createObjectURL=()=>{created++;return 'blob:clipboard-regression';};

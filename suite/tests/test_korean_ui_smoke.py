@@ -1,0 +1,1218 @@
+import importlib.util
+from contextlib import ExitStack, redirect_stdout
+from copy import deepcopy
+import io
+import json
+import os
+import subprocess
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace as NS
+import unittest
+from unittest.mock import patch
+
+E2E = Path(__file__).resolve().parents[1] / 'e2e'
+sys.path.insert(0, str(E2E))
+try:
+    import korean_ui_smoke as smoke
+except ImportError:
+    smoke = None
+
+
+def tab(name, index, *, role=38, parent=None):
+    path = [0, 1] if parent is None else parent
+    return dict(name=name, index=index, role=role, visible=True,
+                indexPath=path+[index], parentIndexPath=path,
+                liveParentVerified=True, liveIndexReadbackVerified=True,
+                rectangle=[20+index*70, 20, 80+index*70, 40])
+
+
+def snapshot(controls):
+    return dict(kind='owned-native-vcl-accessibility', roleNamespace='com.sun.star.accessibility.AccessibleRole',
+                roleConstants={'PAGE_TAB':38, 'PAGE_TAB_LIST':39}, officePid=200, childHwnd=123,
+                module='writer', loadedModuleService='com.sun.star.text.TextDocument',
+                containerHwnd=123, sameLiveFrameVerified=True, ownedPeerAccessibleParentAbsent=True,
+                nativeNotebookbarBinding=dict(ownedPeerWidgetVerified=True,targetWidgetType='TabControlUIObject',
+                                             targetWidgetId='ContextContainer',nextFocusMatchesTargetWidget=True,
+                                             focusRestored=True,selectionUnchanged=True),
+                rootRectangle=[0, 0, 1024, 768], boundsDpiContext='per-monitor-v2', truncated=False,
+                witness=dict(retainedProcessHandle=True,imageVerified=True,creationTimeVerified=True,
+                             hwndVerifiedBefore=True,hwndVerifiedAfter=True,boundsDpiContextRestored=True),
+                tabContainers=[dict(role=39,visible=True,sameLiveParentVerified=True,
+                                    distinctLiveObjectsVerified=True,indexReadbackVerified=True,
+                                    rectangle=[0,10,1024,150],indexPath=[0,1],tabs=controls)])
+
+
+class KoreanUiEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.assertIsNotNone(smoke, 'The bounded native Korean UI collector is missing')
+
+    def test_actual_korean_tab_items_in_same_native_tab_control_pass(self):
+        evidence = smoke.require_korean_tabs(snapshot([tab('홈', 1), tab('삽입', 2)]), 200, 123)
+        self.assertEqual(evidence['koreanTabLabels'], ['삽입', '홈'])
+        self.assertTrue(evidence['koreanUiVerified'])
+        self.assertTrue(evidence['tabbedUiVerified'])
+
+    def test_english_native_tabs_plus_korean_shell_file_menu_fail(self):
+        controls = [tab('Home', 1), tab('Insert', 2), tab('파일', 3, role=35)]
+        with self.assertRaises(AssertionError):
+            smoke.require_korean_tabs(snapshot(controls), 200, 123)
+
+    def test_korean_menus_and_document_text_do_not_prove_a_tabbed_ui(self):
+        for role in (35, 61, 43, 13, 37):
+            with self.subTest(role=role), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(snapshot([tab('홈', 1, role=role),
+                                                    tab('삽입', 2, role=role)]), 200, 123)
+
+    def test_config_without_accessible_controls_does_not_prove_language(self):
+        data = snapshot([])
+        data.update(UILocale='ko', ActiveWriter='notebookbar.ui')
+        with self.assertRaises(AssertionError):
+            smoke.require_korean_tabs(data, 200, 123)
+
+    def test_tabs_must_be_visible_and_share_an_owned_tab_container(self):
+        bad = [tab('홈', 1), tab('삽입', 2, parent=[0,2])]
+        with self.assertRaises(AssertionError):
+            smoke.require_korean_tabs(snapshot(bad), 200, 123)
+        bad[1] = tab('삽입', 2)
+        bad[1]['visible'] = False
+        with self.assertRaises(AssertionError):
+            smoke.require_korean_tabs(snapshot(bad), 200, 123)
+
+    def test_native_ownership_cannot_be_replaced_by_matching_labels(self):
+        for key in ('childHwnd', 'officePid', 'containerHwnd'):
+            data = snapshot([tab('홈', 1), tab('삽입', 2)])
+            data[key] += 1
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(data, 200, 123)
+
+    def test_mnemonic_markup_is_removed_without_accepting_label_substrings(self):
+        self.assertEqual(smoke.normalize_label('삽입(~I)'), '삽입')
+        self.assertEqual(smoke.normalize_label('~홈'), '홈')
+        with self.assertRaises(AssertionError):
+            smoke.require_korean_tabs(snapshot([tab('홈페이지', 1), tab('삽입', 2)]), 200, 123)
+
+    def test_unrendered_contextual_tabs_do_not_replace_or_hide_rendered_required_tabs(self):
+        hidden = tab('문맥별 도구', 3)
+        hidden['rectangle'] = [0, 0, 0, 0]  # VCL may retain SHOWING on an unused context page.
+        evidence = smoke.require_korean_tabs(snapshot([tab('홈', 1), tab('삽입', 2), hidden]), 200, 123)
+        self.assertTrue(evidence['koreanUiVerified'])
+
+    def test_duplicate_actual_indices_cannot_claim_distinct_native_tabs(self):
+        controls = [tab('홈', 1), tab('삽입', 1)]
+        with self.assertRaises(AssertionError):
+            smoke.require_korean_tabs(snapshot(controls), 200, 123)
+
+    def test_live_parent_object_and_index_readback_are_required(self):
+        baseline = snapshot([tab('홈', 1), tab('삽입', 2)])
+        for key in ('sameLiveParentVerified', 'distinctLiveObjectsVerified', 'indexReadbackVerified'):
+            data = deepcopy(baseline)
+            data['tabContainers'][0][key] = False
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(data, 200, 123)
+        for key in ('liveParentVerified', 'liveIndexReadbackVerified'):
+            data = deepcopy(baseline)
+            data['tabContainers'][0]['tabs'][1][key] = False
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(data, 200, 123)
+
+    def test_retained_process_image_creation_and_window_witnesses_are_required(self):
+        for key in ('retainedProcessHandle', 'imageVerified', 'creationTimeVerified', 'hwndVerifiedBefore', 'hwndVerifiedAfter'):
+            data = snapshot([tab('홈', 1), tab('삽입', 2)])
+            data['witness'][key] = False
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(data, 200, 123)
+
+    def test_wrong_frame_module_or_role_namespace_cannot_supply_korean_text(self):
+        baseline = snapshot([tab('홈', 1), tab('삽입', 2)])
+        for change in ({'loadedModuleService': 'com.sun.star.sheet.SpreadsheetDocument'},
+                       {'sameLiveFrameVerified': False},
+                       {'roleNamespace': 'Microsoft.ActiveAccessibility'},
+                       {'roleConstants': {'PAGE_TAB':37, 'PAGE_TAB_LIST':60}}):
+            data = deepcopy(baseline)
+            data.update(change)
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(data, 200, 123)
+
+    def test_foreign_widget_focus_or_unrestored_selection_cannot_bind_native_tabs(self):
+        for key, value in (('ownedPeerWidgetVerified', False), ('targetWidgetType', 'ButtonUIObject'),
+                           ('targetWidgetId', 'foreign frame'), ('nextFocusMatchesTargetWidget', False),
+                           ('focusRestored', False), ('selectionUnchanged', False)):
+            data = snapshot([tab('홈', 1), tab('삽입', 2)])
+            data['nativeNotebookbarBinding'][key] = value
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(data, 200, 123)
+
+    def test_required_tab_outside_owned_native_window_cannot_qualify(self):
+        controls = [tab('홈', 1), tab('삽입', 2)]
+        controls[1]['rectangle'] = [1500, 0, 1600, 20]
+        with self.assertRaises(AssertionError):
+            smoke.require_korean_tabs(snapshot(controls), 200, 123)
+
+    def test_rendered_bounds_require_verified_scoped_physical_pixel_context(self):
+        for missing in ('boundsDpiContext', 'boundsDpiContextRestored'):
+            data = snapshot([tab('홈', 1), tab('삽입', 2)])
+            if missing == 'boundsDpiContext':
+                data.pop(missing)
+            else:
+                data['witness'][missing] = False
+            with self.subTest(missing=missing), self.assertRaises(AssertionError):
+                smoke.require_korean_tabs(data, 200, 123)
+
+
+class PrivateNativeTransportTests(unittest.TestCase):
+    def test_exact_owned_gui_pipe_is_accepted_without_publishing_it(self):
+        value = 'OpenGeul_' + 'a'*32
+        args = ['soffice.bin', '--invisible', '--accept=pipe,name='+value+';urp;StarOffice.ServiceManager']
+        self.assertEqual(value, smoke.accessible.private_pipe(args))
+
+    def test_public_socket_malformed_duplicate_or_headless_transport_is_rejected(self):
+        valid = '--accept=pipe,name=OpenGeul_'+'a'*32+';urp;StarOffice.ServiceManager'
+        for args in (['--invisible', '--accept=socket,host=localhost,port=2002;urp;StarOffice.ServiceManager'],
+                     ['--invisible', valid, valid], ['--headless', valid],
+                     ['--invisible', valid.replace('a'*32, 'foreign')]):
+            with self.subTest(args=args), self.assertRaises(AssertionError):
+                smoke.accessible.private_pipe(args)
+
+
+def numeric_environment():
+    return dict(OPENGEUL_SUITE_NUMERIC_NOTICE='1', OPENGEUL_SUITE_NOTICE_SCOPE='4',
+        GITHUB_ACTIONS='true', GITHUB_REPOSITORY='ATLKR/OpenGeul', GITHUB_JOB='windows-suite',
+        GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/work/opengeul-office-arm64',
+        GITHUB_ACTOR='ATLKR', GITHUB_ACTOR_ID='65988341', GITHUB_RUN_ID='123',
+        GITHUB_RUN_ATTEMPT='1', GITHUB_SHA='a'*40, GITHUB_WORKFLOW_SHA='a'*40, RUNNER_ARCH='ARM64')
+
+
+class NativeChildFailureTests(unittest.TestCase):
+    def request(self):
+        return dict(childHwnd=123, officePid=200, creationTime=300, module='writer',
+            expectedImage='synthetic/Office/program/soffice.bin', pipe='OpenGeul_'+'a'*32,
+            snapshot='synthetic-snapshot.json')
+
+    def payload(self):
+        return dict(schemaVersion=1, officePid=200, officeCreationTime=300, childHwnd=123,
+            moduleCode=1, ownershipStage=2,
+            failure=dict(captured=1, exceptionCode=7, fileCode=19, line=321),
+            ownedFrames=[[19, 445], [19, 321]])
+
+    def feature(self, name):
+        method = getattr(smoke.accessible, name, None)
+        self.assertTrue(callable(method), 'Same-child closed numeric failure forwarding is required: '+name)
+        return method
+
+    def capture(self, output, *, join='valid', close_error=None):
+        events, calls = [], []
+        class Result:
+            returncode = 1
+            stdout = output
+            @property
+            def stderr(self):
+                raise AssertionError('Raw stderr must not be read')
+        def exited(seconds):
+            events.append(('exited', seconds))
+            if join == 'error': raise OSError('synthetic join unavailable')
+            return join == 'exited'
+        def close():
+            events.append('close')
+            if close_error is not None: raise close_error
+        retained = NS(creation_time=300, exited=exited, close=close)
+        def is_window(hwnd):
+            events.append(('window', hwnd));return join != 'window'
+        def pid(hwnd):
+            events.append(('pid', hwnd));return 201 if join == 'pid' else 200
+        api = NS(user=NS(IsWindow=is_window), pid=pid)
+        def run(command, **kwargs):
+            calls.append((command, kwargs));return Result()
+        caught = None
+        with patch.object(smoke.accessible, '_owned_process', return_value=(api, retained)), \
+             patch.object(smoke.accessible, '_command_line', return_value=['--invisible',
+                 '--accept=pipe,name=OpenGeul_'+'a'*32+';urp;StarOffice.ServiceManager']), \
+             patch.object(smoke.accessible.subprocess, 'run', side_effect=run):
+            try:
+                smoke.accessible.capture_bounded(Path('/synthetic'), 123, 200, 300,
+                    'writer', Path('/synthetic-evidence.json'))
+            except BaseException as exc: caught = exc
+        return caught, events, calls
+
+    def test_nonzero_child_keeps_original_assertion_after_one_join_and_one_handle_close(self):
+        caught, events, calls = self.capture(json.dumps(self.payload()))
+        self.assertIs(type(caught), AssertionError)
+        self.assertEqual(str(caught), 'Owned native accessibility collector failed: ')
+        self.assertEqual(vars(caught).get('_opengeul_native_accessibility_failure'), self.payload())
+        self.assertEqual(events, [('exited', 0), ('window', 123), ('pid', 123), 'close'])
+        self.assertEqual(len(calls), 1)
+        command, options = calls[0]
+        self.assertEqual(command[0], str(Path('/synthetic')/'Office/program/python.exe'))
+        self.assertEqual(command[2:], ['--collect-live'])
+        self.assertNotIn('capture_output', options)
+        self.assertEqual({key: options[key] for key in ('timeout', 'shell', 'stdout', 'stderr', 'text', 'encoding')},
+            dict(timeout=45, shell=False, stdout=-1, stderr=-3, text=True, encoding='utf-8'))
+        request = json.loads(options['input'])
+        self.assertEqual(set(request), {'childHwnd','officePid','creationTime','expectedImage','module','pipe','snapshot'})
+
+    def test_join_mismatch_or_error_discards_child_metadata_without_replacing_original_failure(self):
+        for join in ('exited', 'window', 'pid', 'error'):
+            with self.subTest(join=join):
+                caught, events, calls = self.capture(json.dumps(self.payload()), join=join)
+                self.assertIs(type(caught), AssertionError)
+                self.assertEqual(str(caught), 'Owned native accessibility collector failed: ')
+                self.assertNotIn('_opengeul_native_accessibility_failure', vars(caught))
+                self.assertEqual(events.count('close'), 1)
+                self.assertEqual(len(calls), 1)
+
+    def test_existing_handle_close_failure_keeps_its_original_priority(self):
+        error = OSError('synthetic original handle close failure')
+        caught, events, calls = self.capture(json.dumps(self.payload()), close_error=error)
+        self.assertIs(caught, error)
+        self.assertEqual(events[-1], 'close');self.assertEqual(len(calls), 1)
+        self.assertNotIn('_opengeul_native_accessibility_failure', vars(caught))
+
+    def test_decoder_drops_incomplete_noisy_unknown_or_foreign_records(self):
+        decode = self.feature('_decode_child_failure')
+        valid = self.payload()
+        self.assertEqual(decode(json.dumps(valid), self.request()), valid)
+        bad = [json.dumps(valid)[:-1], json.dumps(valid)+'\nPRIVATE', '', '[]',
+            json.dumps(valid).replace('"schemaVersion": 1', '"schemaVersion": 1, "schemaVersion": 1'),
+            ' '*1025, '\ud800',
+            json.dumps(valid|{'extra':'PRIVATE'}), json.dumps(valid|{'schemaVersion':True}),
+            json.dumps(valid|{'officePid':True}), json.dumps(valid|{'officePid':201}),
+            json.dumps(valid|{'officeCreationTime':301}), json.dumps(valid|{'childHwnd':124}),
+            json.dumps(valid|{'moduleCode':2}), json.dumps(valid|{'ownershipStage':3}),
+            json.dumps(valid|{'ownershipStage':True}), json.dumps(valid|{'ownedFrames':[]}),
+            json.dumps(valid|{'ownedFrames':[[19,320]]}), json.dumps(valid|{'ownedFrames':[[19,321]]*9}),
+            json.dumps(valid|{'ownedFrames':[[True,321]]}), json.dumps(valid|{'ownedFrames':[[999,321]]}),
+            json.dumps(valid|{'ownedFrames':[[19,0]]}), json.dumps(valid|{'ownedFrames':[[19,True]]}),
+            json.dumps(valid|{'failure':valid['failure']|{'fileCode':0,'line':0}}),
+            json.dumps(valid|{'failure':valid['failure']|{'line':float('nan')}}),
+            json.dumps(valid|{'failure':valid['failure']|{'captured':True}}),
+            json.dumps(valid|{'failure':valid['failure']|{'message':'PRIVATE'}}),
+            json.dumps(valid|{'failure':dict(captured=1,exceptionCode=1,fileCode=1,line=321),
+                'ownedFrames':[[1,321]]})]
+        for value in bad:
+            with self.subTest(index=bad.index(value)):
+                self.assertIsNone(decode(value, self.request()))
+                caught, _, calls = self.capture(value)
+                self.assertIs(type(caught), AssertionError)
+                self.assertNotIn('_opengeul_native_accessibility_failure', vars(caught))
+                self.assertEqual(len(calls), 1)
+
+    def test_success_keeps_existing_snapshot_join_and_does_not_read_child_output(self):
+        events = []
+        class Result:
+            returncode = 0
+            @property
+            def stdout(self): raise AssertionError('Successful child output is not diagnostic evidence')
+            @property
+            def stderr(self): raise AssertionError('Raw stderr must not be read')
+        retained = NS(exited=lambda seconds:events.append('join') or False,
+            close=lambda:events.append('close'))
+        api = NS(user=NS(IsWindow=lambda hwnd:True), pid=lambda hwnd:200)
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'snapshot.json'
+            destination.write_text('{"witness":{"retainedProcessHandle":false}}', encoding='utf-8')
+            with patch.object(smoke.accessible, '_owned_process', return_value=(api, retained)), \
+                 patch.object(smoke.accessible, '_command_line', return_value=['--invisible',
+                     '--accept=pipe,name=OpenGeul_'+'a'*32+';urp;StarOffice.ServiceManager']), \
+                 patch.object(smoke.accessible.subprocess, 'run', return_value=Result()):
+                value = smoke.accessible.capture_bounded(Path('/synthetic'),123,200,300,'writer',destination)
+            self.assertEqual(value, {'witness':{'retainedProcessHandle':True}})
+            self.assertEqual(json.loads(destination.read_text(encoding='utf-8')), value)
+        self.assertEqual(events, ['join','close'])
+
+    def test_echo_cannot_turn_boolean_request_identity_into_verified_integer_identity(self):
+        decode = self.feature('_decode_child_failure')
+        for request_key, wire_key in (('officePid','officePid'), ('creationTime','officeCreationTime'),
+                                      ('childHwnd','childHwnd')):
+            with self.subTest(field=request_key):
+                request = self.request();request[request_key] = True
+                value = self.payload();value[wire_key] = 1
+                self.assertIsNone(decode(json.dumps(value),request))
+
+    def test_invalid_utf8_child_output_drops_metadata_and_preserves_parent_assertion(self):
+        # Exercise the actual subprocess decoder; only the synthetic executable
+        # is substituted for Office at this external process boundary.
+        real_run = smoke.accessible.subprocess.run
+        calls, events = [], []
+        def run(command, **kwargs):
+            calls.append(command)
+            return real_run([sys.executable,'-c',
+                'import sys;sys.stdout.buffer.write(bytes([255]));sys.stderr.buffer.write(bytes([255]));sys.exit(1)'], **kwargs)
+        retained = NS(exited=lambda seconds:False, close=lambda:events.append('close'))
+        api = NS(user=NS(IsWindow=lambda hwnd:True), pid=lambda hwnd:200)
+        with patch.object(smoke.accessible, '_owned_process', return_value=(api,retained)), \
+             patch.object(smoke.accessible, '_command_line', return_value=['--invisible',
+                 '--accept=pipe,name=OpenGeul_'+'a'*32+';urp;StarOffice.ServiceManager']), \
+             patch.object(smoke.accessible.subprocess,'run',side_effect=run):
+            try: smoke.accessible.capture_bounded(Path('/synthetic'),123,200,300,'writer',Path('/unused'))
+            except BaseException as exc: caught = exc
+        self.assertIs(type(caught), AssertionError)
+        self.assertEqual(str(caught), 'Owned native accessibility collector failed: ')
+        self.assertNotIn('_opengeul_native_accessibility_failure', vars(caught))
+        self.assertEqual(len(calls), 1);self.assertEqual(events, ['close'])
+
+    def test_real_collector_reports_only_completed_ownership_stages_after_unwind(self):
+        collect_main = self.feature('_collect_main')
+        for stage in (0,1,2):
+            with self.subTest(stage=stage):
+                events = []
+                def fail(*args): raise ValueError('synthetic private text')
+                retained = NS(close=lambda:events.append('close'))
+                peer = NS(getWindowHandle=lambda *args:123)
+                frame = NS(getContainerWindow=lambda:peer)
+                controller = NS(getFrame=lambda:frame, getModel=lambda:NS(supportsService=lambda name:True))
+                frame.getController = lambda:controller
+                frames = NS(getCount=lambda:1, getByIndex=lambda index:frame)
+                remote = NS(ServiceManager=NS(createInstanceWithContext=lambda *args:NS(getFrames=lambda:frames)))
+                local = NS(ServiceManager=NS(createInstanceWithContext=lambda *args:NS(resolve=lambda value:remote)))
+                uno = NS(getComponentContext=fail if stage==1 else lambda:local, getConstantByName=fail)
+                def owned(*args):
+                    if stage==0: fail()
+                    return NS(), retained
+                stream = io.StringIO()
+                with patch.dict(os.environ,numeric_environment(),clear=True), \
+                     patch.dict(sys.modules,uno=uno), \
+                     patch.object(smoke.accessible,'_owned_process',side_effect=owned), redirect_stdout(stream):
+                    self.assertEqual(collect_main(self.request()), 1)
+                decoded = self.feature('_decode_child_failure')(stream.getvalue(),self.request())
+                self.assertIsNotNone(decoded)
+                self.assertEqual(decoded['ownershipStage'], stage)
+                self.assertEqual(events, [] if stage==0 else ['close'])
+
+    def test_child_retained_close_failure_stays_above_inner_failure(self):
+        collect_main = self.feature('_collect_main')
+        events = []
+        def fail(): raise ValueError('synthetic inner failure')
+        def close(): events.append('close');raise OSError('synthetic original cleanup failure')
+        stream = io.StringIO()
+        with patch.dict(os.environ,numeric_environment(),clear=True), \
+             patch.dict(sys.modules,uno=NS(getComponentContext=fail)), \
+             patch.object(smoke.accessible,'_owned_process',return_value=(NS(),NS(close=close))), redirect_stdout(stream):
+            self.assertEqual(collect_main(self.request()), 1)
+        decoded = self.feature('_decode_child_failure')(stream.getvalue(),self.request())
+        self.assertEqual(decoded['failure']['exceptionCode'], 6)
+        self.assertEqual(decoded['ownershipStage'], 1)
+        self.assertEqual(events, ['close'])
+
+    def test_child_emits_only_closed_numeric_actual_trace_after_all_existing_cleanup(self):
+        collect_main = self.feature('_collect_main')
+        events = []
+        class NoTextError(ValueError):
+            def __str__(self): raise AssertionError('Exception text must not be read')
+        scope = dict(error=NoTextError(), events=events)
+        exec(compile('def collect(request, diagnostic):\n diagnostic["ownershipStage"]=2\n try:\n  raise error\n finally:\n  events.append("cleanup")\n',
+            str(E2E/'native_accessibility.py'), 'exec'), scope)
+        class Stream(io.StringIO):
+            def write(self, value):
+                self_test.assertEqual(events, ['cleanup']);return super().write(value)
+        self_test = self;stream = Stream()
+        with patch.dict(os.environ, numeric_environment(), clear=True), \
+             patch.object(smoke.accessible, 'collect_live', side_effect=scope['collect']), \
+             patch.object(smoke.native.numeric_notice, 'emit_case_notice', side_effect=AssertionError('No child GHA notice')), \
+             redirect_stdout(stream):
+            result = collect_main(self.request())
+        self.assertEqual(result, 1)
+        self.assertLessEqual(len(stream.getvalue().encode('utf-8')), 1024)
+        decoded = self.feature('_decode_child_failure')(stream.getvalue(), self.request())
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded['ownershipStage'], 2)
+        self.assertEqual(decoded['failure']['exceptionCode'], 0)  # Unknown exact subclass stays unknown.
+        self.assertEqual(decoded['failure']['fileCode'], 19)
+        self.assertEqual(decoded['ownedFrames'][-1], [19, 4])
+        self.assertNotIn('PRIVATE', stream.getvalue());self.assertNotIn('::notice', stream.getvalue())
+
+    def test_child_optional_output_failure_never_retries_or_replaces_nonzero_result(self):
+        collect_main = self.feature('_collect_main')
+        class BrokenStream:
+            def __init__(self): self.writes = 0
+            def write(self, value): self.writes += 1;raise OSError('synthetic partial stdout')
+            def flush(self): raise AssertionError('Do not flush a failed write')
+        stream = BrokenStream()
+        with patch.dict(os.environ, numeric_environment(), clear=True), \
+             patch.object(smoke.accessible, 'collect_live', side_effect=ValueError()), redirect_stdout(stream):
+            self.assertEqual(collect_main(self.request()), 1)
+        self.assertEqual(stream.writes, 1)
+
+    def test_handoff_keeps_controller_audit_and_only_actual_child_frames_in_one_parent_notice(self):
+        handoff = self.feature('attach_child_failure')
+        import numeric_notice
+        caught, _, _ = self.capture(json.dumps(self.payload()))
+        record = dict(case='korean-ui-writer', module='writer', stage='capture-native-accessible-objects',
+            officePid=200, officeCreationTime=300, childHwnd=123)
+        stream = io.StringIO();emitter = numeric_notice.NoticeEmitter(environ=numeric_environment(), stream=stream)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, numeric_environment(), clear=True), \
+             patch.object(numeric_notice, '_EMITTER', emitter):
+            smoke.native.capture_failure(Path(directory), 'korean-ui-writer', record, caught)
+            original_code = deepcopy(record['numericFailure']);original_frames = deepcopy(record['numericFailureFrames'])
+            self.assertEqual(stream.getvalue(), '')
+            with patch.object(smoke.accessible.subprocess, 'run', side_effect=AssertionError('No second process')), \
+                 patch('time.monotonic', side_effect=AssertionError('No new deadline')), \
+                 patch('os.stat', side_effect=AssertionError('No new filesystem observation')):
+                self.assertTrue(handoff(record, caught))
+            self.assertEqual(record['nativeAccessibilityControllerFailure'], original_code)
+            self.assertEqual(record['nativeAccessibilityControllerFrames'], original_frames)
+            self.assertEqual(record['nativeAccessibilityChildFailure'], self.payload())
+            self.assertEqual(record['numericFailureFrames'], [[19,445],[19,321]])
+            smoke.native.write_result(Path(directory), 'korean-ui-writer', record)
+        notices = stream.getvalue().strip().splitlines()
+        self.assertEqual(len(notices), 1)
+        payload = notices[0].split('::', 2)[2]
+        decoded = numeric_notice.decode_notice(payload, 'a'*40, 123, expected_scope=4)
+        self.assertEqual(decoded['schemaVersion'], 2)
+        self.assertEqual(decoded['ownedFrames'], [[19,445],[19,321]])
+        self.assertEqual((decoded['exceptionCode'],decoded['fileCode'],decoded['line']), (7,19,321))
+
+    def test_exact_loaded_uno_runtime_class_changes_only_unknown_exception_code(self):
+        classify = self.feature('_child_failure_code')
+        calls = []
+        class UnoRuntime(Exception):
+            __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+            @property
+            def Message(self): raise AssertionError('No exception Message getter')
+            @property
+            def Context(self): raise AssertionError('No exception Context getter')
+            def __str__(self): raise AssertionError('No exception text')
+        scope = dict(error=UnoRuntime())
+        exec(compile('def fail():\n raise error\n', str(E2E/'native_accessibility.py'), 'exec'), scope)
+        def get_class(name): calls.append(name);return UnoRuntime
+        try: scope['fail']()
+        except UnoRuntime as exc:
+            with patch.dict(sys.modules, uno=NS(getClass=get_class)), \
+                 patch.object(smoke.accessible.subprocess,'run',side_effect=AssertionError('No process query')), \
+                 patch('time.monotonic',side_effect=AssertionError('No clock query')):
+                failure = classify(exc)
+        self.assertEqual(failure, dict(captured=1,exceptionCode=13,fileCode=19,line=2))
+        self.assertEqual(calls, ['com.sun.star.uno.RuntimeException'])
+
+    def test_uno_subclasses_other_classes_and_existing_codes_do_not_trigger_class_lookup(self):
+        classify = self.feature('_child_failure_code')
+        class UnoRuntime(Exception): __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+        class Child(UnoRuntime): pass
+        class Disposed(UnoRuntime): __pyunostruct__ = 'com.sun.star.lang.DisposedException'
+        class Marker:
+            def __eq__(self, other): raise AssertionError('No dynamic marker comparison')
+        class TextMarker(str):
+            def __eq__(self, other): raise AssertionError('No string-subclass comparison')
+        class DynamicMarker(Exception): __pyunostruct__ = Marker()
+        class SubclassMarker(Exception): __pyunostruct__ = TextMarker('com.sun.star.uno.RuntimeException')
+        known = UnoRuntime()
+        known.raw = dict(error=dict(numericFailure=dict(captured=1,exceptionCode=7,fileCode=19,line=55)))
+        def forbidden(*args): self.fail('Unknown/subclass/known code cannot query the UNO class')
+        for exc, expected in ((Child(),0),(Disposed(),0),(DynamicMarker(),0),(SubclassMarker(),0),
+                              (Exception(),0),(RuntimeError(),9),(known,7)):
+            with self.subTest(kind=type(exc).__name__), patch.dict(sys.modules,uno=NS(getClass=forbidden)):
+                failure = classify(exc)
+                self.assertEqual(failure['exceptionCode'],expected)
+                if exc is known: self.assertEqual(failure,known.raw['error']['numericFailure'])
+
+    def test_missing_failed_or_nonidentical_loaded_uno_class_keeps_original_unknown_metadata(self):
+        classify = self.feature('_child_failure_code')
+        class UnoRuntime(Exception): __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+        class Other(Exception): pass
+        def broken(name): raise ImportError('synthetic optional class lookup failure')
+        for module in (None, NS(), NS(getClass=broken), NS(getClass=lambda name:Other)):
+            with self.subTest(module_kind=type(module).__name__), patch.dict(sys.modules,uno=module):
+                self.assertEqual(classify(UnoRuntime()),dict(captured=1,exceptionCode=0,fileCode=0,line=0))
+
+    def test_actual_child_runtime_family_survives_cleanup_and_one_existing_v2_parent_notice(self):
+        import numeric_notice
+        self.feature('_child_failure_code')
+        events = []
+        class UnoRuntime(Exception):
+            __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+            def __getattr__(self,name): raise AssertionError('No exception property getter')
+            def __str__(self): raise AssertionError('No exception text')
+        scope = dict(error=UnoRuntime(),events=events)
+        exec(compile('def collect(request,diagnostic):\n diagnostic["ownershipStage"]=2\n try:\n  raise error\n finally:\n  events.append("cleanup")\n',
+            str(E2E/'native_accessibility.py'),'exec'),scope)
+        def get_class(name):
+            self.assertEqual(events,['cleanup']);return UnoRuntime
+        child_stream = io.StringIO()
+        with patch.dict(os.environ,numeric_environment(),clear=True), \
+             patch.dict(sys.modules,uno=NS(getClass=get_class)), \
+             patch.object(smoke.accessible,'collect_live',side_effect=scope['collect']), redirect_stdout(child_stream):
+            self.assertEqual(smoke.accessible._collect_main(self.request()),1)
+        child = smoke.accessible._decode_child_failure(child_stream.getvalue(),self.request())
+        self.assertEqual(child['failure']['exceptionCode'],13)
+        self.assertEqual(child['ownedFrames'][-1],[19,4])
+        caught, events, calls = self.capture(child_stream.getvalue())
+        self.assertEqual(events[-1],'close');self.assertEqual(len(calls),1)
+        record = dict(case='korean-ui-writer',module='writer',stage='capture-native-accessible-objects',
+            officePid=200,officeCreationTime=300,childHwnd=123)
+        stream = io.StringIO();emitter = numeric_notice.NoticeEmitter(environ=numeric_environment(),stream=stream)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,numeric_environment(),clear=True), \
+             patch.object(numeric_notice,'_EMITTER',emitter):
+            smoke.native.capture_failure(Path(directory),'korean-ui-writer',record,caught)
+            self.assertTrue(smoke.accessible.attach_child_failure(record,caught))
+            smoke.native.write_result(Path(directory),'korean-ui-writer',record)
+        notices = stream.getvalue().strip().splitlines()
+        self.assertEqual(len(notices),1)
+        decoded = numeric_notice.decode_notice(notices[0].split('::',2)[2],'a'*40,123,expected_scope=4)
+        self.assertEqual((decoded['schemaVersion'],decoded['exceptionCode']),(2,13))
+        self.assertEqual(decoded['ownedFrames'],child['ownedFrames'])
+
+    def test_optional_class_lookup_baseexceptions_keep_primary_unknown_frames_and_retained_cleanup(self):
+        import numeric_notice
+        class UnoRuntime(Exception):
+            __pyunostruct__ = 'com.sun.star.uno.RuntimeException'
+            def __getattr__(self,name): raise AssertionError('No exception property getter')
+            def __str__(self): raise AssertionError('No exception text')
+        for secondary in (KeyboardInterrupt(),SystemExit(7)):
+            with self.subTest(secondary=type(secondary).__name__):
+                primary=UnoRuntime();events=[];captured=[];stream=io.StringIO()
+                def context():raise primary
+                def lookup(name):
+                    self.assertEqual(name,'com.sun.star.uno.RuntimeException')
+                    self.assertEqual(events,['retained-close'])
+                    raise secondary
+                original_capture=numeric_notice.capture_failure_code
+                def observe(exc):
+                    self.assertIs(exc,primary)
+                    value=original_capture(exc)
+                    captured.append((dict(value),numeric_notice.capture_failure_frames(exc)))
+                    return value
+                retained=NS(close=lambda:events.append('retained-close'))
+                with patch.dict(os.environ,numeric_environment(),clear=True), \
+                     patch.dict(sys.modules,uno=NS(getComponentContext=context,getClass=lookup)), \
+                     patch.object(smoke.accessible,'_owned_process',return_value=(NS(),retained)), \
+                     patch.object(numeric_notice,'capture_failure_code',side_effect=observe),redirect_stdout(stream):
+                    try:result=smoke.accessible._collect_main(self.request())
+                    except BaseException as escaped:
+                        self.fail('Optional class metadata escaped: '+type(escaped).__name__)
+                self.assertEqual(result,1)
+                self.assertEqual(events,['retained-close'])
+                self.assertEqual(len(captured),1)
+                decoded=smoke.accessible._decode_child_failure(stream.getvalue(),self.request())
+                self.assertIsNotNone(decoded)
+                self.assertEqual(decoded['failure'],captured[0][0])
+                self.assertEqual(decoded['failure']['exceptionCode'],0)
+                self.assertEqual(decoded['ownedFrames'],captured[0][1])
+
+
+class WriterOsIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(hasattr(smoke, 'writer_access'), 'The Writer OS gate is not integrated')
+        self.request = dict(officePid=200, officeCreationTime=300, childHwnd=123,
+            expectedImage=str(Path('/synthetic')/'Office/program/soffice.bin'))
+        self.value = smoke.writer_access.failure(self.request)
+        self.value.update(verified=1, stageCode=12, rootRole=10, documentRole=15,
+            focusedRole=42, focusedState=4, focusVariantType=9, parentCount=2,
+            ia2Supported=1, textSupported=1, ownerBefore=1, ownerAfter=1, ownerReleased=1,
+            referencesAcquired=8,referencesReleased=8,variantsCreated=5,variantsCleared=5)
+
+    def receipt(self, stdout, code=0):
+        class NoStderr:
+            returncode = code
+            @property
+            def stderr(self):
+                raise AssertionError('Original stderr must not be read')
+        value = NoStderr()
+        value.stdout = stdout
+        return value
+
+    def test_writer_uses_one_original_child_budget_without_reading_stderr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'os.json'
+            def child(command, **kwargs):
+                destination.write_text('{"controlCount":1}', encoding='utf-8')
+                self.assertEqual(kwargs['timeout'], 45)
+                self.assertIs(kwargs['shell'], False)
+                self.assertEqual(kwargs['stdout'], subprocess.PIPE)
+                self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
+                self.assertNotIn('capture_output', kwargs)
+                self.assertNotIn('input',kwargs)
+                self.assertNotIn('stdin',kwargs)
+                self.assertEqual(command[-5:-1],['--writer-office-creation-time','300',
+                    '--writer-office-image',self.request['expectedImage']])
+                self.assertEqual(command[-1], '--writer-msaa')
+                return self.receipt('1\n'+json.dumps(self.value))
+            with patch.object(smoke.subprocess, 'run', side_effect=child) as execute:
+                value = smoke.capture_bounded(123,200,destination,writer_request=self.request)
+            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(value['writerOsAccessibility'], self.value)
+            self.assertEqual(destination.read_text(encoding='utf-8'), '{"controlCount":1}')
+
+    def test_other_module_keeps_its_original_command_and_snapshot_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'os.json'
+            destination.write_text('{"controlCount":1}',encoding='utf-8')
+            with patch.object(smoke.subprocess,'run',return_value=NS(returncode=0,stderr='')) as execute:
+                value = smoke.capture_bounded(123,200,destination)
+            self.assertEqual(value, {'controlCount':1})
+            self.assertEqual(execute.call_args.kwargs,
+                             dict(capture_output=True,text=True,timeout=45,shell=False))
+            self.assertNotIn('--writer-msaa',execute.call_args.args[0])
+
+    def test_new_probe_timeout_after_original_snapshot_checkpoint_is_held(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'os.json'
+            original = subprocess.TimeoutExpired(['synthetic'],45,output=b'1\r\n')
+            def child(*args,**kwargs):
+                destination.write_text('{"controlCount":1}',encoding='utf-8')
+                raise original
+            with patch.object(smoke.subprocess,'run',side_effect=child) as execute:
+                value=smoke.capture_bounded(123,200,destination,writer_request=self.request)
+            self.assertEqual(execute.call_count,1)
+            self.assertEqual(value['writerOsAccessibility']['verified'],0)
+            self.assertEqual(value['writerOsAccessibility']['stageCode'],14)
+
+    def test_original_os_timeout_before_checkpoint_preserves_the_same_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination=Path(directory)/'os.json'
+            destination.write_text('{"controlCount":1}',encoding='utf-8')
+            original=subprocess.TimeoutExpired(['synthetic'],45,output=b'')
+            with patch.object(smoke.subprocess,'run',side_effect=original):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    smoke.capture_bounded(123,200,destination,writer_request=self.request)
+            self.assertIs(caught.exception,original)
+
+    def test_nonzero_after_checkpoint_and_partial_noise_or_invalid_payload_are_held_failures(self):
+        for stdout,code in (('1\n',1),('1\n{',0),('1\nnoise',0),
+                            ('1\n'+json.dumps(dict(self.value,officePid=201)),0)):
+            with self.subTest(code=code,stdoutLength=len(stdout)),tempfile.TemporaryDirectory() as directory:
+                destination=Path(directory)/'os.json'
+                destination.write_text('{"controlCount":1}',encoding='utf-8')
+                with patch.object(smoke.subprocess,'run',return_value=self.receipt(stdout,code)):
+                    result=smoke.capture_bounded(123,200,destination,writer_request=self.request)
+                self.assertEqual(result['writerOsAccessibility']['verified'],0)
+                self.assertEqual(result['writerOsAccessibility']['stageCode'],13)
+
+    def test_actual_child_main_finishes_original_snapshot_before_the_numeric_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination=Path(directory)/'os.json'
+            args=NS(capture_child=123,office_pid=200,snapshot=destination,writer_msaa=True,
+                writer_office_creation_time=300,writer_office_image=self.request['expectedImage'])
+            def original(*args):
+                print('discarded-existing-diagnostic-output')
+                return dict(controlCount=1)
+            def observe(request):
+                self.assertEqual(json.loads(destination.read_text(encoding='utf-8')),dict(controlCount=1))
+                return self.value
+            stream,discard=io.StringIO(),io.StringIO()
+            with patch.object(smoke.argparse.ArgumentParser,'parse_args',return_value=args),\
+                 patch.object(smoke.os,'name','nt'),\
+                 patch.object(smoke,'capture_controls',side_effect=original),\
+                 patch.object(smoke.writer_access,'observe',side_effect=observe),\
+                 patch.object(smoke.sys,'stdin',NS(read=lambda *a:self.fail('New stdin read reached'))),\
+                 patch.object(smoke.sys,'stderr',discard),redirect_stdout(stream):
+                code=smoke.main()
+            self.assertEqual(code,0)
+            self.assertTrue(stream.getvalue().startswith('1\n'))
+            self.assertEqual(json.loads(stream.getvalue()[2:]),self.value)
+            self.assertNotIn('discarded',stream.getvalue())
+
+    def run_writer(self, *, vcl_failure=None, tab_failure=None, probe_only=False, held_result=None,
+                   native_seconds=0, late_error=None, module='writer'):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'fixture';source.write_bytes(b'original-fixture')
+            output=root/'output';output.mkdir();calls=[];errors=[];clock=[100.]
+            process=NS(pid=77,poll=lambda:0)
+            engine=NS(creation_time=300,exited=lambda seconds:True,code=lambda:0,
+                      close=lambda:calls.append('engine-close'))
+            api=NS(require_foreground=lambda hwnd:None,user=NS(IsWindow=lambda hwnd:True),
+                   pid=lambda hwnd:200,windows=lambda pid:[])
+            wrapper=NS(maximize=lambda:None,capture_as_image=lambda:NS(save=lambda path:calls.append('screenshot')))
+            desktop=NS(window=lambda **kwargs:NS(wrapper_object=lambda:wrapper))
+            def vcl(*args):
+                calls.append('vcl')
+                clock[0] += native_seconds
+                if vcl_failure:raise vcl_failure
+                return dict(module=module,nativeAccessibleContextCount=2)
+            def secondary(command, **options):
+                calls.append('secondary')
+                self.assertIn('--writer-msaa-only',command)
+                self.assertNotIn('--snapshot',command)
+                self.assertLessEqual(options['timeout'], min(8.,145.-clock[0]))
+                if late_error is not None:raise late_error
+                return self.receipt(json.dumps(self.value))
+            def root_child(command,**options):
+                calls.append('root-diagnostic')
+                self.assertTrue('--writer-root-capabilities-only' in command,'Separate root CLI required')
+                self.assertTrue('--snapshot' not in command,'Root CLI must not read a snapshot')
+                stream=options['stdout'];self.assertTrue(stream!=subprocess.PIPE,'Root stdout must use a file')
+                stream.write(json.dumps(smoke.writer_access.root_diagnostic_failure(self.request)).encode());stream.flush()
+                def wait(timeout):
+                    self.assertGreater(timeout,0);self.assertLessEqual(timeout,min(8.,145.-clock[0]))
+                    return 0
+                return NS(wait=wait,kill=lambda:self.fail('Successful synthetic child needs no kill'))
+            def tabs(*args):
+                calls.append('tabs')
+                if tab_failure:raise tab_failure
+                return dict(koreanUiVerified=True,tabbedUiVerified=True)
+            def failure(output,case,record,exc):
+                errors.append(exc);record['success']=False
+            held=smoke.writer_access.failure(self.request,8) if held_result is None else held_result
+            with ExitStack() as stack:
+                for owner,name,value in ((smoke.native,'require_engine_fixture',lambda *a:source),
+                    (smoke.native,'launch_suite',lambda *a:process),(smoke.native,'Windows',lambda:api),
+                    (smoke.native,'verified_attachment',lambda *a:(11,12,123,200)),
+                    (smoke.startup,'EngineProcessWitness',lambda *a:engine),
+                    (smoke.native,'activate_owned_suite',lambda *a:None),
+                    (smoke,'prepare_korean_ui_focus',lambda *a:calls.append('entry')),
+                    (smoke,'capture_bounded',lambda *a,**kw:dict(controlCount=1,writerOsAccessibility=held)),
+                    (smoke.accessible,'capture_bounded',vcl),(smoke,'require_korean_tabs',tabs),
+                    (smoke.subprocess,'run',secondary),(smoke.subprocess,'Popen',root_child),(smoke.time,'monotonic',lambda:clock[0]),
+                    (smoke.native,'capture_failure',failure),(smoke.native,'close_document',lambda *a:calls.append('close-document')),
+                    (smoke.native,'close_home',lambda *a:None),(smoke.native,'stop_owned_test_process',lambda *a:None),
+                    (smoke.native,'write_result',lambda *a:None)):
+                    stack.enter_context(patch.object(owner,name,side_effect=value))
+                stack.enter_context(patch.dict(sys.modules,pywinauto=NS(Desktop=lambda **kwargs:desktop)))
+                record=smoke.run_case(root,root,output,module,probe_only=probe_only)
+            return record,calls,errors
+
+    def test_original_vcl_collection_or_tab_failure_wins_over_the_held_msaa_failure(self):
+        for point in ('vcl_failure','tab_failure'):
+            primary=RuntimeError('original-primary')
+            record,calls,errors=self.run_writer(**{point:primary})
+            self.assertEqual(errors,[primary])
+            self.assertIn('writerOsAccessibility',record)
+            self.assertEqual(record['writerOsAccessibility']['stageCode'],8)
+            self.assertEqual(calls[-1],'engine-close')
+            self.assertNotIn('close-document',calls)
+
+    def test_writer_probe_failure_is_enforced_only_after_original_vcl_tabs_with_a_fixed_stage(self):
+        record,calls,errors=self.run_writer()
+        self.assertEqual(calls,['entry','screenshot','vcl','secondary','root-diagnostic','tabs','engine-close'])
+        self.assertEqual(len(errors),1)
+        self.assertIsInstance(errors[0],AssertionError)
+        self.assertEqual(record['stage'],'writer-os-text')
+        self.assertFalse(record['osScreenReaderExposureCertified'])
+        self.assertFalse(record.get('writerOsDocumentExposureVerified',False))
+
+    def test_probe_only_retains_unverified_observation_without_acceptance_claim(self):
+        record,calls,errors=self.run_writer(probe_only=True)
+        self.assertEqual(errors,[])
+        self.assertTrue(record['success'])
+        self.assertFalse(record.get('writerOsDocumentExposureVerified',False))
+        self.assertFalse(record['koreanUiVerified'])
+        self.assertNotIn('tabs',calls)
+
+    def test_invalid_probe_metadata_raises_in_the_original_parent_after_vcl_with_a_fixed_protocol_stage(self):
+        record,calls,errors=self.run_writer(held_result={'unknown':1})
+        self.assertEqual(calls,['entry','screenshot','vcl','secondary','root-diagnostic','tabs','engine-close'])
+        self.assertEqual(record['stage'],'writer-os-protocol')
+        self.assertEqual(len(errors),1)
+        self.assertIsInstance(errors[0],AssertionError)
+        trace=errors[0].__traceback__
+        while trace.tb_next is not None:trace=trace.tb_next
+        self.assertEqual(Path(trace.tb_frame.f_code.co_filename).name,'korean_ui_smoke.py')
+
+    def after_native(self, deadline, *, stdout=None, code=0, error=None, clock=None):
+        method=getattr(smoke,'capture_writer_msaa_after_native',None)
+        self.assertTrue(callable(method), 'A separate numeric-only post-native diagnostic is required')
+        def execute(*args,**kwargs):
+            if error is not None:raise error
+            return self.receipt(json.dumps(self.value) if stdout is None else stdout,code)
+        with patch.object(smoke.subprocess,'run',side_effect=execute) as run, \
+             patch.object(smoke.time,'monotonic',side_effect=clock or (lambda:100.)):
+            result=method(self.request,deadline)
+        return result,run
+
+    def test_late_probe_uses_only_remaining_native_budget_and_exact_original_owner(self):
+        for deadline,timeout in ((145.,8.),(103.,3.)):
+            with self.subTest(deadline=deadline):
+                result,run=self.after_native(deadline)
+                self.assertEqual(result['result'],self.value)
+                self.assertFalse(result['acceptanceEligible'])
+                self.assertTrue(result['attempted']);self.assertTrue(result['completedWithinBudget'])
+                self.assertEqual(result['timeoutSeconds'],timeout)
+                run.assert_called_once()
+                command=run.call_args.args[0];options=run.call_args.kwargs
+                self.assertEqual(command,[sys.executable,str(Path(smoke.__file__).resolve()),
+                    '--writer-msaa-only','--capture-child','123','--office-pid','200',
+                    '--writer-office-creation-time','300','--writer-office-image',self.request['expectedImage'],
+                    '--writer-msaa-deadline',repr(100.+timeout)])
+                self.assertEqual(options,dict(stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                    text=True,encoding='utf-8',errors='replace',timeout=timeout,shell=False))
+
+    def test_missing_invalid_or_expired_native_deadline_starts_no_child(self):
+        for deadline in (None,99.,100.,float('nan'),float('inf'),True,146.):
+            with self.subTest(deadline=deadline):
+                result,run=self.after_native(deadline)
+                run.assert_not_called()
+                self.assertFalse(result['attempted']);self.assertFalse(result['completedWithinBudget'])
+                self.assertEqual(result['result']['verified'],0)
+
+    def test_foreign_noisy_oversized_and_nonzero_late_results_are_diagnostic_failures(self):
+        for stdout,code in ((json.dumps(dict(self.value,officePid=201)),0),
+                            (json.dumps(dict(self.value,officeCreationTime=301)),0),
+                            (json.dumps(dict(self.value,childHwnd=124)),0),
+                            ('{',0),('PRIVATE',0),(' '*4097,0),(json.dumps(self.value),1)):
+            with self.subTest(code=code,length=len(stdout)):
+                result,run=self.after_native(145.,stdout=stdout,code=code)
+                run.assert_called_once()
+                self.assertFalse(result['acceptanceEligible'])
+                self.assertEqual(result['result'],smoke.writer_access.failure(self.request))
+
+    def test_late_timeout_and_parent_overrun_cannot_qualify_or_expose_child_output(self):
+        for options in (dict(error=subprocess.TimeoutExpired(['synthetic'],8,output=b'PRIVATE')),
+                        dict(clock=iter((100.,145.)).__next__),
+                        dict(clock=iter((100.,146.)).__next__)):
+            with self.subTest(mode=next(iter(options))):
+                result,run=self.after_native(145.,**options)
+                run.assert_called_once()
+                self.assertFalse(result['completedWithinBudget'])
+                self.assertEqual(result['result'],smoke.writer_access.failure(self.request,14))
+                self.assertNotIn('PRIVATE',json.dumps(result))
+
+    def test_failed_final_budget_check_discards_an_otherwise_valid_late_result(self):
+        result,run=self.after_native(145.,clock=[100.,OSError('PRIVATE')])
+        run.assert_called_once()
+        self.assertFalse(result['completedWithinBudget'])
+        self.assertEqual(result['result'],smoke.writer_access.failure(self.request))
+        self.assertNotIn('PRIVATE',json.dumps(result))
+
+    def test_late_success_does_not_change_the_original_writer_failure_or_stage(self):
+        record,calls,errors=self.run_writer()
+        self.assertEqual(record['stage'],'writer-os-text')
+        self.assertFalse(record['success']);self.assertEqual(len(errors),1)
+        self.assertIn('writerOsAccessibilityAfterNative',record)
+        late=record['writerOsAccessibilityAfterNative']
+        self.assertEqual(late['result']['verified'],1)
+        self.assertFalse(late['acceptanceEligible'])
+        self.assertEqual(record['writerOsAccessibility']['stageCode'],8)
+        self.assertEqual(calls,['entry','screenshot','vcl','secondary','root-diagnostic','tabs','engine-close'])
+
+    def test_late_timeout_cannot_hide_original_failure_and_vcl_failure_or_other_module_adds_no_child(self):
+        record,calls,errors=self.run_writer(late_error=subprocess.TimeoutExpired(['synthetic'],8))
+        self.assertEqual(record['stage'],'writer-os-text');self.assertEqual(len(errors),1)
+        self.assertIn('writerOsAccessibilityAfterNative',record)
+        self.assertEqual(record['writerOsAccessibilityAfterNative']['result']['stageCode'],14)
+        primary=RuntimeError('original-vcl')
+        record,calls,errors=self.run_writer(vcl_failure=primary)
+        self.assertEqual(errors,[primary]);self.assertNotIn('secondary',calls)
+        self.assertNotIn('writerOsAccessibilityAfterNative',record)
+        record,calls,errors=self.run_writer(module='impress')
+        self.assertEqual(errors,[]);self.assertTrue(record['success'])
+        self.assertNotIn('secondary',calls);self.assertNotIn('writerOsAccessibilityAfterNative',record)
+
+    def test_late_child_is_skipped_when_native_collection_consumes_the_original_45_seconds(self):
+        for seconds in (45.,46.):
+            with self.subTest(seconds=seconds):
+                record,calls,errors=self.run_writer(native_seconds=seconds)
+                self.assertNotIn('secondary',calls);self.assertEqual(len(errors),1)
+                self.assertEqual(record['stage'],'writer-os-text')
+                self.assertIn('writerOsAccessibilityAfterNative',record)
+                late=record['writerOsAccessibilityAfterNative']
+                self.assertFalse(late['attempted']);self.assertEqual(late['result']['verified'],0)
+
+    def test_msaa_only_cli_reads_no_uia_snapshot_stdin_or_native_focus(self):
+        stream=io.StringIO();seen=[]
+        def observe(request):seen.append(request);print('discarded-output');return self.value
+        args=['korean_ui_smoke.py','--writer-msaa-only','--capture-child','123','--office-pid','200',
+            '--writer-office-creation-time','300','--writer-office-image',self.request['expectedImage']]
+        with patch.object(smoke.sys,'argv',args),patch.object(smoke.os,'name','nt'), \
+             patch.object(smoke,'capture_controls',side_effect=AssertionError('No UIA tree')) as uia, \
+             patch.object(smoke.accessible,'capture_bounded',side_effect=AssertionError('No native focus')) as vcl, \
+             patch.object(smoke.Path,'open',side_effect=AssertionError('No snapshot read/write')) as files, \
+             patch.object(smoke.sys,'stdin',NS(read=lambda *a:self.fail('No stdin read'))), \
+             patch.object(smoke.sys,'stderr',io.StringIO()), \
+             patch.object(smoke.writer_access,'observe',side_effect=observe),redirect_stdout(stream):
+            try:code=smoke.main()
+            except SystemExit:self.fail('The numeric-only hidden CLI branch is required')
+            self.assertEqual(code,0)
+        self.assertEqual(seen,[self.request]);self.assertEqual(json.loads(stream.getvalue()),self.value)
+        self.assertLessEqual(len(stream.getvalue().encode('utf-8')),4096)
+        uia.assert_not_called();vcl.assert_not_called();files.assert_not_called()
+
+
+class WriterRootDiagnosticRunnerTests(unittest.TestCase):
+    def setUp(self):
+        self.request=dict(officePid=200,officeCreationTime=300,childHwnd=123,
+            expectedImage=str(Path('/synthetic')/'Office/program/soffice.bin'))
+
+    def feature(self):
+        method=getattr(smoke,'capture_writer_root_diagnostic',None)
+        self.assertTrue(callable(method),'Separate numeric root diagnostic runner is required')
+        return method
+
+    def value(self,stage=13):
+        factory=getattr(smoke.writer_access,'root_diagnostic_failure',None)
+        self.assertTrue(callable(factory),'Closed numeric root diagnostic protocol is required')
+        return factory(self.request,stage)
+
+    def capture(self,deadline,*,stdout=None,code=0,error=None,after_wait=100.,cleanup_error=False,
+                enabled=True,clock_error=False,launch_late=False,launch_error=False,close_late=False):
+        method=self.feature();value=self.value();now=[100.];events=[];streams=[]
+        temporary_file=smoke.tempfile.TemporaryFile
+        def temporary(*args):
+            underlying=temporary_file(*args)
+            class Output:
+                def __getattr__(self,name):return getattr(underlying,name)
+                def close(self):
+                    underlying.close()
+                    if close_late:now[0]=109.
+            return Output()
+        class Child:
+            returncode=None
+            def wait(child,timeout):
+                events.append(('wait',timeout))
+                if len([row for row in events if row[0]=='wait'])==1:
+                    if error is not None:
+                        now[0]=107.75
+                        raise error
+                    now[0]=after_wait;child.returncode=code
+                elif cleanup_error:
+                    raise subprocess.TimeoutExpired(['synthetic'],timeout)
+                else:child.returncode=-15
+                return child.returncode
+            def kill(child):events.append(('kill',))
+        def execute(command,**options):
+            stream=options['stdout'];streams.append(stream)
+            self.assertTrue(stream!=subprocess.PIPE,'Pipe capture is forbidden')
+            stream.write((json.dumps(value) if stdout is None else stdout).encode('utf-8'));stream.flush()
+            if launch_error:raise OSError('SYNTHETIC_PRIVATE')
+            if launch_late:now[0]=109.
+            return Child()
+        def clock():
+            if clock_error and any(row[0]=='wait' for row in events):raise OSError('SYNTHETIC_PRIVATE')
+            return now[0]
+        with patch.object(smoke.subprocess,'Popen',side_effect=execute) as run, \
+             patch.object(smoke.subprocess,'run',side_effect=AssertionError('Pipe communicate is forbidden')), \
+             patch.object(smoke.tempfile,'TemporaryFile',side_effect=temporary), \
+             patch.object(smoke.time,'monotonic',side_effect=clock):
+            try:result=method(self.request,deadline,enabled=enabled)
+            except TypeError:self.fail('Bounded diagnostic mode is missing')
+        self.last_events=events;self.last_streams=streams
+        registry=getattr(smoke,'_ROOT_DIAGNOSTIC_PENDING',[])
+        def retire_synthetic():
+            for child,stream in registry:stream.close()
+            registry.clear()
+        self.addCleanup(retire_synthetic)
+        return result,run
+
+    def test_root_child_uses_only_remaining_original_budget_and_original_owner(self):
+        for deadline,timeout in ((145.,8.),(103.,3.)):
+            with self.subTest(deadline=deadline):
+                result,run=self.capture(deadline)
+                self.assertEqual(result['result'],self.value())
+                self.assertTrue(result['diagnosticOnly']);self.assertFalse(result['acceptanceEligible'])
+                self.assertTrue(result['freshRootLater'])
+                self.assertTrue(result['attempted']);self.assertTrue(result['completedWithinBudget'])
+                self.assertEqual(result['timeoutSeconds'],timeout)
+                self.assertEqual(run.call_count,1)
+                command=run.call_args.args[0];options=run.call_args.kwargs
+                self.assertTrue(command==[sys.executable,str(Path(smoke.__file__).resolve()),
+                    '--writer-root-capabilities-only','--capture-child','123','--office-pid','200',
+                    '--writer-office-creation-time','300','--writer-office-image',self.request['expectedImage']],
+                    'Original root diagnostic command binding differs')
+                self.assertEqual(set(options),{'stdout','stderr','shell'})
+                self.assertEqual(options['stderr'],subprocess.DEVNULL);self.assertFalse(options['shell'])
+                self.assertTrue(options['stdout'].closed)
+                self.assertEqual(self.last_events,[('wait',timeout-.25)])
+                self.assertTrue(result['cleanupConfirmed']);self.assertFalse(result['retainedPending'])
+
+    def test_missing_invalid_expired_or_extended_deadline_starts_no_child(self):
+        for deadline in (None,99.,100.,float('nan'),float('inf'),True,146.):
+            with self.subTest(kind=type(deadline).__name__):
+                result,run=self.capture(deadline)
+                self.assertEqual(run.call_count,0)
+                self.assertFalse(result['attempted']);self.assertFalse(result['completedWithinBudget'])
+                self.assertEqual(result['result'],self.value(15))
+
+    def test_invalid_owner_request_is_unknown_without_inventing_identity_or_starting_child(self):
+        method=self.feature()
+        for request in (None,{},dict(self.request,officePid=True),dict(self.request,childHwnd=0),
+                        dict(self.request,officeCreationTime=0),dict(self.request,expectedImage=None)):
+            with self.subTest(kind=type(request).__name__),patch.object(smoke.subprocess,'Popen') as run:
+                result=method(request,145.)
+            self.assertFalse(result['requestValid']);self.assertFalse(result['attempted'])
+            self.assertFalse(result['completedWithinBudget']);self.assertEqual(result['result'],{})
+            self.assertEqual(run.call_count,0)
+
+    def test_root_timeout_or_parent_overrun_discards_every_child_result(self):
+        for options in (dict(error=subprocess.TimeoutExpired(['synthetic'],8,output=b'SYNTHETIC_PRIVATE')),
+                        dict(after_wait=108.),dict(after_wait=109.)):
+            result,run=self.capture(145.,**options)
+            self.assertEqual(run.call_count,1)
+            self.assertFalse(result['completedWithinBudget'])
+            self.assertEqual(result['result'],self.value(14))
+            self.assertNotIn('SYNTHETIC_PRIVATE',json.dumps(result))
+
+    def test_root_child_errors_noisy_foreign_or_oversized_protocol_stay_unknown(self):
+        self.feature();value=self.value()
+        for stdout,code in ((json.dumps(dict(value,officePid=201)),0),
+                            (json.dumps(dict(value,officeCreationTime=301)),0),
+                            (json.dumps(dict(value,childHwnd=124)),0),
+                            ('{',0),('SYNTHETIC_PRIVATE',0),(' '*4097,0),(json.dumps(value),1)):
+            with self.subTest(code=code,length=len(stdout)):
+                result,run=self.capture(145.,stdout=stdout,code=code)
+                self.assertEqual(run.call_count,1)
+                self.assertEqual(result['result'],self.value())
+                self.assertFalse(result['acceptanceEligible'])
+
+    def test_final_clock_error_discards_decoded_result_without_error_text(self):
+        result,run=self.capture(145.,clock_error=True)
+        self.assertEqual(run.call_count,1);self.assertFalse(result['completedWithinBudget'])
+        self.assertEqual(result['result'],self.value())
+        self.assertNotIn('SYNTHETIC_PRIVATE',json.dumps(result))
+
+    def test_root_only_cli_reads_no_uia_snapshot_stdin_focus_or_original_msaa(self):
+        self.feature();value=self.value();seen=[];stream=io.StringIO()
+        def observe(request):seen.append(request);print('discarded-diagnostic-output');return value
+        args=['korean_ui_smoke.py','--writer-root-capabilities-only','--capture-child','123','--office-pid','200',
+            '--writer-office-creation-time','300','--writer-office-image',self.request['expectedImage']]
+        with patch.object(smoke.sys,'argv',args),patch.object(smoke.os,'name','nt'), \
+             patch.object(smoke,'capture_controls',side_effect=AssertionError('No UIA tree')) as uia, \
+             patch.object(smoke.accessible,'capture_bounded',side_effect=AssertionError('No native focus')) as vcl, \
+             patch.object(smoke.writer_access,'observe',side_effect=AssertionError('Original probe stays separate')) as original, \
+             patch.object(smoke.Path,'open',side_effect=AssertionError('No snapshot read/write')) as files, \
+             patch.object(smoke.sys,'stdin',NS(read=lambda *a:self.fail('No stdin read'))), \
+             patch.object(smoke.sys,'stderr',io.StringIO()), \
+             patch.object(smoke.writer_access,'observe_root_diagnostic',side_effect=observe),redirect_stdout(stream):
+            try:code=smoke.main()
+            except SystemExit:self.fail('The separate root diagnostic CLI branch is required')
+        self.assertEqual(code,0);self.assertTrue(seen==[self.request],'Root observer ownership differs')
+        self.assertEqual(json.loads(stream.getvalue()),value)
+        self.assertLessEqual(len(stream.getvalue().encode('utf-8')),4096)
+        self.assertEqual((uia.call_count,vcl.call_count,original.call_count,files.call_count),(0,0,0,0))
+
+    def test_root_diagnostic_runs_only_after_original_before_and_after_receipts(self):
+        self.feature();helper=WriterOsIntegrationTests();helper.setUp();observations=[]
+        def diagnostic(request,deadline,**options):
+            self.assertTrue(options['enabled'])
+            observations.append((dict(request),deadline))
+            return dict(diagnosticOnly=True,acceptanceEligible=False,freshRootLater=True,
+                result=self.value())
+        with patch.object(smoke,'capture_writer_root_diagnostic',side_effect=diagnostic):
+            record,calls,errors=helper.run_writer()
+        self.assertEqual(len(observations),1);self.assertEqual(observations[0][0]['officePid'],200)
+        self.assertEqual(observations[0][1],145.)
+        self.assertEqual(record['writerOsAccessibility']['stageCode'],8)
+        self.assertEqual(record['writerOsAccessibilityAfterNative']['result']['verified'],1)
+        self.assertFalse(record['writerRootIa2Diagnostic']['acceptanceEligible'])
+        self.assertEqual(record['stage'],'writer-os-text');self.assertFalse(record['success'])
+        self.assertEqual(len(errors),1);self.assertEqual(calls[-1],'engine-close')
+
+    def test_root_success_or_failure_cannot_hide_original_vcl_failure_or_add_other_module_probe(self):
+        self.feature();helper=WriterOsIntegrationTests();helper.setUp()
+        for options in (dict(vcl_failure=RuntimeError('synthetic original VCL failure')),dict(module='impress')):
+            with patch.object(smoke,'capture_writer_root_diagnostic') as diagnostic:
+                record,calls,errors=helper.run_writer(**options)
+            self.assertEqual(diagnostic.call_count,0)
+            self.assertNotIn('writerRootIa2Diagnostic',record)
+
+    def test_malformed_primary_shape_keeps_its_original_protocol_failure_stage(self):
+        helper=WriterOsIntegrationTests();helper.setUp()
+        record,calls,errors=helper.run_writer(held_result=['synthetic malformed primary'])
+        self.assertEqual(record['stage'],'writer-os-protocol')
+        self.assertEqual(len(errors),1);self.assertTrue('tabs' in calls,'Original tab gate must precede protocol rejection')
+        self.assertTrue('writerRootIa2Diagnostic' in record,'Malformed primary must not abort optional diagnostics')
+
+    def test_unexpected_diagnostic_exception_cannot_replace_the_original_primary_failure(self):
+        helper=WriterOsIntegrationTests();helper.setUp()
+        with patch.object(smoke,'capture_writer_root_diagnostic',side_effect=RuntimeError('SYNTHETIC_PRIVATE')):
+            record,calls,errors=helper.run_writer()
+        self.assertEqual(record['stage'],'writer-os-text');self.assertFalse(record['success'])
+        self.assertEqual(record['writerOsAccessibility']['stageCode'],8)
+        self.assertEqual(record['writerOsAccessibilityAfterNative']['result']['verified'],1)
+        self.assertEqual(len(errors),1);self.assertTrue(type(errors[0]) is AssertionError,'Original failure type must survive')
+        self.assertEqual(calls,['entry','screenshot','vcl','secondary','tabs','engine-close'])
+        unknown=record['writerRootIa2Diagnostic']
+        self.assertTrue(unknown['invocationFailed']);self.assertFalse(unknown['attemptKnown'])
+        self.assertFalse(unknown['cleanupConfirmed']);self.assertEqual(unknown['result'],{})
+        self.assertNotIn('SYNTHETIC_PRIVATE',json.dumps(unknown))
+
+    def test_successful_primary_skips_child_without_restarting_any_budget(self):
+        result,run=self.capture(145.,enabled=False)
+        self.assertEqual(run.call_count,0);self.assertFalse(result['attempted'])
+        self.assertTrue(result['requestValid']);self.assertEqual(result['result'],self.value(15))
+        helper=WriterOsIntegrationTests();helper.setUp()
+        record,calls,errors=helper.run_writer(held_result=helper.value)
+        self.assertFalse(record['writerRootIa2Diagnostic']['attempted'])
+        self.assertNotIn('root-diagnostic',calls);self.assertTrue(not errors,'Unexpected primary gate failure')
+
+    def test_timeout_cleanup_uses_only_reserved_remaining_and_keeps_unretired_objects(self):
+        result,run=self.capture(145.,error=subprocess.TimeoutExpired(['synthetic'],7.75),cleanup_error=True)
+        self.assertEqual(run.call_count,1)
+        self.assertIn('cleanupConfirmed',result,'Child cleanup evidence is required')
+        self.assertFalse(result['cleanupConfirmed']);self.assertTrue(result['retainedPending'])
+        self.assertEqual(result['result'],self.value(14))
+        self.assertEqual(self.last_events,[('wait',7.75),('kill',),('wait',.25)])
+        self.assertFalse(self.last_streams[0].closed)
+        registry=smoke._ROOT_DIAGNOSTIC_PENDING
+        self.assertEqual(len(registry),1)
+        self.assertTrue(registry[0][1] is self.last_streams[0],'Retained output object differs')
+        result,run=self.capture(145.)
+        self.assertEqual(run.call_count,0);self.assertTrue(result['retainedPending'])
+        self.assertFalse(result['cleanupConfirmed'])
+
+    def test_launch_finishing_after_budget_preserves_child_without_new_kill_or_wait(self):
+        result,run=self.capture(145.,launch_late=True)
+        self.assertEqual(run.call_count,1);self.assertEqual(self.last_events,[])
+        self.assertEqual(result['result'],self.value(14))
+        self.assertFalse(result['cleanupConfirmed']);self.assertTrue(result['retainedPending'])
+
+    def test_launch_exception_does_not_invent_a_process_identity_or_cleanup_success(self):
+        result,run=self.capture(145.,launch_error=True)
+        self.assertEqual(run.call_count,1)
+        self.assertTrue(result.get('launchOutcomeUnknown',False),'Unreturned launch outcome must remain unknown')
+        self.assertFalse(result['cleanupConfirmed']);self.assertTrue(result['retainedPending'])
+        self.assertTrue(smoke._ROOT_DIAGNOSTIC_PENDING[0][0] is None,'Unreturned process must stay unknown')
+        self.assertFalse(self.last_streams[0].closed)
+        self.assertEqual(result['result'],self.value())
+
+    def test_late_output_close_cannot_retain_an_earlier_in_budget_result(self):
+        result,run=self.capture(145.,close_late=True)
+        self.assertEqual(run.call_count,1);self.assertTrue(result['cleanupConfirmed'])
+        self.assertFalse(result['completedWithinBudget'])
+        self.assertEqual(result['result'],self.value(14))
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+class WriterGuiFocusDeadlineTests(unittest.TestCase):
+    def setUp(self):
+        self.request = dict(officePid=200, officeCreationTime=300, childHwnd=123,
+            expectedImage=str(Path('/synthetic')/'Office/program/soffice.bin'))
+        self.value = smoke.writer_access.failure(self.request)
+
+    def test_original_capture_forwards_one_parent_absolute_cap_for_same_45_second_watchdog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)/'os.json'
+            seen = []
+            def child(command, **kwargs):
+                self.assertIn('--writer-msaa-deadline', command)
+                cap = float(command[command.index('--writer-msaa-deadline')+1])
+                seen.append(cap)
+                self.assertEqual((cap, kwargs['timeout']), (145., 45))
+                destination.write_text('{"controlCount":1}', encoding='utf-8')
+                return NS(returncode=0, stdout='1\n'+json.dumps(self.value))
+            with patch.object(smoke.time, 'monotonic', return_value=100.) as clock, \
+                 patch.object(smoke.subprocess, 'run', side_effect=child):
+                value = smoke.capture_bounded(123, 200, destination, writer_request=self.request)
+            self.assertEqual(value['writerOsAccessibility'], self.value)
+            self.assertEqual(seen, [145.]); self.assertEqual(clock.call_count, 1)
+
+    def test_after_native_passes_exact_original_minimum_cap_without_new_timeout(self):
+        for deadline, timeout in ((103., 3.), (145., 8.)):
+            with self.subTest(timeout=timeout):
+                seen = []
+                def child(command, **kwargs):
+                    cap = (float(command[command.index('--writer-msaa-deadline')+1])
+                        if '--writer-msaa-deadline' in command else None)
+                    seen.append((cap, kwargs['timeout']))
+                    return NS(returncode=0, stdout=json.dumps(self.value))
+                with patch.object(smoke.time, 'monotonic', return_value=100.), \
+                     patch.object(smoke.subprocess, 'run', side_effect=child):
+                    value = smoke.capture_writer_msaa_after_native(self.request, deadline)
+                self.assertEqual(value['result'], self.value)
+                self.assertEqual(seen, [(100.+timeout, timeout)])
+
+    def test_hidden_cli_preserves_absent_invalid_caps_and_passes_only_valid_numeric_argument(self):
+        for cap, expected in ((None, {}), ('invalid', {}), ('nan', {}), ('-1', {}), ('103.0', {'gui_deadline': 103.})):
+            with self.subTest(capKind='absent' if cap is None else 'provided'):
+                args = ['korean_ui_smoke.py', '--writer-msaa-only', '--capture-child', '123', '--office-pid', '200',
+                    '--writer-office-creation-time', '300', '--writer-office-image', self.request['expectedImage']]
+                if cap is not None: args.extend(['--writer-msaa-deadline', cap])
+                seen = []
+                def observe(request, **kwargs):
+                    seen.append(kwargs)
+                    self.assertTrue(request == self.request)
+                    return self.value
+                with patch.object(smoke.sys, 'argv', args), patch.object(smoke.os, 'name', 'nt'), \
+                     patch.object(smoke.writer_access, 'observe', side_effect=observe), redirect_stdout(io.StringIO()):
+                    try: result = smoke.main()
+                    except SystemExit: self.fail('Optional numeric cap must not replace the original CLI probe')
+                self.assertEqual(result, 0); self.assertEqual(seen, [expected])

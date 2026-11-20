@@ -187,7 +187,9 @@ class GitHub(qa_download.GitHub):
         raw=self._bytes(path,qa_download.MAX_METADATA)
         return qa.strict_json(raw),{'rawBase64':base64.b64encode(raw).decode('ascii'),
             'bytes':len(raw),'sha256':_bytes_hash(raw)}
-    def zip(self,artifact_id):return self._bytes('actions/artifacts/'+str(artifact_id)+'/zip',MAX_ZIP)
+    def zip(self,artifact_id,*,unsigned_scope=None):
+        cap=MAX_ZIP if unsigned_scope is None else _unsigned_limit(unsigned_scope)
+        return self._bytes('actions/artifacts/'+str(artifact_id)+'/zip',cap)
 
 
 def _metadata(backend,path):
@@ -239,8 +241,14 @@ def _one_job(jobs,binding,name,*,completed=True):
     return _job(rows[0],binding,name,completed=completed)
 
 
-def _files(directory):
-    paths=list(directory.iterdir());pair.budget(paths,MAX_EXPANDED)
+def _unsigned_limit(scope):
+    require(scope in ('source','store'),'알 수 없는 unsigned 실행 scope')
+    return pair.ARCH_LIMIT if scope=='source' else MAX_ZIP
+
+
+def _files(directory,*,scope=None):
+    cap=MAX_EXPANDED if scope is None else _unsigned_limit(scope)
+    paths=list(directory.iterdir());pair.budget(paths,cap)
     return {path.name:{'bytes':path.stat().st_size,'sha256':sha(path)} for path in paths}
 
 
@@ -259,26 +267,28 @@ def _unsigned(scope,directory,env):
         require(node is not None,'실제 MSIX 신원 없음')
         package_identity={key:node.get(key) for key in ('Name','Publisher','Version','ProcessorArchitecture')}
     require(package_identity['ProcessorArchitecture']=='arm64','ARM64 후보만 연결합니다')
-    return current,msix,package_identity,_files(directory)
+    return current,msix,package_identity,_files(directory,scope=scope)
 
 
-def _selected(backend,binding,run,jobs,name,role):
+def _selected(backend,binding,run,jobs,name,role,*,unsigned_scope=None):
+    cap=MAX_ZIP if unsigned_scope is None else _unsigned_limit(unsigned_scope)
     api_binding=_api_binding(binding,run);producer=_one_job(jobs,api_binding,role)
     listing=qa_download._page(backend.get('actions/runs/'+binding['runId']+'/artifacts?per_page=100'),'artifacts')
     rows=[value for value in listing if value.get('name')==name];require(len(rows)==1,'전송 artifact 이름이 누락/중복되었습니다')
-    chosen=artifact(rows[0],api_binding,run,producer,name,MAX_ZIP)
+    chosen=artifact(rows[0],api_binding,run,producer,name,cap)
     actual,rawproof=_metadata(backend,'actions/artifacts/'+str(chosen['id']))
-    fixed=artifact(actual,api_binding,run,producer,name,MAX_ZIP)
+    fixed=artifact(actual,api_binding,run,producer,name,cap)
     require(chosen==fixed,'선택한 artifact가 다운로드 전에 변경되었습니다')
-    raw=backend.zip(chosen['id'])
-    require(isinstance(raw,bytes) and len(raw)==chosen['size_in_bytes'] and 0<len(raw)<=MAX_ZIP
+    raw=backend.zip(chosen['id'],unsigned_scope=unsigned_scope)
+    require(isinstance(raw,bytes) and len(raw)==chosen['size_in_bytes'] and 0<len(raw)<=cap
         and 'sha256:'+_bytes_hash(raw)==chosen['digest'],'원 ZIP 실제 bytes/server SHA256 불일치')
     return raw,{'artifact':chosen,'metadata':rawproof,'producer':producer}
 
 
-def _unsigned_archive(raw,files):
+def _unsigned_archive(raw,files,*,scope):
+    cap=_unsigned_limit(scope)
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-        entries=archive.infolist();require(len(entries)==len(files) and sum(row.file_size for row in entries)<=MAX_EXPANDED,'원본 ZIP 파일 수/확장 크기 불일치')
+        entries=archive.infolist();require(len(entries)==len(files) and sum(row.file_size for row in entries)<=cap,'원본 ZIP 파일 수/확장 크기 불일치')
         seen=set()
         for entry in entries:
             kind=stat.S_IFMT(entry.external_attr>>16)
@@ -348,7 +358,7 @@ def publish(scope,directory,evidence,transport,*,backend=None,env=None):
     run,jobs,pr=_run(binding,scope,backend,env);api_binding=_api_binding(binding,run)
     native_job=_one_job(jobs,api_binding,role,completed=False)
     name=('opengeul-windows-arm64-' if scope=='source' else 'opengeul-store-')+binding['runId']
-    raw,source=_selected(backend,binding,run,jobs,name,'build-arm64' if scope=='source' else 'package');_unsigned_archive(raw,files)
+    raw,source=_selected(backend,binding,run,jobs,name,'build-arm64' if scope=='source' else 'package',unsigned_scope=scope);_unsigned_archive(raw,files,scope=scope)
     record['producer']={'scope':scope,'run':run,'job':native_job,'unsigned':source,'unsignedFiles':files}
     if pr is not None:record['producer']['pullRequestBinding']=pr
     data=pair.encoded(record)+b'\n';require(len(data)<=JSON_CAP,'native record 크기 한도 초과')
@@ -381,7 +391,7 @@ def _producer_proof(record,binding,scope):
     unsigned=proof.get('unsigned');require(isinstance(unsigned,dict),'unsigned API proof 없음')
     original=_metadata_proof(unsigned.get('metadata'))
     name=('opengeul-windows-arm64-' if scope=='source' else 'opengeul-store-')+binding['runId']
-    require(artifact(original,api_binding,run,unsigned.get('producer'),name,MAX_ZIP)==unsigned.get('artifact'),'unsigned API metadata 원문 불일치')
+    require(artifact(original,api_binding,run,unsigned.get('producer'),name,_unsigned_limit(scope))==unsigned.get('artifact'),'unsigned API metadata 원문 불일치')
     return proof,run
 
 
@@ -394,7 +404,7 @@ def download(scope,directory,output,*,backend=None,env=None):
     native_name=('opengeul-native-signed-arm64-' if scope=='source' else 'opengeul-store-native-signed-arm64-')+binding['runId']+'-'+binding['runAttempt']
     raw,native_origin=_selected(backend,binding,run,jobs,native_name,role)
     unsigned_name=('opengeul-windows-arm64-' if scope=='source' else 'opengeul-store-')+binding['runId']
-    source_raw,source_origin=_selected(backend,binding,run,jobs,unsigned_name,'build-arm64' if scope=='source' else 'package');_unsigned_archive(source_raw,files)
+    source_raw,source_origin=_selected(backend,binding,run,jobs,unsigned_name,'build-arm64' if scope=='source' else 'package',unsigned_scope=scope);_unsigned_archive(source_raw,files,scope=scope)
     consumer_name='msix-install-arm64' if scope=='source' else 'Store WACK (arm64)'
     require(env.get('GITHUB_JOB')==('msix-install-arm64' if scope=='source' else 'store-wack'),'다른 SDK 소비자 job입니다')
     consumer=_one_job(jobs,api_binding,consumer_name,completed=False)
@@ -441,7 +451,7 @@ def _origin_proof(origin,native,binding,scope):
     unsigned=origin.get('unsigned');require(isinstance(unsigned,dict),'SDK unsigned 원문 없음')
     unsigned_value=_metadata_proof(unsigned.get('metadata'))
     unsigned_name=('opengeul-windows-arm64-' if scope=='source' else 'opengeul-store-')+binding['runId']
-    require(artifact(unsigned_value,api_binding,run,unsigned.get('producer'),unsigned_name,MAX_ZIP)==unsigned.get('artifact')
+    require(artifact(unsigned_value,api_binding,run,unsigned.get('producer'),unsigned_name,_unsigned_limit(scope))==unsigned.get('artifact')
         and unsigned['artifact']==producer['unsigned']['artifact'] and unsigned['producer']==producer['unsigned']['producer']
         and _metadata_proof(unsigned['metadata'])==_metadata_proof(producer['unsigned']['metadata']),
         '두 소비자가 같은 원본 MSIX 생산자를 사용하지 않았습니다')
@@ -566,7 +576,7 @@ def finalize(directory,native_directory,output,controller_path,*,env=None):
     require(len(embedded)==1 and dict(embedded[0].attrib)==identity_node,'SDK XML 실제 ARM package 신원 불일치')
     split={'formatVersion':1,'scope':scope,'binding':binding,'native':pending['native'],'origin':pending['origin'],'controller':controller}
     context=dict(context,nativeSignedJoin=_context_join(split));installation=dict(pending['native']['installation'],armNativeSplit=split)
-    verify_split(installation,context,unsigned,identity_node,binding,scope,_files(directory))
+    verify_split(installation,context,unsigned,identity_node,binding,scope,_files(directory,scope=scope))
     require(not (output/'install.json').exists(),'최종 설치 성공 원문 재사용 금지')
     install_data=pair.encoded(installation)+b'\n';context_data=pair.encoded(context)+b'\n'
     require(len(install_data)<=JSON_CAP and len(context_data)<=JSON_CAP,'최종 증거 JSON 크기 한도 초과')

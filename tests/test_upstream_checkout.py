@@ -4,6 +4,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import hashlib
+import json
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -73,6 +76,39 @@ class SparseCheckoutTests(unittest.TestCase):
         commit = self.git('rev-parse', 'HEAD').strip()
         with self.assertRaises(ValueError):
             prepare_upstream.checkout_rhwp(Path(self.tmp.name) / 'broken', str(self.repository), commit)
+
+    def test_reviewed_non_target_vendor_test_input_is_recorded_without_fabricating_fixture(self):
+        manifest = self.repository/'Cargo.toml'
+        original_manifest = manifest.read_bytes()
+        rust = self.repository/'vendor/dependency/src/optional.rs'
+        rust.parent.mkdir(parents=True)
+        rust.write_text('#[cfg(test)]\nmod tests { const CERT: &str = include_str!("../../tests/cert.pem"); }\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'Non-target dependency fixture')
+        reviewed = {
+            'manifestSha256': hashlib.sha256(original_manifest).hexdigest(),
+            'source': 'vendor/dependency/src/optional.rs',
+            'sourceSha256': hashlib.sha256(rust.read_bytes()).hexdigest(),
+            'input': 'vendor/tests/cert.pem',
+            'reason': 'Excluded dependency unit-test module; not a workspace test target.',
+        }
+        with patch.object(prepare_upstream, 'NON_TARGET_VENDOR_TEST_INPUTS', (reviewed,), create=True):
+            try:
+                prepare_upstream.restore_compile_inputs(self.repository)
+            except ValueError as error:
+                self.fail('A byte-reviewed non-target fixture needs an explicit receipt: ' + str(error))
+        self.assertFalse((self.repository/'vendor/tests/cert.pem').exists())
+        receipt = json.loads((self.repository/'.opengeul-compile-inputs.json').read_text())
+        self.assertEqual(receipt['nonTargetVendorTestInputs'], [reviewed])
+        for changed in ('source', 'manifest'):
+            with self.subTest(changed=changed):
+                target = rust if changed == 'source' else manifest
+                before = target.read_bytes()
+                target.write_bytes(before + b'\n')
+                with patch.object(prepare_upstream, 'NON_TARGET_VENDOR_TEST_INPUTS', (reviewed,)):
+                    with self.assertRaisesRegex(ValueError, 'Missing tracked Rust include input'):
+                        prepare_upstream.restore_compile_inputs(self.repository)
+                target.write_bytes(before)
 
     def test_workspace_members_and_their_path_dependencies_survive_sparse_checkout(self):
         files = {

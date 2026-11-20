@@ -10,18 +10,20 @@ const {default:init,HwpDocument}=await import(pathToFileURL(join(vendor,'rhwp.js
 const wasm=readFileSync(join(vendor,'rhwp_bg.wasm'));
 await init({module_or_path:wasm}); mkdirSync(folder,{recursive:true});
 const sha=b=>createHash('sha256').update(b).digest('hex');
-const equationSource='third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts';
+// The compatibility key binds exactly the equation and picture focus sources.
+const focusSources=['third_party/rhwp/rhwp-studio/src/ui/equation-editor-dialog.ts',
+  'third_party/rhwp/rhwp-studio/src/ui/picture-props-dialog.ts'];
 const equationHelper='scripts/equation_dialog_focus.py';
 function observeFrontendSource(){return {
   equationDialogFocus:JSON.parse(readFileSync(join(prepared,'.opengeul-overlay.json'))).equationDialogFocus,
-  preparedFiles:{[equationSource]:sha(readFileSync(join(prepared,equationSource)))},
+  preparedFiles:Object.fromEntries(focusSources.map(source=>[source,sha(readFileSync(join(prepared,source)))])),
   helperSha256:{[equationHelper]:sha(readFileSync(new URL('../scripts/equation_dialog_focus.py',import.meta.url)))}};}
 const frontendSource=observeFrontendSource();
 const equationProof=frontendSource.equationDialogFocus;
 if(!equationProof || Object.keys(equationProof).sort().join(',')!=='afterSha256,beforeSha256,helperSha256'
-  || Object.keys(equationProof.beforeSha256??{}).join(',')!==equationSource
-  || Object.keys(equationProof.afterSha256??{}).join(',')!==equationSource
-  || equationProof.afterSha256[equationSource]!==frontendSource.preparedFiles[equationSource]
+  || Object.keys(equationProof.beforeSha256??{}).sort().join(',')!==focusSources.slice().sort().join(',')
+  || Object.keys(equationProof.afterSha256??{}).sort().join(',')!==focusSources.slice().sort().join(',')
+  || focusSources.some(source=>equationProof.afterSha256[source]!==frontendSource.preparedFiles[source])
   || equationProof.helperSha256!==frontendSource.helperSha256[equationHelper]) {
   throw Error('Equation dialog focus actual prepared source/helper proof mismatch');
 }

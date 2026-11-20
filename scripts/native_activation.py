@@ -25,10 +25,15 @@ MAX_FILES = 1500
 PATCH_INPUT = ROOT / 'overlay/native-activation-patches.json'
 SHIM = ROOT / 'overlay/native-open'
 FEATURE = 'opengeul-store-no-restart'
+VENDOR_VERSIONS = {'tauri':'2.12.5', 'tauri-runtime-wry':'2.12.3'}
 REGISTRY_INPUTS = {
     'windows': ('0.61.3', '9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893'),
     'windows-future': ('0.2.1', 'fc6a41e98427b19fe4b73c550f060b59fa592d7d686537eebf9385621bfbad8e'),
     'open': ('5.3.3', '43bb73a7fa3799b198970490a51174027ba0d4ec504b03cd08caf513d40024bc'),
+}
+RUNTIME_REGISTRY_INPUTS = {
+    'windows': ('0.62.2', '527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580'),
+    'windows-future': ('0.3.2', 'e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb'),
 }
 RESERVED = re.compile(r'(?i)(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?\Z')
 
@@ -98,11 +103,13 @@ def provision_vendor(content: bytes, specification: dict, destination: Path) -> 
 
 def desktop_manifest(value: str) -> str:
     value = replace_once(value, 'open = "5"\n', '')
-    value = replace_once(value, 'tauri = { version = "=2.11.1", features = [] }',
-                         'tauri = { version = "=2.11.1", features = ["' + FEATURE + '"] }')
+    value = replace_once(value, 'tauri = { version = "=2.12.5", features = [] }',
+                         'tauri = { version = "=2.12.5", features = ["' + FEATURE + '"] }')
+    if 'patch' not in tomllib.loads(value):
+        value = value.rstrip() + '\n\n[patch.crates-io]\n'
     value = replace_once(value, '[patch.crates-io]\n', '''[patch.crates-io]
-tauri = { path = "opengeul-native/tauri-2.11.1" }
-tauri-runtime-wry = { path = "opengeul-native/tauri-runtime-wry-2.11.1" }
+tauri = { path = "opengeul-native/tauri-2.12.5" }
+tauri-runtime-wry = { path = "opengeul-native/tauri-runtime-wry-2.12.3" }
 ''')
     return value.rstrip() + '''
 
@@ -115,7 +122,7 @@ open = "5"
 [workspace]
 members = ["opengeul-native/native-open"]
 default-members = ["."]
-exclude = ["opengeul-native/tauri-2.11.1", "opengeul-native/tauri-runtime-wry-2.11.1"]
+exclude = ["opengeul-native/tauri-2.12.5", "opengeul-native/tauri-runtime-wry-2.12.3"]
 resolver = "2"
 '''
 
@@ -151,8 +158,8 @@ def transform_lock(value: str) -> str:
 name = "opengeul-native-open"
 version = "1.0.0"
 dependencies = [
- "windows",
- "windows-future",
+ "windows 0.61.3",
+ "windows-future 0.2.1",
 ]
 
 '''
@@ -164,24 +171,32 @@ dependencies = [
 def validate_lock(value: str) -> str:
     packages = tomllib.loads(value)['package']
     selected = {}
-    for name in ('tauri', 'tauri-runtime-wry', 'opengeul-native-open', 'hop-desktop', 'windows', 'windows-future', 'open'):
+    for name in ('tauri', 'tauri-runtime-wry', 'opengeul-native-open', 'hop-desktop'):
         matching = [package for package in packages if package['name'] == name]
         if len(matching) != 1:
             raise ValueError('Native activation lock selection is ambiguous: ' + name)
         selected[name] = matching[0]
     for name in ('tauri', 'tauri-runtime-wry'):
-        if selected[name]['version'] != '2.11.1' or any(key in selected[name] for key in ('source', 'checksum')):
+        if selected[name]['version'] != VENDOR_VERSIONS[name] or any(key in selected[name] for key in ('source', 'checksum')):
             raise ValueError('Native activation vendor lock is invalid')
     for name in ('hop-desktop', 'tauri-runtime-wry'):
         if selected[name]['dependencies'].count('opengeul-native-open') != 1:
             raise ValueError('Native activation lock dependency missing')
     shim = selected['opengeul-native-open']
-    if (shim['version'] != '1.0.0' or shim['dependencies'] != ['windows', 'windows-future']
+    if (shim['version'] != '1.0.0' or shim['dependencies'] != ['windows 0.61.3', 'windows-future 0.2.1']
             or 'source' in shim or 'checksum' in shim):
         raise ValueError('Native activation shim lock is invalid')
     for name, (version, checksum) in REGISTRY_INPUTS.items():
-        if (selected[name]['version'] != version or selected[name].get('checksum') != checksum
-                or selected[name].get('source') != 'registry+https://github.com/rust-lang/crates.io-index'):
+        expected={version:checksum}
+        if name in RUNTIME_REGISTRY_INPUTS:
+            runtime_version,runtime_checksum=RUNTIME_REGISTRY_INPUTS[name]
+            expected[runtime_version]=runtime_checksum
+        matching=[package for package in packages if package['name']==name]
+        if (any(type(package.get('version')) is not str for package in matching)
+                or len(matching)!=len(expected) or {package['version'] for package in matching}!=set(expected)
+                or any(package.get('checksum')!=expected[package['version']]
+                       or package.get('source')!='registry+https://github.com/rust-lang/crates.io-index'
+                       for package in matching)):
             raise ValueError('Native activation registry dependency source changed: ' + name)
     return value
 

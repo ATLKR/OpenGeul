@@ -41,6 +41,19 @@ class Element {
     }
     return null;
   }
+  querySelectorAll(selector: string): Element[] {
+    return this.children.flatMap(child => [
+      ...((selector.startsWith('.') ? child.className.split(' ').includes(selector.slice(1))
+        : child.tagName === selector) ? [child] : []),
+      ...child.querySelectorAll(selector),
+    ]);
+  }
+  contains(target: Element): boolean {
+    return target === this || this.children.some(child => child.contains(target));
+  }
+  closest(selector: string): Element | null {
+    return this.tagName === selector ? this : this.parentNode?.closest(selector) ?? null;
+  }
 }
 
 class Input extends Element {
@@ -48,6 +61,9 @@ class Input extends Element {
   readOnly = false;
 }
 class TextArea extends Element {}
+class Button extends Element {}
+class Select extends Element {}
+class Pre extends Element {}
 const captured = new Map<string, (event: unknown) => void>();
 let documentBody: Element;
 
@@ -63,6 +79,9 @@ beforeEach(() => {
   documentBody = new Element('body');
   vi.stubGlobal('HTMLInputElement', Input);
   vi.stubGlobal('HTMLTextAreaElement', TextArea);
+  vi.stubGlobal('HTMLButtonElement', Button);
+  vi.stubGlobal('HTMLSelectElement', Select);
+  vi.stubGlobal('HTMLPreElement', Pre);
   vi.stubGlobal('document', {
     body: documentBody,
     createElement: (tag: string) => tag === 'input' ? new Input(tag) : new Element(tag),
@@ -70,6 +89,7 @@ beforeEach(() => {
     removeEventListener: (name: string) => captured.delete(name),
     dispatchEvent: () => true,
     querySelector: (selector: string) => documentBody.querySelector(selector),
+    querySelectorAll: (selector: string) => documentBody.querySelectorAll(selector),
   });
   vi.stubGlobal('__APP_VERSION__', '0.8.7');
   vi.stubGlobal('__HOP_VERSION__', '1.1.3');
@@ -82,7 +102,7 @@ describe('OpenGeul 제품 정보', () => {
     expect(body.querySelector('.about-product-name')?.textContent).toBe('OpenGeul');
     expect(body.querySelector('.about-hop-version')?.textContent).toBe('OpenGeul 버전 1.1.3');
     expect(body.querySelector('.about-version')?.textContent).toBe('rhwp 버전 0.8.7');
-    expect(body.textContent).toContain('기반 HOP 버전 0.4.5');
+    expect(body.textContent).toContain('기반 HOP 버전 0.5.3');
   });
 
   it('shows selectable contact details without requiring an email client or launching anything', () => {

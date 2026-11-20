@@ -1,8 +1,9 @@
 """Bind actual imported line segment origin across HWP/HWPX without changing IR checks.
 
-The three original files are immutable pins. Only parser-observed positive stored
-rows receive source lineage; runtime replacement/dirty/axis rules remain owned
-by the original core. No metadata override or legacy output refresh is accepted.
+The four original files are immutable pins. Only parser-observed positive stored
+rows receive source lineage. The fifth, separately pinned runtime producer marks
+only newly generated rows; retained prefixes and dirty/axis rules stay owned by
+the original core. No metadata override or legacy output refresh is accepted.
 """
 from pathlib import Path
 import hashlib
@@ -12,13 +13,19 @@ ROOT = Path(__file__).resolve().parents[1]
 HELPER = 'scripts/stored_lineseg_origin.py'
 SOURCE_FILES = ('third_party/rhwp/src/parser/body_text.rs',
  'third_party/rhwp/src/parser/hwpx/section.rs',
- 'third_party/rhwp/src/serializer/hwpx/section.rs')
-INPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '6373fe16d27297a4dd242ac0690b695e389e25bb100922817ca0cdb78e393ed8',
- 'third_party/rhwp/src/parser/hwpx/section.rs': '7d5d38bb8060bbbd454029f7bbab3cf90af589262ab432b7e95a03034be056b7',
- 'third_party/rhwp/src/serializer/hwpx/section.rs': '87e7ec7579b30bf82f2995bd69c846586d5f6743597ddd6fb57eb130883b78a3'}
-OUTPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '38a73a4c40bb34a889166d0965c7db08d2ce383fdf99a66e65bb5884e566cd57',
- 'third_party/rhwp/src/parser/hwpx/section.rs': '27306e4d8b2832680d2407c19aaf80cf1124026d0f1794c0677429a91a482449',
- 'third_party/rhwp/src/serializer/hwpx/section.rs': '527676d0109f326f373b770aa619e33453d439e77fc101bafd5c075b3c4da8b6'}
+ 'third_party/rhwp/src/serializer/hwpx/section.rs',
+ 'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs',
+ 'third_party/rhwp/src/renderer/composer/line_breaking.rs')
+INPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '25b49e6c998943ff9a674e7ef8f9baaf7f78dc7da9791ecf6b4a757f3cdd56a1',
+ 'third_party/rhwp/src/parser/hwpx/section.rs': '9b5a862765a9d55319619b63350fec298d750e57d547e7544d4af051f8d57b6f',
+ 'third_party/rhwp/src/serializer/hwpx/section.rs': 'f22a4a41e6a381028b927167d7dbab537693c9bad044c1dd045c200b4c37675c',
+ 'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs': 'fffb404df94819fbb2f427280ae89a51b8dac37c35535015feb95cf4fd928936',
+ 'third_party/rhwp/src/renderer/composer/line_breaking.rs': 'a4a325d7793059701c2f37968a6098d52bd1807f77a430d6f7c2fccf37b32e59'}
+OUTPUT_SOURCE_SHA256 = {'third_party/rhwp/src/parser/body_text.rs': '183109289587ad200d3bd24c08c06cba4ca62745883e939f93a64670c52343c3',
+ 'third_party/rhwp/src/parser/hwpx/section.rs': '1770dc23d779af301135c44e977b4a090f8168ca45242b0911c270ba3df8e7e5',
+ 'third_party/rhwp/src/serializer/hwpx/section.rs': '2e83bfe3d7d3c95b81a1f12c4c64202292e00f583762cbdbf4d654eb8fbd2562',
+ 'third_party/rhwp/src/serializer/hwpx/roundtrip/export_cache.rs': '2c9c15669ca0b4b071a10ab232b9a9d991bd98fa0634be1640df096d0f5fc541',
+ 'third_party/rhwp/src/renderer/composer/line_breaking.rs': 'a6fb58a6ace4ab904e7d6c52ba57169eb33673c2827cd1ae483e88f2aeba4af5'}
 
 _BEFORE_0 = """                para.line_segs = parse_para_line_seg(&record.data);
 """
@@ -27,7 +34,8 @@ _AFTER_0 = """                para.source_line_seg_vertical_pos = None;
                 // OpenGeul: an implementation bit in actual stored bytes is not proof
                 // that this row was synthesized by this runtime. Preserve only sized,
                 // non-placeholder imported rows; replacement/reflow clears this origin.
-                if !para.line_segs.is_empty()
+                if !RHWP_LINE_SEG_TAGS.with(std::cell::Cell::get)
+                    && !para.line_segs.is_empty()
                     && para.line_segs.iter().all(|s| {
                         s.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
                             && s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0
@@ -47,8 +55,7 @@ _AFTER_1 = """    // OpenGeul: an implementation bit in actual stored bytes is n
     // non-placeholder imported rows; replacement/reflow clears this origin.
     if !para.line_segs.is_empty()
         && para.line_segs.iter().all(|s| {
-            s.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
-                && s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0
+            s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0
                 && s.line_height > 0
                 && s.text_height > 0
         })
@@ -60,61 +67,20 @@ _AFTER_1 = """    // OpenGeul: an implementation bit in actual stored bytes is n
     // [Task #1058 후속] HWPX `<hp:p id>` → HWP PARA_HEADER instance_id 매핑.
 """
 
-_BEFORE_2 = """    let all_synthetic = !axis_line_segs.is_empty()
-        && axis_line_segs
-            .iter()
-            .all(|s| s.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0);
+_BEFORE_2 = '        let all_synthetic = line_segs_are_all_synthetic(axis_line_segs);\n        Ok(\n            if !axis_line_segs.is_empty() && position_axis_intact && !all_synthetic {\n                // IR 기반 출력 — 원본 lineseg 값 보존 (#177)\n                //\n                // [#5847] reflow 의 구역 단위 vpos 재계산이 원본 캐시 보유 문단의\n                // vertpos 를 문서 누적 좌표로 덮어쓴 경우, 파싱 때 스냅샷해 둔 원본\n                // 쪽-상대 좌표로 되돌려 낸다 — 누적 좌표가 파일로 나가면 한글 2022 가\n                // 캐시를 신뢰해 조판을 폐기한다(08818: 81쪽 → 5쪽). axis 절단은 앞\n                // 접두 슬라이스라 인덱스가 그대로 대응한다.\n                let source_vpos = crate::serializer::line_cache::source_vertical_positions(para)\n                    .map(|v| &v[..axis_line_segs.len()]);\n'
+_AFTER_2 = '        // Stored input flags alone do not prove runtime synthesis. A complete\n        // sized source partition retains its parser-observed row ownership.\n        let imported_stored_origin = para\n            .source_line_seg_vertical_pos\n            .as_ref()\n            .is_some_and(|v| v.len() == serializable_line_segs.len())\n            && serializable_line_segs.iter().all(|s| {\n                s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0\n                    && s.line_height > 0\n                    && s.text_height > 0\n            });\n        let all_synthetic = !imported_stored_origin\n            && line_segs_are_all_synthetic(axis_line_segs);\n        Ok(\n            if !axis_line_segs.is_empty() && position_axis_intact && !all_synthetic\n                && (para.source_line_seg_vertical_pos.is_none() || imported_stored_origin)\n            {\n                // IR 기반 출력 — 원본 lineseg 값 보존 (#177)\n                //\n                // [#5847] reflow 의 구역 단위 vpos 재계산이 원본 캐시 보유 문단의\n                // vertpos 를 문서 누적 좌표로 덮어쓴 경우, 파싱 때 스냅샷해 둔 원본\n                // 쪽-상대 좌표로 되돌려 낸다 — 누적 좌표가 파일로 나가면 한글 2022 가\n                // 캐시를 신뢰해 조판을 폐기한다(08818: 81쪽 → 5쪽). axis 절단은 앞\n                // 접두 슬라이스라 인덱스가 그대로 대응한다.\n                let source_vpos = para\n                    .source_line_seg_vertical_pos\n                    .as_deref()\n                    .filter(|v| v.len() == serializable_line_segs.len())\n                    .map(|v| &v[..axis_line_segs.len()]);\n'
 
-    if !axis_line_segs.is_empty() && position_axis_intact && !all_synthetic {
-        // IR 기반 출력 — 원본 lineseg 값 보존 (#177)
-        //
-        // [#5847] reflow 의 구역 단위 vpos 재계산이 원본 캐시 보유 문단의
-        // vertpos 를 문서 누적 좌표로 덮어쓴 경우, 파싱 때 스냅샷해 둔 원본
-        // 쪽-상대 좌표로 되돌려 낸다 — 누적 좌표가 파일로 나가면 한글 2022 가
-        // 캐시를 신뢰해 조판을 폐기한다(08818: 81쪽 → 5쪽). axis 절단은 앞
-        // 접두 슬라이스라 인덱스가 그대로 대응한다.
-        let source_vpos = para
-            .source_line_seg_vertical_pos
-            .as_deref()
-            .filter(|v| v.len() == para.line_segs.len())
-            .map(|v| &v[..axis_line_segs.len()]);
-"""
-_AFTER_2 = """    // Imported sized rows retain exact flags and coordinates across formats.
-    // A partial/stale snapshot cannot promote runtime-only synthetic rows.
-    let imported_stored_origin = para
-        .source_line_seg_vertical_pos
-        .as_ref()
-        .is_some_and(|v| v.len() == serializable_line_segs.len())
-        && serializable_line_segs.iter().all(|s| {
-            s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0
-                && s.line_height > 0
-                && s.text_height > 0
-        });
-    let all_synthetic = !imported_stored_origin
-        && !axis_line_segs.is_empty()
-        && axis_line_segs
-            .iter()
-            .all(|s| s.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0);
+_BEFORE_3 = '        // #5847: 임시 재조판 줄은 파일에 싣지 않는다. 정상 원본 줄은 유지한다.\n        if !crate::serializer::line_cache::can_serialize_hwpx_line_partition(para)\n            || para\n                .line_segs\n                .iter()\n                .all(|line| line.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0)\n        {\n            para.line_segs.clear();\n        } else if let Some(positions) =\n            crate::serializer::line_cache::source_vertical_positions(para).map(<[i32]>::to_vec)\n        {\n            for (line, source) in para.line_segs.iter_mut().zip(positions) {\n                line.vertical_pos = source;\n            }\n        }\n'
+_AFTER_3 = '        // Imported sized rows own their stored flags even when bit 31 is set.\n        // Renderer-only suffixes are excluded at this shared HWP/HWPX boundary.\n        let serializable_line_segs = para.serializable_line_segs();\n        let imported_stored_origin = para\n            .source_line_seg_vertical_pos\n            .as_ref()\n            .is_some_and(|v| v.len() == serializable_line_segs.len())\n            && serializable_line_segs.iter().all(|s| {\n                s.tag & LineSeg::TAG_EMPTY_SEGMENT == 0\n                    && s.line_height > 0\n                    && s.text_height > 0\n            });\n        let all_synthetic = !imported_stored_origin\n            && !serializable_line_segs.is_empty()\n            && serializable_line_segs\n                .iter()\n                .all(|s| s.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0);\n        let mut stored = if !crate::serializer::line_cache::can_serialize_hwpx_line_partition(para)\n            || all_synthetic\n            || (para.source_line_seg_vertical_pos.is_some() && !imported_stored_origin)\n        {\n            Vec::new()\n        } else {\n            serializable_line_segs.to_vec()\n        };\n        if let Some(source_vpos) = para\n            .source_line_seg_vertical_pos\n            .as_deref()\n            .filter(|v| v.len() == serializable_line_segs.len())\n        {\n            for (row, original) in stored.iter_mut().zip(source_vpos) {\n                row.vertical_pos = *original;\n            }\n        }\n        para.line_segs = stored;\n        para.layout_only_fill_lines = 0;\n'
 
-    if !axis_line_segs.is_empty() && position_axis_intact && !all_synthetic {
-        // IR 기반 출력 — 원본 lineseg 값 보존 (#177)
-        //
-        // [#5847] reflow 의 구역 단위 vpos 재계산이 원본 캐시 보유 문단의
-        // vertpos 를 문서 누적 좌표로 덮어쓴 경우, 파싱 때 스냅샷해 둔 원본
-        // 쪽-상대 좌표로 되돌려 낸다 — 누적 좌표가 파일로 나가면 한글 2022 가
-        // 캐시를 신뢰해 조판을 폐기한다(08818: 81쪽 → 5쪽). axis 절단은 앞
-        // 접두 슬라이스라 인덱스가 그대로 대응한다.
-        let source_vpos = para
-            .source_line_seg_vertical_pos
-            .as_deref()
-            .filter(|v| v.len() == serializable_line_segs.len())
-            .map(|v| &v[..axis_line_segs.len()]);
-"""
+_FRESH_REPLACEMENTS = (('    // Fresh rows inherit only provenance. Page/column-first, empty, indent,\n    // paragraph-head, and FIRST/LAST are properties of the newly projected\n    // physical row and must not leak from the cached first row.\n    let source_tag = para\n        .line_segs\n        .first()\n        .map(|segment| segment.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY)\n        .unwrap_or(LineSeg::TAG_IMPLEMENTATION_PROPERTY);\n', '    // These rows are newly filled, even when their metric template was imported.\n    // Physical-row flags are still derived by the frame, not copied from cache.\n    let source_tag = LineSeg::TAG_IMPLEMENTATION_PROPERTY;\n'), ('        // [Task #1811] 원본 linesegarray 부재(orig=None) 시 합성 seg 에 구현속성\n        // 태그를 부여 — vpos 보정 등에서 실제 저장 증거와 구분한다 (컨버터의\n        // 합성 lineseg flags=0x8000_0000 관례와 정합).\n        let orig_tag = orig\n            .as_ref()\n            .map(|ls| ls.tag)\n            .unwrap_or(LineSeg::TAG_SINGLE_SEGMENT_LINE | LineSeg::TAG_IMPLEMENTATION_PROPERTY);\n        LineSeg {\n            text_start: utf16_start,\n            line_height: line_height_hwp,\n            text_height: text_height_hwp,\n            baseline_distance: baseline_distance_hwp,\n            line_spacing: line_spacing_hwp,\n            column_start: published_horizontal.start,\n            segment_width: seg_width_hwp,\n            tag: if orig_tag != 0 {\n                orig_tag\n            } else {\n                LineSeg::TAG_SINGLE_SEGMENT_LINE\n            },\n', '        // Metric templates do not make a newly computed row imported source.\n        // Preserve its existing flags and add only runtime provenance.\n        let orig_tag = orig\n            .as_ref()\n            .map(|ls| ls.tag)\n            .unwrap_or(LineSeg::TAG_SINGLE_SEGMENT_LINE | LineSeg::TAG_IMPLEMENTATION_PROPERTY);\n        LineSeg {\n            text_start: utf16_start,\n            line_height: line_height_hwp,\n            text_height: text_height_hwp,\n            baseline_distance: baseline_distance_hwp,\n            line_spacing: line_spacing_hwp,\n            column_start: published_horizontal.start,\n            segment_width: seg_width_hwp,\n            tag: (if orig_tag != 0 {\n                orig_tag\n            } else {\n                LineSeg::TAG_SINGLE_SEGMENT_LINE\n            }) | LineSeg::TAG_IMPLEMENTATION_PROPERTY,\n'), ('                    seg.tag = if template.tag != 0 {\n                        template.tag\n                    } else {\n                        seg.tag\n                    };\n', '                    seg.tag = if template.tag != 0 {\n                        template.tag | LineSeg::TAG_IMPLEMENTATION_PROPERTY\n                    } else {\n                        seg.tag\n                    };\n'))
 
 REPLACEMENTS = {
-    SOURCE_FILES[0]: (_BEFORE_0, _AFTER_0),
-    SOURCE_FILES[1]: (_BEFORE_1, _AFTER_1),
-    SOURCE_FILES[2]: (_BEFORE_2, _AFTER_2),
+    SOURCE_FILES[0]: ((_BEFORE_0, _AFTER_0),),
+    SOURCE_FILES[1]: ((_BEFORE_1, _AFTER_1),),
+    SOURCE_FILES[2]: ((_BEFORE_2, _AFTER_2),),
+    SOURCE_FILES[3]: ((_BEFORE_3, _AFTER_3),),
+    SOURCE_FILES[4]: _FRESH_REPLACEMENTS,
 }
 
 def sha(path):
@@ -138,10 +104,11 @@ def apply(source):
         raw=path.read_bytes();before[name]=hashlib.sha256(raw).hexdigest()
         if before[name]!=INPUT_SOURCE_SHA256[name]:
             raise ValueError('Stored line origin source drift or reapplication')
-        old,new=REPLACEMENTS[name]
-        if raw.count(old.encode())!=1:
-            raise ValueError('Stored line origin anchor must occur exactly once')
-        value=raw.replace(old.encode(),new.encode())
+        value=raw
+        for old,new in REPLACEMENTS[name]:
+            if value.count(old.encode())!=1:
+                raise ValueError('Stored line origin anchor must occur exactly once')
+            value=value.replace(old.encode(),new.encode())
         if hashlib.sha256(value).hexdigest()!=OUTPUT_SOURCE_SHA256[name]:
             raise ValueError('Stored line origin output does not match the frozen patch')
         patched[name]=value

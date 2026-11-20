@@ -18,7 +18,7 @@ class SyntheticPrintPdfTests(unittest.TestCase):
   expected=wasm_artifacts.expected();wasm={name:(b'\0asm\1\0\0\0' if name=='rhwp_bg.wasm' else b'synthetic '+name.encode()) for name in wasm_artifacts.FILES}
   wasm['package.json']=json.dumps({'version':expected['upstream']['rhwp']['version']}).encode()
   for name,data in wasm.items():self.put('wasm-input/'+name,data)
-  self.metadata('wasm-input/OPEN_GEUL_WASM.json',{**expected,'artifacts':{name:digest(data) for name,data in wasm.items()},'generator':'wasm-pack 0.14.0 --target web --release --no-opt'})
+  self.metadata('wasm-input/OPEN_GEUL_WASM.json',{**expected,'artifacts':{name:digest(data) for name,data in wasm.items()},'generator':'wasm-pack 0.14.0 --target web --release --no-opt --no-default-features --features console_error_panic_hook,wasm-api'})
   self.put('event.json',json.dumps({'repository':{'private':False,'full_name':'ATLKR/OpenGeul'}}).encode());self.metadata('print-evidence/summary.json',{'tests':8,'failures':0,'skipped':0,'results':[{'name':c,'passed':True} for c in CASES]})
   self.put('print-evidence/junit.xml',('<testsuite name="virtual-print" tests="8" failures="0" skipped="0">'+''.join('<testcase name="'+c+'" />' for c in CASES)+'</testsuite>').encode())
   for case in CASES:

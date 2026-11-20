@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "cycles": [
+    {
+      "contract": "wire/descriptor/privateABI",
+      "red": {
+        "exitCode": 1,
+        "observed": "Wire contract missing assertion"
+      },
+      "green": "sizeof/offsetof and actual descriptor parser;8 malformed rejects"
+    },
+    {
+      "contract": "root/recorder/multithread/hole/closed/expired",
+      "red": {
+        "exitCode": 1,
+        "observed": "Recorder missing assertion"
+      },
+      "green": "15 direct portable contracts, including actual8-thread reservation and recorder scopes"
+    },
+    {
+      "contract": "Setup single owner and resident terminal failure",
+      "red": {
+        "exitCode": 1,
+        "observed": "Setup gate missing assertion"
+      },
+      "green": "16 real threads; exactly1CASwinner, Failed cannot become Ready"
+    },
+    {
+      "contract": "locked two-library source install",
+      "red": {
+        "exitCode": 1,
+        "observed": "Installer missing assertion"
+      },
+      "green": "tamper-before-writes, actual full patch apply, before/after hashes and source behavioral compiler fixtures"
+    },
+    {
+      "contract": "source sample cannot predate setup/bind",
+      "red": {
+        "exitCode": 1,
+        "childExit": -6,
+        "observed": "!r.bind(key,110) failed with setupReadyQpc115"
+      },
+      "green": "immutable private boundQpc before Ready CAS; setup<=bind<=row checked"
+    },
+    {
+      "contract": "public numeric ordinal is bounded",
+      "red": {
+        "exitCode": 1,
+        "childExit": -6,
+        "observed": "Capacity+1 Enter still returned token"
+      },
+      "green": "bounded private CAS counter saturates at2048; active released on ordinal admission failure"
+    },
+    {
+      "contract": "map erase remains under original found condition",
+      "red": {
+        "exitCode": 1,
+        "childExit": 71,
+        "observed": "actual patched missing-key method attempted erase(end); found-key case executed first"
+      },
+      "green": "observer+erase inside original if braces; both compiled/executed"
+    },
+    {
+      "contract": "active release per-call work bound",
+      "red": {
+        "exitCode": 1,
+        "childExit": 72,
+        "observed": "more than32 cleanup CAS while a second real recorder thread alternated Enter/Leave before every owner CAS"
+      },
+      "green": "32attempts then incomplete+cleanupErrors, active1 retained; duplicate Leave cannot fake0"
+    },
+    {
+      "contract": "portable compiler absence is explicit skip",
+      "red": {
+        "exitCode": 1,
+        "observed": "compiler selection/skip helper missing assertion"
+      },
+      "green": "which c++/g++/clang++ fallback, compiler-free source-lock test executes while C++ case records1skip; no compiler install"
+    },
+    {
+      "contract": "hardlink added at r+b boundary cannot be modified",
+      "red": {
+        "exitCode": 1,
+        "observed": "real link added before write open; installer rejected only after original source SHA already changed"
+      },
+      "green": "st_nlink in file identity plus opened fd nlink1 guard rejects before source/payload writes"
+    },
+    {
+      "contract": "open-gate admission contention is durable incomplete",
+      "red": {
+        "exitCode": 1,
+        "childExit": -6,
+        "observed": "32 forced real recorder Enter/Leave races: after scopes exit, active0/holes0 but dropped/incomplete missing"
+      },
+      "green": "open-gate exhaustion bumps dropped and PublicationHole; Closed rejection remains separate"
+    }
+  ],
+  "verificationAdditions": [
+    "Actual native.cpp compiled with explicit fake Win32 boundary, modes ready/prearm/PIN failure/dead controller/cutoff; no real Windows SDK claim",
+    "Actual installed manager header callback prototype and nonvirtual install compare/exchange compile",
+    "Initial fixture-only compiler warnings/duplicate header include were corrected; these are not counted as feature RED cycles"
+  ],
+  "finalCommand": "python3 -B -m unittest discover -s suite/tests -p 'test_writer_server_backend.py'",
+  "finalTests": 10,
+  "finalFailures": 0,
+  "finalErrors": 0,
+  "windowsSdkCompileVerified": false,
+  "arm64CompileVerified": false,
+  "actualWindowsApisExecuted": false,
+  "compilerPolicy": {
+    "candidates": [
+      "c++",
+      "g++",
+      "clang++"
+    ],
+    "missing": "explicit SkipTest for C++ only; Python installer checks run",
+    "compileTimeoutSeconds": 30,
+    "runTimeoutSeconds": [
+      5,
+      15
+    ],
+    "imageName": "writer-fixture.exe on Windows",
+    "completedImageCleanup": "unchanged existing native_executable_cleanup.remove_completed_image, completed child args exactly one image; modes passed through stdin",
+    "portableStandard": "C++17"
+  }
+}

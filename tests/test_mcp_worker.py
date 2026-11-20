@@ -23,7 +23,7 @@ for line in sys.stdin:
  if mode=='large':print('x'*4096,flush=True);continue
  if mode=='stderr':sys.stderr.write('x'*262144);sys.stderr.flush()
  result={} if message['method']=='ping' else {'ok':True,'sequence':message['id']}
- if message['method']=='initialize':result={'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.8.7'},'capabilities':{'tools':{}}}
+ if message['method']=='initialize':result={'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.9.1'},'capabilities':{'tools':{}}}
  if message['method']=='tools/call':result={'isError':False,'content':[{'type':'text','text':'{"pageCount":1,"format":"HWPX"}'}]}
  if mode=='fault' and message['method']=='tools/call' and message.get('params',{}).get('name')=='hwp_batch':
   child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(15)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -49,7 +49,7 @@ for line in sys.stdin:
  message=json.loads(line)
  if 'id' not in message:continue
  method=message['method'];body={};error=False
- if method=='initialize':result={'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.8.7'}}
+ if method=='initialize':result={'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.9.1'}}
  elif method=='ping':result={}
  else:
   name=message['params']['name'];args=message['params']['arguments'];doc_id=args.get('docId')
@@ -132,6 +132,18 @@ class McpWorkerTests(unittest.TestCase):
     def client(self,mode='ok',**kwargs):
         client=self.module().McpClient([sys.executable,str(self.fake),mode],timeout=.35,**kwargs)
         self.addCleanup(client.close);return client
+    def test_installed_initialization_rejects_the_former_rhwp_version_before_tools(self):
+        m=self.module();client=MagicMock()
+        client.request.return_value={'result':{'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.9.0'}}}
+        with self.assertRaisesRegex(ValueError,'초기화 계약'):
+            m.run_cases(client,self.fake,self.folder/'old-version-work',self.folder/'old-version-fixtures',
+                        password_folder=self.folder/'old-version-password',watch=None,context={})
+        self.assertEqual(client.request.call_count,1)
+        self.assertEqual(client.request.call_args.args[0],'initialize')
+        client.notify.assert_not_called()
+        self.assertFalse((self.folder/'old-version-work').exists())
+        self.assertFalse((self.folder/'old-version-fixtures').exists())
+
     def test_real_subprocess_initialize_notification_ping_and_sequential_ids(self):
         client=self.client();response=client.request('initialize',{'protocolVersion':'2025-06-18'})
         self.assertEqual(response['result']['serverInfo']['name'],'rhwp')
@@ -207,7 +219,7 @@ class McpWorkerTests(unittest.TestCase):
                     text='\n'.join(json.dumps(row) for row in value) if isinstance(value,list) else json.dumps(value)
                     return {'id':7,'result':{'isError':error,'content':[{'type':'text','text':text}]}}
                 def request(method,params=None):
-                    if method=='initialize':return {'result':{'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.8.7'}}}
+                    if method=='initialize':return {'result':{'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.9.1'}}}
                     if method=='ping':return {'result':{}}
                     if method=='tools/list':return {'result':{'tools':[{'name':name} for name in ('hwp_info','hwp_export_text','hwp_replace_text','hwp_batch','hwp_ir_diff',
                         'hwp_open','hwp_doc_text','hwp_doc_replace_text','hwp_doc_save','hwp_close','hwp_ws_list','hwp_ws_open','hwp_ws_journal')]}}
@@ -280,7 +292,7 @@ class McpWorkerTests(unittest.TestCase):
                 def response(value,error=False):
                     raw='\n'.join(json.dumps(row) for row in value) if isinstance(value,list) else json.dumps(value)
                     return {'jsonrpc':'2.0','id':request_id,'result':{'isError':error,'content':[{'type':'text','text':raw}]}}
-                if method=='initialize':return {'jsonrpc':'2.0','id':request_id,'result':{'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.8.7'}}}
+                if method=='initialize':return {'jsonrpc':'2.0','id':request_id,'result':{'protocolVersion':'2025-06-18','serverInfo':{'name':'rhwp','version':'0.9.1'}}}
                 if method=='ping':return {'jsonrpc':'2.0','id':request_id,'result':{}}
                 if method=='tools/list':return {'jsonrpc':'2.0','id':request_id,'result':{'tools':[{'name':name} for name in (
                     'hwp_info','hwp_export_text','hwp_replace_text','hwp_batch','hwp_ir_diff','hwp_open','hwp_doc_text',

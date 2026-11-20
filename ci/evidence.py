@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 import zipfile
 LIMITS={'success':1024*1024,'failure':12*1024*1024,'cancelled':12*1024*1024}
@@ -28,11 +29,15 @@ def files(root):
     if root.is_symlink():raise ValueError('Symlinked input is forbidden')
     if not root.exists():return []
     if root.is_file():return [root]
+    if not root.is_dir():raise ValueError('Nonregular input is forbidden')
     found=[]
     for folder,dirs,names in os.walk(root,followlinks=False):
         for name in dirs+names:
             if (Path(folder)/name).is_symlink():raise ValueError('Symlinked evidence is forbidden')
-        found.extend(Path(folder)/name for name in names)
+        for name in names:
+            path=Path(folder)/name
+            if not stat.S_ISREG(path.lstat().st_mode):raise ValueError('Nonregular evidence is forbidden')
+            found.append(path)
         if len(found)>10_000:raise ValueError('Too many evidence files')
     return sorted(found)
 
@@ -108,7 +113,9 @@ def pack(source,destination,status,limit=None):
     reserve=min(64*1024,cap//2)
     try:
         for path in candidates:
-            rel=path.relative_to(source).as_posix();size=path.stat().st_size;suffix=path.suffix.lower();reason=None
+            info=path.lstat()
+            if not stat.S_ISREG(info.st_mode):raise ValueError('Nonregular evidence is forbidden')
+            rel=path.relative_to(source).as_posix();size=info.st_size;suffix=path.suffix.lower();reason=None
             if suffix not in TEXT|VISUAL:reason='excluded type (documents, fonts and keys are never uploaded)'
             elif status=='success' and suffix not in TEXT:reason='success keeps summaries; visual data stays local'
             elif size>6*1024*1024 or used+size>cap-reserve:reason='evidence size cap'
@@ -120,10 +127,22 @@ def pack(source,destination,status,limit=None):
             with path.open('rb') as stream:
                 if stream.read(4) in FONT_MAGIC:raise ValueError('Disguised font is not evidence')
             target=stage/rel;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target)
+            after=path.lstat();copied=target.lstat()
+            if (not stat.S_ISREG(after.st_mode) or not stat.S_ISREG(copied.st_mode)
+                    or after.st_size!=size or copied.st_size!=size):
+                raise ValueError('Evidence changed during copy')
             used+=size;report['copied'].append({'path':rel,'bytes':size})
-        report['copiedBytes']=used
-        (stage/'evidence-index.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-        measure([stage],cap)
+        while True:
+            report['copiedBytes']=used
+            index_bytes=(json.dumps(report,ensure_ascii=False,indent=2)+'\n').encode('utf-8')
+            if used+len(index_bytes)<=cap:break
+            if not report['copied']:raise ValueError('Evidence index exceeds pre-upload cap')
+            row=report['copied'].pop();(stage/row['path']).unlink();used-=row['bytes']
+            report['omittedCount']+=1
+            if len(report['omitted'])<128:
+                report['omitted'].append(dict(row,reason='evidence size cap'))
+        (stage/'evidence-index.json').write_bytes(index_bytes)
+        if measure([stage],cap)!=used+len(index_bytes):raise ValueError('Evidence changed after selection')
         stage.rename(destination)
     finally:
         if stage.exists():shutil.rmtree(stage)

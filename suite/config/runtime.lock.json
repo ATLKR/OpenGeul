@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "version": "0.2.0-dev",
+  "architecture": "x64",
+  "shellRuntime": {
+    "name": ".NET Windows Desktop",
+    "version": "10.0.15",
+    "sourceUrl": "https://github.com/dotnet/runtime/tree/v10.0.15",
+    "desktopSourceUrl": "https://github.com/dotnet/winforms/tree/v10.0.15"
+  },
+  "runtime": {
+    "name": "LibreOffice",
+    "version": "26.8.2.2",
+    "format": "source-built-zip",
+    "url": "https://api.github.com/repos/ATLKR/OpenGeul/actions/artifacts/14608698821/zip",
+    "size": 422401503,
+    "sha256": "51a252709a35bf1ad11e7a76ed31645205c3fffd4624d8bf78090f73ae4f3eec",
+    "sourceUrl": "https://download.documentfoundation.org/libreoffice/src/26.8.2/libreoffice-26.8.2.2.tar.xz",
+    "sourceSha256": "f0012302d9cc70955bd55890d3aaccf6c55677c4a6a46e1003f996b1b0dae8e7",
+    "sourceCoreCommit": "9dea406ab7695df6325b11b0e19fdca8db4b7276",
+    "sourceBuild": {
+      "receiptSha256": "f740788061228bb4c26d3f8bb422d198318711120bebb84d17f15b29aaf8c56e",
+      "sourceCommit": "c2f5bfd6202dcf6dcd7c673b98354a24a074c79a",
+      "sourceTree": "be0c54bf1467acad039d5d7c1ac13f6a7dcca8f2",
+      "runId": 44673552619,
+      "artifactId": 14608698821,
+      "artifactSha256": "69964253a28651f79fd00ed215aa1741f9f97f5d67718a6e310038a58377aa37",
+      "artifactSize": 422720755,
+      "patchManifestSha256": "37fba766084127e2fdf2f51c3108290a39ddfdaa895af03c68d3cfc8b35d2020",
+      "driverSha256": "db559c8a7c5e461df8765f04b5b096a6805760a8aa2ce5f14e1b729618612278",
+      "nativeTargetsSha256": "ba8d627adefb2dfe90e048546f6f55d54c8e739d0f4f21afbe8a556af54768bc"
+    }
+  },
+  "hwp": {
+    "version": "1.1.4",
+    "sourceCommit": "131ccbf3ac10a82e1d6785b4c906fb836b912e73",
+    "url": "https://github.com/ATLKR/OpenGeul/releases/download/v1.1.4/OpenGeul_1.1.4_windows-x64_unsigned-portable.zip",
+    "size": 33362247,
+    "sha256": "6bda733fba96ae692c504630eceb1113f5f11f7cac9208158531960e5d822764",
+    "sourceUrl": "https://github.com/ATLKR/OpenGeul/tree/131ccbf3ac10a82e1d6785b4c906fb836b912e73",
+    "provenanceUrl": "https://github.com/ATLKR/OpenGeul/releases/download/v1.1.4/provenance-x64.json"
+  }
+}

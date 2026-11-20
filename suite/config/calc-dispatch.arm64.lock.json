@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "calc-dispatch-diagnostic-input",
+  "architecture": "arm64",
+  "repository": "ATLKR/OpenGeul",
+  "repositoryId": 1405493151,
+  "sourceCommit": "867ee1db23d9142ffd2f7984793482831e359af5",
+  "runId": 40666981474,
+  "runAttempt": 1,
+  "artifactId": 12824920132,
+  "artifactSha256": "840b53ffa70895a704faa6f51c79e0d73f515dced830b1f09d17f7bdc0cf5a07",
+  "artifactSize": 419139979,
+  "sourceLockSha256": "ebd2f3300001c561372b05b767a3a6e9e4c4238de259c960adcee5ae89128ef9",
+  "coreCommit": "bf6ef2662401c7d6dce671ab4deb26ee0af3a7c1"
+}

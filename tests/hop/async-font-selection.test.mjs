@@ -24,6 +24,7 @@ await native.default({module_or_path:readFileSync(resolve(hop,'apps/studio-host/
 const {WasmBridge}=await upstream('core/wasm-bridge.ts');
 const {EventBus}=await upstream('core/event-bus.ts');
 const {InputHandler}=await upstream('engine/input-handler.ts');
+const {ImeNavigationGuard}=await upstream('engine/ime-navigation-guard.ts');
 const {CursorState}=await upstream('engine/cursor.ts');
 const {CommandHistory}=await upstream('engine/history.ts');
 const {Toolbar}=await host('ui/toolbar.ts');
@@ -50,9 +51,9 @@ function element() {
 function boundaries(t,gate='read') {
   const originals=new Map(['window','document','FontFace','CSS','__ownedFontInvoke'].map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
   const read=deferred(),face=deferred(),trace=[];
-  globalThis.window={__TAURI_INTERNALS__:{},location:{protocol:'tauri:',search:''}};
+  globalThis.window=Object.assign(new EventTarget(),{__TAURI_INTERNALS__:{},location:{protocol:'tauri:',search:''}});
   globalThis.CSS={escape:value=>value};
-  globalThis.document={documentElement:{lang:'ko'},head:element(),createElement:element,
+  globalThis.document={querySelector:()=>null,documentElement:{lang:'ko'},head:element(),createElement:element,
     addEventListener:noop,removeEventListener:noop,fonts:{add:noop,delete:noop,check:()=>true}};
   globalThis.__ownedFontInvoke=async(command,args)=>{
     trace.push({command,args});
@@ -85,7 +86,7 @@ function harness(t) {
     viewportManager:{getZoom:()=>1,getViewportSize:()=>({width:800,height:1200}),getScrollY:()=>0,getScrollX:()=>0},
     virtualScroll:{getVisiblePages:()=>[0]},selectionRenderer:renderer,cellSelectionRenderer:renderer,
     caret:renderer,fieldMarker:renderer,caretLayoutReveal:{requestFor:noop,clear:noop},
-    deferredPaginationRunner:{cancel:noop},_cellBlockLetterImeGuard:{reset:noop},_compositionFragment:null,
+    deferredPaginationRunner:{cancel:noop},_cellBlockLetterImeGuard:{reset:noop},_imeNavigationGuard:new ImeNavigationGuard(),_compositionFragment:null,
     textarea:{value:'',removeEventListener:noop,remove:noop,focus:noop},container:{removeEventListener:noop},
     rawTextMutationEffects:{reset:noop},flushDeferredPaginationIfNeeded:noop,cancelDeferredPaginationFlush:noop,
     resetRawTextMutationEffects:noop,prepareTextMutationBeforeCursor:()=>false,

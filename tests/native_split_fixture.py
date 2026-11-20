@@ -18,7 +18,7 @@ def bind_source(package,wack):
     binding={'repository':provenance['repository'],'commit':provenance['commit'],'runId':provenance['runId'],
         'runAttempt':provenance['windowsComponents']['runAttempt']}
     install=json.loads((wack/'install.json').read_bytes())
-    _,install,join,_=make_split(package/provenance['package'],install,binding,'source',transport._files(package))
+    _,install,join,_=make_split(package/provenance['package'],install,binding,'source',transport._files(package,scope='source'))
     (wack/'install.json').write_bytes(pair.encoded(install)+b'\n')
     context=json.loads((wack/'wack-context.json').read_bytes());context.update(inputPackageSha256=install['signedTestPackageSha256'],nativeSignedJoin=join)
     (wack/'wack-context.json').write_bytes(pair.encoded(context)+b'\n')

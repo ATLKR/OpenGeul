@@ -1,0 +1,21 @@
+{
+  "baseSourceGitObject": "b8c4ce5:suite/e2e/owned_native_menu.py",
+  "baseSourceSha256": "a663fe7836e27d35a022066622cc40172e3d857e4df2cdc16488e20e3cda8bff",
+  "functionAstSha256": {
+    "NativeMenuProbe._call": "3843e486bbb99805787e81d23867dec500742e57a27a728dc4a7291838577611",
+    "NativeMenuProbe._chrome": "739951511586f2855b5193e2f7cf2ced7c4cf82e2fdb2ba07ffd152a1a4beac9",
+    "NativeMenuProbe._provider_timeout": "4a2db47152aab07016d1a1227e1c0672c0fb3d6aadefc8df70835792ff10b4f3",
+    "NativeMenuProbe._role": "c85b79b9b340d138dffa72192b3419605c9114a03e7d3d1349b128165a911134",
+    "NativeMenuProbe._runtime": "efdeab6f9b065cad1d94477246b907bcd6fccb762cd6dee9946c475528687f60",
+    "NativeMenuProbe._uia_call": "8a7283a1c98a04549540212452d6c9b07506b97c5907ac71e00c3e49163d0773",
+    "NativeMenuProbe.close_provider": "7105e0d84a66fd2acae27bf2a4729ea607dc09c798d7dba5eded9211031eb7d6",
+    "NativeMenuProbe.keyboard": "afbf667331d8cdb11d2bc1bc22f128e57d920b40ceca224f560d6097958daa6c",
+    "_arm_source_input": "9c0a2d59982c57b6efb8458c8ac769fceba42b74f7711ae7e3a0063bbf49f6f6",
+    "_keyboard_recipient": "b17f9b6e1167cdf82eea27b0dae6309491eb6a6d6fdf7942d9a8a0129a761a53",
+    "_require_source_point_uses": "dd0cac7016dce3b2a07dba32f4377577f1aaa2408a8f082de96e05a4d65f6740",
+    "_run": "76efd5da79ef91285c56e837da806e8d8d1f107c500dd845b3784ce52a1aa9b3",
+    "_run.keyboard": "5a5b39c0ce106509cbbbe8093e573e0169a2a55ff38a02b58c72871b86134a11",
+    "_validate": "bd289318cc39d2484a0100aab58afc945874195bf28daf9f425566bef3b544f9"
+  },
+  "schemaVersion": 1
+}

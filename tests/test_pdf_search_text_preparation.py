@@ -38,7 +38,10 @@ class PdfSearchTextPreparationTests(unittest.TestCase):
                       '    opengeul_pdf_guard::reject_direct_export()?;\n'),
             pdf.PATCHES: '# Original upstream patch history\n',
             pdf.SVG: ('fn draw_text() {\n'
-                      '                let common_attrs = attrs_for_cluster(cluster_str, &color);\n'
+                      '                let common_attrs = match &outline_attrs {\n'
+                      '                    Some(stroke) => attrs_for_cluster(cluster_str, "none") + stroke,\n'
+                      '                    None => attrs_for_cluster(cluster_str, &color),\n'
+                      '                };\n'
                       '                // original positioned glyph emission\n}\n'),
             pdf.TEXT: ('fn write_font() {\n    let mut flags = FontFlags::empty();\n}\n'
                        'pub struct Font {\n    pub face_index: u32,\n}\n'
@@ -193,6 +196,17 @@ class PdfSearchTextPreparationTests(unittest.TestCase):
         self.assertIn('width.is_finite() && width > 0.0', text)
         self.assertIn('positioned_glyphs.len()).sum::<usize>() != 1', text)
         self.assertNotIn('actual_text(', text)
+
+    def test_outline_and_filled_clusters_keep_their_paint_when_advance_is_marked(self):
+        upstream = '''                let common_attrs = match &outline_attrs {
+                    Some(stroke) => attrs_for_cluster(cluster_str, "none") + stroke,
+                    None => attrs_for_cluster(cluster_str, &color),
+                };'''
+        texts = dict(self.texts)
+        result = pdf.patched_texts(texts)[pdf.SVG]
+        self.assertIn(upstream.replace('let common_attrs', 'let mut common_attrs'), result)
+        self.assertIn('opengeul-layout-advance-', result)
+        self.assertIn('advance.to_bits()', result)
 
     def test_tampered_source_or_license_is_rejected_before_any_write(self):
         for name in pdf.SOURCE_FILES:

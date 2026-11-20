@@ -91,7 +91,7 @@ class ReleasePairTests(unittest.TestCase):
         installation=json.loads((wack/'install.json').read_bytes());installation.pop('armNativeSplit',None)
         binding={'repository':provenance['repository'],'commit':provenance['commit'],'runId':provenance['runId'],
             'runAttempt':provenance['windowsComponents']['runAttempt']}
-        _,installation,join,_=native_split_fixture.make_split(package/provenance['package'],installation,binding,'source',native_wack_transport._files(package))
+        _,installation,join,_=native_split_fixture.make_split(package/provenance['package'],installation,binding,'source',native_wack_transport._files(package,scope='source'))
         self.write_json(wack/'install.json',installation)
         context=json.loads((wack/'wack-context.json').read_bytes());context.update(inputPackageSha256=installation['signedTestPackageSha256'],nativeSignedJoin=join)
         self.write_json(wack/'wack-context.json',context)
@@ -226,7 +226,7 @@ class ReleasePairTests(unittest.TestCase):
         with self.assertRaises(ValueError): pair.verify_pair(self.output)
 
     def test_pair_and_arch_byte_caps_precede_output(self):
-        with (self.packages['x64'] / 'rhwp-help.txt').open('wb') as f: f.truncate(96 * 1024 * 1024 + 1)
+        with (self.packages['x64'] / 'rhwp-help.txt').open('wb') as f: f.truncate(128 * 1024 * 1024 + 1)
         self.rejected()
 
     def test_file_changed_after_validation_cannot_be_released(self):

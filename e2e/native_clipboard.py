@@ -409,3 +409,236 @@ class WindowsClipboardProvider:
         finally:
             if self.api:self.api.dispose()
             self.completed.set()
+
+
+# Optional host-only callback statistics. Existing clipboard/provider code above
+# is unchanged; this seam neither subscribes to events nor reads their payload.
+import math as _cb_math
+import sys as _cb_sys
+import types as _cb_types
+
+_CB_CONSOLE_TYPES = ('assert','clear','count','debug','dir','dirxml','endGroup',
+    'error','info','log','profile','profileEnd','startGroup','startGroupCollapsed',
+    'table','time','timeEnd','trace','warning')
+_CB_ERROR_NAMES = ('Error','TypeError','ReferenceError','RangeError','SyntaxError',
+    'URIError','EvalError','NotAllowedError','SecurityError','NotSupportedError',
+    'AbortError','InvalidStateError','QuotaExceededError','TimeoutError','TargetClosedError')
+_CB_CONSOLE_CODES = {name:index for index,name in enumerate(_CB_CONSOLE_TYPES,1)}
+_CB_ERROR_CODES = {name:index for index,name in enumerate(_CB_ERROR_NAMES,1)}
+
+
+class ClipboardCallbackObservation:
+    """One optional original-page reference; callback delivery is not mutation proof."""
+    def __init__(self,session,page,transport_code,owner,writer,*,clock=time.monotonic,enabled=False,location_writer=None):
+        self.session,self.page,self.transport_code=session,page,transport_code
+        self._owner_input,self._writer,self._clock=owner,writer,clock
+        self._enabled=enabled is True
+        self.active=False;self.installed=False;self.install_known=False
+        self.page_identity_known=False;self.page_identity_matched=False
+        self.cleanup_known=False;self.own_reference_released=False;self.write_known=False
+        self._owner=None;self._start=None;self._wait_start=None
+        self._window_ms=None;self._wait_ms=None;self._closed=False
+        self._events=[];self._console=[0]*20;self._errors=[0]*16
+        self._optional=[];self._overflow=False;self._error_overflow=False
+        self._location_writer=location_writer
+        self._warning_locations=[]
+
+    def _fault(self,site,error=None):
+        kind={TypeError:1,ValueError:2,RuntimeError:3,OSError:4,PermissionError:5,
+              AssertionError:6,KeyError:7,KeyboardInterrupt:8,SystemExit:9}.get(type(error),0)
+        if len(self._optional)<4:self._optional.append([site,kind])
+        else:self._error_overflow=True
+
+    def _now(self,*,primary=None):
+        try:
+            value=self._clock()
+            if type(value) not in (int,float) or not 0<=value<=10**12 or not _cb_math.isfinite(value):
+                self._fault(4);return None
+            return value
+        except BaseException as error:
+            if primary is None and not isinstance(error,Exception):raise
+            self._fault(4,error);return None
+
+    def _elapsed(self,start,end):
+        if start is None or end is None:return None
+        if not 0<=end-start<=86400:self._fault(4);return None
+        return round((end-start)*1000)
+
+    def __enter__(self):
+        if not self._enabled:return self
+        self._start=self._now()
+        owner=self._owner_input
+        if (type(owner) is dict and set(owner)=={'hwnd','pid','creation','session','sequence'}
+                and all(type(value) is int and 0<value<2**64 for value in owner.values())):
+            self._owner=dict(owner)
+        else:self._fault(1)
+        try:
+            self.page_identity_matched=self.session.page is self.page
+            self.page_identity_known=True
+            if not self.page_identity_matched:self.install_known=True;self._fault(1);return self
+            if self.session._clipboard_callback_sink is not None:
+                self.install_known=True;self._fault(2);return self
+            self.session._clipboard_callback_sink=self
+            if self.session._clipboard_callback_sink is not self:
+                self._fault(2);return self
+            self.install_known=True;self.installed=True;self.active=True
+        except Exception as error:
+            self._fault(2,error)
+            self._detach()
+        return self
+
+    def begin_wait(self):
+        if self._enabled:self._wait_start=self._now()
+
+    def end_wait(self,*,primary=None):
+        try:
+            if self._enabled:self._wait_ms=self._elapsed(self._wait_start,self._now(primary=primary))
+        except BaseException as error:
+            if primary is None and not isinstance(error,Exception):raise
+            self._wait_ms=None;self._fault(4,error)
+
+    def _detach(self,*,primary=None):
+        self.active=False
+        try:
+            current=self.session._clipboard_callback_sink
+            if current is self:
+                self.session._clipboard_callback_sink=None
+                self.own_reference_released=self.session._clipboard_callback_sink is None
+                self.cleanup_known=self.own_reference_released
+            elif self.installed and not self.own_reference_released:
+                self.cleanup_known=False;self._fault(5)
+            else:self.cleanup_known=True
+        except BaseException as error:
+            self.cleanup_known=False
+            if primary is None and not isinstance(error,Exception):raise
+            self._fault(5,error)
+
+    def __exit__(self,error_type,primary,traceback):
+        if not self._enabled or self._closed:return False
+        self._closed=True;self.active=False
+        effective_primary=primary
+        new_cancel=None
+        def finish_window():
+            self._window_ms=self._elapsed(self._start,self._now(primary=effective_primary))
+        def write_packet():
+            packet=self.packet()
+            if len(json.dumps(packet,sort_keys=True,separators=(',',':'),allow_nan=False).encode('ascii'))>8192:
+                raise ValueError()
+            self._writer(packet);self.write_known=True
+            _cb_write_warning_locations(self)
+        for site,action in ((4,finish_window),(5,lambda:self._detach(primary=effective_primary)),(6,write_packet)):
+            try:action()
+            except BaseException as failure:
+                self._fault(site,failure)
+                if effective_primary is None and not isinstance(failure,Exception):
+                    effective_primary=failure;new_cancel=failure
+        if new_cancel is not None:raise new_cancel
+        return False
+
+    def packet(self):
+        return dict(schemaVersion=1,diagnosticOnly=True,acceptanceEligible=False,qualification=False,
+            transportCode=self.transport_code,clipboardOwner=dict(self._owner) if self._owner is not None else None,
+            installKnown=self.install_known,installed=self.installed,pageIdentityKnown=self.page_identity_known,
+            pageIdentityMatched=self.page_identity_matched,cleanupKnown=self.cleanup_known,
+            ownReferenceReleased=self.own_reference_released,callbackWindowMsKnown=self._window_ms is not None,
+            callbackWindowMs=self._window_ms,dirtyWaitMsKnown=self._wait_ms is not None,dirtyWaitMs=self._wait_ms,
+            events=[list(row) for row in self._events],consoleTypeCounts=list(self._console),
+            pageErrorNameCounts=list(self._errors),overflow=self._overflow,
+            optionalErrors=[list(row) for row in self._optional],errorOverflow=self._error_overflow,
+            actualEventTimingKnown=False,handlerSuccessKnown=False,noErrorGuarantee=False)
+
+
+def _forward_clipboard_callback(session,page,event,kind,attribute,codes):
+    try:
+        sink=session._clipboard_callback_sink
+        if type(sink) is not ClipboardCallbackObservation or not sink.active or sink.page is not page:return
+        if session.page is not page:sink._fault(1);return
+        if len(sink._events)>=8:sink._overflow=True;return
+        try:
+            value=getattr(event,attribute)
+            code=codes.get(value,0) if type(value) is str and len(value)<=64 else 0
+            if code==0:sink._fault(7)
+        except Exception as error:
+            code=0;sink._fault(3,error)
+        sink._events.append([kind,code,code!=0])
+        (sink._console if kind==1 else sink._errors)[code]+=1
+        if kind==1 and code==19 and sink._location_writer is not None:
+            _cb_record_warning_location(sink,event)
+    except Exception:
+        pass  # Optional forwarding never replaces the existing handler outcome.
+
+
+def forward_clipboard_console(session,page,message):
+    _forward_clipboard_callback(session,page,message,1,'type',_CB_CONSOLE_CODES)
+
+
+def forward_clipboard_pageerror(session,page,error):
+    _forward_clipboard_callback(session,page,error,2,'name',_CB_ERROR_CODES)
+
+
+def _cb_native_dict(value,expected):
+    if type(expected) is not type or type(value) is not expected:return None
+    lineage=type.__getattribute__(expected,'__mro__')
+    if type(lineage) is not tuple or len(lineage)>8:return None
+    for base in lineage:
+        if type(base) is not type:return None
+        descriptor=type.__getattribute__(base,'__dict__').get('__dict__')
+        if descriptor is not None:
+            if (type(descriptor) is not _cb_types.GetSetDescriptorType
+                    or descriptor.__objclass__ is not base):return None
+            result=object.__getattribute__(value,'__dict__')
+            return result if type(result) is dict else None
+    return None
+
+
+def _cb_cached_warning_location(event):
+    """Read only cached integers; unsupported package/cache shapes remain unknown."""
+    try:
+        modules=_cb_sys.modules
+        if type(modules) is not dict:return None
+        classes=[]
+        for name in ('playwright.sync_api._generated','playwright._impl.console_message'):
+            module=dict.get(modules,name)
+            if type(module) is not _cb_types.ModuleType:return None
+            namespace=_cb_types.ModuleType.__getattribute__(module,'__dict__')
+            if type(namespace) is not dict:return None
+            classes.append(dict.get(namespace,'ConsoleMessage'))
+        wrapper=_cb_native_dict(event,classes[0])
+        if wrapper is None:return None
+        implementation=_cb_native_dict(dict.get(wrapper,'_impl_obj'),classes[1])
+        if implementation is None:return None
+        cached=dict.get(implementation,'_event')
+        if type(cached) is not dict:return None
+        coordinates=dict.get(cached,'location')
+        if type(coordinates) is not dict:return None
+        line=dict.get(coordinates,'lineNumber');column=dict.get(coordinates,'columnNumber')
+        if not all(type(value) is int and 0<=value<=2147483647 for value in (line,column)):return None
+        return line,column
+    except BaseException:
+        return None
+
+
+def _cb_record_warning_location(sink,event):
+    location=None
+    try:location=_cb_cached_warning_location(event)
+    except BaseException:pass
+    sink._warning_locations.append([len(sink._events),location is not None,
+        location[0] if location is not None else None,location[1] if location is not None else None])
+
+
+def _cb_write_warning_locations(sink):
+    if sink._location_writer is None:return
+    try:
+        packet=dict(schemaVersion=1,sidecarType=1,packetSchemaVersion=1,diagnosticOnly=True,
+            acceptanceEligible=False,qualification=False,transportCode=sink.transport_code,
+            clipboardOwner=dict(sink._owner) if sink._owner is not None else None,
+            callbackWindowMs=sink._window_ms,dirtyWaitMs=sink._wait_ms,eventCount=len(sink._events),
+            warningLocations=[list(row) for row in sink._warning_locations],
+            installKnown=sink.install_known,installed=sink.installed,
+            pageIdentityKnown=sink.page_identity_known,pageIdentityMatched=sink.page_identity_matched,
+            cleanupKnown=sink.cleanup_known,ownReferenceReleased=sink.own_reference_released,
+            scriptIdentityKnown=False,warningOriginKnown=False,handlerSuccessKnown=False)
+        if len(json.dumps(packet,sort_keys=True,separators=(',',':'),allow_nan=False).encode('ascii'))>8192:return
+        sink._location_writer(packet)
+    except BaseException:
+        pass  # Optional sidecar cannot change the original packet or primary outcome.

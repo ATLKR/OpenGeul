@@ -1,0 +1,90 @@
+--- a/sc/source/ui/view/tabvwsha.cxx
++++ b/sc/source/ui/view/tabvwsha.cxx
+@@ -16,6 +16,11 @@
+  *   except in compliance with the License. You may obtain a copy of
+  *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
+  */
++
++#include <sal/config.h>
++
++#define OPENGEUL_CALC_DISPATCH_DIAGNOSTIC_BUILD 1
++#include <opengeul_calc_dispatch/windows_runtime.h>
+ 
+ #include <com/sun/star/table/BorderLineStyle.hpp>
+ #include <officecfg/Office/Calc.hxx>
+@@ -824,6 +829,7 @@
+ 
+ void ScTabViewShell::ExecuteSave( SfxRequest& rReq )
+ {
++    opengeul::calc_dispatch::Scope opengeulCalcDispatch(1);
+     // only SID_SAVEDOC / SID_SAVEASDOC
+     bool bCommitChanges = true;
+     const SfxItemSet* pReqArgs = rReq.GetArgs();
+@@ -832,6 +838,8 @@
+     bool bHasDontTerminateEdit = pReqArgs && pReqArgs->HasItem(FN_PARAM_1, &pItem);
+     if (bHasDontTerminateEdit && pItem)
+         bCommitChanges = !static_cast<const SfxBoolItem*>(pItem)->GetValue();
++
++    opengeulCalcDispatch.mark(3, bCommitChanges);
+ 
+     // Finish entering unless 'DontTerminateEdit' is specified, even if a formula is being processed
+     if (bCommitChanges)
+@@ -843,7 +851,9 @@
+         // to save immediately without committing any erroneous input in possibly
+         // a cell with validation rules. After save is complete the user
+         // can continue editing.
++        opengeulCalcDispatch.mark(4);
+         ScModule::get()->InputEnterHandler(ScEnterMode::NORMAL, bLOKActive /* bBeforeSavingInLOK */);
++        opengeulCalcDispatch.mark(5);
+ 
+         if (bLOKActive)
+         {
+@@ -871,7 +881,9 @@
+     }
+ 
+     // otherwise as normal
++    opengeulCalcDispatch.mark(6);
+     GetViewData().GetDocShell()->ExecuteSlot( rReq );
++    opengeulCalcDispatch.mark(7);
+ }
+ 
+ void ScTabViewShell::GetSaveState( SfxItemSet& rSet )
+--- a/sfx2/source/doc/objstor.cxx
++++ b/sfx2/source/doc/objstor.cxx
+@@ -20,6 +20,10 @@
+ #include <config_features.h>
+ 
+ #include <sal/config.h>
++
++#define OPENGEUL_CALC_DISPATCH_DIAGNOSTIC_BUILD 1
++#include <opengeul_calc_dispatch/windows_runtime.h>
++
+ #include <sal/log.hxx>
+ 
+ #include <cassert>
+@@ -1384,6 +1388,7 @@
+ */
+ 
+ {
++    opengeul::calc_dispatch::Scope opengeulCalcDispatch(2);
+     SAL_INFO( "sfx.doc", "saving \"" << rMedium.GetName() << "\"" );
+ 
+     UpdateDocInfoForSave();
+@@ -2025,7 +2030,9 @@
+         }
+ 
+         const OUString sName( rMedium.GetName( ) );
++        opengeulCalcDispatch.mark(8);
+         bOk = rMedium.Commit();
++        opengeulCalcDispatch.mark(9, bOk);
+         const OUString sNewName( rMedium.GetName( ) );
+ 
+         if ( sName != sNewName )
+@@ -2836,6 +2843,7 @@
+ 
+ bool SfxObjectShell::DoSave_Impl( const SfxItemSet* pArgs )
+ {
++    opengeul::calc_dispatch::Scope opengeulCalcDispatch(3);
+     SfxMedium* pRetrMedium = GetMedium();
+     std::shared_ptr<const SfxFilter> pFilter = pRetrMedium->GetFilter();
+ 

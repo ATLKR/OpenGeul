@@ -1,0 +1,14 @@
+--- a/winaccessibility/source/service/AccObjectWinManager.cxx
++++ b/winaccessibility/source/service/AccObjectWinManager.cxx
+@@ -365,10 +365,10 @@
+     {
+         AccObject* pAccObjOld = GetAccObjByXAcc(oldFocus);
+         oldFocus = newFocus;
+-        pAccObjNew->setFocus();
+         //if old == new, the pAccObjNew will be without focused state
+         if (pAccObjOld && pAccObjOld != pAccObjNew)
+             pAccObjOld->unsetFocus();
++        pAccObjNew->setFocus();
+     }
+ }
+ 

@@ -30,8 +30,8 @@ HELPER = ENGINE+'opengeul-menu-clipboard.ts'
 SOURCE_KEYS = {HANDLER, KEYBOARD, LIB, WINDOWS, CONFIG}
 HWPX_SUFFIX = '\n// miniature reviewed HWPX handler registrations\n'
 REVIEWED_PINS = {
-    HANDLER: '6b88aaae0cb18f742957733ed9f39264bd5345f5622348ce840e3eb89598155e',
-    KEYBOARD: '6d9e30cd4398beefed92f86fda6e331ac0e5c0876424b620076a344bbc50de49',
+    HANDLER: 'f029addbc657044203ab266ef8c525f9097dde0a4259cf9cfad69bb975dc97eb',
+    KEYBOARD: '8a9987386c68fe97c9203cdeb66035792375cc803f6cf33dc91ecf7bff5ecc11',
 }
 
 HANDLER_SOURCE = """import { isBodyControl } from './picture-hit-policy';

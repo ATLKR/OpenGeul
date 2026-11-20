@@ -1,0 +1,161 @@
+"""Corresponding source archives must identify the exact clean build input."""
+import importlib.util
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import zipfile
+from contextlib import ExitStack
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def implementation():
+    path = ROOT/'suite/package.py'
+    assert path.is_file(), 'Suite source packaging implementation is required'
+    spec = importlib.util.spec_from_file_location('suite_package_under_test', path)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+
+class PackageSourceTests(unittest.TestCase):
+    def repository(self, path):
+        subprocess.run(['git','init','-q',str(path)],check=True)
+        subprocess.run(['git','-C',str(path),'config','user.name','Suite test'],check=True)
+        subprocess.run(['git','-C',str(path),'config','user.email','suite-test@example.invalid'],check=True)
+        (path/'LICENSE').write_text('preserved source license')
+        subprocess.run(['git','-C',str(path),'add','LICENSE'],check=True)
+        subprocess.run(['git','-C',str(path),'commit','-qm','test source'],check=True)
+
+    def test_clean_commit_is_archived_with_its_original_license(self):
+        module = implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)/'repo'; self.repository(root)
+            target = Path(folder)/'source.zip'
+            commit = module.write_source_archive(root,target)
+            self.assertEqual(len(commit),40)
+            with zipfile.ZipFile(target) as archive:
+                self.assertEqual(archive.read('LICENSE'),b'preserved source license')
+
+    def test_dirty_build_source_cannot_claim_the_clean_commit(self):
+        module = implementation()
+        for dirty in ('tracked','untracked'):
+            with self.subTest(dirty=dirty),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder)/'repo'; self.repository(root)
+                (root/('LICENSE' if dirty=='tracked' else 'new-source.py')).write_text('uncommitted')
+                target=Path(folder)/'source.zip'
+                with self.assertRaises(ValueError): module.write_source_archive(root,target)
+                self.assertFalse(target.exists())
+
+    def test_source_archive_never_overwrites_an_existing_file(self):
+        module=implementation()
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'repo'; self.repository(root)
+            target=Path(folder)/'source.zip'; target.write_bytes(b'keep')
+            with self.assertRaises(ValueError): module.write_source_archive(root,target)
+            self.assertEqual(target.read_bytes(),b'keep')
+
+    def test_assembly_inventory_uses_the_authenticated_lock_architecture(self):
+        from suite import payload, prepare
+        for architecture, source_built in (('x64', False), ('arm64', False), ('arm64', True), ('x64', True)):
+            with self.subTest(architecture=architecture, source_built=source_built), tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+                root = Path(folder)/'repo'; self.repository(root)
+                config = root/'suite/config'; config.mkdir(parents=True)
+                (config/'product.json').write_text(json.dumps({'version': 'test-version'}))
+                # Exercise the actual checked-in worker files: a one-file fake
+                # missed source documentation leaking into the runtime payload.
+                shutil.copytree(ROOT/'suite/worker', root/'suite/worker',
+                                ignore=shutil.ignore_patterns('__pycache__'))
+                (root/'suite/notices').mkdir(); (root/'suite/notices/upstream.txt').write_text('upstream notices')
+                subprocess.run(['git', '-C', str(root), 'add', 'suite'], check=True)
+                subprocess.run(['git', '-C', str(root), 'commit', '-qm', 'package fixture'], check=True)
+                runtime = Path(folder)/'runtime'; runtime.mkdir(); (runtime/'LICENSE').write_text('runtime license')
+                shell = Path(folder)/'shell'; shell.mkdir(); (shell/'OpenGeul.Office.exe').write_bytes(b'shell')
+                hwp = Path(folder)/'hwp.zip'
+                with zipfile.ZipFile(hwp, 'w') as archive: archive.writestr('OpenGeul.exe', b'hwp editor')
+                lock = {'architecture': architecture, 'version': 'test-version',
+                        'runtime': {'version': 'upstream-version', 'sourceUrl': 'https://example.org/source',
+                                    'sourceSha256': 'a'*64},
+                        'hwp': {'size': hwp.stat().st_size, 'sha256': prepare.sha256(hwp),
+                                'sourceUrl': 'https://example.org/hwp-source',
+                                'provenanceUrl': 'https://example.org/hwp-provenance'}}
+                if source_built:
+                    from suite.tests.test_prepare import source_build_fixture, x64_source_build_fixture, synthetic_source_template_pins
+                    if architecture == 'x64':
+                        archive,lock['runtime'],receipt_path,proof=x64_source_build_fixture(Path(folder),runtime_templates=True)
+                        patches.enter_context(patch.object(prepare,'_source_python_templates',return_value=synthetic_source_template_pins(proof)))
+                    else:archive, lock['runtime'], receipt_path, _ = source_build_fixture(Path(folder))
+                    runtime = prepare.extract_source_engine_zip(archive, Path(folder)/'source-runtime',
+                        runtime=lock['runtime'], receipt=receipt_path, architecture=architecture)
+                def brand(source, destination, product):
+                    shutil.copytree(source, destination)
+                    return {'schemaVersion': 1}
+                # The inventory validator is an independently tested boundary;
+                # preserve its x64 default so missing ARM64 forwarding is observable.
+                def inventory(path, *, architecture='x64'):
+                    for member in (path/'worker').rglob('*'):
+                        payload._layout(member.relative_to(path).as_posix(), directory=member.is_dir())
+                    return {'schemaVersion': 1, 'architecture': architecture, 'files': {}}
+                output = Path(folder)/'output'
+                module = implementation()
+                with patch.object(module, 'ROOT', root), patch.dict('sys.modules', {
+                        'prepare': prepare, 'runtime_branding': SimpleNamespace(brand_runtime=brand),
+                        'payload': SimpleNamespace(create_inventory=inventory, verify_payload=lambda *args: None)}):
+                    module.assemble(runtime=runtime, hwp=hwp, shell=shell, output=output, lock=lock)
+                self.assertEqual(architecture, json.loads((output/'suite-provenance.json').read_text())['architecture'])
+                self.assertEqual(architecture, json.loads((output/'suite-inventory.json').read_text())['architecture'])
+                self.assertEqual({path.name for path in (output/'worker').iterdir()},
+                                 {path.name for path in (ROOT/'suite/worker').glob('*.py')})
+                self.assertEqual((output/'worker/calc_close.py').read_bytes(),
+                                 (ROOT/'suite/worker/calc_close.py').read_bytes())
+                self.assertFalse((output/'worker/calc_close.README.md').exists())
+                with zipfile.ZipFile(output/'Sources/OpenGeul-Office-source.zip') as archive:
+                    self.assertEqual(archive.read('suite/worker/calc_close.README.md'),
+                                     (ROOT/'suite/worker/calc_close.README.md').read_bytes())
+                    self.assertEqual(archive.read('suite/worker/calc_close.py'),
+                                     (ROOT/'suite/worker/calc_close.py').read_bytes())
+                with self.assertRaisesRegex(ValueError, 'Unexpected Suite payload path'):
+                    payload._layout('worker/calc_close.README.md')
+                if source_built:
+                    notice = (output/'Notices/CORRESPONDING_SOURCE.md').read_text()
+                    commit = lock['runtime']['sourceBuild']['sourceCommit']
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/blob/'+commit+'/suite/engine-build/source-build.json', notice)
+                    workflow='office-native-engine-x64.yml' if architecture=='x64' else 'office-native-engine.yml'
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/blob/'+commit+'/.github/workflows/'+workflow, notice)
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/tree/'+commit, notice)
+                    self.assertIn('https://github.com/ATLKR/OpenGeul/actions/runs/123', notice)
+                    self.assertIn('Native engine producer source archive: https://github.com/ATLKR/OpenGeul/archive/'+commit+'.zip', notice)
+                    self.assertIn('The local Suite source ZIP contains OpenGeul Suite additions.', notice)
+                    self.assertIn('Native engine build scripts and patches are in the pinned producer source archive above.', notice)
+                    self.assertNotIn('The exact patch files are included in the OpenGeul source archive.', notice)
+                    self.assertEqual((output/'Office/opengeul-source-build.json').read_bytes(), receipt_path.read_bytes())
+                    self.assertEqual(json.loads((output/'suite-provenance.json').read_text())['runtime'], lock['runtime'])
+
+    def test_source_engine_missing_or_unpinned_receipt_fails_before_output_creation(self):
+        from suite import prepare
+        from suite.tests.test_prepare import source_build_fixture
+        module = implementation()
+        for wrong in ('missing', 'hash'):
+            with self.subTest(wrong=wrong), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                _, runtime_lock, receipt_path, _ = source_build_fixture(root)
+                runtime = root/'runtime'; runtime.mkdir()
+                if wrong == 'hash':
+                    (runtime/'opengeul-source-build.json').write_bytes(receipt_path.read_bytes()+b' ')
+                shell = root/'shell'; shell.mkdir(); (shell/'OpenGeul.Office.exe').write_bytes(b'shell')
+                hwp = root/'hwp.zip'; hwp.write_bytes(b'input')
+                with patch.dict('sys.modules', {'prepare': prepare,
+                        'runtime_branding': SimpleNamespace(brand_runtime=None),
+                        'payload': SimpleNamespace(create_inventory=None, verify_payload=None)}), \
+                     self.assertRaisesRegex(ValueError, 'receipt|source.build'):
+                    module.assemble(runtime=runtime, hwp=hwp, shell=shell, output=root/'output',
+                        lock={'architecture': 'arm64', 'runtime': runtime_lock,
+                              'hwp': {'size': hwp.stat().st_size, 'sha256': prepare.sha256(hwp)}})
+                self.assertFalse((root/'output').exists())
+
+
+if __name__ == '__main__': unittest.main()

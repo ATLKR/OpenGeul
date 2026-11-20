@@ -103,7 +103,7 @@ def stop_session(session):
     finally:
         session.close()
 
-def print_document(exe,fixture,case,folder):
+def print_document(exe,fixture,case,folder,*,admission=None):
     folder.mkdir(parents=True,exist_ok=False);source=folder/fixture.name;shutil.copyfile(fixture,source)
     before=digest(source);output=folder/'printed.pdf';session=None
     try:
@@ -111,7 +111,19 @@ def print_document(exe,fixture,case,folder):
             queue=resources.enter_context(VirtualQueue())
             session=Session('native',folder/'session',source,executable=exe)
             resources.callback(stop_session,session)
+            if admission is not None:
+                observer=admission(session,folder)
+                if observer is not None:
+                    resources.push(observer)
             resources.push(lambda error_type,error,tb: capture_failure(folder,error_type))
+            if admission is not None and observer is not None:
+                def remember_operation(error_type,error,tb):
+                    try:
+                        remember=getattr(observer,'remember_primary',None)
+                        if remember is not None:remember(error)
+                    except BaseException:pass
+                    return False
+                resources.push(remember_operation)
             if queue.jobs():raise AssertionError('Queue contains stale jobs')
             dialog=system_dialog(session,queue,folder);configure_media(dialog,session.proc.pid,folder,app_handle=int(session.proc._handle))
             if case.get('range'):
@@ -150,18 +162,22 @@ def print_document(exe,fixture,case,folder):
         actual=digest(source)
         (folder/'source-preservation.json').write_text(json.dumps({'before':before,'after':actual,'unchanged':actual==before}),encoding='utf-8')
         if actual!=before:raise AssertionError('Printing modified the source document, including on failure/cancellation')
+def build_cases(inputs,fixtures):
+    cases=json.loads((fixtures/'print-cases.json').read_text(encoding='utf-8'))
+    cases=[{**c,'path':fixtures/c['file']} for c in cases]
+    basic={'pages':[{'size_pt':[595.28,841.86],'markers':['OpenGeul fixture','한글','123']}]}
+    for suffix in ('hwp','hwpx'):cases.append({**basic,'name':'basic-'+suffix,'path':inputs/('basic.'+suffix)})
+    multi=next(c for c in cases if c['name']=='multipage')
+    cases.append({**multi,'name':'page-range','range':'2','pages':multi['pages'][1:]})
+    cases.append({**basic,'name':'cancel','path':inputs/'basic.hwpx','cancel':True})
+    validate_cases(cases)
+    return cases
+
 def main():
     require_host();parser=argparse.ArgumentParser()
     for name in ('exe','inputs','fixtures','out'):parser.add_argument('--'+name,type=Path,required=True)
     args=parser.parse_args();exe=args.exe.resolve();out=args.out.resolve();out.mkdir(parents=True,exist_ok=True)
-    cases=json.loads((args.fixtures/'print-cases.json').read_text(encoding='utf-8'))
-    cases=[{**c,'path':args.fixtures/c['file']} for c in cases]
-    basic={'pages':[{'size_pt':[595.28,841.86],'markers':['OpenGeul fixture','한글','123']}]}
-    for suffix in ('hwp','hwpx'):cases.append({**basic,'name':'basic-'+suffix,'path':args.inputs/('basic.'+suffix)})
-    multi=next(c for c in cases if c['name']=='multipage')
-    cases.append({**multi,'name':'page-range','range':'2','pages':multi['pages'][1:]})
-    cases.append({**basic,'name':'cancel','path':args.inputs/'basic.hwpx','cancel':True})
-    validate_cases(cases)
+    cases=build_cases(args.inputs,args.fixtures)
     results=[];suite=ET.Element('testsuite',name='virtual-print',tests=str(len(cases)),failures='0',skipped='0')
     for case in cases:
         item=ET.SubElement(suite,'testcase',name=case['name'])

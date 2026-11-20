@@ -26,7 +26,7 @@ jobs:
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: golbin/hop
-        ref: 34bd15c97e0851627cb7f055042c5340198aeb7f
+        ref: c298160120c9ffbfca7e72f13dc2e7060ddff7fe
         submodules: recursive
         persist-credentials: false
     - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
@@ -48,7 +48,7 @@ jobs:
       run: |
         $ErrorActionPreference = 'Stop'
         $PSNativeCommandUseErrorActionPreference = $true
-        if ((git -C third_party/rhwp rev-parse HEAD) -ne '1a76570e833917d15817415a53c09ad61ab3203f') { throw 'Unexpected rhwp revision' }
+        if ((git -C third_party/rhwp rev-parse HEAD) -ne 'c9095c5f67632e6721e800ccc7fb43ea49d26682') { throw 'Unexpected rhwp revision' }
         corepack enable
         pnpm install --frozen-lockfile
     - name: 업스트림 계약·화면 검사 실행

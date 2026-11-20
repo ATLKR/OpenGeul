@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="260" viewBox="0 0 440 260" role="img" aria-label="OpenGeul Office">
+  <title>OpenGeul Office original wordmark</title>
+  <rect width="440" height="260" rx="16" fill="#f4f7fb"/>
+  <rect x="180" y="30" width="80" height="80" rx="18" fill="#123c63"/>
+  <path d="M202 43h25l13 14v40h-38z" fill="#ffffff"/>
+  <path d="M227 43v14h13" fill="#f4ae43"/>
+  <path d="M211 68h20M211 78h20M211 88h13" stroke="#123c63" stroke-width="4" stroke-linecap="round"/>
+  <text x="220" y="160" text-anchor="middle" font-family="sans-serif" font-size="34" font-weight="600" fill="#123c63">OpenGeul Office</text>
+  <text x="220" y="195" text-anchor="middle" font-family="sans-serif" font-size="15" fill="#4e6178">Documents · Sheets · Presentations</text>
+</svg>

@@ -3,11 +3,11 @@
   "crates": {
     "tauri": {
       "name": "tauri",
-      "version": "2.11.1",
-      "checksum": "b93bd86d231f0a8138f11a02a584769fe4b703dc36ae133d783228dbc4801405",
+      "version": "2.12.5",
+      "checksum": "5fb0244332cfb9cee7e2a568bf5da29a36ed8fdbd717f6f47a66b6b7b358c072",
       "patches": {
         "Cargo.toml": {
-          "sha256": "7740847a00a13797a625c8b4081657853bb21b02b91d6984be1ab61f6fc73514",
+          "sha256": "7ecaec70bb98cfb858e7ec5ec88122915584c414ac747208916912e05d3026c7",
           "replacements": [
             [
               "[features]\n",
@@ -16,7 +16,7 @@
           ]
         },
         "src/process.rs": {
-          "sha256": "9c413b0b6b74df553028f826ee0bc60164db533dceb96d79bf6c47b6358aa8ba",
+          "sha256": "4bd9af755113e8ed6230cb301748a12ec454e490ade398d397bf518e5d4f0075",
           "replacements": [
             [
               "pub fn restart(env: &Env) -> ! {",
@@ -25,7 +25,7 @@
           ]
         },
         "src/app.rs": {
-          "sha256": "d2bbeff336c5699ca74b1455ed7575b48ad3315e2266b9871e8355cfab6e61c1",
+          "sha256": "ef71e5c2da6696f9bef817f5f32d34c7710b678ca7ec8a00e539527bca5ad1d4",
           "replacements": [
             [
               "  pub fn restart(&self) -> ! {",
@@ -41,20 +41,20 @@
     },
     "tauri-runtime-wry": {
       "name": "tauri-runtime-wry",
-      "version": "2.11.1",
-      "checksum": "a3989df2ae1c476404fe0a2e8ffc4cfbde97e51efd613c2bb5355fbc9ab52cf0",
+      "version": "2.12.3",
+      "checksum": "e1aa9d8b7a120f879f44fdc1053f7b7dbf416bf0bbc6a72b714dec46b782b52f",
       "patches": {
         "Cargo.toml": {
-          "sha256": "860d57122fab8e05f860343fd23657240fd396a089f15cc6d5a8da6f6c5e7763",
+          "sha256": "88bdc06cd424f92acd4da737c17200fdf1301982def6a9204afab32c37a1cf70",
           "replacements": [
             [
-              "[target.\"cfg(windows)\".dependencies.once_cell]",
-              "[target.\"cfg(windows)\".dependencies.opengeul-native-open]\npath = \"../native-open\"\n\n[target.\"cfg(windows)\".dependencies.once_cell]"
+              "[target.\"cfg(windows)\".dependencies.softbuffer]",
+              "[target.\"cfg(windows)\".dependencies.opengeul-native-open]\npath = \"../native-open\"\n\n[target.\"cfg(windows)\".dependencies.softbuffer]"
             ]
           ]
         },
         "src/dialog/windows.rs": {
-          "sha256": "3fc7cf1571b1f727107c61026f830b20eb53fb06ac1aaf474d30412fa7ac97fd",
+          "sha256": "cb340da9de1e9688e281be9bab126cdb48ddd5802c8aabceb82170c8f1f00518",
           "replacements": [
             [
               "    use windows::Win32::UI::Shell::*;\n",

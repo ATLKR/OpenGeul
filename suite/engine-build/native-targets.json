@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "arm64": {
+      "architecture": "arm64",
+      "nativeMachine": 43620,
+      "productMachine": 43620,
+      "processMachine": 0,
+      "configureCpu": "AARCH64",
+      "configureTriple": "aarch64-pc-cygwin",
+      "distro": "LibreOfficeWinArm64",
+      "compilerYear": "2026",
+      "toolset": "v145",
+      "compilerTools": "Hostarm64/arm64",
+      "sourceRecipe": "windows-arm64-v1",
+      "proofVersion": 1,
+      "runner": "windows-11-arm",
+      "runnerArchitecture": "ARM64",
+      "requiredBuildTypes": [
+        "FIREBIRD",
+        "LIBATOMIC_OPS",
+        "LIBTOMMATH"
+      ],
+      "workflow": ".github/workflows/office-native-engine.yml",
+      "ref": "refs/heads/work/opengeul-office-native-engine",
+      "job": "native-firebird-and-office",
+      "artifactPrefix": "opengeul-native-arm64-engine-",
+      "archive": "OpenGeul-Office-engine-arm64.zip",
+      "crtRedistributionUrl": "https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution"
+    },
+    "x64": {
+      "architecture": "x64",
+      "nativeMachine": 34404,
+      "productMachine": 34404,
+      "processMachine": 0,
+      "configureCpu": "X86_64",
+      "configureTriple": "x86_64-pc-cygwin",
+      "distro": "LibreOfficeWin64",
+      "compilerYear": "2022",
+      "toolset": "v143",
+      "compilerTools": "Hostx64/x64",
+      "sourceRecipe": "windows-x64-common-v2",
+      "proofVersion": 2,
+      "runner": "windows-2022",
+      "runnerArchitecture": "X64",
+      "requiredBuildTypes": [
+        "FIREBIRD",
+        "LIBTOMMATH"
+      ],
+      "workflow": ".github/workflows/office-native-engine-x64.yml",
+      "ref": "refs/heads/work/opengeul-office-native-engine-x64",
+      "job": "native-firebird-and-office-x64",
+      "artifactPrefix": "opengeul-native-x64-engine-",
+      "archive": "OpenGeul-Office-engine-x64.zip",
+      "crtRedistributionUrl": "https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution"
+    }
+  }
+}

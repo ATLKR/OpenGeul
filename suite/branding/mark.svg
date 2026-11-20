@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="OpenGeul Office">
+  <title>OpenGeul Office original document mark</title>
+  <rect x="8" y="8" width="112" height="112" rx="25" fill="#123c63"/>
+  <path d="M38 28h36l20 20v52H38z" fill="#ffffff"/>
+  <path d="M74 28v20h20" fill="#f4ae43"/>
+  <path d="M51 62h30M51 75h30M51 88h20" fill="none" stroke="#123c63" stroke-width="6" stroke-linecap="round"/>
+</svg>

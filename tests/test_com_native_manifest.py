@@ -13,9 +13,11 @@ sys.path.insert(0, str(ROOT/'scripts'))
 import com_source_contract as contract
 import prepare_native_tests
 
-NEW_PINS = ('3e5a95c7b4b81b208d56844b252f3d1f50077a4ab28f38ec3746b0b51b8541b0',
-            '54781eabb14ad85dbc06d4929b7b6ed00219e4030840e9cfbc8d76aa5ae0e4ca')
-OLD_PINS = ('839947cf430e2c3587c235a4ef8980195be1c78f9f8ef68e9f60f9968a1e01c6',
+NEW_PINS = ('1ff93f936143ecba8dcce0153a8477cbecdf53e52ba3b565a74ec00d6f830698',
+            'f90dceb621acad5ae70a166480de408b118f3602036c84ac9ed8fd28bcbea1d9')
+OLD_PINS = ('5edcc9bd774878379521fefd9a1e7b509aa7571a478858550ef61b5d5afc186d',
+            '80350e8f958a063ddd13731bb3defd059e3144a252a016bbb699ead22190a12a',
+            '839947cf430e2c3587c235a4ef8980195be1c78f9f8ef68e9f60f9968a1e01c6',
             '8895d687ba3eae0602f2003e0078420b5a844c19f090162b7f4e5315ad262b6c',
             '8fbbc05a985091264101cf14fc4d01563eacef548fd9f7f02e68993e8aebc5e3',
             'db5bb7fa8f838c3597aaed8e4f85ba9acaa5d0f1eca290fe8240d3b045c093a3')
@@ -53,8 +55,8 @@ class ComNativeManifestTests(unittest.TestCase):
                 contract.validate(record,prepared,native,config)
 
     def test_original_and_com_patched_prefix_digests_are_unchanged_and_required(self):
-        self.assertEqual(contract.REFERENCE['originalFiles']['Cargo.toml'],'17d3f9d347d3d5c1011e3299ac85f640d9f31e854e442c4696f55da85809700b')
-        self.assertEqual(contract.REFERENCE['patchedFiles']['Cargo.toml'],'769745d72376286c03413925eff943af5014db3467e21798d9fc886044d02405')
+        self.assertEqual(contract.REFERENCE['originalFiles']['Cargo.toml'],'b00948c9aa1b8801d8731908d2c80a4e9174ddb9e292729dd0e5cca2166db81e')
+        self.assertEqual(contract.REFERENCE['patchedFiles']['Cargo.toml'],'b309371ae72e44fa4bb9cffc587ff0986c19b79025a254e3de4bbe4f553b3307')
         record,prepared,native,config=materials();prepared[contract.CORE+'/Cargo.toml']=NEW_PINS[0]
         for key in ('originalFiles','patchedFiles'):
             bad=copy.deepcopy(record);bad['ledger'][key]['Cargo.toml']='0'*64

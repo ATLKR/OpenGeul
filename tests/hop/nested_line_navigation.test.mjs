@@ -12,6 +12,21 @@ function geometry(h,line,atEnd){
  assert.ok(Math.abs(parseFloat(caret.height)-row.h)<=0.15,'Real public caret height must match endpoint font span');
 }
 
+test('a covering path clip preserves native nested visual line ownership',async t=>{
+ const input=inputFixture(2,'INNER-00'),h=await harness(t,input),before=h.export();
+ const read=h.wasm.getPageLayerTreeObject.bind(h.wasm);
+ h.wasm.getPageLayerTreeObject=(page,...args)=>{
+  const tree=read(page,...args),bounds=tree.root.bounds,{x,y,width,height}=bounds;
+  return {...tree,root:{kind:'clipPath',bounds,paths:[{even_odd:false,commands:[
+   {Move:[x,y]},{Line:[x+width,y]},{Line:[x+width,y+height]},{Line:[x,y+height]},'Close',
+  ]}],child:tree.root}};
+ };
+ h.clickAtOffset(3);h.key('End');assert.equal(h.position().charOffset,8);
+ h.key('Home');assert.equal(h.position().charOffset,0);
+ assert.deepEqual(h.position().cellPath,input.path);assert.deepEqual(h.export(),before);
+ assert.equal(h.handler.canUndo(),false);
+});
+
 for(const depth of [2,3])test(`depth ${depth} End appends in exact inner owner and preserves undo/redo`,async t=>{
  const input=inputFixture(depth,'INNER-00'),hash=sha(input.bytes),h=await harness(t,input),before=h.export();
  h.clickAtOffset(3);h.key('End');assert.equal(h.position().charOffset,8,'End must read inner paragraph rather than empty outer host');

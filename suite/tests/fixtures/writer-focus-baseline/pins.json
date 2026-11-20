@@ -1,0 +1,7 @@
+{
+  "baselineDriverSha256": "4e92d95c6ef079ebd3e0f19a2dbabc0cacca5913808bbfd42f9c7708ea4b6f99",
+  "copiedNormalHelperHashes": {
+    "apply_winacc_focus_order.py": "b385c13795b14feb44de72ecbad72decefaff3a1969d558742bd3b22254e2b61",
+    "winacc-focus-order.patch": "968379ba427ac952c5c7df7f0c37ceabb495310acc224ee5380d51f523fb3ed7"
+  }
+}

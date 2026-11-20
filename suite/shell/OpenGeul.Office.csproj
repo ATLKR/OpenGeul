@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeFrameworkVersion>10.0.15</RuntimeFrameworkVersion>
+    <TargetLatestRuntimePatch>false</TargetLatestRuntimePatch>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationIcon>opengeul.ico</ApplicationIcon>
+    <AssemblyName>OpenGeul.Office</AssemblyName>
+    <RootNamespace>OpenGeul.Office</RootNamespace>
+    <Version>0.2.0</Version>
+    <Product>OpenGeul Office</Product>
+    <Company>ATLKR</Company>
+    <Copyright>OpenGeul contributors</Copyright>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Core/**/*.cs" />
+    <ProjectReference Include="Core/OpenGeul.Office.Core.csproj" />
+  </ItemGroup>
+</Project>
