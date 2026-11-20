@@ -1,3 +1,4 @@
+# Revalidate the unchanged qualified x64 source after its input is no longer listed.
 name: OpenGeul native x64 Office engine source build
 'on':
   push:
