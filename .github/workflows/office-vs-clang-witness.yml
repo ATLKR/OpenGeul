@@ -83,7 +83,7 @@ jobs:
               host = 0
               code = 1
               try:
-                  process = subprocess.Popen([sys.executable, '-I', '-B', '-c', CODE,
+                  process = subprocess.Popen([sys.executable, '-I', '-X', 'utf8', '-B', '-c', CODE,
                                               str(report), head, str(root)], cwd=root, env=finite,
                                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                              stderr=subprocess.DEVNULL)
@@ -123,7 +123,7 @@ jobs:
                   code = 1
               raise SystemExit(code)
           '@
-            $code | & $hostPython -I -B - $report $head $root
+            $code | & $hostPython -I -X utf8 -B - $report $head $root
             if ($LASTEXITCODE -ne 0) { exit 1 }
           } catch { exit 1 }
       - name: Validate the one closed unit report
