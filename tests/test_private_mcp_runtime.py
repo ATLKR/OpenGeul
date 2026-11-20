@@ -81,6 +81,7 @@ class PrivateMcpRuntimeTests(unittest.TestCase):
                     if path!=marked:return value
                     class Reparse:
                         st_file_attributes=0x400
+                        def __getattr__(self,name):return getattr(value,name)
                     return Reparse()
                 with patch.object(Path,'lstat',lstat):
                     with self.assertRaises(ValueError):self.copy()
