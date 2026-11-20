@@ -512,17 +512,25 @@ def current_binding():
             '실제 source/run/attempt 바인딩이 없습니다')
     return result
 
-def private_runtime(executable,output):
+def private_runtime(executable,output,*,expected_sha256):
+    """Copy the single-file CLI component, without the unrelated editor payload."""
     require(executable.name.lower()=='rhwp.exe' and executable.parent.name=='Tools','검증한 제품 Tools/rhwp.exe가 필요합니다')
-    source=executable.parent.parent;paths=[];total=0
-    for path in source.rglob('*'):
+    require(type(expected_sha256) is str and re.fullmatch('[0-9a-f]{64}',expected_sha256),'고정 CLI 바이트 신원이 필요합니다')
+    for path in (executable,*executable.parents,*output.parents):
         require(not path.is_symlink() and not getattr(path.lstat(),'st_file_attributes',0)&0x400,'runtime symlink/reparse를 복사하지 않습니다')
-        if path.is_file():
-            total+=path.stat().st_size;paths.append(path)
-            require(len(paths)<=10000 and total<=96*1024*1024,'private runtime 복사 상한을 초과했습니다')
+    size=executable.stat().st_size;limit=96*1024*1024
+    require(executable.is_file() and 0<size<=limit,'private runtime 복사 상한을 초과했습니다')
     require(not output.exists() and not output.is_symlink(),'private runtime을 덮어쓰지 않습니다')
-    shutil.copytree(source,output)
-    return output/'Tools/rhwp.exe'
+    output.mkdir();(output/'Tools').mkdir();owned=output/'Tools/rhwp.exe'
+    copied=0;digest=hashlib.sha256()
+    with executable.open('rb') as source,owned.open('xb') as target:
+        for block in iter(lambda:source.read(1024*1024),b''):
+            copied+=len(block)
+            require(copied<=limit,'private runtime 복사 상한을 초과했습니다')
+            target.write(block);digest.update(block)
+    require(copied==size and digest.hexdigest()==expected_sha256
+            and owned.stat().st_size==size and sha(owned)==expected_sha256,'private CLI 복사본의 바이트 신원이 다릅니다')
+    return owned
 
 def main():
     parser=argparse.ArgumentParser()
@@ -547,7 +555,7 @@ def main():
     args.out.mkdir(parents=True)
     with tempfile.TemporaryDirectory(prefix='opengeul-mcp-'+uuid.uuid4().hex+'-') as temporary:
         work=Path(temporary)
-        if args.context=='portable':executable=private_runtime(executable,work/'runtime')
+        if args.context=='portable':executable=private_runtime(executable,work/'runtime',expected_sha256=args.expected_sha256)
         client=None
         try:
             workspace=prepare_workspace(work,args.fixtures.resolve())
