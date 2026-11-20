@@ -8,7 +8,7 @@ import ctypes as C
 from suite_window_activation import (NativeActivationProbe, Point, Rect, TitleBarInfo,
     Input, InputData, MouseInput, caption_candidates, _owned_window, _caption_hit)
 from writer_server_observer_prepare_native import (PreparationCode, PreparationError,
-    PreparationNativeApi, OriginalAttachment, GuiThreadInfo, _number)
+    PreparationNativeApi, OriginalAttachment, FocusSnapshot, GuiThreadInfo, _number)
 
 PROFILE = 'one-owned-caption-v1'
 BOOLS = ('enabled eligible dpiEntered dpiRestored foregroundBefore readyBefore cleanupComplete').split()
@@ -17,25 +17,38 @@ INTS = {'stageCode':8, 'reasonCode':3, 'pointerMoves':1, 'inputCalls':1, 'reques
     'pendingInputPrefix':1, 'pendingDpiContext':1}
 
 
-_HIT_KEYS = {'mismatchMask','pidRoleCode','hitTestCode'}
+_HIT_PRESENCE = ('hitPresent','rootPresent','pidPresent')
+_HIT_FOREGROUND = ('hitRootMatchesForegroundBefore','hitRootMatchesForegroundAfter')
+_HIT_KEYS = {'mismatchMask','pidRoleCode','hitTestCode',*_HIT_PRESENCE,*_HIT_FOREGROUND}
 
 
 def _valid_hit_row(row):
     if type(row) is not dict or row.keys()!=_HIT_KEYS:return False
     mask,role,code=(row[key] for key in ('mismatchMask','pidRoleCode','hitTestCode'))
-    if mask is None:return role is None and code is None
+    if mask is None:return all(value is None for value in row.values())
     if type(mask) is not int or not 0<=mask<=31 or type(role) is not int or not 0<=role<=2:return False
     if code is not None and (type(code) is not int or not -2<=code<=21):return False
+    if (any(type(row[key]) is not bool for key in _HIT_PRESENCE) or
+            any(row[key] is not None and type(row[key]) is not bool for key in _HIT_FOREGROUND) or
+            not row['rootPresent'] and any(row[key] is not None for key in _HIT_FOREGROUND) or
+            not row['hitPresent'] and (row['rootPresent'] or row['pidPresent']) or
+            not row['hitPresent'] and not (mask & 2) or
+            not row['rootPresent'] and not (mask & 4) or
+            not row['pidPresent'] and role!=0):return False
     return bool((not (mask & 8))==(role==1) and (not (mask & 16))==(code==2))
 
 
-def _hit_numbers(value, attachment, point):
+def _hit_numbers(value, attachment, point, focus=None):
     """Project cached primitive returns only; no identity or input authority.
 
     Bits 1/2/4/8/16 mean mismatch of point/doc/root/host PID/HTCAPTION.
     pidRoleCode is separate: 0 unmatched, 1 original host, 2 original engine.
     Only standard Win32 hit-test codes leave RAM; an absent/nonstandard LRESULT
     is null. No raw HWND/PID/coordinate, error content or native call is needed.
+    Presence False means an observed zero, while None means unavailable metadata.
+    Foreground comparisons use this original FocusSnapshot's two cached raw
+    returns, both sampled before caption candidates, never a new live query.
+    A zero root or zero foreground is not compared as an identity.
     """
     if (type(value) is not dict or value.keys()!={'point','hitHwnd','rootHwnd','pid','hitTest'} or
             type(attachment) is not OriginalAttachment or type(point) is not tuple or len(point)!=2 or
@@ -49,17 +62,27 @@ def _hit_numbers(value, attachment, point):
     mask=sum(bit for bit,matched in ((1,value['point']==list(point)),(2,value['hitHwnd']==attachment.document),
         (4,value['rootHwnd']==attachment.document),(8,value['pid']==attachment.host_pid),(16,value['hitTest']==2)) if not matched)
     role=1 if value['pid']==attachment.host_pid else 2 if value['pid']==attachment.engine_pid else 0
-    code=value['hitTest']
+    code=value['hitTest'];before=after=None
+    # These are cached raw foreground returns, never a live ownership oracle.
+    if (type(focus) is FocusSnapshot and type(focus._original) is tuple and len(focus._original)==10 and
+            all(type(v) is int and 0<=v<(1<<64) for v in focus._original) and
+            focus._original==attachment.private_tuple() and type(focus._raw) is tuple and len(focus._raw)==6 and
+            all(type(v) is int and 0<=v<(1<<64) for v in focus._raw)):
+        root=value['rootHwnd'];previous,current=focus._raw[4:6]
+        if root and previous:before=root==previous
+        if root and current:after=root==current
     return {'mismatchMask':mask,'pidRoleCode':role,
-        'hitTestCode':code if type(code) is int and -2<=code<=21 else None}
+        'hitTestCode':code if type(code) is int and -2<=code<=21 else None,
+        'hitPresent':value['hitHwnd']!=0,'rootPresent':value['rootHwnd']!=0,'pidPresent':value['pid']!=0,
+        'hitRootMatchesForegroundBefore':before,'hitRootMatchesForegroundAfter':after}
 
 
-def _record_hit(observation, value, attachment, point):
+def _record_hit(observation, value, attachment, point, focus=None):
     # Count only snapshots whose ORIGINAL predicate already finished. A later
     # native/budget failure leaves this prefix, never a total/query-count claim.
     unknown={key:None for key in _HIT_KEYS}
     try:
-        try:row=_hit_numbers(value,attachment,point)
+        try:row=_hit_numbers(value,attachment,point,focus)
         except BaseException:row=unknown
         if not _valid_hit_row(row):row=unknown
         rows=[] if observation['samples'] is None else list(observation['samples'])
@@ -232,7 +255,7 @@ class OwnedCaptionPreparation:
             def candidate_hit(p):
                 value=probe.point_snapshot(attachment.document,p)
                 matched=_caption_hit(value,attachment.document,attachment.host_pid,p)
-                _record_hit(report['captionHitObservation'],value,attachment,p)
+                _record_hit(report['captionHitObservation'],value,attachment,p,focus)
                 return matched
             point=next((p for p in caption_candidates(original['rectangle'],caption['rectangle']) if candidate_hit(p)),None)
             if point is None:raise PreparationError(PreparationCode.ATTACHMENT)

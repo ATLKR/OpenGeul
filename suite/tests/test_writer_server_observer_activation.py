@@ -127,6 +127,17 @@ class NativeFixture(typed.System):
         return result
 
 
+def hit_row(mask, role, code):
+    return {'mismatchMask':mask,'pidRoleCode':role,'hitTestCode':code,
+        'hitPresent':True,'rootPresent':True,'pidPresent':True,
+        'hitRootMatchesForegroundBefore':False,'hitRootMatchesForegroundAfter':False}
+
+
+def unknown_hit_row():
+    return dict.fromkeys(('mismatchMask','pidRoleCode','hitTestCode','hitPresent','rootPresent','pidPresent',
+        'hitRootMatchesForegroundBefore','hitRootMatchesForegroundAfter'))
+
+
 class CaptionPreparationTests(unittest.TestCase):
     def setUp(self): composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
     def tearDown(self): composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
@@ -458,7 +469,7 @@ class CaptionPreparationTests(unittest.TestCase):
         report,c,s,_=self.run_case(lambda c,s:setattr(s,'hit_test',1))
         witness=self.hit_observation(report)
         self.assertEqual(witness,{'candidateCount':3,'samples':[
-            {'mismatchMask':16,'pidRoleCode':1,'hitTestCode':1} for _ in range(3)]})
+            hit_row(16,1,1) for _ in range(3)]})
         self.assertEqual(len(report['captionActivation']),17)
         self.assertEqual(len(s.user.SendMessageTimeoutW.calls),3)
         self.assertEqual(s.user.SendInput.calls,[]);self.assertEqual(s.user.SetPhysicalCursorPos.calls,[])
@@ -472,7 +483,7 @@ class CaptionPreparationTests(unittest.TestCase):
                 s.facts[888]=(901,911,0,888)
                 s.user.WindowFromPhysicalPoint.action=lambda p:s.child if engine else 888
             report,c,s,_=self.run_case(change);witness=self.hit_observation(report)
-            expected={'mismatchMask':26 if engine else 30,'pidRoleCode':2 if engine else 0,'hitTestCode':None}
+            expected=hit_row(26 if engine else 30,2 if engine else 0,None)
             self.assertEqual(witness,{'candidateCount':3,'samples':[expected]*3})
             self.assertEqual(s.user.SendMessageTimeoutW.calls,[]);self.assertEqual(s.user.SendInput.calls,[])
             self.assertFalse(set(witness['samples'][0]) & {'pid','hwnd','root','point','rectangle','name','uri','text'})
@@ -483,8 +494,7 @@ class CaptionPreparationTests(unittest.TestCase):
             report,c,s,_=self.run_case(lambda c,s:setattr(s,'hit_test',code))
             witness=self.hit_observation(report)
             self.assertEqual(witness['candidateCount'],1 if code==2 else 3)
-            self.assertEqual(witness['samples'][-1],{'mismatchMask':0 if code==2 else 16,
-                'pidRoleCode':1,'hitTestCode':code if -2<=code<=21 else None})
+            self.assertEqual(witness['samples'][-1],hit_row(0 if code==2 else 16,1,code if -2<=code<=21 else None))
             self.assertEqual(len(s.user.SendInput.calls),int(code==2))
             self.assertEqual(report['preparation']['inputCount'],2 if code==2 else 0)
 
@@ -513,7 +523,7 @@ class CaptionPreparationTests(unittest.TestCase):
                 s.hit_test=1;s.user.SendMessageTimeoutW.action=hit
             report,c,s,_=self.run_case(change);witness=self.hit_observation(report)
             self.assertEqual(len(s.user.SendMessageTimeoutW.calls),completed+1)
-            expected={'candidateCount':1,'samples':[{'mismatchMask':16,'pidRoleCode':1,'hitTestCode':1}]} if completed else {'candidateCount':None,'samples':None}
+            expected={'candidateCount':1,'samples':[hit_row(16,1,1)]} if completed else {'candidateCount':None,'samples':None}
             self.assertEqual(witness,expected)
             self.assertEqual(s.user.SendInput.calls,[])
             self.assertEqual(report['preparation']['preparationFailureCode'],2 if budget_late else 3)
@@ -552,7 +562,7 @@ class CaptionPreparationTests(unittest.TestCase):
                     witness=self.hit_observation(report)
                     self.assertEqual(events,['query','predicate','projection','query','predicate'] if accepted else ['query','predicate','projection']*3)
                     self.assertEqual(witness['candidateCount'],1 if accepted else 3)
-                    if poison:self.assertEqual(witness['samples'],[{'mismatchMask':None,'pidRoleCode':None,'hitTestCode':None}]*(1 if accepted else 3))
+                    if poison:self.assertEqual(witness['samples'],[unknown_hit_row()]*(1 if accepted else 3))
                     self.assertEqual(len(s.user.SendInput.calls),int(accepted));self.assertEqual(len(s.user.SetPhysicalCursorPos.calls),int(accepted))
                     runs.append((native,len(reads),c.api.calls,report['failureCode'],report['preparation']['preparationFailureCode']))
             self.assertEqual(runs[0],runs[1])
@@ -582,8 +592,13 @@ class CaptionPreparationTests(unittest.TestCase):
         pure={'_hit_numbers','_record_hit','_valid_hit_row','valid_hit_observation'}
         for helper in (n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in pure):
             for call in (n for n in ast.walk(helper) if isinstance(n,ast.Call)):
-                if isinstance(call.func,ast.Name):self.assertIn(call.func.id,{'type','len','sum','list','ValueError','any','bool','_hit_numbers','_valid_hit_row'})
-                else:self.assertIn(call.func.attr,{'keys','append','update'})
+                if isinstance(call.func,ast.Name):self.assertIn(call.func.id,{'type','len','sum','list','ValueError','any','all','bool','_hit_numbers','_valid_hit_row'})
+                else:
+                    self.assertIn(call.func.attr,{'keys','append','update','private_tuple','values'})
+                    if call.func.attr in ('private_tuple','values'):
+                        self.assertIsInstance(call.func.value,ast.Name)
+                        self.assertEqual(call.func.value.id,'attachment' if call.func.attr=='private_tuple' else 'row')
+                        self.assertEqual((call.args,call.keywords),([],[]))
 
     def test_hit_observation_schema_is_exact_bounded_and_preserves_guard_correlations(self):
         report,c,s,_=self.run_case(lambda c,s:setattr(s,'hit_test',1));self.hit_observation(report)
@@ -609,6 +624,88 @@ class CaptionPreparationTests(unittest.TestCase):
         with self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(altered)
         altered=copy.deepcopy(report);altered['captionActivation']['cleanupComplete']=False
         with self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(altered)
+
+    def test_r17_cached_null_and_nonzero_foreground_cover_are_distinct_without_input(self):
+        for null_hit in (True,False):
+            composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+            def change(c,s):
+                s.facts[888]=(901,911,0,888);s.foreground=888
+                s.user.WindowFromPhysicalPoint.action=lambda point:0 if null_hit else 888
+            report,c,s,_=self.run_case(change);rows=self.hit_observation(report)['samples']
+            self.assertEqual(len(rows),3)
+            for row in rows:
+                self.assertEqual((row['mismatchMask'],row['pidRoleCode'],row['hitTestCode']),(30,0,None))
+                self.assertIs(row['hitPresent'],not null_hit)
+                self.assertIs(row['rootPresent'],not null_hit)
+                self.assertIs(row['pidPresent'],not null_hit)
+                self.assertIs(row['hitRootMatchesForegroundBefore'],None if null_hit else True)
+                self.assertIs(row['hitRootMatchesForegroundAfter'],None if null_hit else True)
+            self.assertEqual(s.user.SendInput.calls,[]);self.assertEqual(s.user.SetPhysicalCursorPos.calls,[])
+            self.assertEqual(s.user.SendMessageTimeoutW.calls,[])
+            self.assertEqual(report['preparation']['preparationFailureCode'],5)
+    def test_r17_existing_engine_hit_is_only_cached_role_and_foreground_unknown_stays_unknown(self):
+        module=self.module();a=typed.M.OriginalAttachment(600,610,601,101,501,401,611,201,203,111)
+        value={'point':[1,2],'hitHwnd':601,'rootHwnd':600,'pid':401,'hitTest':None}
+        row=module._hit_numbers(value,a,(1,2))
+        self.assertEqual(row['pidRoleCode'],2)
+        self.assertTrue(row['hitPresent'] and row['rootPresent'] and row['pidPresent'])
+        self.assertIsNone(row['hitRootMatchesForegroundBefore']);self.assertIsNone(row['hitRootMatchesForegroundAfter'])
+    def test_r17_new_presence_schema_rejects_missing_bool_as_int_or_raw_identifiers(self):
+        def foreign(c,s):s.facts[888]=(901,911,0,888);s.covered=True
+        report,_,_,_=self.run_case(foreign)
+        keys={'mismatchMask','pidRoleCode','hitTestCode','hitPresent','rootPresent','pidPresent',
+            'hitRootMatchesForegroundBefore','hitRootMatchesForegroundAfter'}
+        self.assertEqual(set(report['captionHitObservation']['samples'][0]),keys)
+        for key,value in (('hitPresent',0),('rootPresent',None),('pidPresent',1),
+                ('hitRootMatchesForegroundBefore',1),('rawPid',123)):
+            changed=copy.deepcopy(report);changed['captionHitObservation']['samples'][0][key]=value
+            with self.subTest(field=key),self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(changed)
+        changed=copy.deepcopy(report);del changed['captionHitObservation']['samples'][0]['hitPresent']
+        with self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(changed)
+    def test_r17_prepare_changes_only_the_completed_predicate_projection_argument(self):
+        after=ast.parse(Path(self.module().__file__).read_text())
+        def prepare(tree):
+            cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='OwnedCaptionPreparation')
+            return next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='prepare')
+        b=prepare(after)
+        wrapper=next(n for n in ast.walk(b) if isinstance(n,ast.FunctionDef) and n.name=='candidate_hit')
+        call=wrapper.body[2].value
+        self.assertEqual(len(call.args),5)
+        self.assertIsInstance(call.args[-1],ast.Name);self.assertEqual(call.args[-1].id,'focus')
+        call.args.pop()
+        options={'show_empty':True} if 'show_empty' in inspect.signature(ast.dump).parameters else {}
+        self.assertEqual(hashlib.sha256(ast.dump(b,include_attributes=False,**options).encode()).hexdigest(),'01fb827db553aec3dc32e0816ec7b169e4b8ef2dc30fec53aaae3e50cddcb3b9')
+
+    def test_r17_zero_stale_and_unavailable_cached_foreground_are_not_identity_matches(self):
+        from dataclasses import replace
+        module=self.module();a=typed.M.OriginalAttachment(600,610,601,101,501,401,611,201,203,111)
+        value={'point':[1,2],'hitHwnd':888,'rootHwnd':888,'pid':901,'hitTest':None}
+        focus=typed.M.FocusSnapshot(False,True,False,False,True,True,True,1,2,a.private_tuple(),(0,0,0,0,0,888))
+        row=module._hit_numbers(value,a,(1,2),focus)
+        self.assertIsNone(row['hitRootMatchesForegroundBefore']);self.assertIs(row['hitRootMatchesForegroundAfter'],True)
+        class Poison:
+            def reject(self,*args):raise AssertionError()
+            __eq__=__repr__=__str__=reject
+        stale=replace(focus,_original=(999,*focus._original[1:]))
+        unknown=replace(focus,_raw=(0,0,0,0,Poison(),888))
+        for other in (None,object(),stale,unknown):
+            row=module._hit_numbers(value,a,(1,2),other)
+            self.assertTrue(row['hitPresent'] and row['rootPresent'] and row['pidPresent'])
+            self.assertIsNone(row['hitRootMatchesForegroundBefore']);self.assertIsNone(row['hitRootMatchesForegroundAfter'])
+        empty=dict(value,hitHwnd=0,rootHwnd=0,pid=0)
+        row=module._hit_numbers(empty,a,(1,2),replace(focus,_raw=(0,0,0,0,0,0)))
+        self.assertFalse(row['hitPresent'] or row['rootPresent'] or row['pidPresent'])
+        self.assertIsNone(row['hitRootMatchesForegroundBefore']);self.assertIsNone(row['hitRootMatchesForegroundAfter'])
+
+    def test_r17_closed_presence_cannot_contradict_the_original_mask_or_role(self):
+        report,_,_,_=self.run_case()
+        for values in ({'hitPresent':False,'rootPresent':False,'pidPresent':False,
+                'hitRootMatchesForegroundBefore':None,'hitRootMatchesForegroundAfter':None},
+                {'rootPresent':False,'hitRootMatchesForegroundBefore':None,'hitRootMatchesForegroundAfter':None},
+                {'pidPresent':False}):
+            changed=copy.deepcopy(report);changed['captionHitObservation']['samples'][0].update(values)
+            with self.subTest(fields=len(values)),self.assertRaises(composed.runner.RunnerFailure):
+                composed.runner.validate_public_report(changed)
 
 
 if __name__=='__main__':unittest.main()

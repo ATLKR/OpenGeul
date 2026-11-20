@@ -351,7 +351,9 @@ class InitialEngine(unittest.TestCase):
             self.assertIsNone(report['preparation']['originalEngineExitObserved'])
     def test_default_strict_classifier_has_the_exact_preimage_native_call_sequence(self):
         import importlib.util
-        old_path=Path(__file__).resolve().parents[3]/'restored-preimage/suite/e2e/writer_server_observer_runner.py'
+        import hashlib
+        old_path=Path(__file__).with_name('fixtures')/'writer-r15-strict-classifier.py'
+        self.assertEqual(hashlib.sha256(old_path.read_bytes()).hexdigest(),'5b324ff2fd4d1a0d64ff49a13c9ce1ff177cf3756a0466e23c2e8047db9c368e')
         spec=importlib.util.spec_from_file_location('_initial_preimage_runner',old_path)
         old=importlib.util.module_from_spec(spec)
         import sys
@@ -398,6 +400,16 @@ class InitialEngine(unittest.TestCase):
             self.assertIs(other.M,before)
             self.assertIs(sys.modules['writer_server_observer_prepare_native'],before)
         finally:sys.modules['writer_server_observer_prepare_native']=before
+
+    def test_strict_preimage_fixture_rejects_an_unreviewed_live_guard_mutation(self):
+        from unittest import mock
+        source=Path(__file__).with_name('fixtures')/'writer-r15-strict-classifier.py'
+        original=Path.read_bytes;data=original(source)
+        changed=data.replace(b'if waited != 258:',b'if waited == 258:',1)
+        self.assertNotEqual(data,changed)
+        def read(path):return changed if path==source else original(path)
+        with mock.patch.object(Path,'read_bytes',read),self.assertRaises(AssertionError):
+            self.test_default_strict_classifier_has_the_exact_preimage_native_call_sequence()
 
 class InitialWorkflow(unittest.TestCase):
     def source(self):return (Path(__file__).resolve().parents[2]/'.github/workflows/office-suite.yml').read_text()
