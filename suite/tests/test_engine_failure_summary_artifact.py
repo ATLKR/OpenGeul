@@ -29,7 +29,8 @@ def sample():
             'failure':{'stage':'engine-start','category':'RuntimeError'} if failed else None,
             'finalizationFailures':[],'cleanupErrorCount':0,
             'cleanup':{'gracefulQualified':None,'forcedTermination':False,'jobEmptyVerified':True,
-                       'launcherExitCode':0,'errors':[],'errorsTruncated':False}})
+                       'launcherExitCode':0,'errors':[],'errorsTruncated':False,
+                       'desktopLifetime':None,'originalEngine':None}})
     return {'schemaVersion':1,'kind':'engine-failure-summary','acceptanceEligible':False,'passed':False,'cases':cases}
 
 

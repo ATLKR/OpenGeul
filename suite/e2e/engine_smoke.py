@@ -553,16 +553,112 @@ def failure_summary(results):
     def error(stage, value):
         return dict(stage=stage if stage in _FAILURE_STAGES else 'unknown',
                     category=value.get('type') if value.get('type') in _ERROR_CATEGORIES else 'unknown')
+    def positive(value, bits):
+        return type(value) is int and 0 < value < 2**bits
+    def registered(value):
+        return (type(value) is dict and type(value.get('schemaVersion')) is int
+            and value['schemaVersion'] == 1 and type(value.get('kind')) is str
+            and value['kind'] == 'owned-generated-fixture-desktop-lifetime'
+            and type(value.get('scope')) is str and value['scope'] == 'explicit-run-case-fixture'
+            and type(value.get('registration')) is str and value['registration'] == 'returned')
+    def desktop_lifetime(cleanup):
+        value = cleanup.get('fixtureDesktopLifetime')
+        if not registered(value):
+            return None
+        states = {'not-attempted': 1, 'attempted': 2, 'returned': 3, 'raised': 4}
+        removal, events, omitted = value.get('removal'), value.get('events'), value.get('omittedEvents')
+        if (type(removal) is not str or removal not in states or type(events) is not list
+            or len(events) > 64 or type(omitted) is not int or not 0 <= omitted <= 64
+            or omitted and len(events) != 64
+            or any(type(value.get(key)) is not bool for key in ('active', 'callbackFault', 'unexpectedTermination'))):
+            return None
+        counts = [0, 0, 0]
+        names = ('queryTermination', 'notifyTermination', 'disposing')
+        for event in events:
+            if type(event) is not dict or type(event.get('event')) is not str or event['event'] not in names or type(event.get('active')) is not bool:
+                return None
+            if event['active']:
+                counts[names.index(event['event'])] += 1
+        return dict(active=value['active'], registrationCode=3, removalCode=states[removal],
+            eventCount=len(events), activeQueryCount=counts[0], activeNotifyCount=counts[1],
+            activeDisposingCount=counts[2], callbackFault=value['callbackFault'],
+            unexpectedTermination=value['unexpectedTermination'], omittedEvents=omitted)
+    def identity(row):
+        if type(row) is not dict or row.get('error') is not None:
+            return None
+        values = row.get('pid'), row.get('creationTime'), row.get('handleValue')
+        return values if all(positive(value, bits) for value, bits in zip(values, (32, 64, 64))) else None
+    def select(rows, expected, owner=None):
+        if type(rows) is not list or not 0 < len(rows) <= 128:
+            return None
+        found, pids, handles = [], set(), set()
+        for row in rows:
+            if type(row) is not dict or type(row.get('image')) is not str or not row['image']:
+                return None
+            binding = identity(row)
+            if binding is None or binding[0] in pids or binding[2] in handles:
+                return None
+            pids.add(binding[0]); handles.add(binding[2])
+            if row['image'] == expected:
+                found.append(row)
+        if len(found) != 1 or identity(found[0]) is None or owner is not None and identity(found[0]) != owner:
+            return None
+        return found[0]
+    def state(row):
+        if row is None or identity(row) is None:
+            return None
+        alive, waited, code = row.get('alive'), row.get('waitResult'), row.get('exitCode')
+        if (type(alive) is not bool or type(waited) is not int or waited not in (0, 258)
+            or alive != (waited == 258) or type(code) is not int or not 0 <= code < 2**32
+            or row.get('getExitCodeProcessResult') is not True):
+            return None
+        # Wait and exit-code reads are separate; Wait258/exit0 stays unchanged.
+        return dict(alive=alive, waitResult=waited, exitCode=code, getExitCodeProcessResult=True)
+    def original_engine(cleanup):
+        if not registered(cleanup.get('fixtureDesktopLifetime')):
+            return None
+        expected, snapshots = cleanup.get('expectedEngineImage'), cleanup.get('snapshots')
+        if type(expected) is not str or not expected or type(snapshots) is not list or not 0 < len(snapshots) <= 16:
+            return None
+        initial = select(cleanup.get('initialMembers'), expected)
+        if initial is None:
+            return None
+        owner = identity(initial)
+        first, before = [], []
+        for index, snapshot in enumerate(snapshots):
+            if type(snapshot) is not dict or type(snapshot.get('phase')) is not str:
+                return None
+            if snapshot['phase'] == 'fixture-before-first-load':
+                first.append((index, snapshot))
+            elif snapshot['phase'] == 'before-desktop-termination':
+                before.append((index, snapshot))
+        if len(first) != 1:
+            return None
+        first_row = select(first[0][1].get('members'), expected, owner)
+        if first_row is None:
+            return None
+        pre = before[0] if len(before) == 1 and before[0][0] > first[0][0] else None
+        before_state = state(select(pre[1].get('members'), expected, owner)) if pre is not None else None
+        final_state = None
+        if pre is not None and len(snapshots) - 1 > pre[0]:
+            final = state(select(cleanup.get('finalMembers'), expected, owner))
+            last = state(select(snapshots[-1].get('members'), expected, owner))
+            if final is not None and final == last:
+                final_state = final
+        return dict(pid=owner[0], creationTime=owner[1], handleValue=owner[2],
+            first=state(first_row), beforeTermination=before_state, final=final_state, stateReadsAtomic=False)
     cases = []
     for result in results:
         assert result['status'] in ('passed', 'failed')
-        cleanup = result.get('engineCleanup') or {}
+        cleanup = result.get('engineCleanup')
+        cleanup = cleanup if type(cleanup) is dict else {}
         errors = cleanup.get('errors') or []
         flags = {name: cleanup.get(name) if type(cleanup.get(name)) is bool else None
                  for name in ('gracefulQualified', 'forcedTermination', 'jobEmptyVerified')}
         code = cleanup.get('launcherExitCode')
         flags.update(launcherExitCode=code if type(code) is int and 0 <= code < 2**32 else None,
-                     errors=[error(e.get('stage'), e) for e in errors[:16]], errorsTruncated=len(errors)>16)
+                     errors=[error(e.get('stage'), e) for e in errors[:16]], errorsTruncated=len(errors)>16,
+                     desktopLifetime=desktop_lifetime(cleanup), originalEngine=original_engine(cleanup))
         cases.append(dict(module=result['module'], status=result['status'],
             failure=error(result.get('failureStage'), result['error']) if result.get('error') else None,
             finalizationFailures=[error(e.get('stage'), e) for e in result.get('finalizationFailures', [])[:2]],

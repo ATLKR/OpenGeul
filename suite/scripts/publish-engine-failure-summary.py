@@ -42,6 +42,29 @@ def error(row):
 
 
 def validate_bytes(raw):
+    def state(value):
+        if value is None:return
+        need(type(value) is dict and set(value)=={'alive','waitResult','exitCode','getExitCodeProcessResult'})
+        need(type(value['alive']) is bool and type(value['waitResult']) is int and value['waitResult'] in (0,258))
+        need(value['alive']==(value['waitResult']==258) and uint32(value['exitCode']) and value['getExitCodeProcessResult'] is True)
+    def lifetime(value):
+        if value is None:return
+        need(type(value) is dict and set(value)=={'active','registrationCode','removalCode','eventCount',
+            'activeQueryCount','activeNotifyCount','activeDisposingCount','callbackFault','unexpectedTermination','omittedEvents'})
+        for key in ('active','callbackFault','unexpectedTermination'):need(type(value[key]) is bool)
+        need(type(value['registrationCode']) is int and value['registrationCode']==3)
+        need(type(value['removalCode']) is int and value['removalCode'] in (1,2,3,4))
+        for key in ('eventCount','activeQueryCount','activeNotifyCount','activeDisposingCount','omittedEvents'):
+            need(type(value[key]) is int and 0<=value[key]<=64)
+        need(value['activeQueryCount']+value['activeNotifyCount']+value['activeDisposingCount']<=value['eventCount'])
+        need(value['omittedEvents']==0 or value['eventCount']==64)
+    def original(value):
+        if value is None:return
+        need(type(value) is dict and set(value)=={'pid','creationTime','handleValue','first','beforeTermination','final','stateReadsAtomic'})
+        need(type(value['pid']) is int and 0<value['pid']<2**32)
+        for key in ('creationTime','handleValue'):need(type(value[key]) is int and 0<value[key]<2**64)
+        need(value['stateReadsAtomic'] is False)
+        for key in ('first','beforeTermination','final'):state(value[key])
     need(type(raw) is bytes and 0<len(raw)<=MAX_BYTES)
     row=json.loads(raw.decode('utf-8'),object_pairs_hook=pairs,parse_constant=reject_constant)
     need(type(row) is dict and set(row)=={'schemaVersion','kind','acceptanceEligible','passed','cases'})
@@ -56,13 +79,14 @@ def validate_bytes(raw):
         for value in case['finalizationFailures']:error(value)
         need(uint32(case['cleanupErrorCount']))
         cleanup=case['cleanup']
-        need(type(cleanup) is dict and set(cleanup)=={'gracefulQualified','forcedTermination','jobEmptyVerified','launcherExitCode','errors','errorsTruncated'})
+        need(type(cleanup) is dict and set(cleanup)=={'gracefulQualified','forcedTermination','jobEmptyVerified','launcherExitCode','errors','errorsTruncated','desktopLifetime','originalEngine'})
         for key in ('gracefulQualified','forcedTermination','jobEmptyVerified'):
             need(cleanup[key] is None or type(cleanup[key]) is bool)
         need(cleanup['launcherExitCode'] is None or uint32(cleanup['launcherExitCode']))
         need(type(cleanup['errors']) is list and len(cleanup['errors'])<=16 and type(cleanup['errorsTruncated']) is bool)
         need(not cleanup['errorsTruncated'] or len(cleanup['errors'])==16)
         for value in cleanup['errors']:error(value)
+        lifetime(cleanup['desktopLifetime']);original(cleanup['originalEngine'])
     need(row['passed']==all(case['status']=='passed' for case in row['cases']))
     return row
 
