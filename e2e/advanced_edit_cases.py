@@ -32,6 +32,35 @@ MERGED={(0,0):((1,2),'ADV-CELL-00ADV-CELL-01',('ADV-CELL-00','ADV-CELL-01')),(1,
 SPLIT={**GRID,(0,0):((1,1),'ADV-CELL-00ADV-CELL-01',('ADV-CELL-00','ADV-CELL-01')),(0,1):((1,1),'',('',))}
 
 
+def _textbox_mm100(value):
+    if type(value)is not str or len(value)>7 or re.fullmatch(r'[0-9]{1,4}(?:\.[0-9]{1,2})?',value)is None:
+        return None
+    whole,_,fraction=value.partition('.')
+    return int(whole)*100+int(fraction.ljust(2,'0'))
+
+
+def _textbox_preapply(panel,folder):
+    # Read only the authored textbox fixture; this never grants a UI check.
+    record=dict(schemaVersion=1,diagnosticOnly=True,qualification=False,normalAcceptance=False,
+        fullEngineQualified=False,acceptanceEligible=False,guiVerified=False,
+        valuesMm100=[None,None],errorCodes=[0,0])
+    for index in range(2):
+        try:
+            value=_textbox_mm100(panel.locator('input[type=number]').nth(index).input_value(timeout=1000))
+            record['valuesMm100'][index]=value
+            record['errorCodes'][index]=1 if value is None else 0
+        except Exception as error:
+            # 0=valid,1=invalid;2..6=allowlisted read error;7=unknown error.
+            record['errorCodes'][index]={'TimeoutError':2,'TargetClosedError':3,'Error':4,
+                'OSError':5,'PermissionError':6}.get(type(error).__name__,7)
+    try:
+        (folder/'textbox-property-observation.numeric.json').write_text(
+            json.dumps(record,sort_keys=True,separators=(',',':'),allow_nan=False)+'\n',encoding='ascii')
+    except Exception:
+        # Missing diagnostics cannot replace the original Apply/save oracle.
+        pass
+
+
 def _advanced_rect(value):
     assert type(value) is dict and set(value)=={'x','y','width','height'}, 'Incomplete public rectangle'
     assert all(type(n) in (int,float) and math.isfinite(n) for n in value.values()), 'Nonfinite public rectangle'
@@ -480,6 +509,7 @@ class AdvancedEditCases:
         d=self.page.locator('.pp-dialog'); expect(d).to_be_visible(); panel=d.locator('.dialog-tab-panel[data-tab=basic]')
         ratio=panel.get_by_label('비율 유지',exact=True); ratio.uncheck()
         panel.locator('input[type=number]').nth(0).fill('45'); panel.locator('input[type=number]').nth(1).fill('25')
+        _textbox_preapply(panel,self.folder)
         d.locator('.cs-right-col .dialog-btn-primary').click()
         self.advanced_check('properties',lambda r:verify(r,1,'ADV-TEXTBOX',(45,25)))
         self.undo(); self.advanced_check('property-undo',lambda r:verify(r,1,'ADV-TEXTBOX'))

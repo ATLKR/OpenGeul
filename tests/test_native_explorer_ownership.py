@@ -124,9 +124,13 @@ class ExplorerDriverTests(unittest.TestCase):
         def release(**kwargs):
             self.inputs.append(('release', kwargs['coords']))
             if wrong_cleanup_thread: probe.root['tid'] = 999
+        # Match the pinned pywinauto 0.6.9 public signature. Accepting arbitrary
+        # keywords here hid an actual Windows-only TypeError before any move.
+        def move(coords=(0, 0)):
+            self.inputs.append(('move', coords))
         mouse = SimpleNamespace(click=physical_click,
             press=lambda **kwargs: self.inputs.append(('press', kwargs['coords'])),
-            move=lambda **kwargs: self.inputs.append(('move', kwargs['coords'])),
+            move=move,
             release=release)
         desktop = SimpleNamespace(window=lambda **kwargs: explorer, windows=lambda **kwargs: [app])
         def advance(seconds): state['clock'] += seconds

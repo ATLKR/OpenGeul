@@ -16,8 +16,8 @@ BRIDGE = 'third_party/rhwp/rhwp-studio/src/core/wasm-bridge.ts'
 SOURCE_FILES = (CURSOR, BRIDGE)
 INPUT_SHA256 = 'cf9f71bad5b9ec16e4b960ef02a2d913796c66ccadcd76e9c8a9b6e774d1ed58'
 OUTPUT_SHA256 = '2bf6183f9adcd6f742125afb633214c305718ba08a84db6926ef4993591500ac'
-INPUT_SOURCE_SHA256 = {CURSOR: INPUT_SHA256, BRIDGE: '1606343a91a26f0b24a5a8f863d322319212a9545e4da54a4726b51c6d9a4983'}
-OUTPUT_SOURCE_SHA256 = {CURSOR: OUTPUT_SHA256, BRIDGE: 'fb5f2fba04c1c817a9352a00cfc060c34d374a4d4b6b0473a469fa4916214916'}
+INPUT_SOURCE_SHA256 = {CURSOR: INPUT_SHA256, BRIDGE: '49f08ccd2ee748fbe1989cdfa7cb453b7852b65d559b581c048fd4602adecb66'}
+OUTPUT_SOURCE_SHA256 = {CURSOR: OUTPUT_SHA256, BRIDGE: '3be41fa9c9aa8c65204185e625f84f50f5d39ff3a9761d4956286302953ca0db'}
 REPLACEMENTS = (
     ("import type { DocumentPosition, CursorRect, LineInfo, CellPathEntry, NavContextEntry, CellBbox } from '@/core/types';",
      "import type { DocumentPosition, CursorRect, LineInfo, CellPathEntry, NavContextEntry, CellBbox, LayerNode, LayerTextRunOp } from '@/core/types';"),

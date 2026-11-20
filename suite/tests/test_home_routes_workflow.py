@@ -9,7 +9,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from suite.tests.workflow_scope import normal_suite_source
+from suite.tests.workflow_scope import normal_suite_source, original_acceptance_source
 
 from suite.tests.test_portable_package_workflow import workflow_test_environment
 
@@ -51,7 +51,7 @@ BASE_NAMES = (
 
 def steps(path):
     source=path.read_text(encoding='utf-8')
-    if path==MATRIX:source=normal_suite_source(source)
+    if path==MATRIX:source=original_acceptance_source(source)
     return re.split(r'^    - name: ', source, flags=re.M)[1:]
 
 

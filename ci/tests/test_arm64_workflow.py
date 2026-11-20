@@ -74,6 +74,21 @@ class Arm64WorkflowTests(unittest.TestCase):
                          '--package-directory release-output'):
             self.assertIn(required,commands)
     def _without_paired_print_addendum(self,steps):
+        # Admit only the reviewed failure-only two-step postimage. Restore its
+        # single opt-in before applying the unchanged original tail/core hashes.
+        if len(steps)>=2 and [step.get('id') for step in steps[-2:]]==['paired-failure-admit','paired-failure-evidence']:
+            self.assertGreaterEqual(len(steps),5)
+            encoded=json.dumps(steps[-2:],sort_keys=True,separators=(',',':')).encode()
+            self.assertEqual(hashlib.sha256(encoded).hexdigest(),
+                '53ec860ec65ef57932847730791a03e64b39935be708c8e439837ab53ce26c85')
+            tail=copy.deepcopy(steps[-5:-2])
+            self.assertEqual([step.get('id') for step in tail],
+                ['paired-print','paired-print-admit','paired-print-evidence'])
+            command=tail[0].get('run')
+            self.assertIsInstance(command,str)
+            self.assertEqual(command.count(' --failure-numeric-sidecar'),1)
+            tail[0]['run']=command.replace(' --failure-numeric-sidecar','',1)
+            steps=[*steps[:-5],*tail]
         # Reviewed workflow postimage 14d48954ba0592509c7cc3f3bbf5faadc7b7078d83bf639f7f1a9279e3a4e7d3.
         # Remove only its exact three-step tail and two additive outcome IDs.
         # The original complete-step hashes below remain unchanged.

@@ -25,7 +25,7 @@ NATIVE_NAMES=frozenset(('basic.hwp','basic.hwpx','blank.hwp','blank.hwpx','inval
 BASELINE_FILES=({'e2e-fixtures/'+n for n in NATIVE_NAMES}|{'structured-fixtures/'+n for n in ('structured.hwp','structured.hwpx','checkerboard.png','generation.json')}|{'structured-input-binding.json'})
 BROWSER_BASELINE=NATIVE_NAMES|{'paragraphs.hwp'}
 DIST_STATIC=frozenset(('index.html','favicon.ico','opengeul.ico','images/icon_small_ko.svg','images/icon_small_ko_dark.svg'))
-DIST_DYNAMIC=(r'assets/dist-js-[A-Za-z0-9_-]{8}\.js',r'assets/event-[A-Za-z0-9_-]{8}\.js',
+DIST_DYNAMIC=(r'assets/dist-js-[A-Za-z0-9_-]{8}\.js',r'assets/form-action-worker-[A-Za-z0-9_-]{8}\.js',
     r'assets/index-[A-Za-z0-9_-]{8}\.js',r'assets/index-[A-Za-z0-9_-]{8}\.css',
     r'assets/rhwp_bg-[A-Za-z0-9_-]{8}\.wasm',r'assets/webviewWindow-[A-Za-z0-9_-]{8}\.js')
 STAGES=frozenset(('boundary','native-boundary','native-source','native-input-binding','local-wasm','source-run',

@@ -240,7 +240,7 @@ class FullscreenTests(unittest.TestCase):
         self.assertEqual(value['sourceMenu']['admission']['admissionSha256'],admission.admission_sha256)
         self.assertEqual(value['sourceMenu']['generation']['engineHandleValue'],10)
         self.assertEqual(value['sourceMenu']['generation']['shellHandleValue'],8)
-        self.assertEqual(value['sourceMenu']['focusProtocolVersion'],1)
+        self.assertEqual(value['sourceMenu']['focusProtocolVersion'],2)
         self.assertTrue(callable(probe._source_snapshot_original))
         self.assertTrue(value['success'])
 

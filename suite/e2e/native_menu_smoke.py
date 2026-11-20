@@ -62,7 +62,7 @@ def _initial_focus_counters(lines,original,*,trace,worker,managed,retirement_con
         identity['managedThreadId']=managed
         prefix=b'{"event":"suite.initialEditorFocusFlow","component":"host",'
         observe=prefix+b'"stage":"observe",'
-        rows=[]
+        rows=[];route_rows=[];route_seen=False
         def unique(pairs):
             value={}
             for key,item in pairs:
@@ -88,18 +88,40 @@ def _initial_focus_counters(lines,original,*,trace,worker,managed,retirement_con
             if value['stage']=='observe':continue
             assert value['stage'] in ('prefix','final')
             details=value['details'];assert type(details) is dict
+            details=dict(details)
+            present='hwpCommandRoute' in details
+            route_section=details.pop('hwpCommandRoute',None)
+            route_seen=route_seen or present
             assert all(type(item) is int for item in details.values())
             assert type(details.get('snapshotKindCode')) is int
             assert details['snapshotKindCode']==(1 if value['stage']=='prefix' else 2)
             sequence=integer(value['sequence'],128,1)
             assert 'sequence' not in details
             rows.append(dict(sequence=sequence,**details));assert len(rows)<=128
+            route_rows.append(dict(focus=rows[-1],route=route_section))
         budget()
         code=11
         from initial_focus_final_counters import parse_initial_focus_final_counters
         result=parse_initial_focus_final_counters(rows,retained_identity=identity,
             retirement_confirmed=retirement_confirmed)
         budget()
+        if route_seen:
+            # Same read/envelope/scope only. The old details/parser stay unchanged;
+            # base is final before optional work can consume the same deadline.
+            route_result=dict(schemaVersion=1,known=0,snapshotKnown=0,positiveRouteObserved=0,
+                coverageComplete=0,zeroCountsUsable=0,eventCompletenessUnknown=1,
+                acceptanceEligible=0,errorCode=6,scope={},latest={})
+            try:
+                budget()
+                from hwp_command_route_observation import parse_hwp_command_route
+                budget()
+                route_candidate=parse_hwp_command_route(route_rows,
+                    retained_identity=identity,retirement_confirmed=retirement_confirmed)
+                budget()
+                route_result=route_candidate
+            except TimeoutError:route_result['errorCode']=7
+            except Exception:pass
+            result['hwpCommandRoute']=route_result
         return result
     except TimeoutError:
         return _initial_focus_counters_unknown(10)

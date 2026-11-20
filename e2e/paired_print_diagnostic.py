@@ -50,8 +50,8 @@ def admit_current(value, *, expected_source, run_id, attempt, expected_upstream,
     digest(value['sha256'])
     require(type(value['package']) is str and re.fullmatch(r'[A-Za-z0-9_.-]{1,180}\.msix', value['package']), 13)
     require(value['upstream'] == expected_upstream and type(expected_upstream) is dict
-            and expected_upstream.get('rhwp', {}).get('version') == '0.9.0'
-            and expected_upstream.get('rhwp', {}).get('commit') == 'c9095c5f67632e6721e800ccc7fb43ea49d26682', 13)
+            and expected_upstream.get('rhwp', {}).get('version') == '0.9.1'
+            and expected_upstream.get('rhwp', {}).get('commit') == '981ce66b4183b13c1a3b5907e04a8969c8c42034', 13)
     receipt = value['windowsComponents']
     shape(receipt, ('formatVersion', 'repository', 'commit', 'runId', 'runAttempt',
                     'sourceContractSha256', 'components'))
@@ -85,6 +85,35 @@ def admit_current(value, *, expected_source, run_id, attempt, expected_upstream,
         digest(fingerprint)
     return {'editorSha256': editor['sha256'], 'editorBytes': editor['size'],
             'wasmSha256': wasm['artifacts']['rhwp_bg.wasm'], 'jsSha256': wasm['artifacts']['rhwp.js']}
+
+
+def _observe_census_failure(rows, parents, known, descendants, root_pid, creation,
+                            *, sealed, require_live_root):
+    """Already-read PID-chain hints only; no generation or ownership authority."""
+    reachable = {root_pid}
+    for _ in range(65):
+        expanded = reachable | {pid for pid, parent in parents.items() if parent in reachable}
+        if expanded == reachable:
+            break
+        reachable = expanded
+    else:
+        raise Rejected(15)
+    unexpected = descendants - known
+    selected = unexpected & reachable
+    roles = {'msedgewebview2.exe': 1, 'conhost.exe': 2, 'werfault.exe': 3}
+    observed = []
+    for row in rows:
+        pid = row['processId']
+        if pid not in selected:
+            continue
+        name = row.get('executableName')
+        role = roles.get(name.lower(), 0) if type(name) is str and len(name) <= 260 and name.isascii() else 0
+        observed.append({'pid': pid, 'parentPid': parents[pid], 'executableRoleCode': role})
+    return {'schemaVersion': 1, 'diagnosticOnly': True, 'acceptanceEligible': False,
+        'rootPid': root_pid, 'originalRootCreationFileTime': creation,
+        'sealed': sealed, 'requireLiveRoot': require_live_root, 'snapshotCount': len(rows),
+        'knownCount': len(known), 'guardUnexpectedCount': len(unexpected),
+        'rootSnapshotReachableCount': len(selected), 'rows': sorted(observed, key=lambda row: row['pid'])}
 
 
 class RetainedLease:
@@ -184,7 +213,17 @@ class RetainedLease:
             if expanded == descendants:
                 break
             descendants = expanded
-        require(descendants <= known, 15)
+        try:
+            require(descendants <= known, 15)
+        except Rejected as error:
+            try:
+                error.pairedCensusObservation = _observe_census_failure(
+                    rows, parents, known, descendants, self.root_pid,
+                    self.handles[self.root_pid]['creation'], sealed=self.sealed,
+                    require_live_root=require_live_root)
+            except BaseException:
+                pass  # Optional observation cannot replace the original guard.
+            raise
         if require_live_root:
             for pid in known & set(parents):
                 require(self._state(pid) == 258, 15)
@@ -254,6 +293,42 @@ class RetainedLease:
             raise first
 
 
+def _cached_original_root(lease):
+    """Keep two original cached integers while the admitted lease still owns them."""
+    try:
+        if type(lease) is not RetainedLease:
+            return None
+        fields = object.__getattribute__(lease, '__dict__')
+        pid, handles = fields.get('root_pid'), fields.get('handles')
+        if type(pid) is int and 1 <= pid <= 0xffffffff and type(handles) is dict:
+            record = handles.get(pid)
+            creation = record.get('creation') if type(record) is dict else None
+            if type(creation) is int and 1 <= creation <= 2**64-1:
+                return pid, creation
+    except BaseException:
+        pass
+    return None
+
+
+def _stamp_failure_progress(error, root_identity, *, phase_code, printer_returned, oracle_mismatch=None):
+    """Optional cached fields only; no native calls or original-error changes."""
+    try:
+        value = {'phaseCode': phase_code, 'printerCallAttempted': True,
+            'printerCallReturned': printer_returned,
+            'originalOracleAttempted': True if oracle_mismatch is True else None,
+            'originalOracleReturned': False if oracle_mismatch is True else None,
+            'rootIdentityKnown': False, 'originalRootPid': 0,
+            'originalRootCreationFileTime': 0}
+        if (type(root_identity) is tuple and len(root_identity) == 2 and
+                type(root_identity[0]) is int and 1 <= root_identity[0] <= 0xffffffff and
+                type(root_identity[1]) is int and 1 <= root_identity[1] <= 2**64-1):
+            value.update(rootIdentityKnown=True, originalRootPid=root_identity[0],
+                         originalRootCreationFileTime=root_identity[1])
+        error.pairedFailureProgress = value
+    except BaseException:
+        pass
+
+
 def invoke_print(printer, executable, fixture, case, folder, admit, oracle_error):
     """Keep the original exception; retire only handles captured by admission.
 
@@ -265,17 +340,23 @@ def invoke_print(printer, executable, fixture, case, folder, admit, oracle_error
     report = None
     retirement = None
     cleanup_error = None
+    cleanup_phase = 0
+    printer_returned = False
+    root_identity = None
 
     def admission(session, observed_folder):
-        nonlocal lease
+        nonlocal lease, root_identity
         require(lease is None and observed_folder == folder, 10)
         lease = admit(session, observed_folder)
         require(lease is not None and callable(getattr(lease, 'wait_retired', None))
                 and callable(getattr(lease, 'close', None)), 10)
+        try:root_identity = _cached_original_root(lease)
+        except BaseException:pass  # Optional cache cannot replace successful admission.
         return lease
 
     try:
         report = printer(executable, fixture, case, folder, admission=admission)
+        printer_returned = True
     except BaseException as error:
         primary = error
     if lease is not None:
@@ -284,9 +365,11 @@ def invoke_print(printer, executable, fixture, case, folder, admit, oracle_error
         except BaseException as error:
             operation_error = None
             cleanup_error = error
+            cleanup_phase = 2
         if operation_error is not None:
             if primary is not operation_error:
                 cleanup_error = primary if primary is not None else Rejected(11)
+                cleanup_phase = 2
             primary = operation_error
     if lease is not None:
         try:
@@ -297,22 +380,37 @@ def invoke_print(printer, executable, fixture, case, folder, admit, oracle_error
             integer(retirement['retainedWebviewCount'], 1, 64)
         except BaseException as error:
             cleanup_error = error
+            cleanup_phase = 3
         finally:
             try:
                 lease.close()
             except BaseException as error:
                 if cleanup_error is None:
                     cleanup_error = error
+                    cleanup_phase = 4
     if cleanup_error is not None:
+        if primary is not None:
+            try:
+                observed = BaseException.__getattribute__(cleanup_error, '__dict__').get('pairedCensusObservation')
+                if type(observed) is dict and 'pairedCensusObservation' not in BaseException.__getattribute__(primary, '__dict__'):
+                    primary.pairedCensusObservation = observed
+            except BaseException:
+                pass  # Keep the original operation/cancellation and cleanup priority.
+        _stamp_failure_progress(primary if primary is not None else cleanup_error, root_identity,
+            phase_code=1 if primary is not None else cleanup_phase, printer_returned=printer_returned)
         raise primary if primary is not None else cleanup_error
     if primary is not None:
         if lease is None:
+            _stamp_failure_progress(primary, root_identity, phase_code=1, printer_returned=printer_returned)
             raise primary
         try:
             matched = oracle_error(primary) is True
         except BaseException:
+            _stamp_failure_progress(primary, root_identity, phase_code=5, printer_returned=printer_returned)
             raise primary
         if not matched:
+            _stamp_failure_progress(primary, root_identity, phase_code=1, printer_returned=printer_returned)
             raise primary
+        _stamp_failure_progress(primary, root_identity, phase_code=5, printer_returned=printer_returned, oracle_mismatch=True)
     require(lease is not None and retirement is not None, 10)
     return report, primary, retirement

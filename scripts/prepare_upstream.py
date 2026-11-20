@@ -9,6 +9,7 @@ import posixpath
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -17,6 +18,7 @@ from native_activation import apply as apply_native_activation
 from com_worker import apply as apply_com_worker
 from pdf_search_text import apply as apply_pdf_search_text
 from pdf_font_resolution import apply as apply_pdf_font_resolution
+from renderer_font_candidates import apply as apply_renderer_font_candidates
 from equation_dialog_focus import apply as apply_equation_dialog_focus
 from menu_clipboard import apply as apply_menu_clipboard
 from shape_creation_history import apply as apply_shape_creation_history
@@ -53,13 +55,13 @@ ASYNC_FONT_INPUT_SHA256 = {
 }
 FONT_TOOLBAR_TEST_SHA256 = 'e48357f3a39095b06800aa8b75fb9727a3367015f2857243ea6de0b57c2e5f5c'
 FONT_MAIN = 'apps/studio-host/src/main.ts'
-# rhwp 0.9.0 excludes this vendored crate from the workspace and never enables
+# rhwp 0.9.1 excludes this vendored crate from the workspace and never enables
 # its signatures feature, even through the root's --all-features graph. Its
 # standalone dependency unit tests refer to a certificate not shipped in Git.
 # This exact reviewed source/manifest pair is not a product or workspace test
 # target. Never fabricate the certificate or exempt another missing include.
 NON_TARGET_VENDOR_TEST_INPUTS = ({
-    'manifestSha256': 'f9b27a36d6feb82f66e456489398b6406b48e6ebbe1c8d2dc4c7f960edb5c505',
+    'manifestSha256': 'b00948c9aa1b8801d8731908d2c80a4e9174ddb9e292729dd0e5cca2166db81e',
     'source': 'vendor/rhwp-pdf-import-backend/src/signatures/pades/ess.rs',
     'sourceSha256': 'f53c1a9c85ea4f8d215ac4df293c97b9bd71f1305c6f66148de66443046dff4d',
     'input': 'vendor/rhwp-pdf-import-backend/tests/fixtures/test_signing_cert.pem',
@@ -728,6 +730,7 @@ def patch(source: Path, version: str) -> None:
         allowed_roots.extend(dedupe_existing_dirs(vec![windir.join("Fonts")]));
     }''')
     shutil.copy2(ROOT/'overlay/font-catalog.ts',host/'src/core/font-catalog.ts')
+    renderer_font_candidates_proof = apply_renderer_font_candidates(source)
     # Keep proper names while making user-facing version and comparison labels Korean-first.
     ui=upstream/'rhwp-studio/src/ui'
     replace_file(ui/'about-dialog.ts', "titleEn.textContent = 'HWP/HWPX Compatible Module for Rust';",
@@ -829,7 +832,7 @@ def patch(source: Path, version: str) -> None:
     for name, digest in original.items():
         if hashlib.sha256((source/name).read_bytes()).hexdigest() != digest:
             raise ValueError('A protected upstream Windows capability was changed: '+name)
-    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'imageInsertionGuard':image_insertion_proof,'asyncFontSelectionGuard':async_font_proof,'pdfSearchText':pdf_search_text_proof,'pdfFontResolution':pdf_font_resolution_proof,'equationDialogFocus':equation_dialog_focus_proof,'menuClipboardPaste':menu_clipboard_proof,'shapeCreationHistory':shape_creation_history_proof,'nestedLineNavigation':nested_line_navigation_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard','image file insertion document and lifecycle guard','installed font selection document and editing context guard','GUI PDF searchable text root coordinates','native menu clipboard fallback and atomic plain-text paste','public shape creation history and document lifecycle guard','full-path nested cell visual-line Home and End navigation']},indent=2),encoding='utf-8')
+    (source/'.opengeul-overlay.json').write_text(json.dumps({'version':version,'source':'OpenGeul distribution overlays','preservedFiles':original,'nativeActivation':activation_proof,'comWorker':com_proof,'asyncClipboardGuard':async_clipboard_proof,'imageInsertionGuard':image_insertion_proof,'asyncFontSelectionGuard':async_font_proof,'pdfSearchText':pdf_search_text_proof,'pdfFontResolution':pdf_font_resolution_proof,'rendererFontCandidates':renderer_font_candidates_proof,'equationDialogFocus':equation_dialog_focus_proof,'menuClipboardPaste':menu_clipboard_proof,'shapeCreationHistory':shape_creation_history_proof,'nestedLineNavigation':nested_line_navigation_proof,'changes':['branding','installed-only fonts','font help','Windows system-font read allowlist','PDF metadata guard','unreviewed direct Skia PDF embedding denied','legacy toolbar preference migration','disabled upstream updater','Korean-first version and comparison labels','pinned Tauri origin-confusion fix','Windows 기본 앱의 네이티브 활성화와 검증한 Tauri 소스 패치','MCP의 별도 COM 작업자와 원본 표준입출력·실패 격리 유지','asynchronous clipboard document and editing context guard','image file insertion document and lifecycle guard','installed font selection document and editing context guard','GUI PDF searchable text root coordinates','native menu clipboard fallback and atomic plain-text paste','public shape creation history and document lifecycle guard','full-path nested cell visual-line Home and End navigation']},indent=2),encoding='utf-8')
 
 
 def port_windows_contract_test(dest: Path) -> None:
@@ -839,13 +842,132 @@ def port_windows_contract_test(dest: Path) -> None:
                  "const relativePath = relative(studioRoot, file).replaceAll('\\\\', '/');")
 
 
+BASELINE_HOP_COMMIT='c298160120c9ffbfca7e72f13dc2e7060ddff7fe'
+BASELINE_SOURCE_SHA256={
+    'config/rhwp-upstream.json':'e749f290a9cea63182ddcc0bee9731039a2cdd9a75ed9010103c30eafccf78a8',
+    'tests/rhwp-baseline.test.mjs':'d55c4ddc456f87748ccf20f0dd646c57d4b921f4d1f76c74d960cd98148aae79',
+    'tests/rhwp-boundary.test.mjs':'23203f09dd48bec95b5ec8994be7a2afc6c5f56a14ea37734a464d03d461ad1c',
+}
+
+
+# c909 enclosed-pua.ts imports this tracked JSON outside the selected Node trees.
+# Restore its exact Git blob, never the surrounding font directory or a current
+# overlay. No generator/install script produces this original baseline input.
+BASELINE_NODE_INPUTS={
+    'assets/fonts/enclosed-pua-metrics.json':(
+        2412,'c2b3049172cf20f9065506b51804b0e12f08af98ab5c364a050c2f0e2f4902a1',
+        '1902fb1401222137a2e0f639ca3d7adacd96e188'),
+}
+
+
+def restore_original_baseline_node_inputs(destination: Path) -> None:
+    destination=Path(destination)
+    if not destination.is_absolute() or '..' in destination.parts:
+        raise ValueError('Original Node input requires its absolute checkout')
+
+    def directory_identity(path):
+        info=path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or getattr(info,'st_file_attributes',0)&0x400):
+            raise ValueError('Original Node input parent has a path alias')
+        return info.st_dev,info.st_ino
+
+    parents={path:directory_identity(path) for path in (destination,*destination.parents)}
+    def recheck_parents():
+        if any(directory_identity(path)!=identity for path,identity in parents.items()):
+            raise ValueError('Original Node input parent changed')
+
+    for name,(size,digest,blob) in BASELINE_NODE_INPUTS.items():
+        if (type(name)is not str or not name or '\\' in name or ':' in name or '\0' in name
+                or posixpath.isabs(name) or posixpath.normpath(name)!=name
+                or any(part in ('','.','..') for part in name.split('/'))):
+            raise ValueError('Original Node literal input path differs')
+        target=destination/name
+        parent=destination
+        for part in name.split('/')[:-1]:
+            recheck_parents()
+            parent=parent/part
+            try:parent.lstat()
+            except FileNotFoundError:parent.mkdir()
+            parents[parent]=directory_identity(parent)
+        try:target.lstat()
+        except FileNotFoundError:pass
+        else:raise ValueError('Refusing to replace an existing original Node input')
+        if (run('git','rev-parse','HEAD:'+name,cwd=destination)!=blob
+                or run('git','cat-file','-t',blob,cwd=destination)!='blob'
+                or run('git','cat-file','-s',blob,cwd=destination)!=str(size)):
+            raise ValueError('Original Node literal input object differs')
+        data=subprocess.check_output(['git','cat-file','blob',blob],cwd=destination)
+        if len(data)!=size or hashlib.sha256(data).hexdigest()!=digest:
+            raise ValueError('Original Node literal input bytes differ')
+        recheck_parents()
+        # Exclusive creation also rejects a leaf introduced after lstat. Never
+        # truncate, follow a leaf alias, or delete a pre-existing target on error.
+        with target.open('xb') as stream:
+            opened=os.fstat(stream.fileno())
+            stream.write(data)
+        recheck_parents()
+        final=target.lstat()
+        if (not stat.S_ISREG(final.st_mode) or stat.S_ISLNK(final.st_mode)
+                or getattr(final,'st_file_attributes',0)&0x400 or final.st_nlink!=1
+                or (final.st_dev,final.st_ino)!=(opened.st_dev,opened.st_ino)
+                or final.st_size!=size):
+            raise ValueError('Original Node literal output identity differs')
+
+
+def checkout_original_baseline(destination: Path, repository: str, commit: str) -> None:
+    """Keep original Node/studio inputs; Rust is built only from the current tree."""
+    if (repository!='https://github.com/edwardkim/rhwp.git'
+            or commit!='c9095c5f67632e6721e800ccc7fb43ea49d26682'):
+        raise ValueError('Unreviewed original baseline checkout')
+    if destination.is_symlink() or (destination.exists() and any(destination.iterdir())):
+        raise ValueError('Refusing to replace an original baseline checkout')
+    destination.mkdir(parents=True,exist_ok=True)
+    run('git','init','--quiet',str(destination),cwd=ROOT)
+    run('git','config','core.autocrlf','false',cwd=destination)
+    run('git','config','core.longpaths','true',cwd=destination)
+    run('git','remote','add','origin',repository,cwd=destination)
+    run('git','fetch','--filter=blob:none','--depth=1','origin',commit,cwd=destination)
+    if run('git','rev-parse','FETCH_HEAD',cwd=destination)!=commit:
+        raise ValueError('Original baseline fetch differs')
+    roots=('rhwp-studio','rhwp-shared','ttfs')
+    for name in roots:
+        if run('git','cat-file','-t','FETCH_HEAD:'+name,cwd=destination)!='tree':
+            raise ValueError('Original Node/studio input tree differs')
+    run('git','sparse-checkout','init','--cone',cwd=destination)
+    run('git','sparse-checkout','set',*roots,cwd=destination)
+    run('git','checkout','--detach','FETCH_HEAD',cwd=destination)
+    restore_original_baseline_node_inputs(destination)
+
+
+def original_baseline_rhwp(source: Path, lock: dict) -> dict:
+    """Authenticate HOP's own baseline without claiming it qualifies the upgrade."""
+    from frontend_dependencies import _read
+    if lock['hop']['commit']!=BASELINE_HOP_COMMIT:
+        raise ValueError('Unreviewed HOP baseline source')
+    original={name:_read(source/name) for name in BASELINE_SOURCE_SHA256}
+    if any(hashlib.sha256(raw).hexdigest()!=BASELINE_SOURCE_SHA256[name]
+           for name,raw in original.items()):
+        raise ValueError('Original HOP baseline source changed')
+    baseline=json.loads(original['config/rhwp-upstream.json'])
+    if (baseline['source']!='https://github.com/edwardkim/rhwp'
+            or lock['rhwp']['repository']!='https://github.com/edwardkim/rhwp.git' or baseline['version']!='0.9.0'
+            or baseline['tag']!='v0.9.0'
+            or baseline['commit']!='c9095c5f67632e6721e800ccc7fb43ea49d26682'):
+        raise ValueError('Original HOP baseline metadata differs')
+    return {'repository':lock['rhwp']['repository'],'version':baseline['version'],'commit':baseline['commit']}
+
+
 def main() -> None:
     parser=argparse.ArgumentParser()
     parser.add_argument('--directory',type=Path,default=ROOT/'.work/hop')
     parser.add_argument('--fetch-only',action='store_true')
     parser.add_argument('--patch-only',action='store_true')
+    parser.add_argument('--baseline-only',action='store_true')
     args=parser.parse_args();dest=args.directory.resolve()
-    if args.fetch_only and args.patch_only:raise ValueError('Select one preparation mode')
+    if sum((args.fetch_only,args.patch_only,args.baseline_only))>1:raise ValueError('Select one preparation mode')
+    if args.baseline_only and dest==(ROOT/'.work/hop').resolve():
+        raise ValueError('Original baseline requires a separate source directory')
     lock=json.loads((ROOT/'config/upstream.lock.json').read_text(encoding='utf-8'))
     version=json.loads((ROOT/'config/product.json').read_text(encoding='utf-8'))['version']
     if not args.patch_only:
@@ -858,20 +980,24 @@ def main() -> None:
         run('git','remote','add','origin',lock['hop']['repository'],cwd=dest)
         run('git','-c','core.autocrlf=false','fetch','--depth=1','origin',lock['hop']['commit'],cwd=dest)
         run('git','-c','core.autocrlf=false','checkout','--detach','FETCH_HEAD',cwd=dest)
+    if run('git','rev-parse','HEAD',cwd=dest)!=lock['hop']['commit']:raise ValueError('HOP commit mismatch')
+    selected=original_baseline_rhwp(dest,lock) if args.baseline_only else lock['rhwp']
+    if not args.patch_only:
         # The locked rhwp tree contains gigabytes of development screenshots and
         # reference PDFs. Native ARM runners have 14 GiB; retain all source,
         # samples, tests and literal compile inputs without fetching those blobs.
         run('git', 'submodule', 'init', 'third_party/rhwp', cwd=dest)
-        checkout_rhwp(dest/'third_party/rhwp', lock['rhwp']['repository'], lock['rhwp']['commit'])
-    if run('git','rev-parse','HEAD',cwd=dest)!=lock['hop']['commit']:raise ValueError('HOP commit mismatch')
-    if run('git','rev-parse','HEAD',cwd=dest/'third_party/rhwp')!=lock['rhwp']['commit']:raise ValueError('rhwp submodule mismatch')
+        checkout=checkout_original_baseline if args.baseline_only else checkout_rhwp
+        checkout(dest/'third_party/rhwp', selected['repository'], selected['commit'])
+    if run('git','rev-parse','HEAD',cwd=dest/'third_party/rhwp')!=selected['commit']:raise ValueError('rhwp submodule mismatch')
     if not args.patch_only:port_windows_contract_test(dest)
     # Corepack reads this before the first Windows pnpm install. Changing it
     # only in patch() leaves .modules.yaml on the old upstream installer.
     pin_package_manager(dest, lock['pnpm'])
-    pin_frontend_dependencies(dest)
-    if not args.fetch_only:patch(dest,version)
-    print(f'Prepared {dest}; fetch_only={args.fetch_only}. Compilation and runtime verification are separate gates.')
+    pin_frontend_dependencies(dest,baseline=args.baseline_only)
+    if not (args.fetch_only or args.baseline_only):patch(dest,version)
+    phase='original HOP baseline' if args.baseline_only else 'OpenGeul current source'
+    print(f'Prepared {phase}: HOP {lock["hop"]["commit"]}; rhwp {selected["commit"]}; {dest}. Compilation and runtime verification are separate gates.')
 
 if __name__=='__main__':
     try:main()

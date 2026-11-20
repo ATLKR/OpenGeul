@@ -55,7 +55,7 @@ def _identity(value):
 
 class RetainedCohort:
     def __init__(self, api, launch, *, expected_worker, expected_engine,
-                 auxiliary=None, expected_members=None, require_all_exit=False):
+                 auxiliary=None, expected_members=None, require_all_exit=False, initial_engine=None):
         self._api, self._launch, self._job = api, launch, launch.job
         self._host_handle, self._thread = launch.host, launch.thread
         self._host_identity = launch.identity
@@ -69,6 +69,8 @@ class RetainedCohort:
         self._original_engine = None
         self.auxiliary, self._expected_members = auxiliary, expected_members
         self._require_all_exit = require_all_exit
+        self.initial_engine=initial_engine
+        if type(initial_engine) is RetainedProcess:self._members[initial_engine.pid]=initial_engine
         self.job_empty_observed = None
         if type(auxiliary) is RetainedProcess: self._members[auxiliary.pid] = auxiliary
 
@@ -83,6 +85,10 @@ class RetainedCohort:
     @property
     def auxiliary_exit_observed(self):
         return None if self.auxiliary is None else self.auxiliary.handle in self._confirmed_exited
+
+    @property
+    def initial_engine_closed(self):
+        return self.initial_engine is None or self.initial_engine.handle in self._closed_handles
 
     def _controller(self):
         if (self._launch.job != self._job or self._launch.host != self._host_handle or
@@ -112,6 +118,12 @@ class RetainedCohort:
                     (self.auxiliary is not None and (self._require_all_exit is not True or self._expected_members is None or type(self.auxiliary) is not RetainedProcess or
                     not _identity((self.auxiliary.pid, self.auxiliary.birth)) or self.auxiliary.pid in {v[0] for v in expected}))):
                 raise DiagnosticFailure(FailureCode.GENERATION)
+            if self.initial_engine is not None and (type(self.initial_engine) is not RetainedProcess or
+                    self._expected_members is None or
+                    (self.initial_engine.pid,self.initial_engine.birth)!=self._engine_identity or
+                    self.initial_engine.handle in (self._host_handle,self._controller_handle,self._thread,self._job) or
+                    self.auxiliary is not None and self.initial_engine.handle==self.auxiliary.handle):
+                raise DiagnosticFailure(FailureCode.GENERATION)
             self._controller()
             pids = self._api.census(self._job)
             if (not isinstance(pids, tuple) or not 3 <= len(pids) <= 128 or len(set(pids)) != len(pids) or
@@ -129,6 +141,8 @@ class RetainedCohort:
                 handle = self._host_handle if pid == self._host_identity[0] else (
                     self.auxiliary.handle if self.auxiliary is not None and pid == self.auxiliary.pid else None)
                 try:
+                    if handle is None and self.initial_engine is not None and pid==self.initial_engine.pid:
+                        handle=self.initial_engine.handle
                     if handle is None:
                         handle = self._api.open_initial_member(pid, self._job)
                     value = self._api.identity(handle)
@@ -138,6 +152,8 @@ class RetainedCohort:
                         raise DiagnosticFailure(FailureCode.GENERATION)
                     if self.auxiliary is not None and pid == self.auxiliary.pid:
                         if value != (self.auxiliary.pid, self.auxiliary.birth): raise DiagnosticFailure(FailureCode.GENERATION)
+                    elif self.initial_engine is not None and pid==self.initial_engine.pid:
+                        if value!=(self.initial_engine.pid,self.initial_engine.birth):raise DiagnosticFailure(FailureCode.GENERATION)
                     else: self._members[pid] = RetainedProcess(handle, *value)
                 except Exception as exc:
                     retained = getattr(exc, 'retained_handle', None)

@@ -5,6 +5,9 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+import json
+import io
+from types import SimpleNamespace
 from unittest import mock
 
 from ci.policy import load_workflow
@@ -17,7 +20,62 @@ ANCHOR='--work-root "$private/owned-blank-writer"'+OPTION+' --report'
 T13_SHA256='47572931fd2fdc53b8f06a9d889f00b146031e549d68ef9362bca936114fedbd'
 
 
+
+INITIAL_OPTION=' --initial-engine-profile verified-normal-restart-v1'
+INITIAL_ANCHOR='--activation-profile one-owned-caption-v1'+INITIAL_OPTION+' --report'
+PREFIX_FIXTURE_SHA256='5b9b9c4a684736f1c7ee3f424b60b03bdb141e36f3947317f9c1342ebe178148'
+PREFIX_MARKER='\n  writer-server-observer:\n'
+NORMAL_IF="    if: github.event.repository.private == false && (github.ref != 'refs/heads/work/opengeul-office-native-writer-observer-suite-9dea')\n"
+
+
+def without_initial(run):
+    if (type(run) is not str or run.count('--initial-engine-profile')!=1 or
+            run.count(INITIAL_OPTION)!=1 or run.count(INITIAL_ANCHOR)!=1 or
+            run.count('-- observe --admission-profile owned-peer-before-first-admission-v1 --output')!=1):
+        raise ValueError('Exact initial readiness option required')
+    return run.replace(INITIAL_OPTION,'',1)
+
+
+def historical_prefix(source):
+    if type(source) is not str or source.count(PREFIX_MARKER)!=1:
+        raise ValueError('Exact Writer job boundary required')
+    prefix,tail=source.split(PREFIX_MARKER,1)
+    raw=(BASE/'suite/tests/fixtures/writer-t16-677-normal-prefix-inverse.json').read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=PREFIX_FIXTURE_SHA256:
+        raise ValueError('Unreviewed normal prefix inverse')
+    fixture=json.loads(raw)
+    if hashlib.sha256(prefix.encode()).hexdigest()!=fixture['afterSha256']:
+        raise ValueError('Unreviewed current normal prefix')
+    lines=prefix.splitlines(keepends=True)
+    for hunk in reversed(fixture['hunks']):
+        start=hunk['afterStart'];after=hunk['afterLines']
+        if lines[start:start+len(after)]!=after:raise ValueError('Unreviewed normal inverse context')
+        lines[start:start+len(after)]=hunk['beforeLines']
+    prefix=''.join(lines)
+    if hashlib.sha256(prefix.encode()).hexdigest()!=fixture['beforeSha256']:
+        raise ValueError('Historical normal prefix differs')
+    return prefix+PREFIX_MARKER+tail
+
+
+def historical_workflow(workflow):
+    source=SOURCE.read_text()
+    current=load_workflow(SOURCE)
+    if workflow['jobs']['windows-suite']!=current['jobs']['windows-suite']:
+        raise ValueError('Unreviewed normal job mutation')
+    text=historical_prefix(source)
+    path=SimpleNamespace(stat=lambda:SimpleNamespace(st_size=len(text.encode())),open=lambda **kwargs:io.StringIO(text))
+    original=copy.deepcopy(workflow)
+    original['jobs']['windows-suite']=load_workflow(path)['jobs']['windows-suite']
+    return original
+
+
+def normal_oracle_input(normal):
+    if normal.count(NORMAL_IF)!=1:raise ValueError('Exact diagnostic normal exclusion required')
+    return normal.replace(NORMAL_IF,NORMAL_IF.replace('-suite-9dea',''),1)
+
+
 def original_run(run):
+    run=without_initial(run)
     if type(run) is not str or run.count('--activation-profile')!=1 or run.count(OPTION)!=1 or run.count(ANCHOR)!=1:
         raise ValueError('Exact single original-owned-caption option required')
     if run.count('-- observe --admission-profile owned-peer-before-first-admission-v1 --output')!=1:
@@ -26,12 +84,14 @@ def original_run(run):
 
 
 def original_bytes(source):
+    if source.count('--initial-engine-profile')!=1:raise ValueError('Exact one initial readiness profile required')
+    source=historical_prefix(source)
     marker='\n      id: writer-observe\n'
     if source.count(marker)!=1 or source.count('--activation-profile')!=1 or source.count(OPTION)!=1:
         raise ValueError('Exact one observe-only caption profile required')
     observe=source.split(marker,1)[1].split('\n    - name:',1)[0]
     original_run(observe)
-    return source.replace(OPTION,'',1)
+    return source.replace(INITIAL_OPTION,'',1).replace(OPTION,'',1)
 
 
 class CaptionWorkflow(unittest.TestCase):

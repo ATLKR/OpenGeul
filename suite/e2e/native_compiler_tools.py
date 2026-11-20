@@ -12,8 +12,10 @@ MACHINES = {'x64': 0x8664, 'arm64': 0xaa64}
 STAT_FIELDS = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
 
 
-def validate_tool_pin(value, architecture, name):
-    assert architecture in MACHINES and name in ('clang-cl.exe', 'lld-link.exe', 'dumpbin.exe')
+def validate_tool_pin(value, architecture, name, *, compiler_mode='clang-lld'):
+    assert compiler_mode in ('clang-lld', 'msvc')
+    allowed = ('cl.exe', 'link.exe') if compiler_mode == 'msvc' else ('clang-cl.exe', 'lld-link.exe', 'dumpbin.exe')
+    assert architecture in MACHINES and name in allowed
     assert name != 'dumpbin.exe' or architecture == 'arm64'
     assert type(value) is dict and set(value) == {'path', 'bytes', 'sha256', 'machine'}
     assert type(value['path']) is str and Path(value['path']).is_absolute() and Path(value['path']).name == name
@@ -22,7 +24,7 @@ def validate_tool_pin(value, architecture, name):
     assert type(value['sha256']) is str and re.fullmatch('[0-9a-f]{64}', value['sha256'])
 
 
-def pin_native_tool(path, architecture, *, check, facts=None):
+def pin_native_tool(path, architecture, *, check, facts=None, compiler_mode='clang-lld'):
     """Stream under the caller's original deadline; reject managed/foreign EXEs."""
     assert architecture in MACHINES
     path = Path(path)
@@ -80,6 +82,11 @@ def pin_native_tool(path, architecture, *, check, facts=None):
     assert identity(after) == identity(before), 'Native compiler path changed while reading'
     assert size == before.st_size == fd_before.st_size == fd_after.st_size == after.st_size, 'Native compiler streamed bytes disagree with stat sizes'
     value = dict(path=str(path), bytes=size, sha256=digest.hexdigest(), machine=machine)
-    validate_tool_pin(value, architecture, path.name)
+    if compiler_mode == 'msvc':
+        assert (before.st_dev, before.st_ino) == (fd_before.st_dev, fd_before.st_ino) == (fd_after.st_dev, fd_after.st_ino), 'Native compiler path/FD identity differs'
+        validate_tool_pin(value, architecture, path.name, compiler_mode=compiler_mode)
+    else:
+        assert compiler_mode == 'clang-lld', 'Unknown native compiler mode'
+        validate_tool_pin(value, architecture, path.name)
     check()
     return value

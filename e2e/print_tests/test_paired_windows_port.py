@@ -30,7 +30,7 @@ class ReadRegularIdentityTests(unittest.TestCase):
 
     @contextlib.contextmanager
     def metadata(self,*,platform='nt',birth=1000,missing_birth=False,
-                 open_change=None,after_change=None,final_change=None,distinct_ctime=True):
+                 before_change=None,open_change=None,after_change=None,final_change=None,distinct_ctime=True):
         path_lstat,fd_stat=Path.lstat,os.fstat
         counts=dict(path=0,handle=0)
         def changed(info,changes=None,*,handle=False):
@@ -43,7 +43,7 @@ class ReadRegularIdentityTests(unittest.TestCase):
             info=path_lstat(path,*args,**kwargs)
             if path!=self.path:return info
             counts['path']+=1
-            return changed(info,final_change if counts['path']>1 else None)
+            return changed(info,final_change if counts['path']>1 else before_change)
         def fstat(fd):
             counts['handle']+=1
             return changed(fd_stat(fd),open_change if counts['handle']==1 else after_change,handle=True)
@@ -95,6 +95,119 @@ class ReadRegularIdentityTests(unittest.TestCase):
         with self.metadata(),self.assertRaises(core.Rejected):api.read_regular(self.path,len(self.raw)-1)
         ticks=iter((0,11))
         with self.metadata(),self.assertRaises(core.Rejected):api.read_regular(self.path,128,clock=lambda:next(ticks))
+
+
+class FixedFontReadTests(unittest.TestCase):
+    def setUp(self):
+        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
+        self.root=Path(temporary.name);self.fonts=self.root/'Fonts';self.fonts.mkdir()
+        self.path=self.fonts/'arial.ttf';self.raw=b'SYNTHETIC-READONLY-OS-FONT';self.path.write_bytes(self.raw)
+
+    @contextlib.contextmanager
+    def windows_directory(self,*,same_private=False):
+        import ctypes
+        calls=dict(system=0,private=0)
+        root=self.root
+        class Getter:
+            def __init__(self,key):self.key=key
+            def __call__(self,buffer,cap):
+                calls[self.key]+=1
+                buffer.value=str(root if self.key=='system'or same_private else root/'private-windows')
+                return len(buffer.value)
+        kernel=SimpleNamespace(GetSystemWindowsDirectoryW=Getter('system'),GetWindowsDirectoryW=Getter('private'))
+        with mock.patch.object(ctypes,'WinDLL',return_value=kernel,create=True):yield calls
+
+    def metadata(self,**kwargs):return ReadRegularIdentityTests.metadata(self,**kwargs)
+
+    def test_fixed_font_single_link_uses_only_system_windows_api(self):
+        with self.windows_directory()as calls:result=api.sampled_fonts()
+        self.assertEqual(calls,dict(system=1,private=0))
+        self.assertTrue(result['files'][0]['present'])
+        self.assertEqual(result['files'][0]['bytes'],len(self.raw))
+        self.assertFalse(result['files'][1]['present'])
+
+    def test_actual_two_link_font_is_read_but_default_reader_still_rejects(self):
+        os.link(self.path,self.root/'font-alias')
+        self.assertEqual(self.path.stat().st_nlink,2)
+        with self.windows_directory(same_private=True):
+            try:result=api.sampled_fonts()
+            except core.Rejected:self.fail('Fixed stable two-link OS font should be sampled')
+        self.assertTrue(result['files'][0]['present'])
+        self.assertEqual(result['files'][0]['sha256'],__import__('hashlib').sha256(self.raw).hexdigest())
+        with self.assertRaises(core.Rejected):api.read_regular(self.path,128)
+        with self.assertRaises(core.Rejected):api.fingerprint_file(self.path)
+
+    def test_font_read_keeps_four_stats_and_windows_time_domains(self):
+        os.link(self.path,self.root/'font-alias')
+        with self.metadata()as counts:
+            result=api._font_fingerprint(self.path,self.fonts)
+        self.assertEqual(result['bytes'],len(self.raw));self.assertEqual(counts,dict(path=2,handle=2))
+
+    def test_link_count_changes_are_rejected_even_between_two_allowed_values(self):
+        for original,changed in ((1,2),(2,1)):
+            alias=self.root/'font-alias'
+            if original==2:os.link(self.path,alias)
+            for phase in ('open_change','after_change','final_change'):
+                with self.subTest(original=original,phase=phase),self.metadata(**{phase:{'st_nlink':changed}}),self.assertRaises(core.Rejected):
+                    api._font_fingerprint(self.path,self.fonts)
+            if original==2:alias.unlink()
+
+    def test_font_only_link_domain_is_exact_one_or_two_at_every_stat(self):
+        for phase in ('before_change','open_change','after_change','final_change'):
+            for value in (0,3,True,1.0,'2'):
+                with self.subTest(phase=phase,valueType=type(value).__name__),self.metadata(**{phase:{'st_nlink':value}}),self.assertRaises(core.Rejected):
+                    api._font_fingerprint(self.path,self.fonts)
+
+    def test_font_read_rejects_reparse_mode_and_changed_original_identity(self):
+        info=self.path.stat()
+        changes=({'st_dev':info.st_dev+1},{'st_ino':info.st_ino+1},{'st_size':info.st_size+1},
+            {'st_mtime_ns':info.st_mtime_ns+1},{'st_birthtime_ns':1001},
+            {'st_file_attributes':0x400},{'st_mode':0})
+        for phase in ('before_change','open_change','after_change','final_change'):
+            for index,change in enumerate(changes):
+                with self.subTest(phase=phase,change=index),self.metadata(**{phase:change}),self.assertRaises(core.Rejected):
+                    api._font_fingerprint(self.path,self.fonts)
+
+    def test_font_keeps_same_api_ctime_stability_and_mandatory_birthtime(self):
+        for phase,value in (('after_change',2001),('final_change',1001)):
+            with self.subTest(phase=phase),self.metadata(**{phase:{'st_ctime_ns':value}}),self.assertRaises(core.Rejected):
+                api._font_fingerprint(self.path,self.fonts)
+        with self.metadata(missing_birth=True),self.assertRaises(core.Rejected):api._font_fingerprint(self.path,self.fonts)
+
+    def test_font_name_and_original_root_are_checked_before_filesystem_read(self):
+        for path,root in ((self.fonts/'other.ttf',self.fonts),(self.root/'other'/'arial.ttf',self.fonts),
+                (self.path,self.root/'OtherFonts'),(self.path,Path('Fonts'))):
+            with self.subTest(caseNumber=(path.name=='arial.ttf')),\
+                    mock.patch.object(Path,'lstat',side_effect=AssertionError('Stat reached')),\
+                    mock.patch.object(Path,'open',side_effect=AssertionError('Open reached')),self.assertRaises(core.Rejected):
+                api._font_fingerprint(path,root)
+
+    def test_font_limits_remain_thirty_two_mib_and_ten_seconds(self):
+        with self.metadata(before_change={'st_size':32*1024*1024+1}),\
+                mock.patch.object(Path,'open',side_effect=AssertionError('Open reached')),self.assertRaises(core.Rejected):
+            api._font_fingerprint(self.path,self.fonts)
+        ticks=iter((0,11))
+        with self.metadata(),mock.patch.object(api,'time',SimpleNamespace(monotonic=lambda:next(ticks))),self.assertRaises(core.Rejected):
+            api._font_fingerprint(self.path,self.fonts)
+
+    def test_font_parent_or_file_symlink_is_not_followed(self):
+        target=self.root/'original-font';self.path.rename(target);self.path.symlink_to(target)
+        with mock.patch.object(Path,'open',side_effect=AssertionError('Open reached')),self.assertRaises(core.Rejected):
+            api._font_fingerprint(self.path,self.fonts)
+        self.path.unlink();target.rename(self.path)
+        alias=self.root/'alias-windows';alias.symlink_to(self.root,target_is_directory=True)
+        with mock.patch.object(Path,'open',side_effect=AssertionError('Open reached')),self.assertRaises(core.Rejected):
+            api._font_fingerprint(alias/'Fonts/arial.ttf',alias/'Fonts')
+
+    def test_font_parent_reparse_bit_is_rejected_before_open(self):
+        import stat
+        original=Path.lstat
+        def lstat(path,*args,**kwargs):
+            if path==self.fonts:return SimpleNamespace(st_mode=stat.S_IFDIR|0o755,st_file_attributes=0x400)
+            return original(path,*args,**kwargs)
+        with mock.patch.object(Path,'lstat',lstat),\
+                mock.patch.object(Path,'open',side_effect=AssertionError('Open reached')),self.assertRaises(core.Rejected):
+            api._font_fingerprint(self.path,self.fonts)
 
 
 class WindowsPortTests(unittest.TestCase):

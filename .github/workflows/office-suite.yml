@@ -384,7 +384,7 @@ jobs:
     - name: 실제 한국어 IME와 네이티브 UI 검사 준비
       shell: pwsh
       run: |
-        python -m pip install pywinauto==0.6.9
+        python -m pip install pywinauto==0.6.9 comtypes==1.5.0
         if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
         ./suite/scripts/ensure-korean-ime.ps1 -Architecture '${{ matrix.architecture }}' -Output .work/suite-korean-readiness
         if ($LASTEXITCODE -ne 0) { throw 'Actual Microsoft Korean IME readiness failed.' }
@@ -411,7 +411,7 @@ jobs:
       run: |
         $ErrorActionPreference = 'Stop'
         if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic') {
-          python -m pip install pywinauto==0.6.9
+          python -m pip install pywinauto==0.6.9 comtypes==1.5.0
           if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }
         }
         ./suite/scripts/prepare-native31.ps1 -Architecture '${{ matrix.architecture }}'
@@ -1278,6 +1278,32 @@ jobs:
         retention-days: 1
         if-no-files-found: error
         compression-level: 0
+    - name: Observe the selected VS bundled Clang pair without changing acceptance
+      id: bundled-clang-probe
+      if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && matrix.architecture == 'x64' && steps.suite-unit-shell.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
+      shell: pwsh
+      timeout-minutes: 2
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+        $hostPython = (Get-Command python -ErrorAction Stop).Source
+        python -B suite/e2e/vs_bundled_clang_probe.py --suite ([IO.Path]::GetFullPath($env:SUITE_PACKAGE)) --windows $env:SystemRoot --vswhere $vswhere --host-python $hostPython --expected-suite-source-commit $env:GITHUB_SHA --output ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-private')) --report ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-public/report.numeric.json')) --cached-preparation ([IO.Path]::GetFullPath('.work/suite-calc-save/ascii-message-observer/preparation.json'))
+        if ($LASTEXITCODE -ne 0) { throw 'Read-only bundled compiler observation is incomplete; acceptance is unchanged.' }
+    - name: Validate the closed bundled Clang observation before upload
+      id: bundled-clang-report
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && matrix.architecture == 'x64' && steps.bundled-clang-probe.outcome != 'skipped'"
+      shell: pwsh
+      run: |
+        python -B suite/e2e/vs_bundled_clang_probe.py --validate-report ([IO.Path]::GetFullPath('.work/suite-bundled-clang-probe-public/report.numeric.json'))
+        if ($LASTEXITCODE -ne 0) { throw 'Bundled compiler observation is absent or outside the numeric schema.' }
+    - name: Preserve only the closed bundled Clang numeric observation
+      if: "always() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && matrix.architecture == 'x64' && steps.bundled-clang-report.outcome == 'success'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-bundled-clang-probe-x64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-bundled-clang-probe-public/report.numeric.json
+        retention-days: 1
+        if-no-files-found: warn
 
   writer-server-observer:
     if: >-
@@ -1378,7 +1404,7 @@ jobs:
         $hostPython = (Get-Command python -ErrorAction Stop).Source
         $private = [IO.Path]::GetFullPath('.work/writer-observer-private')
         $program = [IO.Path]::GetFullPath('.work/writer-diagnostic/Office/program')
-        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds $env:WRITER_OBSERVER_PHASE_SECONDS --receipt .work/writer-observer-public/observe-phase.numeric.json -- observe --admission-profile owned-peer-before-first-admission-v1 --output ([IO.Path]::GetFullPath('.work/writer-diagnostic')) --baseline ([IO.Path]::GetFullPath('.work/writer-normal-baseline')) --artifact ([IO.Path]::GetFullPath('.work/writer-engine-input/github-artifact.zip')) --diagnostic-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer.arm64.lock.json')) --source-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer-9dea/source-lock.json')) --expected-suite-source-commit $env:GITHUB_SHA --prepared-library "$private/atomic-descriptor.json" --host-python $hostPython --helper-script ([IO.Path]::GetFullPath('suite/e2e/writer_server_observer_msaa_helper.py')) --windows $env:SystemRoot --work-root "$private/owned-blank-writer" --activation-profile one-owned-caption-v1 --report ([IO.Path]::GetFullPath('.work/writer-observer-public/report.numeric.json'))
+        python -B suite/e2e/writer_server_observer_phase.py --host-python $hostPython --windows $env:SystemRoot --temp "$private/temp" --office-program $program --seconds $env:WRITER_OBSERVER_PHASE_SECONDS --receipt .work/writer-observer-public/observe-phase.numeric.json -- observe --admission-profile owned-peer-before-first-admission-v1 --output ([IO.Path]::GetFullPath('.work/writer-diagnostic')) --baseline ([IO.Path]::GetFullPath('.work/writer-normal-baseline')) --artifact ([IO.Path]::GetFullPath('.work/writer-engine-input/github-artifact.zip')) --diagnostic-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer.arm64.lock.json')) --source-lock ([IO.Path]::GetFullPath('suite/config/writer-server-observer-9dea/source-lock.json')) --expected-suite-source-commit $env:GITHUB_SHA --prepared-library "$private/atomic-descriptor.json" --host-python $hostPython --helper-script ([IO.Path]::GetFullPath('suite/e2e/writer_server_observer_msaa_helper.py')) --windows $env:SystemRoot --work-root "$private/owned-blank-writer" --activation-profile one-owned-caption-v1 --initial-engine-profile verified-normal-restart-v1 --report ([IO.Path]::GetFullPath('.work/writer-observer-public/report.numeric.json'))
         $result = $LASTEXITCODE
         exit $result
     - name: Validate the exact numeric report before upload

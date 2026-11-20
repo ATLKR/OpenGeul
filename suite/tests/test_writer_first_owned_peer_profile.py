@@ -1,5 +1,7 @@
 """Real coordinator and typed peer adapter with synthetic OS effects only."""
 import inspect
+import ast
+import hashlib
 import contextlib
 import io
 import json
@@ -16,6 +18,19 @@ import test_writer_server_observer_prepare_native as native_fixture
 from test_writer_server_observer_runner_composition import runner
 
 PROFILE = 'owned-peer-before-first-admission-v1'
+
+def retained_guard_line():
+    source=Path(__file__).resolve().parents[1]/'e2e/writer_server_observer_cohort.py'
+    tree=ast.parse(source.read_text())
+    node=next(fn for cl in tree.body if isinstance(cl,ast.ClassDef) and cl.name=='RetainedCohort'
+        for fn in cl.body if isinstance(fn,ast.FunctionDef) and fn.name=='_verify_retained')
+    options={'show_empty':True} if 'show_empty' in inspect.signature(ast.dump).parameters else {}
+    dump=ast.dump(node,include_attributes=False,**options)
+    assert hashlib.sha256(dump.encode()).hexdigest()=='77bc34d82298234d843142c849d7784bba1ca80e536062e6216b0d980f06612e', 'Original retained state guard changed'
+    raises=[n for n in ast.walk(node) if isinstance(n,ast.Raise) and isinstance(n.exc,ast.Name) and n.exc.id=='error']
+    assert len(raises)==1, 'Exact original retained failure required'
+    return raises[0].lineno
+
 
 
 class FirstOwnedPeerProfile(unittest.TestCase):
@@ -207,7 +222,7 @@ class FirstOwnedPeerProfile(unittest.TestCase):
             report = x.obj.execute(x.inputs)
         prep = report['preparation']
         self.assertEqual((report['stageCode'], report['failureCode']), (4, 13))
-        self.assertEqual((prep['preparationFailureKindCode'], prep['preparationFailureSourceCode'], prep['preparationFailureLine']), (14, 7, 177))
+        self.assertEqual((prep['preparationFailureKindCode'], prep['preparationFailureSourceCode'], prep['preparationFailureLine']), (14, 7, retained_guard_line()))
         self.assertEqual((prep['cohortFailureRoleCode'], prep['cohortFailureWaitResult'], prep['cohortFailureExitCode']), (3, 0, 81))
         self.assertEqual(len(x.peers), 1)
         self.assertNotIn(801, x.opens)

@@ -12,7 +12,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from suite.tests.workflow_scope import normal_suite_source
+from suite.tests.workflow_scope import original_acceptance_source
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / '.github/workflows/office-suite.yml'
@@ -33,7 +33,7 @@ SEQUENCED_READY = ('"(env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' || '
 
 
 def workflow_source():
-    return normal_suite_source(WORKFLOW.read_text(encoding='utf-8'))
+    return original_acceptance_source(WORKFLOW.read_text(encoding='utf-8'))
 
 
 def workflow_steps():

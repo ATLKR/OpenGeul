@@ -35,6 +35,40 @@ def _phase_ast(node, *, dump=ast.dump):
     return dump(node, include_attributes=False, **options)
 
 
+
+def _legacy_preparation_bytes():
+    current=(E2E/'ascii_message_preparation.py').read_bytes()
+    raw=(BASE/'suite/tests/fixtures/writer-t16-677-preparation-inverse.json').read_bytes()
+    assert hashlib.sha256(raw).hexdigest()=='22ecdad0de39ac3075a60aee4e9a5791652ef74dbdbc83ade23afe9dbfdaa62b', 'Unreviewed preparation inverse'
+    fixture=json.loads(raw)
+    assert hashlib.sha256(current).hexdigest()==fixture['afterSha256'], 'Unreviewed current preparation'
+    lines=current.decode().splitlines(keepends=True)
+    for hunk in reversed(fixture['hunks']):
+        start=hunk['afterStart'];after=hunk['afterLines']
+        assert lines[start:start+len(after)]==after, 'Preparation inverse context differs'
+        lines[start:start+len(after)]=hunk['beforeLines']
+    restored=''.join(lines).encode()
+    assert hashlib.sha256(restored).hexdigest()==fixture['beforeSha256'], 'Original preparation differs'
+    return restored
+
+
+def _preparation_coordinates():
+    _legacy_preparation_bytes()
+    tree=ast.parse((E2E/'ascii_message_preparation.py').read_bytes())
+    original=ast.parse(_legacy_preparation_bytes())
+    budget=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='_Budget')
+    old=next(n for n in original.body if isinstance(n,ast.ClassDef) and n.name=='_Budget')
+    assert _phase_ast(budget)==_phase_ast(old), 'Original Budget guard changed'
+    now=next(n for n in budget.body if isinstance(n,ast.FunctionDef) and n.name=='now')
+    guards=[n.lineno for n in now.body if isinstance(n,ast.Assert)]
+    prepare=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='prepare_observer')
+    calls=[n.lineno for n in prepare.body if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and
+        isinstance(n.value.func,ast.Attribute) and isinstance(n.value.func.value,ast.Name) and
+        n.value.func.value.id=='budget' and n.value.func.attr=='now']
+    assert len(guards)==2 and len(calls)==2, 'Exact original preparation guard required'
+    return guards[0],guards[1],calls[0]
+
+
 class BudgetCallerProfileTests(unittest.TestCase):
     def setUp(self):
         self.phase = load(E2E / 'writer_server_observer_phase.py', 'writer_prep_phase')
@@ -51,14 +85,14 @@ class BudgetCallerProfileTests(unittest.TestCase):
     def test_optin_records_actual_known_caller_without_changing_legacy_encoding(self):
         error = self.expiry()
         legacy = self.phase.atomic_failure_exit(error)
-        self.assertEqual(legacy, 0x5A000000 | (1 << 20) | (2 << 16) | 60)
+        self.assertEqual(legacy, 0x5A000000 | (1 << 20) | (2 << 16) | _preparation_coordinates()[1])
         code = self.phase.atomic_failure_exit(error, profile=PROFILE)
-        self.assertEqual(code, 0x5A000000 | (1 << 20) | (2 << 16) | 283)
+        self.assertEqual(code, 0x5A000000 | (1 << 20) | (2 << 16) | _preparation_coordinates()[2])
         self.assertEqual((preparation.LIMIT, preparation.CLEANUP_RESERVE), (30., 3.))
 
     def test_clock_guard_is_not_skipped(self):
         error = self.expiry(99)
-        expected = 0x5A000000 | (1 << 20) | (2 << 16) | 58
+        expected = 0x5A000000 | (1 << 20) | (2 << 16) | _preparation_coordinates()[0]
         self.assertEqual(self.phase.atomic_failure_exit(error, profile=PROFILE), expected)
 
     def test_same_filename_line_without_exact_budget_code_is_not_skipped(self):
@@ -75,7 +109,7 @@ class BudgetCallerProfileTests(unittest.TestCase):
             __getitem__ = get = __iter__ = keys = items = values = copy = __len__ = reject
         with mock.patch.object(self.phase.os, 'environ', Unreadable()):
             self.assertEqual(self.phase.atomic_failure_exit(error, profile='unknown'), 3)
-            self.assertEqual(self.phase.atomic_failure_exit(error, profile=PROFILE) & 0xffff, 283)
+            self.assertEqual(self.phase.atomic_failure_exit(error, profile=PROFILE) & 0xffff, _preparation_coordinates()[2])
 
     def test_atomic_child_optin_keeps_original_prepare_arguments_and_failure(self):
         calls = []
@@ -84,7 +118,7 @@ class BudgetCallerProfileTests(unittest.TestCase):
         with mock.patch.object(preparation, 'prepare_observer', side_effect=captured):
             result = self.phase.child(['atomic', '--work', '/synthetic/private',
                 '--descriptor', '/synthetic/descriptor.json', '--failure-origin-profile', PROFILE])
-        self.assertEqual(result, 0x5A000000 | (1 << 20) | (2 << 16) | 283)
+        self.assertEqual(result, 0x5A000000 | (1 << 20) | (2 << 16) | _preparation_coordinates()[2])
         self.assertEqual(calls, [{'architecture': 'arm64', 'discovery_policy': 'installed-native'}])
 
     def test_phase_ast_serialization_preserves_legacy_empty_fields_on_both_supported_signatures(self):
@@ -116,7 +150,7 @@ class BudgetCallerProfileTests(unittest.TestCase):
 
     def test_generic_budget_and_original_phase_lifetime_ast_are_unchanged(self):
         expected = 'b497180853f4684b8caf90f70e7eca1b8a8ff57438cb1784e58823841d4426e1'
-        self.assertEqual(hashlib.sha256((E2E / 'ascii_message_preparation.py').read_text().encode()).hexdigest(), expected)
+        self.assertEqual(hashlib.sha256(_legacy_preparation_bytes()).hexdigest(), expected)
         tree = ast.parse((E2E / 'writer_server_observer_phase.py').read_bytes())
         run = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_phase')
         self.assertEqual(hashlib.sha256(_phase_ast(run).encode()).hexdigest(), 'd4b19bab5440a50cf58a9a49657ffdb91dd11cc9cf02d8a88200aa3e4b5afecc')

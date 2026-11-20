@@ -1,0 +1,43 @@
+{
+  "afterBytes": 25694,
+  "afterSha256": "4c89b39466c6ab02e374e8cc04a52697f73b22344bca7fb5277777d42c84f57a",
+  "beforeBytes": 24867,
+  "beforeSha256": "167dbe3e619cae05ace7ac142c0cbaf0783d4e9f4a1846efabefcad4ae2cc8c2",
+  "file": "native_document_windows.py",
+  "hunks": [
+    {
+      "afterLines": [
+        "        focus_rows = None\n",
+        "        focus_read_count = 0\n",
+        "        focus_evaluation_completed = False\n",
+        "\n",
+        "        def focus_ready():\n",
+        "            nonlocal focus_rows, focus_read_count, focus_evaluation_completed\n",
+        "            focus_read_count += 1\n",
+        "            focus_rows = None\n",
+        "            focus_evaluation_completed = False\n",
+        "            focus_rows = self.owner._focus_rows()\n",
+        "            focus_evaluation_completed = True\n",
+        "            return require_focus_map(self.key, focus_rows)\n",
+        "\n",
+        "        try:\n",
+        "            until(focus_ready, timeout=10,\n",
+        "                  pump=lambda seconds: self.page.wait_for_timeout(seconds*1000))\n",
+        "        except BaseException:\n",
+        "            try:\n",
+        "                from native_document_policy import focus_map_failure_observation\n",
+        "                self.owner._record('focus-map-failure-numeric', focus_map_failure_observation(\n",
+        "                    self.key, focus_rows, focus_read_count, focus_evaluation_completed))\n",
+        "            except BaseException:\n",
+        "                pass\n",
+        "            raise\n"
+      ],
+      "afterStart": 194,
+      "beforeLines": [
+        "        until(lambda: require_focus_map(self.key, self.owner._focus_rows()), timeout=10,\n",
+        "              pump=lambda seconds: self.page.wait_for_timeout(seconds*1000))\n"
+      ]
+    }
+  ],
+  "schemaVersion": 1
+}

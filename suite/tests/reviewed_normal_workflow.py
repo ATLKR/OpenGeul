@@ -5,7 +5,7 @@ Any other edit remains visible to the independent original-job SHA256 check.
 """
 
 CURRENT_NORMAL_IF = ("    if: github.event.repository.private == false && "
-    "(github.ref != 'refs/heads/work/opengeul-office-native-writer-observer-suite-9dea')\n")
+    "(github.ref != 'refs/heads/work/opengeul-office-native-writer-observer')\n")
 EXACT_SDK_SETUP = ("    - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73\n"
     "      with:\n"
     "        dotnet-version: '10.0.404'\n"
@@ -14,6 +14,17 @@ EXACT_SDK_SETUP = ("    - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd
 CURRENT_PILLOW_INSTALL = "        python -m pip install Pillow==13.0.0\n"
 EXACT_YAML_SETUP = ("        python -m pip install PyYAML==6.0.3\n"
     "        if ($LASTEXITCODE -ne 0) { throw 'Pinned YAML workflow tooling installation failed.' }\n")
+EXACT_UI_READINESS_INSTALL = (
+    '    - name: 실제 한국어 IME와 네이티브 UI 검사 준비\n'
+    '      shell: pwsh\n'
+    '      run: |\n'
+    '        python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n'
+    "        if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }\n")
+EXACT_READER_CONSOLE_INSTALL = (
+    "        if ($env:OPENGEUL_SUITE_RUN_MODE -ceq 'reader-console-diagnostic') {\n"
+    '          python -m pip install pywinauto==0.6.9 comtypes==1.5.0\n'
+    "          if ($LASTEXITCODE -ne 0) { throw 'Native UI test prerequisites failed.' }\n"
+    '        }\n')
 
 # These are exact source-only reader deltas, not a generic legacy fallback.
 # Each prologue must remain adjacent to its one original command. Missing,
@@ -75,10 +86,13 @@ WRITER_SAME_ROOT_COMMAND = '        python suite/e2e/korean_ui_smoke.py --suite 
 def original_normal_oracle_text(normal):
     if type(normal) is not str:
         raise ValueError('Historical normal-job oracle requires text')
+    normal = _without_bundled_clang_probe(normal)
     changes = ((CURRENT_NORMAL_IF, '    if: github.event.repository.private == false\n'),
         (EXACT_SDK_SETUP, ''),
         (CURRENT_PILLOW_INSTALL, '        python -m pip install Pillow==12.3.0\n'),
-        (EXACT_YAML_SETUP, ''))
+        (EXACT_YAML_SETUP, ''),
+        (EXACT_UI_READINESS_INSTALL, EXACT_UI_READINESS_INSTALL.replace(' comtypes==1.5.0', '', 1)),
+        (EXACT_READER_CONSOLE_INSTALL, EXACT_READER_CONSOLE_INSTALL.replace(' comtypes==1.5.0', '', 1)))
     for before, after in changes:
         if normal.count(before) != 1:
             raise ValueError('Reviewed normal-job dependency delta differs')
@@ -93,3 +107,25 @@ def original_normal_oracle_text(normal):
         raise ValueError('Reviewed normal-job Writer failure-observation delta differs')
     normal = normal.replace(before, WRITER_SAME_ROOT_COMMAND + '\n', 1)
     return normal
+
+
+# One exact reviewed read-only probe block; no production or broad-name fallback.
+BUNDLED_CLANG_PROBE_START = '    - name: Observe the selected VS bundled Clang pair without changing acceptance\n'
+BUNDLED_CLANG_PROBE_AFTER = '    - name: 모든 검증을 통과한 Suite 개발 패키지 전달\n'
+BUNDLED_CLANG_PROBE_SHA256 = '51775e3521c251a614b1cf6ff47e1163e0cabab6dfcba31207b27407203d12aa'
+
+
+def _without_bundled_clang_probe(normal):
+    import hashlib
+    if BUNDLED_CLANG_PROBE_START not in normal:
+        return normal
+    if normal.count(BUNDLED_CLANG_PROBE_START) != 1 or normal.count(BUNDLED_CLANG_PROBE_AFTER) != 1:
+        raise ValueError('Reviewed bundled Clang observation delta differs')
+    start = normal.index(BUNDLED_CLANG_PROBE_START)
+    if normal.rfind('    - name:', 0, start) != normal.index(BUNDLED_CLANG_PROBE_AFTER):
+        raise ValueError('Reviewed bundled Clang observation must follow the final original step')
+    block = normal[start:]
+    if (hashlib.sha256(block.encode('utf-8')).hexdigest() != BUNDLED_CLANG_PROBE_SHA256 or
+            block.count('    - name:') != 3):
+        raise ValueError('Reviewed bundled Clang observation delta differs')
+    return normal[:start]

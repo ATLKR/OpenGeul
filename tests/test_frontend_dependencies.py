@@ -17,7 +17,7 @@ import prepare_upstream
 import collect_notices
 
 OLD_SHA='ed88ee7fcf037e64667c18fe2421f9010c543b066cdd423c47ad20235426cba2'
-NEW_SHA='9625a90ccd967d8ad49716b8ed00b8fb61b5c78bd8bb81c1d9d02220bf4fcd14'
+NEW_SHA='b3d461da3ad8f7c9667f3cc9c1bb3a3cfb0be056b473bdd9690e029aaf44e3e0'
 
 
 class FrontendDependencyTests(unittest.TestCase):
@@ -30,9 +30,10 @@ class FrontendDependencyTests(unittest.TestCase):
 
     def populate(self,source):
         for path,value in {
-            'package.json':{'name':'hop','version':'0.5.3','packageManager':'pnpm@10.34.9'},
+            'package.json':{'name':'hop','version':'0.5.3','packageManager':'pnpm@10.34.9','dependencies':{'@noble/hashes':'^2.4.0'}},
             'apps/desktop/package.json':{'name':'hop-desktop','version':'0.5.3','devDependencies':{'@tauri-apps/cli':'^2.0.0','synthetic-unrelated':'1.0.0'}},
-            'apps/studio-host/package.json':{'name':'@golbin/hop-studio-host','dependencies':{'@tauri-apps/api':'^2.10.1','synthetic-unrelated':'1.0.0'}},
+            'apps/studio-host/package.json':{'name':'@golbin/hop-studio-host','dependencies':{'@tauri-apps/api':'^2.10.1','synthetic-unrelated':'1.0.0'},'devDependencies':{'canvaskit-wasm':'^0.42.0','typescript':'^7.0.2','vite':'^8.3.5'}},
+            'third_party/rhwp/rhwp-studio/package.json':{'name':'rhwp-studio','version':'0.9.1','dependencies':{'@noble/hashes':'^2.4.0','canvaskit-wasm':'^0.42.0'},'devDependencies':{'typescript':'^7.0.2','vite':'^8.3.8'}},
         }.items():
             target=source/path;target.parent.mkdir(parents=True,exist_ok=True)
             target.write_text(json.dumps(value)+'\n')
@@ -52,6 +53,7 @@ class FrontendDependencyTests(unittest.TestCase):
         for path,field,package in [('apps/desktop/package.json','devDependencies','@tauri-apps/cli'),
                                    ('apps/studio-host/package.json','dependencies','@tauri-apps/api')]:
             expected=json.loads(before[path]);expected[field][package]='2.12.4'
+            if path=='apps/studio-host/package.json':expected['devDependencies']['vite']='^8.3.8'
             self.assertEqual(json.loads(after[path]),expected)
         self.assertEqual(after['package.json'],before['package.json'])
         self.assertEqual(hashlib.sha256(after['pnpm-lock.yaml']).hexdigest(),NEW_SHA)
@@ -77,6 +79,29 @@ class FrontendDependencyTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256((target/'pnpm-lock.yaml').read_bytes()).hexdigest(),NEW_SHA)
         self.assertEqual(json.loads((target/'apps/desktop/package.json').read_bytes())['devDependencies']['@tauri-apps/cli'],'2.12.4')
         self.assertEqual(json.loads((target/'apps/studio-host/package.json').read_bytes())['dependencies']['@tauri-apps/api'],'2.12.4')
+
+    def test_original_baseline_keeps_its_vite_contract_and_separate_reviewed_lock(self):
+        module=__import__('frontend_dependencies')
+        upstream=self.source/'third_party/rhwp/rhwp-studio/package.json'
+        value=json.loads(upstream.read_bytes());value['version']='0.9.0';value['devDependencies']['vite']='^8.3.5'
+        upstream.write_text(json.dumps(value))
+        module.pin_frontend_dependencies(self.source,baseline=True)
+        self.assertEqual((self.source/'pnpm-lock.yaml').read_bytes(),(ROOT/'overlay/baseline-pnpm-lock.txt').read_bytes())
+        host=json.loads((self.source/'apps/studio-host/package.json').read_bytes())
+        self.assertEqual(host['devDependencies']['vite'],'^8.3.5')
+        before=self.snapshot();module.pin_frontend_dependencies(self.source,baseline=True)
+        self.assertEqual(self.snapshot(),before)
+        with self.assertRaises(ValueError):module.pin_frontend_dependencies(self.source)
+        self.assertEqual(self.snapshot(),before)
+
+    def test_wrong_imported_frontend_contract_is_rejected_before_writes(self):
+        path=self.source/'third_party/rhwp/rhwp-studio/package.json';original=path.read_bytes()
+        for field,key,value in [('devDependencies','vite','^8.3.5'),('devDependencies','typescript','^7.0.1'),('dependencies','canvaskit-wasm','^0.41.0'),('dependencies','@noble/hashes','^2.3.0')]:
+            changed=json.loads(original);changed[field][key]=value
+            path.write_text(json.dumps(changed));before=self.snapshot()
+            with self.subTest(package=key),self.assertRaises(ValueError):self.apply()
+            self.assertEqual(self.snapshot(),before)
+        path.write_bytes(original)
 
     def test_notice_selector_requires_the_same_reviewed_graph(self):
         self.assertEqual(collect_notices.REVIEWED_NPM_LOCK_SHA256,NEW_SHA)
@@ -139,7 +164,7 @@ class FrontendDependencyTests(unittest.TestCase):
     def test_unreviewed_installer_is_rejected_before_writes(self):
         path=self.source/'package.json'
         for manager in ('pnpm@10.33.0','pnpm@10.34.9-beta.1','pnpm@latest'):
-            path.write_text(json.dumps({'name':'hop','packageManager':manager}));before=self.snapshot()
+            path.write_text(json.dumps({'name':'hop','packageManager':manager,'dependencies':{'@noble/hashes':'^2.4.0'}}));before=self.snapshot()
             with self.subTest(manager=manager),self.assertRaises(ValueError):self.apply()
             self.assertEqual(before,self.snapshot())
 

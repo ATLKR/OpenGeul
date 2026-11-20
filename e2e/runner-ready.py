@@ -46,6 +46,71 @@ def bounded(value, limit=256):
     return ''.join(c if ord(c) >= 32 else ' ' for c in str(value or ''))[:limit]
 
 
+class _FocusStartupInfo(ctypes.Structure):
+    # Win64 STARTUPINFOW. All other storage is opaque and never dereferenced.
+    _fields_ = [('cb', ctypes.c_uint32), ('_opaque0', ctypes.c_void_p * 3),
+                ('_opaque1', ctypes.c_uint32 * 7), ('dwFlags', ctypes.c_uint32),
+                ('wShowWindow', ctypes.c_uint16), ('_opaque2', ctypes.c_uint16),
+                ('_opaque3', ctypes.c_void_p * 4)]
+
+
+def focus_foreground_category(foreground, owned, baseline):
+    if foreground == 0: return 0
+    if foreground == owned: return 1
+    if baseline is not None and foreground == baseline: return 2
+    return 3
+
+
+def focus_observation_empty():
+    return {'schemaVersion': 1, 'knownMask': 0, 'errorCode': 2, 'windowFlags': 0,
+            'startfUseShowWindow': -1, 'wShowWindow': -1, 'beforeForeground': 3, 'afterForeground': 3}
+
+
+def focus_visibility_observation(owned, foreground, baseline, deadline, *, clock=None):
+    """Optional metadata on the caller's already owned helper; no qualification."""
+    record = focus_observation_empty()
+    class BudgetExpired(Exception): pass
+    try:
+        record['beforeForeground'] = focus_foreground_category(foreground, owned, baseline)
+        record['knownMask'] = 16
+        clock = time.monotonic if clock is None else clock
+        end = min(deadline, clock() + 5)
+        def call(function, *args):
+            if clock() >= end: raise BudgetExpired()
+            value = function(*args)
+            if clock() >= end: raise BudgetExpired()
+            return value
+        if clock() >= end: raise BudgetExpired()
+        if not (ctypes.sizeof(ctypes.c_void_p) == 8 and ctypes.sizeof(_FocusStartupInfo) == 104
+                and _FocusStartupInfo.dwFlags.offset == 60 and _FocusStartupInfo.wShowWindow.offset == 64):
+            return record
+        # Independent WinDLL wrappers preserve the original probe's declarations.
+        user = ctypes.WinDLL('user32', use_last_error=True)
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        functions = [user.IsWindowVisible, user.IsIconic, user.IsWindowEnabled]
+        for function in functions:
+            function.argtypes = [ctypes.c_void_p]; function.restype = ctypes.c_int32
+        kernel.GetStartupInfoW.argtypes = [ctypes.POINTER(_FocusStartupInfo)]
+        kernel.GetStartupInfoW.restype = None
+        for index, function in enumerate(functions):
+            record['errorCode'] = index + 3
+            value = call(function, owned)
+            if value: record['windowFlags'] |= 1 << index
+            record['knownMask'] |= 1 << index
+        record['errorCode'] = 6
+        startup = _FocusStartupInfo(cb=ctypes.sizeof(_FocusStartupInfo))
+        call(kernel.GetStartupInfoW, ctypes.byref(startup))
+        record['startfUseShowWindow'] = int(bool(startup.dwFlags & 1))  # STARTF_USESHOWWINDOW only.
+        record['wShowWindow'] = int(startup.wShowWindow)
+        record['knownMask'] |= 8
+        record['errorCode'] = 0
+    except BudgetExpired:
+        record['errorCode'] = 1
+    except Exception:
+        pass  # Optional metadata never replaces the original failure or result.
+    return record
+
+
 def integer(value, minimum=1):
     require(type(value) is int and minimum <= value < 2**64, '관찰 정수 형식이 다릅니다')
 
@@ -1199,6 +1264,13 @@ class WindowsProbe:
             deadline = self._startup_activation_guard['deadline']
             self.startup_native_call(self.user.ShowWindow, hwnd, 4, deadline=deadline)  # SW_SHOWNOACTIVATE.
             result['foregroundAtActivation'] = int(self.startup_native_call(self.user.GetForegroundWindow, deadline=deadline) or 0)
+            result['foregroundObservation'] = focus_observation_empty()
+            try:
+                baseline = self._startup_activation_guard['baseline']
+                result['foregroundObservation'] = focus_visibility_observation(hwnd, result['foregroundAtActivation'],
+                    baseline[0]['hwnd'] if baseline is not None else None, deadline)
+            except Exception:
+                pass
             self.startup_activation_guard(hwnd)
             require(time.monotonic() < deadline, 'owned foreground setter 직전 시작 시간이 초과했습니다')
             result['setForegroundReturned'] = bool(self.startup_native_call(self.user.SetForegroundWindow, hwnd, deadline=deadline))
@@ -1210,6 +1282,14 @@ class WindowsProbe:
                 if int(self.user.GetForegroundWindow() or 0) == hwnd: break
                 time.sleep(0.05)
             result['foregroundAfter'] = int(self.user.GetForegroundWindow() or 0)
+            try:
+                baseline = self._startup_activation_guard['baseline']
+                observation = result['foregroundObservation']
+                observation['afterForeground'] = focus_foreground_category(result['foregroundAfter'], hwnd,
+                    baseline[0]['hwnd'] if baseline is not None else None)
+                observation['knownMask'] |= 32
+            except Exception:
+                pass
             self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
             result['foregroundMatched'] = result['foregroundAfter'] == hwnd and owner.value == pid
         except Exception as error:

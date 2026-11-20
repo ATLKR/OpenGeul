@@ -76,15 +76,53 @@ def read_cells(data):
         return result
 
 
+def _record_saved_workbook_outcome(receipt,code=None,*,read_error=False,checkpoint=None):
+    """Optional numeric evidence; 0 is unknown and never increments a bucket."""
+    try:
+        if type(receipt) is not dict:return None
+        counts=receipt.get('outcomeCounts',[0]*5)
+        if type(counts) is not list or len(counts)!=5 or any(type(n) is not int or n<0 for n in counts):return None
+        if code is None and not read_error:
+            receipt['outcomeCounts']=counts;receipt['lastOutcomeCode']=0
+            attempts=receipt.get('attempts',0);transients=receipt.get('transientCount',0)
+            if type(attempts) is int and attempts>=0 and type(transients) is int and transients>=0:
+                return attempts,transients,receipt.get('lastTransient')
+            return None
+        if read_error:
+            code=0;row=receipt.get('lastTransient')
+            if (type(checkpoint) is tuple and len(checkpoint)==3
+                    and type(receipt.get('attempts')) is int and receipt['attempts']==checkpoint[0]+1
+                    and type(receipt.get('transientCount')) is int and receipt['transientCount']==checkpoint[1]+1
+                    and type(row) is dict and row is not checkpoint[2]):
+                kind=row.get('kind')
+                if type(kind) is str:code={'FileNotFoundError':1,'PermissionError':2}.get(kind,0)
+        if type(code) is not int or not 0<=code<=5:return None
+        if code:
+            counts=counts.copy();counts[code-1]+=1
+        receipt['outcomeCounts']=counts;receipt['lastOutcomeCode']=code
+    except BaseException:
+        pass  # Diagnostics cannot replace the original value, exception or deadline.
+    return None
+
+
 def saving_workbook_snapshot(source,baseline,expected,deadline,receipt):
+    checkpoint=_record_saved_workbook_outcome(receipt)
     raw=native.read_saving_document(source,deadline,receipt)
-    if raw is None:return False
-    cells=read_cells(raw)
+    if raw is None:
+        _record_saved_workbook_outcome(receipt,read_error=True,checkpoint=checkpoint)
+        return False
+    try:cells=read_cells(raw)
+    except zipfile.BadZipFile:
+        _record_saved_workbook_outcome(receipt,3)
+        raise
     assert time.monotonic()<deadline,'Original Calc save deadline expired during durable workbook observation'
-    if cells['a1Text']==baseline['a1Text']:return False
+    if cells['a1Text']==baseline['a1Text']:
+        _record_saved_workbook_outcome(receipt,4)
+        return False
     require_grid(cells,baseline,expected)
     result=dict(sha256=hashlib.sha256(raw).hexdigest(),bytes=len(raw),cells=cells)
     assert time.monotonic()<deadline,'Original Calc save deadline expired during durable workbook observation'
+    _record_saved_workbook_outcome(receipt,5)
     return result
 
 

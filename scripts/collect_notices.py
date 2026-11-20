@@ -13,16 +13,16 @@ from frontend_dependencies import PREPARED_LOCK_SHA256 as REVIEWED_NPM_LOCK_SHA2
 
 ROOT = Path(__file__).resolve().parents[1]
 RUST_SKIA_NAMES = {'skia-safe', 'skia-bindings'}
-RUST_SKIA_VERSION = '0.156.0'
-RUST_SKIA_COMMIT = 'ce6727ef251518df37bcfdde4865b71f7e3a4352'
+RUST_SKIA_VERSION = '0.157.0'
+RUST_SKIA_COMMIT = '30669978c3f39a73e8a7ac74eead8d414eb1891d'
 RUST_SKIA_SHA256 = '4b33ed5b329a3a79eb1243fd91373c68b0ae0b9df7503bfc50d0c5253adf1b9a'
-RUST_SKIA_NOTICE = ROOT / 'notices/rust-skia-0.156.0-LICENSE.txt'
-RHWP_SOURCE_COMMIT = 'c9095c5f67632e6721e800ccc7fb43ea49d26682'
+RUST_SKIA_NOTICE = ROOT / 'notices/rust-skia-0.157.0-LICENSE.txt'
+RHWP_SOURCE_COMMIT = '981ce66b4183b13c1a3b5907e04a8969c8c42034'
 # These source-package notices are not all at Cargo's package root. Keep their
 # exact origins in the review inventory without claiming that every asset ships.
 SUPPLEMENTAL_NOTICES = {
     'rhwp-pdf-import-backend': {
-        'version':'0.3.78-rhwp.1', 'license':'MIT OR Apache-2.0',
+        'version':'0.3.78-rhwp.2', 'license':'MIT OR Apache-2.0',
         'directory':'vendor/rhwp-pdf-import-backend',
         'files':{
             'src/fonts/assets/LICENSE-DejaVu':'5fe93f9ee914fc7c4f0cfc73b7b0e972167f1b8f89ba57f9ad55d6013eb8a8ac',
@@ -37,7 +37,7 @@ SUPPLEMENTAL_NOTICES = {
         'files':{'README.ijg':'75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6'},
     },
     'rhwp-hayro-jpeg2000': {
-        'version':'0.4.0-rhwp.1', 'license':'Apache-2.0 OR MIT',
+        'version':'0.4.0-rhwp.2', 'license':'Apache-2.0 OR MIT',
         'directory':'vendor/rhwp-hayro-jpeg2000',
         'files':{'assets/LICENSE.txt':'469d87b5fa48f8aaf69e25f4fcac3a309c97dbb7d561b917638abdb640e004d9'},
     },
@@ -81,6 +81,18 @@ REVIEWED_SOURCE_NOTICES = {
         'packageProvenance':{
             'archiveUrl':'https://registry.npmjs.org/rolldown/-/rolldown-1.2.16.tgz',
             'archiveIntegrity':'sha512-bWvlMpFKiTfDKfnK7FC2MPgPeWCf/Kpwsq49ApdW+FQaBZb6O6dZ4MAPbPUjp7hYQrw/RobqCzn64BRrQecGHw==',
+            'archiveMember':'package/THIRD-PARTY-LICENSE'}},
+        '1.2.19': {
+        'license':'MIT',
+        'manifestSha256':'73ea5ca898ac22574e23d66e54dc9c5b3714f9d8c1be934412824d62f25e21fc',
+        'sourcePath':'THIRD-PARTY-LICENSE',
+        'sourceSha256':'a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c',
+        'noticeSha256':'a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c',
+        'packageLicenseText':False,
+        'sourceUrl':'https://registry.npmjs.org/rolldown/-/rolldown-1.2.19.tgz',
+        'packageProvenance':{
+            'archiveUrl':'https://registry.npmjs.org/rolldown/-/rolldown-1.2.19.tgz',
+            'archiveIntegrity':'sha512-QIiV1J9d0pzN4jeeTH4sjPy0AZ6cAy2cG0ExeoE1+U8Rvj+hR3gYkokx0YbeUNGlZqiQJJ2utcETe0oKXwzsuA==',
             'archiveMember':'package/THIRD-PARTY-LICENSE'}}},
     ('npm', 'stackback'): {'0.0.2': {
         'license':'MIT',
@@ -97,14 +109,14 @@ REVIEWED_SOURCE_NOTICES = {
             'archiveMember':'package/formatstack.js'}}},
 }
 
-# pnpm's isolated graph from HOP c2981601 plus the reviewed Tauri npm overlay. These two
+# pnpm's isolated graph from HOP c2981601 plus the reviewed Tauri/rhwp frontend overlay. These two
 # source packages have no peer suffix. This adapter selects additional notices
 # only; it does not change the over-inclusive dependency inventory below.
 REVIEWED_NPM_ROOTS = {
-    ('rolldown', '1.2.16'): {
-        'slot': 'rolldown@1.2.16', 'callerSlot': 'vite@8.3.6',
-        'callerName': 'vite', 'callerVersion': '8.3.6',
-        'callerManifestSha256': 'c190c4c3dadb457bedc5d756a2269cd648b134a293da9f4d873c01fc66f4186c'},
+    ('rolldown', '1.2.19'): {
+        'slot': 'rolldown@1.2.19', 'callerSlot': 'vite@8.3.8',
+        'callerName': 'vite', 'callerVersion': '8.3.8',
+        'callerManifestSha256': '149cf436b89044371ae3cb35ac0e687ee75c6e8412962c7ce671f3d1a4a09d82'},
     ('stackback', '0.0.2'): {
         'slot': 'stackback@0.0.2', 'callerSlot': 'why-is-node-running@2.3.0',
         'callerName': 'why-is-node-running', 'callerVersion': '2.3.0',

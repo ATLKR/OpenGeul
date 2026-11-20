@@ -304,7 +304,8 @@ class Workflow(unittest.TestCase):
         fixture=json.loads(raw);candidate=self.candidate()
         actual=candidate.split('jobs:\n',1)[1].split('\n  writer-server-observer:',1)[0]
         from suite.tests.reviewed_normal_workflow import original_normal_oracle_text
-        actual=original_normal_oracle_text(actual)
+        from test_writer_owned_caption_workflow import normal_oracle_input
+        actual=original_normal_oracle_text(normal_oracle_input(actual))
         self.assertEqual(hashlib.sha256(actual.encode()).hexdigest(),fixture['normalJobTextSha256'])
         self.assertIn("permissions:\n  contents: read\n  actions: read\n",candidate)
         self.assertIn('OPENGEUL_SUITE_RUN_MODE: acceptance',candidate)

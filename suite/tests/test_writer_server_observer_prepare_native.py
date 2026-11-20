@@ -10,8 +10,12 @@ import unittest
 
 SOURCE = Path(__file__).parents[1] / 'e2e' / 'writer_server_observer_prepare_native.py'
 if SOURCE.exists():
-    spec = importlib.util.spec_from_file_location('writer_server_observer_prepare_native', SOURCE)
-    M = importlib.util.module_from_spec(spec);sys.modules[spec.name] = M;spec.loader.exec_module(M)
+    M = sys.modules.get('writer_server_observer_prepare_native')
+    if M is None:
+        spec = importlib.util.spec_from_file_location('writer_server_observer_prepare_native', SOURCE)
+        M = importlib.util.module_from_spec(spec);sys.modules[spec.name] = M;spec.loader.exec_module(M)
+    else:
+        assert Path(M.__file__).resolve() == SOURCE.resolve(), 'Canonical preparation source differs'
 else:
     M = SimpleNamespace()
 

@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'e2e'))
 import test_writer_server_observer_console as console_fixture
+from test_writer_first_owned_peer_profile import retained_guard_line
 from test_writer_server_observer_runner_composition import runner
 
 
@@ -69,7 +70,7 @@ class RetainedEngineRestart(unittest.TestCase):
         self.assertEqual(prep['classificationAuxiliaryCount'], 1)
         self.assertEqual((report['stageCode'], report['failureCode']), (4, 13))
         self.assertEqual((prep['preparationFailureKindCode'], prep['preparationFailureSourceCode'],
-                          prep['preparationFailureLine']), (14, 7, 177))
+                          prep['preparationFailureLine']), (14, 7, retained_guard_line()))
         self.assertEqual((prep['cohortFailureRoleCode'], prep['cohortFailureWaitResult'],
                           prep['cohortFailureExitCode']), (3, 0, 81))
         self.assertEqual(attachment_calls, [])

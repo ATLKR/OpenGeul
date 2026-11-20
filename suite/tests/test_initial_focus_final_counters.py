@@ -234,7 +234,8 @@ class FormCounterSeamTests(unittest.TestCase):
         import re
         wire=self.source.split('initialFocusFlowDiagnostics.Write(prefix ? "prefix" : "final", new',1)[1].split('}, counters.WorkerPid',1)[0]
         fields=set(re.findall(r'\b(\w+)\s*=(?!=)',wire))
-        self.assertEqual(fields,set(final_row())-{'sequence'})
+        self.assertEqual(fields,set(final_row())-{'sequence'}|{'hwpCommandRoute'})
+        self.assertEqual(wire.count('hwpCommandRoute = SnapshotHwpRoute(counters)'),1)
         self.assertNotIn('Handle',wire)
 
     def test_status_prefix_follows_original_success_with_cached_owner_only(self):

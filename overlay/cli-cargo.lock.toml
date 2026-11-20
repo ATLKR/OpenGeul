@@ -451,9 +451,9 @@ dependencies = [
 
 [[package]]
 name = "cfb"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f13298d9178622b7916ec5d01d470425c04273c8ed07e87b1c38b34c4f4612b"
+checksum = "fef29b910ef2b9dbecc60168d1568d643c633b0518af970c17e83bd5f6e2c94f"
 dependencies = [
  "fnv",
  "uuid",
@@ -2077,9 +2077,9 @@ dependencies = [
 
 [[package]]
 name = "read-fonts"
-version = "0.46.0"
+version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdaa4fffe9ff3ca2c353fa9729792805b9b3e324695ff5a081f860612e81b330"
+checksum = "a39d2f8f681030a7bcbbcf3e8568775ac2393afd51401a2e2133ee89e3953897"
 dependencies = [
  "bytemuck",
  "foldhash",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "rhwp"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes",
  "argon2",
@@ -2209,6 +2209,7 @@ dependencies = [
  "image",
  "js-sys",
  "libc",
+ "log",
  "ml-dsa",
  "ml-kem",
  "office_oxide",
@@ -2219,8 +2220,9 @@ dependencies = [
  "proptest",
  "quick-xml 0.42.0",
  "rand_core",
- "read-fonts 0.46.0",
+ "read-fonts 0.47.0",
  "resvg 0.47.0",
+ "rhwp-codec-resource",
  "rhwp-contracts",
  "rhwp-jpeg-encoder",
  "rhwp-ooxml-chart",
@@ -2262,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "rhwp-codec-resource"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "rhwp-contracts"
@@ -2273,14 +2275,14 @@ dependencies = [
 
 [[package]]
 name = "rhwp-hayro-ccitt"
-version = "0.3.0-rhwp.1"
+version = "0.3.0-rhwp.2"
 dependencies = [
  "rhwp-codec-resource",
 ]
 
 [[package]]
 name = "rhwp-hayro-jbig2"
-version = "0.3.0-rhwp.1"
+version = "0.3.0-rhwp.2"
 dependencies = [
  "rhwp-codec-resource",
  "rhwp-hayro-ccitt",
@@ -2288,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "rhwp-hayro-jpeg2000"
-version = "0.4.0-rhwp.1"
+version = "0.4.0-rhwp.2"
 dependencies = [
  "rhwp-codec-resource",
 ]
@@ -2309,13 +2311,14 @@ name = "rhwp-native-ffi"
 version = "0.1.0"
 dependencies = [
  "rhwp",
+ "rhwp-codec-resource",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "rhwp-ooxml-chart"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "quick-xml 0.42.0",
 ]
@@ -2342,7 +2345,7 @@ dependencies = [
 
 [[package]]
 name = "rhwp-pdf-import-backend"
-version = "0.3.78-rhwp.1"
+version = "0.3.78-rhwp.2"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -2396,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "rhwp-qcms"
-version = "0.3.0-rhwp.1"
+version = "0.3.0-rhwp.2"
 dependencies = [
  "rhwp-codec-resource",
 ]
@@ -2737,23 +2740,23 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skera"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1304685b8b275337200c0c138d8ca1b0b19be6185e4eb4013aebc9a1c270d761"
+checksum = "02fa4a4dc04b2d2326e4cfdcf890234a58419d00953e512fbf2823d33965d26b"
 dependencies = [
  "foldhash",
  "hashbrown",
- "read-fonts 0.46.0",
- "skrifa 0.49.0",
+ "read-fonts 0.47.0",
+ "skrifa 0.50.0",
  "thiserror",
- "write-fonts 0.55.0",
+ "write-fonts 0.56.0",
 ]
 
 [[package]]
 name = "skia-bindings"
-version = "0.156.0"
+version = "0.157.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fdac65e59d2ee3d2307397cc0a6a5156e4364debf3db465af1a8fd8252781f1"
+checksum = "3930c7f5e8d813364d74c3b17b227f3bb3a84504f93bb1f8c222d8fd5a7d9c6f"
 dependencies = [
  "bindgen",
  "cc",
@@ -2768,9 +2771,9 @@ dependencies = [
 
 [[package]]
 name = "skia-safe"
-version = "0.156.0"
+version = "0.157.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38c60bc899f4b9e23eba0223187ff572b25d26155d0176b26e9b3a743f1e75b1"
+checksum = "dc1c946dbc1a10b6b1ace7e368ea71f96c81448bbf55effcad0a9a3a392358eb"
 dependencies = [
  "bitflags 2.13.1",
  "skia-bindings",
@@ -2789,13 +2792,13 @@ dependencies = [
 
 [[package]]
 name = "skrifa"
-version = "0.49.0"
+version = "0.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7459fb60888ad9a5f367dd293fa2fb9df142cb451aa6bfd6cd66a7d6a9b739d"
+checksum = "e85ba678a6023a063d0a78c8770f1c166674ef46af13523d05eff67430f79dfe"
 dependencies = [
  "bytemuck",
  "once_cell",
- "read-fonts 0.46.0",
+ "read-fonts 0.47.0",
  "smallvec",
  "yoke",
 ]
@@ -3928,13 +3931,13 @@ dependencies = [
 
 [[package]]
 name = "write-fonts"
-version = "0.55.0"
+version = "0.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e91ad74b39f48f456560ed1ccc75959efa19bf6f0817d1560751bb49db84f6c"
+checksum = "944049531d52f9002812ea9de23ec8aa4e9577a7bee6869a1d0f297c679817ea"
 dependencies = [
  "font-types 0.12.7",
  "log",
- "read-fonts 0.46.0",
+ "read-fonts 0.47.0",
 ]
 
 [[package]]

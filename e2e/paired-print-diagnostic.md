@@ -140,5 +140,20 @@ their Known flags are false. Projection performs no new file/process query and
 reads no exception text, args, repr, locals, environment or command line. A
 diagnostic cancellation cannot replace the existing failure or weaken a guard.
 
+Failure stdout uses `paired-print-failure-numeric` schema 2, with the original
+numeric fields and nullable `censusObservation`; historical schema 1 has no such
+field. The optional schema-1 census record contains only the already-observed
+root PID/original creation time, sealed/live-root-check flags, snapshot/known/
+guard-unexpected counts and up to 64 PID-sorted `{pid,parentPid,executableRoleCode}`
+rows. Codes 1/2/3 mean exact `msedgewebview2.exe`/`conhost.exe`/`werfault.exe` names
+after ASCII-only case normalization; all other names or shapes are 0. Raw names
+and paths are never emitted. The
+guard expands from all retained PIDs; its unexpected count is separate from the
+rows whose snapshot parent chain reaches the root PID. That chain is neither
+current ownership nor process-generation proof. The record is diagnostic only,
+never acceptance eligible, and absent/invalid observation remains unknown while
+the original rejection and cleanup priority are retained. No new process query,
+handle, late adoption, input or collector permission is introduced.
+
 Actual Windows execution, legacy transport, CI submission, installation and
 publication remain unperformed until the owning task integrates this candidate.

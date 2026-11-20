@@ -44,7 +44,7 @@ class PairedPrintEvidenceTests(unittest.TestCase):
         wasm = self.value['sourceParity']['wasmRebuild']
         for name in api.WASM_FILES:
             data = b'\0asm\1\0\0\0' if name == 'rhwp_bg.wasm' else b'SYNTHETIC-' + name.encode('ascii')
-            if name == 'package.json': data = json.dumps({'version': '0.9.0'}).encode()
+            if name == 'package.json': data = json.dumps({'version': '0.9.1'}).encode()
             (self.workspace / 'wasm-input' / name).write_bytes(data)
             wasm['artifacts'][name] = hashlib.sha256(data).hexdigest()
         (self.workspace / 'wasm-input/OPEN_GEUL_WASM.json').write_text(json.dumps(wasm))

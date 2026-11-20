@@ -1,6 +1,6 @@
 """Same-run owned advanced INPUT admission; never executes Windows or product UI."""
 from pathlib import Path
-import contextlib,copy,hashlib,importlib.util,io,json,os,shutil,stat,subprocess,sys,tempfile,unittest,zipfile
+import contextlib,copy,hashlib,importlib.util,io,json,os,shutil,stat,subprocess,sys,tempfile,unittest,warnings,zipfile
 import xml.etree.ElementTree as ET
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
@@ -38,7 +38,7 @@ class NativeAdvancedInputTests(unittest.TestCase):
         self.assertEqual(len(self.advanced),14)
         self.browser={**{'e2e-fixtures/advanced-owned/'+n:v for n,v in self.advanced.items()},
             **{'e2e-fixtures/'+n:b'owned unused baseline'for n in ('basic.hwp','basic.hwpx','blank.hwp','blank.hwpx','invalid.hwpx','missing-font.hwp','missing-font.hwpx','paragraphs.hwp','paragraphs.hwpx','unicode.hwp','unicode.hwpx')},
-            **{'hop/apps/studio-host/dist/'+n:b'owned unused browser dist'for n in ('index.html','favicon.ico','opengeul.ico','images/icon_small_ko.svg','images/icon_small_ko_dark.svg','assets/index-abcdef12.js','assets/index-abcdef12.css','assets/dist-js-abcdef12.js','assets/event-abcdef12.js','assets/rhwp_bg-abcdef12.wasm','assets/webviewWindow-abcdef12.js')}}
+            **{'hop/apps/studio-host/dist/'+n:b'owned unused browser dist'for n in ('index.html','favicon.ico','opengeul.ico','images/icon_small_ko.svg','images/icon_small_ko_dark.svg','assets/index-abcdef12.js','assets/index-abcdef12.css','assets/dist-js-abcdef12.js','assets/form-action-worker-abcdef12.js','assets/rhwp_bg-abcdef12.wasm','assets/webviewWindow-abcdef12.js')}}
         self.run=copy.deepcopy(self.context.run);self.producer={**self.context.job,'name':'wasm'}
         self.archives={67:self.zip(self.browser),68:self.zip(self.wasm_files)}
         self.artifacts={i:{**self.context.artifact,'id':i,'name':('opengeul-browser-inputs-'if i==67 else 'opengeul-wasm-')+'123'}for i in self.archives}
@@ -155,6 +155,48 @@ class NativeAdvancedInputTests(unittest.TestCase):
 
     def test_single_page_api_inventory_cannot_hide_a_truncated_run(self):
         self.responses['actions/runs/123/artifacts?per_page=100']['total_count']=101;self.rejected()
+
+    def test_current_browser_worker_is_admitted_in_the_exact_inventory(self):
+        try:admitted=self.module().zip_members(self.zip(self.browser),browser=True)
+        except ValueError:self.fail('Current pinned browser worker was rejected before input staging')
+        with admitted as archive:
+            self.assertEqual(len(archive.infolist()),36)
+            self.assertEqual(set(archive.namelist()),set(self.browser))
+            self.assertIn('hop/apps/studio-host/dist/assets/form-action-worker-abcdef12.js',archive.namelist())
+
+    def test_old_event_and_foreign_worker_names_cannot_replace_the_current_role(self):
+        worker='hop/apps/studio-host/dist/assets/form-action-worker-abcdef12.js'
+        for name in ('assets/event-abcdef12.js','assets/foreign-worker-abcdef12.js',
+                'assets/form-action-worker-abcdef123.js','assets/form-action-worker-abcdef12.js.extra'):
+            with self.subTest(role=name):
+                files=dict(self.browser);raw=files.pop(worker)
+                files['hop/apps/studio-host/dist/'+name]=raw
+                with self.assertRaises(ValueError):self.module().zip_members(self.zip(files),browser=True)
+
+    def test_worker_inventory_rejects_missing_extra_case_alias_and_duplicate_members(self):
+        worker='hop/apps/studio-host/dist/assets/form-action-worker-abcdef12.js'
+        missing=dict(self.browser);missing.pop(worker)
+        for files in (missing,{**self.browser,'hop/apps/studio-host/dist/assets/event-abcdef12.js':b'foreign'}):
+            with self.subTest(memberCount=len(files)),self.assertRaises(ValueError):
+                self.module().zip_members(self.zip(files),browser=True)
+        original=list(self.browser.items())
+        for extra in (original[0][0],original[0][0].upper()):
+            duplicate=io.BytesIO()
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore',UserWarning)
+                with zipfile.ZipFile(duplicate,'w',zipfile.ZIP_DEFLATED)as archive:
+                    for name,raw in original[:-1]:archive.writestr(name,raw)
+                    archive.writestr(extra,original[0][1])
+            with self.subTest(alias=extra),self.assertRaisesRegex(ValueError,'Unsafe, duplicate or oversized ZIP member'):
+                self.module().zip_members(duplicate.getvalue(),browser=True)
+        reparse=io.BytesIO()
+        with zipfile.ZipFile(reparse,'w',zipfile.ZIP_DEFLATED)as archive:
+            for name,raw in original:
+                info=zipfile.ZipInfo(name);info.external_attr=(stat.S_IFREG|0o644)<<16
+                if name==worker:info.external_attr|=0x400
+                archive.writestr(info,raw)
+        with self.assertRaisesRegex(ValueError,'Unsafe, duplicate or oversized ZIP member'):
+            self.module().zip_members(reparse.getvalue(),browser=True)
 
     def test_original_crc_and_nonregular_archive_members_are_rejected(self):
         stored=io.BytesIO()

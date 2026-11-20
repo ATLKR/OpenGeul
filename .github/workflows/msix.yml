@@ -1131,7 +1131,7 @@ jobs:
         $ErrorActionPreference='Stop'
         $PSNativeCommandUseErrorActionPreference=$true
         $provenanceSha=(Get-FileHash -Algorithm SHA256 package/provenance.json).Hash.ToLowerInvariant()
-        python -u e2e/paired_print_run.py --run-paired-print --acquire-legacy --harness-source $env:GITHUB_SHA --run-id $env:GITHUB_RUN_ID --run-attempt $env:GITHUB_RUN_ATTEMPT --current-provenance-sha256 $provenanceSha --package package --wasm wasm-input --inputs inputs/e2e-fixtures --fixtures print-fixtures --legacy-cache paired-locked-inputs --legacy-runtime paired-legacy-runtime --current-runtime paired-current-runtime --work paired-private-attempts --output paired-print-evidence
+        python -u e2e/paired_print_run.py --run-paired-print --acquire-legacy --harness-source $env:GITHUB_SHA --run-id $env:GITHUB_RUN_ID --run-attempt $env:GITHUB_RUN_ATTEMPT --current-provenance-sha256 $provenanceSha --package package --wasm wasm-input --inputs inputs/e2e-fixtures --fixtures print-fixtures --legacy-cache paired-locked-inputs --legacy-runtime paired-legacy-runtime --current-runtime paired-current-runtime --work paired-private-attempts --output paired-print-evidence --failure-numeric-sidecar
     - name: 비교 진단 원본·소유 종료·동일 입력·크기와 source 바인딩 독립 재검증
       id: paired-print-admit
       if: always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false && github.event_name == 'pull_request' && github.event.pull_request.draft == true && github.event.pull_request.head.repo.full_name == 'ATLKR/OpenGeul' && github.event.pull_request.head.ref == 'work/opengeul-office-arm64' && matrix.os == 'windows-2025' && (steps.paired-print.outcome == 'success' || steps.paired-print.outcome == 'failure')
@@ -1144,6 +1144,21 @@ jobs:
       with:
         name: opengeul-paired-print-windows-2025-${{ github.run_id }}-${{ github.run_attempt }}
         path: paired-print-evidence/
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 9
+    - name: 실패한 비교의 source·실행·숫자 기록만 독립 재검증
+      id: paired-failure-admit
+      if: always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false && github.event_name == 'pull_request' && github.event.pull_request.draft == true && github.event.pull_request.head.repo.full_name == 'ATLKR/OpenGeul' && github.event.pull_request.head.ref == 'work/opengeul-office-arm64' && matrix.os == 'windows-2025' && steps.paired-print.outcome == 'failure'
+      shell: pwsh
+      run: python e2e/paired_print_failure_sidecar.py --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID --expected-attempt $env:GITHUB_RUN_ATTEMPT
+    - name: 검증된 비수용 실패 숫자 기록 한 파일만 전송
+      id: paired-failure-evidence
+      if: always() && !cancelled() && github.repository == 'ATLKR/OpenGeul' && github.event.repository.private == false && github.event_name == 'pull_request' && github.event.pull_request.draft == true && github.event.pull_request.head.repo.full_name == 'ATLKR/OpenGeul' && github.event.pull_request.head.ref == 'work/opengeul-office-arm64' && matrix.os == 'windows-2025' && steps.paired-print.outcome == 'failure' && steps.paired-failure-admit.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-paired-print-failure-numeric-windows-2025-${{ github.run_id }}-${{ github.run_attempt }}
+        path: paired-print-failure.numeric.json
         retention-days: 1
         if-no-files-found: error
         compression-level: 9

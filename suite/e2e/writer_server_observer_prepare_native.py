@@ -355,3 +355,35 @@ class PreparationNativeApi:
             if not result or '\0' in result:raise ValueError()
             return result
         except BaseException:raise PreparationError(PreparationCode.IMAGE) from None
+
+
+    def process_image_observed(self, retained_handle, *, check):
+        """One original query; fixed failure facts captured before post-call QPC."""
+        handle = _handle(retained_handle)
+        buffer, length = (U16*32768)(), U32(32768)
+        facts = None
+        def query(*args):
+            nonlocal facts
+            result = self._image(*args)
+            if type(result) is int:
+                error = None
+                if result == 0:
+                    getter = getattr(self, '_image_last_error', None)
+                    if getter is None:
+                        getter = getattr(getattr(self, '_native', None), '_last_error', None)
+                    try:
+                        value = getter() if callable(getter) else None
+                        if type(value) is int and 0 <= value <= 0xffffffff: error = value
+                    except BaseException: pass
+                facts = (result != 0, int(length.value), error)
+            return result
+        result = self._call(check, query, handle, 0, buffer, C.byref(length))
+        if not result or not 0 < length.value < 32768:
+            failure = PreparationError(PreparationCode.IMAGE)
+            failure._image_query_facts = facts
+            raise failure
+        try:
+            value = bytes(buffer)[:int(length.value)*2].decode('utf-16-le')
+            if not value or '\0' in value: raise ValueError()
+            return value
+        except BaseException: raise PreparationError(PreparationCode.IMAGE) from None

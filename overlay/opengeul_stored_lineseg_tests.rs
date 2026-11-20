@@ -4,6 +4,21 @@ use rhwp::{DocumentCore, model::{document::Document, paragraph::{LineSeg, Paragr
 use rhwp::model::control::Control;
 use rhwp::serializer::hwpx::roundtrip::{diff_documents, strip_hwp_to_hwpx_noise};
 
+fn external_stored_hwp(bytes: Vec<u8>) -> Vec<u8> {
+    use std::io::{Cursor, Read};
+    // The authored CFB becomes an external-store adversary by removing only its
+    // rhwp authentication witness. The original BodyText bytes remain exact.
+    let mut file=cfb::CompoundFile::open(Cursor::new(bytes)).expect("owned authored CFB");
+    let before={let mut row=Vec::new();file.open_stream("/BodyText/Section0").expect("owned body stream").read_to_end(&mut row).expect("owned body bytes");row};
+    file.remove_stream("/RhwpLineSegTags").expect("remove only the authored authentication witness");
+    let bytes=file.into_inner().into_inner();
+    let mut readback=cfb::CompoundFile::open(Cursor::new(bytes.clone())).expect("owned external CFB readback");
+    let mut after=Vec::new();readback.open_stream("/BodyText/Section0").expect("same original body stream").read_to_end(&mut after).expect("same original body bytes");
+    assert_eq!(before,after,"fixture classification cannot rewrite the actual stored record payload");
+    assert!(readback.open_stream("/RhwpLineSegTags").is_err(),"the external fixture cannot retain an authenticated-runtime witness");
+    bytes
+}
+
 fn authored() -> Vec<u8> {
     let mut core=DocumentCore::new_empty();
     core.create_blank_document_native().expect("owned blank");
@@ -21,7 +36,7 @@ fn authored() -> Vec<u8> {
     core.set_field_value_by_name_at("CUSTOMER",0,"C-INIT").expect("public body value");
     core.set_field_value_by_name_at("ITEM",0,"I-BODY").expect("public first repeated value");
     core.set_field_value_by_name_at("ITEM",1,"I-CELL").expect("public second repeated value");
-    core.export_hwp_native().expect("native HWP serialization")
+    external_stored_hwp(core.export_hwp_native().expect("native HWP serialization"))
 }
 
 fn fields(doc: &Document) -> Vec<&Paragraph> {
@@ -57,7 +72,7 @@ fn authored_positive_body_and_cell_rows_survive_hwp_hwpx_hwp() {
     let input=authored();let before=rhwp::parse_document(&input).expect("parse native authored HWP");
     for p in fields(&before) {
         assert_eq!(p.source_line_seg_vertical_pos.as_ref().expect("actual imported origin").len(),p.serializable_line_segs().len());
-        assert!(p.line_segs.iter().all(|s|s.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY!=0 && s.line_height>0 && s.text_height>0));
+        assert!(p.line_segs.iter().all(|s|s.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY==0 && s.line_height>0 && s.text_height>0),"upstream normalizes the non-authenticated bit while the parser retains actual stored ownership");
     }
     let xml=rhwp::serializer::serialize_hwpx(&before).expect("HWP to HWPX");
     let middle=rhwp::parse_document(&xml).expect("parse HWPX");
@@ -78,8 +93,8 @@ fn shared_hwp_projection_preserves_owned_fallback_and_rejects_runtime_rows() {
         match case {
             0=>{},
             1=>{let mut fill=p.line_segs[0].clone();fill.vertical_pos=999999;p.line_segs.push(fill);p.layout_only_fill_lines=1;},
-            2=>p.source_line_seg_vertical_pos=None,
-            3=>p.source_line_seg_vertical_pos=Some(Vec::new()),
+            2=>{p.source_line_seg_vertical_pos=None;for row in &mut p.line_segs{row.tag|=LineSeg::TAG_IMPLEMENTATION_PROPERTY;}},
+            3=>{p.source_line_seg_vertical_pos=Some(Vec::new());for row in &mut p.line_segs{row.tag|=LineSeg::TAG_IMPLEMENTATION_PROPERTY;}},
             4=>{p.line_segs[0].tag|=LineSeg::TAG_EMPTY_SEGMENT;p.line_segs[0].line_height=0;p.line_segs[0].text_height=0;},
             5=>p.invalidate_layout_inputs(),
             _=>p.line_segs[0].text_start=p.char_count+1000,
@@ -153,7 +168,7 @@ fn public_picture_tac_replacement_cannot_reuse_same_count_stored_origin() {
     let p=&mut stored.sections[0].paragraphs[0];
     assert_eq!(p.line_segs.len(),1);assert!(p.line_segs[0].line_height>0&&p.line_segs[0].text_height>0);
     p.line_segs[0].tag|=LineSeg::TAG_IMPLEMENTATION_PROPERTY;p.line_segs[0].vertical_pos=7777;
-    let input=rhwp::serializer::serialize_document(&stored).expect("actual stored regression bytes");
+    let input=external_stored_hwp(rhwp::serializer::serialize_document(&stored).expect("actual stored regression bytes"));
     let parsed=rhwp::parse_document(&input).expect("public parser");
     assert_eq!(parsed.sections[0].paragraphs[0].source_line_seg_vertical_pos,Some(vec![7777]));
     let mut core=DocumentCore::from_bytes(&input).expect("public stored picture import");
@@ -204,6 +219,46 @@ fn row(vpos:i32,height:i32,tag:u32)->Vec<u8> {
 }
 
 #[test]
+fn external_stored_positive_bit31_is_not_authenticated_runtime_origin() {
+    let mut bytes=Vec::new();let mut header=vec![0;22];header[..4].copy_from_slice(&2u32.to_le_bytes());
+    record(66,0,&header,&mut bytes);record(67,1,&[b'A',0,13,0],&mut bytes);
+    record(69,1,&row(7777,1000,0x80060000),&mut bytes);
+    let section=rhwp::parser::body_text::parse_body_text_section(&bytes).expect("actual external stored row parser");
+    let p=&section.paragraphs[0];
+    assert_eq!(p.source_line_seg_vertical_pos,Some(vec![7777]),"sized external stored rows retain their actual vpos owner");
+    assert_eq!(p.line_segs[0].tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY,0,"upstream clears the non-authenticated runtime bit");
+}
+
+#[test]
+fn hwpx_sized_stored_rows_keep_origin_without_requiring_runtime_tag() {
+    use rhwp::parser::hwpx::section::parse_hwpx_section;
+    for (flags,height,expected) in [
+        (0,1000,Some(vec![7777])),
+        (LineSeg::TAG_IMPLEMENTATION_PROPERTY,1000,Some(vec![7777])),
+        (LineSeg::TAG_EMPTY_SEGMENT,1000,None),
+        (0,0,None),
+    ] {
+        let xml=format!(r#"<hs:sec xmlns:hs="urn:hwp:section" xmlns:hp="urn:hwp:paragraph"><hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>A</hp:t></hp:run><hp:linesegarray><hp:lineseg textpos="0" vertpos="7777" vertsize="{height}" textheight="{height}" baseline="850" spacing="600" horzpos="0" horzsize="1000" flags="{flags}"/></hp:linesegarray></hp:p></hs:sec>"#);
+        let section=parse_hwpx_section(&xml).expect("authored synthetic stored section");
+        assert_eq!(section.paragraphs.len(),1);
+        assert_eq!(section.paragraphs[0].source_line_seg_vertical_pos,expected);
+    }
+}
+
+#[test]
+fn authenticated_native_runtime_rows_do_not_become_external_stored_origin() {
+    let mut author=DocumentCore::new_empty();author.create_blank_document_native().expect("owned authenticated blank");
+    author.insert_text_native(0,0,0,"AUTHENTICATED-RUNTIME-ROW").expect("public authored text");
+    let bytes=author.export_hwp_native().expect("actual authenticated native HWP");
+    let parsed=rhwp::parse_document(&bytes).expect("actual section digest authentication");
+    assert!(parsed.extra_streams.iter().any(|(name,_)|name=="/RhwpLineSegTags"),"the actual native output carries its semantic witness");
+    let runtime:Vec<_>=parsed.sections.iter().flat_map(|s|s.paragraphs.iter())
+        .filter(|p|p.line_segs.iter().any(|r|r.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY!=0)).collect();
+    assert!(!runtime.is_empty(),"the witness must cover actual positive runtime rows");
+    for p in runtime {assert!(p.source_line_seg_vertical_pos.is_none(),"authenticated synthetic rows cannot gain external ownership on parse");}
+}
+
+#[test]
 fn later_direct_child_line_record_replacement_never_inherits_prior_origin() {
     for placeholder in [false,true] {
         let mut bytes=Vec::new();let mut header=vec![0;22];header[..4].copy_from_slice(&2u32.to_le_bytes());
@@ -222,7 +277,7 @@ const OWNER_PNG: &[u8]=&[137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0
 fn owner_picture_core() -> DocumentCore {
     let mut author=DocumentCore::new_empty();author.create_blank_document_native().expect("owned owner blank");
     author.insert_picture_native(0,0,0,&[],OWNER_PNG,11339,5669,1,1,"png","OWNED-ROW-OWNER",Some(8504),Some(28346)).expect("public owner picture");
-    DocumentCore::from_bytes(&author.export_hwp_native().expect("owned stored source")).expect("public stored owner import")
+    DocumentCore::from_bytes(&external_stored_hwp(author.export_hwp_native().expect("owned stored source"))).expect("public stored owner import")
 }
 
 fn owner_picture_index(p: &Paragraph) -> usize {
@@ -307,7 +362,7 @@ fn public_text_free_header_footer_tac_keeps_dirty_without_reflow_publication() {
         }).expect("owned text-free HF model");
         let p=&mut paragraphs[0];p.controls.push(picture);p.ctrl_data_records.push(None);p.char_count+=8;
         p.line_segs=vec![source_row];
-        let input=author.export_hwp_native().expect("authored stored HF cache");
+        let input=external_stored_hwp(author.export_hwp_native().expect("authored stored HF cache"));
         let mut core=DocumentCore::from_bytes(&input).expect("actual parser-owned HF import");
         let address=owner_hf_address(core.document(),is_header);let (pi,ci,inner,picture)=address;
         let p=match &mut core.document_mut().sections[0].paragraphs[pi].controls[ci] {
@@ -449,7 +504,7 @@ fn public_imported_tac_header_footer_text_reverse_publishes_fresh_partition() {
             _=>panic!("actual authored HF paragraph"),
         };
         let mut row=p.line_segs[0].clone();row.vertical_pos=5555;row.line_height=5669;row.text_height=5669;row.baseline_distance=4819;row.tag=0x80060000;p.line_segs=vec![row];p.source_line_seg_vertical_pos=None;
-        let input=author.export_hwp_native().expect("actual stored HF input");
+        let input=external_stored_hwp(author.export_hwp_native().expect("actual stored HF input"));
         let mut core=DocumentCore::from_bytes(&input).expect("public stored HF import");
         let address=owner_hf_address(core.document(),is_header);let before=owner_hf_paragraph(core.document(),address);
         assert!(before.source_line_seg_vertical_pos.is_some());assert!(before.text.contains("OWNED-HF-TEXT"));
@@ -525,7 +580,7 @@ fn owner_endnote_input(initial_tac:bool)->Vec<u8> {
     row.line_height=if initial_tac{5669}else{1000};row.text_height=row.line_height;
     row.baseline_distance=if initial_tac{4819}else{850};row.tag=0x80060000;
     p.line_segs=vec![row];p.source_line_seg_vertical_pos=None;
-    author.export_hwp_native().expect("actual stored Endnote source")
+    external_stored_hwp(author.export_hwp_native().expect("actual stored Endnote source"))
 }
 
 #[test]
@@ -706,8 +761,17 @@ fn persistence_runtime_owner_policy_preserves_imported_rows_axes_and_suffix_boun
         assert_eq!(p.line_segs.len(),1);let original_row=p.line_segs[0].clone();p.hwpx_axis_shift=16;
         match case {
             0=>{},
-            1=>p.source_line_seg_vertical_pos=None,
-            2=>{p.source_line_seg_vertical_pos=None;let mut ordinary=original_row.clone();ordinary.tag&=!LineSeg::TAG_IMPLEMENTATION_PROPERTY;p.line_segs.push(ordinary);},
+            1=>{
+                p.source_line_seg_vertical_pos=None;
+                for row in &mut p.line_segs {row.tag|=LineSeg::TAG_IMPLEMENTATION_PROPERTY;}
+                assert!(p.line_segs.iter().all(|row|row.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY!=0),"case 1 fixture requires runtime-tagged rows before the empty-partition oracle");
+            },
+            2=>{
+                p.source_line_seg_vertical_pos=None;
+                for row in &mut p.line_segs {row.tag|=LineSeg::TAG_IMPLEMENTATION_PROPERTY;}
+                let mut ordinary=original_row.clone();ordinary.tag&=!LineSeg::TAG_IMPLEMENTATION_PROPERTY;p.line_segs.push(ordinary);
+                assert_eq!(p.line_segs.iter().map(|row|u32::from(row.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY!=0)).collect::<Vec<_>>(),vec![1,0],"case 2 fixture requires runtime then ordinary classifications before the mixed-partition oracle");
+            },
             3=>p.source_line_seg_vertical_pos=Some(Vec::new()),
             4=>{p.line_segs[0].line_height=0;p.line_segs[0].text_height=0;p.line_segs[0].tag|=LineSeg::TAG_EMPTY_SEGMENT;},
             5=>p.invalidate_layout_inputs(),
@@ -721,6 +785,22 @@ fn persistence_runtime_owner_policy_preserves_imported_rows_axes_and_suffix_boun
         else if case==2 {assert_eq!(actual.line_segs.len(),2,"mixed owned-axis rows cannot be blanket-dropped");}
         else {assert_eq!(actual.line_segs.len(),1);assert_eq!(tuples(actual),tuples(&original.sections[0].paragraphs[2]),"positive source row and serializable-prefix ownership retain all nine fields");}
     }
+}
+
+#[test]
+fn persistence_none_ordinary_rows_keep_all_nine_fields() {
+    let mut live=rhwp::parse_document(&persistence_owned_hwpx_input()).expect("owned ordinary stored HWPX");
+    let p=&mut live.sections[0].paragraphs[2];
+    assert_eq!(p.line_segs.len(),1,"the ordinary None control uses one actual stored row");
+    assert!(p.line_segs.iter().all(|row|row.tag&LineSeg::TAG_IMPLEMENTATION_PROPERTY==0),"the legacy control remains ordinary rather than runtime-tagged");
+    p.source_line_seg_vertical_pos=None;
+    let original=tuples(p);
+    let expected=rhwp::serializer::hwpx::roundtrip::hwpx_persistence_document(&live);
+    assert_eq!(tuples(&expected.sections[0].paragraphs[2]),original,"None alone cannot discard an ordinary stored partition or change any of its nine fields");
+    let bytes=rhwp::serializer::serialize_hwpx(&live).expect("ordinary None actual HWPX save");
+    let reopened=rhwp::parse_document(&bytes).expect("ordinary None independent HWPX reopen");
+    assert_eq!(tuples(&reopened.sections[0].paragraphs[2]),original,"ordinary None save/reopen preserves all nine stored fields");
+    assert_eq!(tuples(&live.sections[0].paragraphs[2]),original,"the independent persistence expectation cannot mutate the live row");
 }
 
 #[test]
@@ -862,4 +942,337 @@ fn actual_hwpx_field_editable_and_dirty_attribute_corruption_is_strict() {
         let actual=DocumentCore::from_bytes(&corrupt).expect("actual XML flag corruption");let diff=persistence_canonical_diff(live.document(),actual.document());
         assert!(diff.differences.iter().any(|d|matches!(d,IrDifference::FieldIdentity{changed,..} if changed.contains(&label))),"only the actual persistent getter flag changes; raw properties are not compared");
     }
+}
+
+// rhwp 0.9.1: independent expected-resource normalization, using real public
+// create/edit/export/import APIs. This source must run in the native gate.
+fn resource_owned_input(original_orphan: bool) -> (Vec<u8>, Option<u16>) {
+    use rhwp::model::bin_data::{BinData, BinDataCompression, BinDataContent, BinDataStatus, BinDataType};
+    let mut author=DocumentCore::new_empty();author.create_blank_document_native().expect("owned resource blank");
+    for _ in 0..2 {
+        author.insert_picture_native(0,0,0,&[],OWNER_PNG,11339,5669,1,1,"png","OWNED-RESOURCE-IDENTITY",Some(8504),Some(28346)).expect("public owned picture insertion");
+    }
+    let bytes=author.export_hwpx_native().expect("actual initial owned HWPX");
+    if !original_orphan { return (bytes,None); }
+    let mut document=rhwp::parse_document(&bytes).expect("parse owned original HWPX");
+    let id=document.bin_data_content.iter().map(|c|c.id).max().unwrap_or(0).checked_add(1).expect("owned storage ID");
+    let mut orphan_bytes=OWNER_PNG.to_vec();orphan_bytes.extend_from_slice(b"OWNED-ORPHAN");
+    document.bin_data_content.push(BinDataContent{id,data:orphan_bytes.into(),extension:"png".into()});
+    document.doc_info.bin_data_list.push(BinData{raw_data:None,attr:0x0101,data_type:BinDataType::Embedding,compression:BinDataCompression::Default,status:BinDataStatus::Success,abs_path:None,rel_path:None,storage_id:id,extension:Some("png".into())});
+    (rhwp::serializer::serialize_hwpx(&document).expect("actual owned pre-existing orphan fixture"),Some(id))
+}
+
+fn resource_delete_first(original_orphan: bool) -> (DocumentCore, Option<u16>) {
+    let (bytes,orphan)=resource_owned_input(original_orphan);
+    let mut core=DocumentCore::from_bytes(&bytes).expect("public load initializes original orphan ownership");
+    let index=core.document().sections[0].paragraphs[0].controls.iter().enumerate().filter_map(|(index,control)|match control {
+        Control::Picture(picture)=>Some((index,picture.image_attr.bin_data_id)),_=>None,
+    }).min_by_key(|(_,position)|*position).expect("actual first picture position").0;
+    core.delete_picture_control_native(0,0,index).expect("public deletion leaves append-only live BinData");
+    // HWPX re-import assigns sorted manifest entries a new 1-based namespace.
+    // This fixture independently knows its only original orphan and surviving picture.
+    let canonical_orphan=orphan.map(|source_id| {
+        let document=core.document();let mut retained=std::collections::BTreeSet::from([source_id]);
+        for control in &document.sections[0].paragraphs[0].controls {if let Control::Picture(p)=control{retained.insert(document.bin_data_content[usize::from(p.image_attr.bin_data_id)-1].id);}}
+        u16::try_from(retained.iter().position(|id|*id==source_id).expect("known original orphan source role")+1).expect("owned small canonical namespace")
+    });
+    (core,canonical_orphan)
+}
+
+fn resource_saved_pair(core: &DocumentCore) -> (Document,Document) {
+    use rhwp::serializer::hwpx::roundtrip::{hwpx_persistence_document,hwpx_persistence_expected_document};
+    let before=format!("{:?}",core.document());
+    let expected=hwpx_persistence_expected_document(core).expect("independent supported resource expectation");
+    let bytes=core.export_hwpx_native().expect("actual edited HWPX serialization");
+    let reloaded=DocumentCore::from_bytes(&bytes).expect("independent actual saved HWPX import");
+    let actual=hwpx_persistence_document(reloaded.document());
+    assert!(before==format!("{:?}",core.document()),"expectation and save preserve the live model");
+    (expected,actual)
+}
+
+#[test]
+fn actual_picture_delete_save_reopen_keeps_independent_resource_and_content_expectation() {
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let (core,_)=resource_delete_first(false);let (expected,actual)=resource_saved_pair(&core);
+    assert!(diff_documents(&expected,&actual).is_empty(),"normal deletion must satisfy the original independent content oracle");
+    assert!(hwpx_persistence_resources_match(&expected,&actual),"retained payload and semantic resource bindings remain exact");
+}
+
+#[test]
+fn actual_original_orphan_survives_unrelated_picture_delete_and_save() {
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let (core,orphan)=resource_delete_first(true);let orphan=orphan.expect("owned original orphan identity");
+    let (expected,actual)=resource_saved_pair(&core);
+    assert!(expected.bin_data_content.iter().any(|c|c.id==orphan));assert!(actual.bin_data_content.iter().any(|c|c.id==orphan));
+    let mut original_bytes=OWNER_PNG.to_vec();original_bytes.extend_from_slice(b"OWNED-ORPHAN");
+    assert!(actual.bin_data_content.iter().find(|c|c.id==orphan).expect("canonical original orphan role").data.load_limited(1024).is_some_and(|bytes|bytes==original_bytes));
+    assert!(diff_documents(&expected,&actual).is_empty());assert!(hwpx_persistence_resources_match(&expected,&actual));
+}
+
+#[test]
+fn actual_reloaded_resource_loss_mutation_and_binding_change_are_not_normalized_away() {
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let (core,orphan)=resource_delete_first(true);let orphan=orphan.expect("owned original orphan identity");
+    let (expected,actual)=resource_saved_pair(&core);
+    assert!(hwpx_persistence_resources_match(&expected,&actual));
+    let referenced=actual.sections[0].paragraphs[0].controls.iter().find_map(|control|match control {Control::Picture(p)=>Some(p.image_attr.bin_data_id),_=>None}).expect("actual retained picture reference");
+    let retained_id=actual.bin_data_content[usize::from(referenced)-1].id;
+    for id in [retained_id,orphan] {
+        let mut changed=actual.clone();let content=changed.bin_data_content.iter_mut().find(|c|c.id==id).expect("owned retained storage");
+        let mut bytes=content.data.load_limited(1024).expect("bounded owned PNG or original-orphan fixture");bytes[0]^=1;content.data=bytes.into();
+        assert!(!hwpx_persistence_resources_match(&expected,&changed),"same-count referenced or original-orphan payload mutation must fail");
+        let mut missing=actual.clone();missing.bin_data_content.retain(|c|c.id!=id);
+        assert!(!hwpx_persistence_resources_match(&expected,&missing),"missing retained or original-orphan payload must fail");
+    }
+    let mut rebound=actual.clone();let wrong=rebound.bin_data_content.iter().position(|c|c.id==orphan).expect("actual original orphan slot") as u16+1;
+    for control in &mut rebound.sections[0].paragraphs[0].controls {if let Control::Picture(p)=control {p.image_attr.bin_data_id=wrong;}}
+    assert!(!hwpx_persistence_resources_match(&expected,&rebound),"equal PNG bytes cannot hide a changed storage-owner binding");
+}
+
+// The canonical detached master-page owner and chart placeholder use actual
+// rhwp types and the public mutable document API, never a model-shaped stub.
+fn resource_detached_master() -> DocumentCore {
+    let mut core=DocumentCore::new_empty();core.create_blank_document_native().expect("actual empty master source");
+    for _ in 0..2 {core.insert_picture_native(0,0,0,&[],OWNER_PNG,11339,5669,1,1,"png","OWNED-MASTER-RESOURCE",Some(8504),Some(28346)).expect("public master fixture picture");}
+    core.create_master_page_native(0,r#"{"applyTo":0}"#).expect("public master creation");
+    let section=&mut core.document_mut().sections[0];
+    let controls=std::mem::take(&mut section.paragraphs[0].controls);
+    let (pictures,others):(Vec<_>,Vec<_>)=controls.into_iter().partition(|c|matches!(c,Control::Picture(_)));
+    assert_eq!(pictures.len(),2);section.paragraphs[0].controls=others;
+    section.section_def.master_pages[0].paragraphs[0].controls=pictures;
+    let canonical=section.section_def.clone();
+    for paragraph in &mut section.paragraphs {for control in &mut paragraph.controls{if let Control::SectionDef(def)=control{**def=canonical.clone();}}}
+    // Materialize a valid owned source model after moving controls through the
+    // public model API. This is fixture construction, never the expected oracle.
+    let before=format!("{:?}",core.document());
+    let bytes=core.export_hwpx_native().expect("actual first master fixture serialization");
+    assert!(before==format!("{:?}",core.document()));
+    let core=DocumentCore::from_bytes(&bytes).expect("actual master fixture source load");
+    assert_eq!(core.document().bin_data_content.len(),2,"the first export must retain both fresh master-owned resources");
+    assert_eq!(core.document().sections[0].section_def.master_pages[0].paragraphs[0].controls.iter().filter(|c|matches!(c,Control::Picture(_))).count(),2);
+    core
+}
+
+#[test]
+fn actual_detached_master_picture_save_reopen_preserves_resource_owners() {
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_detached_master();let(expected,actual)=resource_saved_pair(&core);
+    assert_eq!(expected.bin_data_content.len(),2);assert_eq!(actual.bin_data_content.len(),2);
+    assert!(diff_documents(&expected,&actual).is_empty());assert!(hwpx_persistence_resources_match(&expected,&actual));
+    assert!(!actual.sections[0].section_def.master_pages[0].paragraphs[0].controls.is_empty());
+}
+
+#[test]
+fn actual_detached_master_same_count_resource_rebinding_is_rejected() {
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_detached_master();let(expected,actual)=resource_saved_pair(&core);
+    assert!(hwpx_persistence_resources_match(&expected,&actual),"the negative control requires an admitted unchanged baseline");
+    let mut changed=actual.clone();
+    let mut positions=changed.sections[0].section_def.master_pages[0].paragraphs[0].controls.iter().filter_map(|c|match c{Control::Picture(p)=>Some(p.image_attr.bin_data_id),_=>None});
+    let first=positions.next().expect("actual first master image");let second=positions.next().expect("actual second master image");assert_ne!(first,second);
+    for c in &mut changed.sections[0].section_def.master_pages[0].paragraphs[0].controls {if let Control::Picture(p)=c{if p.image_attr.bin_data_id==first{p.image_attr.bin_data_id=second;break;}}}
+    assert_eq!(changed.bin_data_content.len(),actual.bin_data_content.len());
+    assert!(!hwpx_persistence_resources_match(&expected,&changed));
+}
+
+fn resource_chart_placeholder() -> DocumentCore {
+    let mut core=DocumentCore::new_empty();core.create_blank_document_native().expect("actual chart source");
+    let mut ole=rhwp::model::shape::OleShape::default();ole.chart_id_ref=Some("Chart/chart1.xml".into());ole.bin_data_id=60001;
+    core.document_mut().sections[0].paragraphs[0].controls.push(Control::Shape(Box::new(rhwp::model::shape::ShapeObject::Ole(Box::new(ole)))));
+    core.document_mut().bin_data_content.push(rhwp::model::bin_data::BinDataContent{id:60001,data:b"<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart><c:plotArea/></c:chart></c:chartSpace>".to_vec().into(),extension:"ooxml_chart".into()});
+    core
+}
+
+#[test]
+fn actual_native_chart_placeholder_60001_save_reopen_is_supported() {
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_chart_placeholder();let(expected,actual)=resource_saved_pair(&core);
+    let part=actual.bin_data_content.iter().find(|c|c.id==60001&&c.extension=="ooxml_chart").expect("actual Chart part retained outside the binary manifest");
+    assert!(part.data.load_limited(1024).is_some_and(|bytes|!bytes.is_empty()));
+    assert!(diff_documents(&expected,&actual).is_empty());assert!(hwpx_persistence_resources_match(&expected,&actual));
+}
+
+#[test]
+fn actual_chart_target_and_placeholder_identity_are_not_normalized_away() {
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_chart_placeholder();let(expected,actual)=resource_saved_pair(&core);
+    assert!(hwpx_persistence_resources_match(&expected,&actual),"the chart negative requires an admitted unchanged baseline");
+    let part=actual.bin_data_content.iter().position(|c|c.id==60001&&c.extension=="ooxml_chart").expect("known retained Chart part");
+    let mut missing=actual.clone();missing.bin_data_content.remove(part);assert!(!hwpx_persistence_resources_match(&expected,&missing));
+    let mut modified=actual.clone();let mut bytes=modified.bin_data_content[part].data.load_limited(1024).expect("bounded authored Chart part");bytes[0]^=1;modified.bin_data_content[part].data=bytes.into();assert!(!hwpx_persistence_resources_match(&expected,&modified));
+    for target in [false,true] {
+        let mut changed=actual.clone();let mut changed_one=false;
+        for c in &mut changed.sections[0].paragraphs[0].controls {if let Control::Shape(s)=c {if let rhwp::model::shape::ShapeObject::Ole(o)=s.as_mut(){if target{o.chart_id_ref=Some("Chart/chart2.xml".into());}else{o.bin_data_id=60002;}changed_one=true;}}}
+        assert!(changed_one);assert!(!hwpx_persistence_resources_match(&expected,&changed));
+    }
+}
+
+// Synthetic URI metadata only. No external image is loaded: input pictures have
+// external_path=None and re-import uses the byte-only parser, without a directory.
+fn resource_linked_source(remove_link_picture: bool, zero_link_slot: bool) -> DocumentCore {
+    use rhwp::model::bin_data::{BinDataBytes,BinDataType};
+    let mut core=DocumentCore::new_empty();core.create_blank_document_native().expect("owned linked source");
+    for _ in 0..2 {core.insert_picture_native(0,0,0,&[],OWNER_PNG,11339,5669,1,1,"png","OWNED-LINKED-RESOURCE",Some(8504),Some(28346)).expect("actual authored embedded image");}
+    let document=core.document_mut();
+    let record=&mut document.doc_info.bin_data_list[0];record.data_type=BinDataType::Link;record.attr &= !0x000f;record.raw_data=None;
+    record.abs_path=if zero_link_slot{None}else{Some("https://example.invalid/owned-linked.png".into())};record.rel_path=None;
+    if zero_link_slot {record.storage_id=0;let data=&mut document.bin_data_content[0];data.id=0;data.data=BinDataBytes::Loaded(Vec::new());data.extension.clear();}
+    else {document.bin_data_content.remove(0);}
+    if remove_link_picture {
+        let index=core.document().sections[0].paragraphs[0].controls.iter().position(|c|matches!(c,Control::Picture(p)if p.image_attr.bin_data_id==1)).expect("owned link control");
+        core.delete_picture_control_native(0,0,index).expect("public linked-picture deletion");
+    }
+    core
+}
+
+fn resource_fixture_stage(function:u8,stage:u8,line:u32,values:&[u64]) {
+    assert!(values.len()<=8);
+    eprintln!("OPEN_GEUL_RESOURCE_FIXTURE {}",serde_json::json!({"function":function,"stage":stage,"line":line,"values":values}));
+}
+
+fn resource_byte_only_pair(core:&DocumentCore)->(Document,Document){
+    use rhwp::serializer::hwpx::roundtrip::{hwpx_persistence_document,hwpx_persistence_expected_document};
+    resource_fixture_stage(2,50,line!(),&[]);
+    let expected=hwpx_persistence_expected_document(core).expect("existing linked or empty-slot save must have an independent expectation");
+    resource_fixture_stage(2,51,line!(),&[1]);
+    let bytes=core.export_hwpx_native().expect("actual linked metadata export");
+    resource_fixture_stage(2,55,line!(),&[bytes.len() as u64]);
+    let actual=hwpx_persistence_document(&rhwp::parse_document(&bytes).expect("byte-only linked metadata import"));
+    resource_fixture_stage(2,60,line!(),&[actual.bin_data_content.len() as u64]);
+    (expected,actual)
+}
+
+#[test]
+fn actual_linked_uri_and_embedded_resource_preservation_are_supported(){
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_linked_source(false,false);let(expected,actual)=resource_byte_only_pair(&core);
+    assert!(diff_documents(&expected,&actual).is_empty());assert!(hwpx_persistence_resources_match(&expected,&actual));
+    let link=actual.doc_info.bin_data_list.iter().find(|entry|entry.data_type==rhwp::model::bin_data::BinDataType::Link).expect("retained linked role");
+    assert!(link.abs_path.as_deref()==Some("https://example.invalid/owned-linked.png"));
+    let mut changed=actual.clone();changed.doc_info.bin_data_list.iter_mut().find(|entry|entry.storage_id==link.storage_id).unwrap().abs_path=Some("https://example.invalid/other.png".into());
+    assert!(!hwpx_persistence_resources_match(&expected,&changed),"same-count linked target substitution must fail");
+}
+
+#[test]
+fn actual_unreferenced_link_record_does_not_erase_later_embedded_owner(){
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_linked_source(true,false);let source_bytes=core.document().bin_data_content[0].data.load_limited(1024).expect("owned surviving embedded data");
+    let(expected,actual)=resource_byte_only_pair(&core);
+    assert!(actual.bin_data_content.iter().any(|c|c.data.load_limited(1024).is_some_and(|bytes|bytes==source_bytes)),"an earlier link descriptor cannot erase a later owned resource");
+    assert!(diff_documents(&expected,&actual).is_empty());assert!(hwpx_persistence_resources_match(&expected,&actual));
+}
+
+#[test]
+fn actual_unreferenced_hwp5_empty_link_slot_has_no_deletion_authority_for_ink(){
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_linked_source(true,true);let(expected,actual)=resource_byte_only_pair(&core);
+    assert_eq!(actual.bin_data_content.iter().filter(|c|c.data.load_limited(1024).is_some_and(|bytes|!bytes.is_empty())).count(),1);
+    assert!(diff_documents(&expected,&actual).is_empty());assert!(hwpx_persistence_resources_match(&expected,&actual));
+}
+
+#[test]
+fn actual_referenced_missing_descriptor_and_invalid_zero_storage_are_rejected(){
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_expected_document;
+    let mut core=resource_linked_source(false,true);
+    // A declared Link with an empty URI is a supported missing-image placeholder.
+    // This negative instead has an invalid zero-storage embedded descriptor.
+    core.document_mut().doc_info.bin_data_list[0].data_type=rhwp::model::bin_data::BinDataType::Embedding;
+    core.document_mut().doc_info.bin_data_list[0].attr=(core.document().doc_info.bin_data_list[0].attr&!0x000f)|1;
+    assert!(hwpx_persistence_expected_document(&core).is_none(),"a referenced zero-storage embedded descriptor is invalid");
+    for c in &mut core.document_mut().sections[0].paragraphs[0].controls {if let Control::Picture(p)=c{p.image_attr.bin_data_id=65500;}}
+    assert!(hwpx_persistence_expected_document(&core).is_none(),"a missing source descriptor cannot borrow an unrelated resource");
+}
+
+fn resource_actual_hwp5_link(empty_uri:bool)->DocumentCore {
+    let mut author=resource_linked_source(false,true);
+    if !empty_uri {
+        let document=author.document_mut();document.doc_info.bin_data_list[0].abs_path=Some("https://example.invalid/owned-hwp5-link.png".into());
+        for control in &mut document.sections[0].paragraphs[0].controls {if let Control::Picture(p)=control{if p.image_attr.bin_data_id==1{p.image_attr.external_path=Some("https://example.invalid/owned-hwp5-link.png".into());}}}
+    }
+    let source=&author.document().doc_info.bin_data_list[0];
+    resource_fixture_stage(1,10,line!(),&[u64::from(source.data_type==rhwp::model::bin_data::BinDataType::Link),u64::from(source.attr&0x000f),u64::from(source.storage_id)]);
+    let bytes=author.export_hwp_native().expect("actual owned HWP5 serialization without marker bypass");
+    resource_fixture_stage(1,20,line!(),&[bytes.len() as u64]);
+    let core=DocumentCore::from_bytes(&bytes).expect("independent actual HWP5 load");
+    let parsed=&core.document().doc_info.bin_data_list[0];
+    resource_fixture_stage(1,30,line!(),&[u64::from(parsed.data_type==rhwp::model::bin_data::BinDataType::Link),u64::from(parsed.attr&0x000f),u64::from(parsed.storage_id),u64::from(core.document().bin_data_content[0].id)]);
+    assert!(core.document().doc_info.bin_data_list[0].data_type==rhwp::model::bin_data::BinDataType::Link);
+    assert_eq!(core.document().doc_info.bin_data_list[0].storage_id,0);
+    assert_eq!(core.document().bin_data_content[0].id,0);
+    assert!(core.document().bin_data_content[0].data.load_limited(0).is_some_and(|bytes|bytes.is_empty()));
+    resource_fixture_stage(1,40,line!(),&[1]);
+    core
+}
+
+#[test]
+fn actual_hwp5_zero_storage_link_and_embedded_owner_survive_hwpx_reopen(){
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_actual_hwp5_link(false);let(expected,actual)=resource_byte_only_pair(&core);
+    assert!(diff_documents(&expected,&actual).is_empty());assert!(hwpx_persistence_resources_match(&expected,&actual));
+    assert!(actual.doc_info.bin_data_list.iter().any(|entry|entry.data_type==rhwp::model::bin_data::BinDataType::Link&&entry.abs_path.as_deref()==Some("https://example.invalid/owned-hwp5-link.png")));
+    assert_eq!(actual.bin_data_content.iter().filter(|c|c.data.load_limited(1024).is_some_and(|b|!b.is_empty())).count(),1);
+}
+
+#[test]
+fn actual_hwp5_link_uri_and_owner_substitution_are_rejected(){
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_actual_hwp5_link(false);let(expected,actual)=resource_byte_only_pair(&core);
+    assert!(hwpx_persistence_resources_match(&expected,&actual));
+    let link=actual.doc_info.bin_data_list.iter().find(|entry|entry.data_type==rhwp::model::bin_data::BinDataType::Link).expect("owned actual linked role").storage_id;
+    let embedded=actual.bin_data_content[0].id;assert_ne!(link,embedded);
+    let mut changed=actual.clone();changed.doc_info.bin_data_list.iter_mut().find(|entry|entry.storage_id==link).unwrap().abs_path=Some("https://example.invalid/changed-hwp5-link.png".into());
+    assert!(!hwpx_persistence_resources_match(&expected,&changed));
+    let mut changed=actual.clone();let mut count=0;
+    for control in &mut changed.sections[0].paragraphs[0].controls {if let Control::Picture(p)=control{if p.image_attr.bin_data_id==link{p.image_attr.bin_data_id=embedded;count+=1;}}}
+    assert_eq!(count,1);assert!(!hwpx_persistence_resources_match(&expected,&changed));
+}
+
+#[test]
+fn actual_hwp5_declared_empty_link_is_a_preserved_placeholder(){
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_resources_match;
+    let core=resource_actual_hwp5_link(true);let(expected,actual)=resource_byte_only_pair(&core);
+    assert!(diff_documents(&expected,&actual).is_empty());assert!(hwpx_persistence_resources_match(&expected,&actual));
+    assert!(actual.doc_info.bin_data_list.iter().any(|entry|entry.data_type==rhwp::model::bin_data::BinDataType::Link&&entry.abs_path.as_deref().unwrap_or_default().is_empty()));
+    assert_eq!(actual.sections[0].paragraphs[0].controls.iter().filter(|c|matches!(c,Control::Picture(_))).count(),2);
+}
+
+#[test]
+fn actual_empty_link_manifest_entry_preserves_position_and_rejects_missing_paths() {
+    use rhwp::parser::hwpx::content::parse_content_hpf;
+    let xml = r#"<package><manifest>
+<item id="empty-link" href="" media-type="image/png" isEmbeded="0"/>
+<item id="embedded" href="BinData/image2.png" media-type="image/png" isEmbeded="1"/>
+</manifest></package>"#;
+    let parsed = parse_content_hpf(xml).expect("public package parser");
+    assert_eq!(parsed.bin_data_items.len(), 2);
+    assert_eq!(parsed.bin_data_items[0].id, "empty-link");
+    assert!(!parsed.bin_data_items[0].is_embedded);
+    assert!(parsed.bin_data_items[0].href.is_empty());
+    assert_eq!(parsed.bin_data_items[1].id, "embedded");
+    let rejected = r#"<package><manifest>
+<item id="no-href" media-type="image/png" isEmbeded="0"/>
+<item id="embedded-empty" href="" media-type="image/png" isEmbeded="1"/>
+<item id="default-embedded" href="" media-type="image/png"/>
+<item id="xml-empty" href="" media-type="application/xml" isEmbeded="0"/>
+<item id="" href="" media-type="image/png" isEmbeded="0"/>
+<item id="   " href="" media-type="image/png" isEmbeded="0"/>
+<unrelated id="noise" href="" media-type="image/png" isEmbeded="0"/>
+</manifest></package>"#;
+    assert!(parse_content_hpf(rejected).expect("public rejection parse").bin_data_items.is_empty());
+}
+
+#[test]
+fn actual_zero_embedding_descriptor_cannot_borrow_a_colliding_owned_resource() {
+    use rhwp::model::bin_data::BinDataType;
+    use rhwp::serializer::hwpx::roundtrip::hwpx_persistence_expected_document;
+    let mut core = resource_linked_source(false, true);
+    let document = core.document_mut();
+    document.doc_info.bin_data_list[0].data_type = BinDataType::Embedding;
+    document.doc_info.bin_data_list[0].attr = (document.doc_info.bin_data_list[0].attr & !0x000f) | 1;
+    document.doc_info.bin_data_list[1].storage_id = 1;
+    document.bin_data_content[1].id = 1;
+    assert_eq!(document.doc_info.bin_data_list[0].storage_id, 0);
+    assert!(document.bin_data_content[0].data.is_empty());
+    assert!(!document.bin_data_content[1].data.is_empty());
+    assert!(hwpx_persistence_expected_document(&core).is_none(), "an explicit invalid record cannot borrow a later resource by numeric collision");
 }

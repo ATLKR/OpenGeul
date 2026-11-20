@@ -26,6 +26,18 @@ class NativeBoundary:
         self.drift = self.foreground_changed = False
         self.gui_seen = False
         self.primary = OSError(5, 'Synthetic native diagnostic failure')
+        self.classes = {99: 'SALTMPSUBFRAME'}
+        self.roots = {}
+        self.class_count = 0
+        self.class_mutation = self.kernel_mutation = None
+        self.class_result = None
+        self.engine_pid, self.engine_birth, self.engine_wait = 88, 200, 258
+        self.times_succeeded = 1
+        self.identity_drift = {}
+        self.owner_drift = {}
+        self.thread_drift = {}
+        self.final_root_mutation = None
+        self.final_root_pending = False
 
     def called(self, name):
         if self.clock() >= self.probe.deadline:
@@ -52,18 +64,26 @@ class NativeBoundary:
             output._obj.value = 999
         if self.drift and self.gui_seen and hwnd == 56:
             output._obj.value = 999
-        return 7 if shell else 9
+        if hwnd in self.identity_drift:
+            output._obj.value = self.identity_drift[hwnd]
+        return self.thread_drift.get(hwnd, 7 if shell else 9)
 
     def GetAncestor(self, hwnd, flag):
         self.called('GetAncestor')
         if flag != 2:
             raise AssertionError('Only the existing GA_ROOT declaration is used')
-        return 11 if hwnd in (11, 55, 56) else hwnd
+        result = self.roots.get(hwnd, 11 if hwnd in (11, 55, 56) else hwnd)
+        if self.final_root_pending and hwnd == self.foreground:
+            self.final_root_pending = False
+            if self.final_root_mutation is not None: self.final_root_mutation()
+        return result
 
     def GetWindow(self, hwnd, flag):
         self.called('GetWindow')
         if flag != 4:
             raise AssertionError('Only the existing GW_OWNER declaration is used')
+        if hwnd in self.owner_drift:
+            return self.owner_drift[hwnd]
         if self.owner_mode == 'zero':
             return 0
         if self.owner_mode == 'cycle':
@@ -74,6 +94,7 @@ class NativeBoundary:
 
     def GetForegroundWindow(self):
         self.called('GetForegroundWindow')
+        if self.gui_seen: self.final_root_pending = True
         return 11 if self.foreground_changed and self.gui_seen else self.foreground
 
     def GetGUIThreadInfo(self, thread, output):
@@ -96,6 +117,39 @@ class NativeBoundary:
     def IsChild(self, parent, child):
         self.called('IsChild')
         return int((parent, child) in ((11, 55), (55, 56)))
+
+    def GetClassNameW(self, hwnd, output, size):
+        self.called('GetClassNameW')
+        if not isinstance(output, C.Array) or output._type_ is not C.c_wchar or size != len(output):
+            raise AssertionError('The existing WCHAR buffer declaration is required')
+        self.class_count += 1
+        output.value = self.classes.get(hwnd, 'SYNTHETIC-UNKNOWN')
+        if self.class_mutation is not None:
+            self.class_mutation(hwnd)
+        return len(output.value) if self.class_result is None else self.class_result
+
+    def GetProcessId(self, handle):
+        self.called('GetProcessId')
+        if handle != 9: raise AssertionError('Only the original borrowed engine HANDLE is permitted')
+        if self.kernel_mutation is not None: self.kernel_mutation('GetProcessId')
+        return self.engine_pid
+
+    def GetProcessTimes(self, handle, *outputs):
+        self.called('GetProcessTimes')
+        from suite_window_activation import FileTime
+        if handle != 9 or len(outputs) != 4 or any(type(p._obj) is not FileTime for p in outputs):
+            raise AssertionError('The existing HANDLE and four FILETIME outputs are required')
+        outputs[0]._obj.low = self.engine_birth & 0xffffffff
+        outputs[0]._obj.high = self.engine_birth >> 32
+        if self.kernel_mutation is not None: self.kernel_mutation('GetProcessTimes')
+        return self.times_succeeded
+
+    def WaitForSingleObject(self, handle, timeout):
+        self.called('WaitForSingleObject')
+        if (handle, timeout) != (9, 0):
+            raise AssertionError('Only a zero-duration wait on the original engine HANDLE is permitted')
+        if self.kernel_mutation is not None: self.kernel_mutation('WaitForSingleObject')
+        return self.engine_wait
 
 
 class FocusBoundaryDiagnosticTests(unittest.TestCase):
@@ -121,9 +175,219 @@ class FocusBoundaryDiagnosticTests(unittest.TestCase):
             boundary.native.engine, clock(), probe.deadline), lambda: None)
         native = NativeBoundary(probe, clock)
         for name in ('IsWindow', 'GetWindowThreadProcessId', 'GetAncestor', 'GetWindow',
-                'GetForegroundWindow', 'GetGUIThreadInfo', 'GetPropW', 'IsChild'):
+                'GetForegroundWindow', 'GetGUIThreadInfo', 'GetPropW', 'IsChild', 'GetClassNameW'):
             setattr(probe.user, name, getattr(native, name))
+        probe.kernel = NS(**{name: getattr(native, name) for name in
+            ('GetProcessId', 'GetProcessTimes', 'WaitForSingleObject')})
         return m, probe, boundary, clock, binding, attachment, native
+
+    def source_fixture(self):
+        values = self.fixture()
+        m, p, b, clock, binding, attachment, native = values
+        p.source_selection = p._source_bound_selection = object()
+        p._native_point_profile_version = 4
+        p._native_identity_diagnostic = 0
+        p._source_generation_binding = m._source_generation(binding, b.native.shell, b.native.engine, 9)
+        p._point_source = dict(shellHandle=8, engineHandle=9)
+        return values
+
+    def facts(self, row):
+        self.assertIn('boundaryFacts', row)
+        value = row['boundaryFacts']
+        self.assertEqual(set(value), {'schemaVersion', 'diagnosticOnly', 'acceptanceEligible',
+            'foregroundClassKnown', 'foregroundClassCode', 'rootClassKnown', 'rootClassCode',
+            'sourceMatched', 'engineIdentityKnown', 'engineWaitKnown', 'engineWaitResult'})
+        self.assertTrue(all(type(v) is int for v in value.values()))
+        self.assertEqual((value['schemaVersion'], value['diagnosticOnly'], value['acceptanceEligible']), (1, 1, 0))
+        return value
+
+    def test_boundary_facts_classifies_only_exact_fixed_classes_and_reads_same_hwnd_once(self):
+        names = ('SALFRAME', 'SALTMPSUBFRAME', '#32770', 'ConsoleWindowClass',
+            'Windows.UI.Core.CoreWindow', 'ApplicationFrameWindow', 'Tauri Window')
+        for code, name in enumerate(names, 1):
+            with self.subTest(code=code):
+                _, p, _, _, binding, attachment, native = self.source_fixture()
+                native.classes[99] = name
+                facts = self.facts(self.collect(p, binding, attachment, native))
+                self.assertEqual((facts['foregroundClassKnown'], facts['foregroundClassCode']), (1, code))
+                self.assertEqual((facts['rootClassKnown'], facts['rootClassCode']), (1, code))
+                self.assertEqual(native.class_count, 1)
+                self.assertEqual((facts['sourceMatched'], facts['engineIdentityKnown'],
+                    facts['engineWaitKnown'], facts['engineWaitResult']), (1, 1, 1, 258))
+
+    def test_raw_and_root_class_are_separate_and_hwnd_pid_namespace_is_not_mixed(self):
+        _, p, _, _, binding, attachment, native = self.source_fixture()
+        native.foreground = 91; native.roots[91] = 99
+        native.classes.update({91: '#32770', 99: 'SALFRAME'})
+        facts = self.facts(self.collect(p, binding, attachment, native))
+        self.assertEqual((facts['foregroundClassCode'], facts['rootClassCode'], native.class_count), (3, 1, 2))
+        _, p, _, _, binding, attachment, native = self.source_fixture()
+        native.foreground = 88; native.classes[88] = 'SALTMPSUBFRAME'
+        facts = self.facts(self.collect(p, binding, attachment, native, foreground=88))
+        self.assertEqual((facts['foregroundClassKnown'], facts['rootClassCode'], facts['engineWaitKnown']), (1, 2, 1))
+
+    def test_unknown_or_failed_class_is_never_retained_and_does_not_replace_original_owner_observation(self):
+        for name, result in (('SALFRAME-extra', None), ('salframe', None), ('SYNTHETIC-PRIVATE-WINDOW', None),
+                ('SALFRAME', 0), ('SALFRAME', 1), ('SALFRAME', 64), ('SALFRAME', True)):
+            with self.subTest(caseCode=(name, result) != ('SALFRAME', 0)):
+                _, p, _, _, binding, attachment, native = self.source_fixture()
+                native.classes[99] = name; native.class_result = result
+                row = self.collect(p, binding, attachment, native); facts = self.facts(row)
+                self.assertEqual((facts['foregroundClassKnown'], facts['foregroundClassCode']), (0, 0))
+                self.assertEqual((row['statusCode'], row['bindingAfter'], row['foregroundSame'], row['popupQualified']), (2, 1, 1, 0))
+                self.assertNotIn(name, json.dumps(row))
+
+    def test_class_identity_or_owner_change_leaves_only_unknown_numeric_class(self):
+        for mode in ('pid', 'root', 'owner'):
+            with self.subTest(mode=mode):
+                _, p, _, _, binding, attachment, native = self.source_fixture()
+                def change(hwnd):
+                    if mode == 'pid': native.identity_drift[hwnd] = 999
+                    elif mode == 'root': native.roots[hwnd] = 111
+                    else: native.owner_drift[hwnd] = 0
+                native.class_mutation = change
+                facts = self.facts(self.collect(p, binding, attachment, native))
+                self.assertEqual((facts['foregroundClassKnown'], facts['rootClassKnown']), (0, 0))
+
+    def test_class_join_rejects_stable_new_metadata_that_disagrees_with_the_captured_root_owner(self):
+        for mode in ('pid', 'thread', 'owner', 'raw-root', 'root-during-raw-class'):
+            with self.subTest(mode=mode):
+                _, p, _, _, binding, attachment, native = self.source_fixture()
+                if mode in ('raw-root', 'root-during-raw-class'):
+                    native.foreground = 91; native.roots[91] = 99; native.classes[91] = '#32770'
+                def change():
+                    if mode == 'pid': native.identity_drift[99] = 999
+                    elif mode == 'thread': native.thread_drift[99] = 10
+                    elif mode == 'owner': native.owner_drift[99] = 0
+                    elif mode == 'raw-root': native.roots[91] = 111
+                native.final_root_mutation = change
+                if mode == 'root-during-raw-class':
+                    def during_class(hwnd):
+                        if hwnd == 91: native.identity_drift[99] = 999
+                    native.class_mutation = during_class
+                row = self.collect(p, binding, attachment, native); facts = self.facts(row)
+                self.assertEqual((row['owners'][0]['pid'], row['owners'][0]['threadId'], row['owners'][0]['ownerHwnd']), (88, 9, 100))
+                self.assertEqual((facts['foregroundClassKnown'], facts['foregroundClassCode']), (0, 0))
+                self.assertEqual(facts['rootClassKnown'], int(mode == 'raw-root'))
+                self.assertEqual(facts['engineWaitKnown'], 1)
+
+    def test_engine_wait_zero_and_timeout_are_known_only_after_original_pid_and_birth_match(self):
+        for wait, known in ((0, 1), (258, 1), (0xffffffff, 0), (1, 0), (True, 0)):
+            with self.subTest(waitCode=int(wait)):
+                _, p, _, _, binding, attachment, native = self.source_fixture()
+                native.engine_wait = wait
+                facts = self.facts(self.collect(p, binding, attachment, native))
+                self.assertEqual((facts['engineIdentityKnown'], facts['engineWaitKnown']), (1, known))
+                self.assertEqual(facts['engineWaitResult'], wait if known else 0)
+        for field, value in (('engine_pid', 999), ('engine_pid', True), ('engine_birth', 201), ('times_succeeded', 0)):
+            with self.subTest(field=field):
+                _, p, _, _, binding, attachment, native = self.source_fixture(); setattr(native, field, value)
+                facts = self.facts(self.collect(p, binding, attachment, native))
+                self.assertEqual((facts['engineIdentityKnown'], facts['engineWaitKnown'], facts['engineWaitResult']), (0, 0, 0))
+                self.assertNotIn('WaitForSingleObject', native.calls)
+
+    def test_wrong_or_untyped_source_generation_never_queries_the_retained_engine_handle(self):
+        changes = (lambda p: p._source_generation_binding.update(engineHandleValue=10),
+            lambda p: p._source_generation_binding.update(officePid=True),
+            lambda p: p._source_generation_binding.update(engineCreationTime=201),
+            lambda p: p._source_generation_binding.update(document=12),
+            lambda p: p._source_generation_binding.update(extra=1),
+            lambda p: p._point_source.update(engineHandle=True),
+            lambda p: p._point_source.update(shellHandle=10),
+            lambda p: p._point_source.update(extra=1),
+            lambda p: p._identity_scope.update(officeCreationTime=201),
+            lambda p: setattr(p, '_source_bound_selection', object()),
+            lambda p: setattr(p, 'source_selection', None),
+            lambda p: setattr(p, '_native_point_profile_version', 3),
+            lambda p: p._menu_classification_context[0].update(version=True),
+            lambda p: p._identity_scope.update(startedAt=False))
+        for index, change in enumerate(changes):
+            with self.subTest(case=index):
+                _, p, _, _, binding, attachment, native = self.source_fixture(); change(p)
+                facts = self.facts(self.collect(p, binding, attachment, native))
+                self.assertEqual((facts['sourceMatched'], facts['engineIdentityKnown'], facts['engineWaitKnown']), (0, 0, 0))
+                self.assertFalse(set(native.calls) & {'GetProcessId', 'GetProcessTimes', 'WaitForSingleObject'})
+
+    def test_source_change_at_each_borrowed_handle_return_stops_all_further_process_queries(self):
+        order = ['GetProcessId', 'GetProcessTimes', 'WaitForSingleObject']
+        for stop in order:
+            with self.subTest(apiCode=order.index(stop)):
+                _, p, _, _, binding, attachment, native = self.source_fixture()
+                def change(name):
+                    if name == stop: p._point_source = dict(p._point_source)
+                native.kernel_mutation = change
+                facts = self.facts(self.collect(p, binding, attachment, native))
+                self.assertEqual((facts['sourceMatched'], facts['engineIdentityKnown'], facts['engineWaitKnown']), (0, 0, 0))
+                self.assertEqual([name for name in native.calls if name in order], order[:order.index(stop) + 1])
+
+    def test_new_fact_reads_share_original_budget_pending_and_native_only_boundary(self):
+        _, p, _, _, binding, attachment, native = self.source_fixture()
+        self.facts(self.collect(p, binding, attachment, native)); total = len(native.calls)
+        for index in range(1, total + 1):
+            for mode in ('late', 'pending'):
+                with self.subTest(boundary=index, mode=mode):
+                    _, p, _, _, binding, attachment, native = self.source_fixture()
+                    if mode == 'late': native.expire_at = index
+                    else: native.pending_at = index
+                    row = self.collect(p, binding, attachment, native)
+                    self.assertEqual(len(native.calls), index); self.assertEqual(native.after_deadline, 0)
+                    self.assertEqual((row['statusCode'], row['popupQualified']), (1, 0))
+                    self.assertEqual(self.facts(row)['engineWaitKnown'], 0)
+
+    def test_new_native_fact_failures_and_cancellation_preserve_original_foreground_assertion(self):
+        for target in ('GetClassNameW', 'GetProcessId', 'GetProcessTimes', 'WaitForSingleObject'):
+            for error_type in (OSError, KeyboardInterrupt, SystemExit):
+                with self.subTest(api=target, errorCode=(OSError, KeyboardInterrupt, SystemExit).index(error_type)):
+                    _, p, _, _, _, _, native = self.source_fixture()
+                    primary = error_type()
+                    original_called = native.called
+                    def called(name):
+                        original_called(name)
+                        if name == target: raise primary
+                    native.called = called
+                    calls = []; preserved = {}
+                    def foreground():
+                        calls.append(1)
+                        if len(calls) == 1: return 11
+                        preserved['last'] = p.interop.get('lastCall')
+                        preserved['exception'] = getattr(p, '_last_call_exception', None)
+                        return 99
+                    p.foreground = foreground
+                    marker = dict(apiCode=7); p.interop['lastCall'] = marker
+                    original = RuntimeError(); p._last_call_exception = original
+                    with self.assertRaisesRegex(AssertionError, 'Physical File header requires its original foreground document'):
+                        p._physical_base()
+                    row = p.interop['graphRefresh']['foregroundMismatch']; facts = self.facts(row)
+                    self.assertEqual(row['popupQualified'], 0); self.assertEqual(facts['acceptanceEligible'], 0)
+                    self.assertNotIn('error', facts); self.assertNotIn('exception', facts)
+                    self.assertIs(p._last_call_exception, preserved['exception'])
+                    self.assertIs(p.interop['lastCall'], preserved['last'])
+
+    def test_borrowed_engine_filetime_keeps_high_bits_without_querying_an_image_or_exit_code(self):
+        _, p, _, _, binding, attachment, native = self.source_fixture()
+        birth = (1 << 40) + 200
+        native.engine_birth = birth
+        p._identity_scope['officeCreationTime'] = birth
+        p._menu_classification_context[0]['officeCreationTime'] = birth
+        p._source_generation_binding['engineCreationTime'] = birth
+        facts = self.facts(self.collect(p, binding, attachment, native))
+        self.assertEqual((facts['engineIdentityKnown'], facts['engineWaitKnown'], facts['engineWaitResult']), (1, 1, 258))
+        self.assertEqual([name for name in native.calls if name in ('GetProcessId', 'GetProcessTimes', 'WaitForSingleObject')],
+            ['GetProcessId', 'GetProcessTimes', 'WaitForSingleObject'])
+
+    def test_unsupported_optional_native_apis_stay_unknown_without_losing_original_numeric_owner_result(self):
+        for name in ('GetClassNameW', 'GetProcessId', 'GetProcessTimes', 'WaitForSingleObject'):
+            with self.subTest(api=name):
+                _, p, _, _, binding, attachment, native = self.source_fixture()
+                delattr(p.user if name == 'GetClassNameW' else p.kernel, name)
+                row = self.collect(p, binding, attachment, native); facts = self.facts(row)
+                self.assertEqual((row['statusCode'], row['ownerStopCode'], row['bindingAfter'], row['foregroundSame']), (2, 2, 1, 1))
+                self.assertEqual(row['popupQualified'], 0)
+                if name == 'GetClassNameW':
+                    self.assertEqual((facts['foregroundClassKnown'], facts['rootClassKnown']), (0, 0))
+                    self.assertEqual(facts['engineWaitKnown'], 1)
+                else:self.assertEqual(facts['engineWaitKnown'], 0)
+
 
     def collect(self, probe, binding, attachment, native, foreground=99):
         helper = getattr(probe, '_observe_physical_foreground_mismatch', None)

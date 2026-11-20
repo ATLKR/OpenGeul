@@ -243,7 +243,7 @@ class OwnedNativeMenuTests(unittest.TestCase):
             'SetPhysicalCursorPos','GetPhysicalCursorPos','SetThreadDpiAwarenessContext',
             'GetThreadDpiAwarenessContext','AreDpiAwarenessContextsEqual','SendMessageTimeoutW',
             'GetAsyncKeyState','GetSystemMetrics','SendInput','GetWindow','GetWindowTextW',
-            'GetClassNameW','IsChild','GetPropW','GetMenuBarInfo','GetGUIThreadInfo')})
+            'GetClassNameW','IsChild','GetPropW','GetWindowLongW','GetMenuBarInfo','GetGUIThreadInfo')})
         kernel=NS(**{name:Function(name) for name in ('GetProcessId','WaitForSingleObject','GetProcessTimes','QueryFullProcessImageNameW')})
         dwm=NS(DwmGetWindowAttribute=Function('DwmGetWindowAttribute'))
         class Provider:

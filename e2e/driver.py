@@ -18,6 +18,7 @@ from native_controls import filename_control, explorer_window_binding, explorer_
 from ui_contract import canonical_local_path
 from webview_debug import MachineRegistry, ScopedDebugOverride, debug_arguments
 from native_architecture import verify_executable, verify_host, verify_process, verify_webview2, require_architecture
+from native_clipboard import forward_clipboard_console, forward_clipboard_pageerror
 
 
 def until(check, timeout=25, *, pump=None):
@@ -55,6 +56,7 @@ class Session:
         self.mode=mode; self.folder=folder; folder.mkdir(parents=True,exist_ok=True)
         self.executable=executable; self.proc=None; self.browser=None; self.context=None; self.page=None
         self.messages=[]; self.requests=[]; self.dialogs=[]; self.errors=[]
+        self._clipboard_callback_sink=None
         self.lifecycle=LifecycleObserver(enabled=mode!='native',browser_code={'chromium':1,'firefox':2,'webkit':3}.get(browser,0))
         self.lifecycle.phase(1)
         self.profile=None; self.log=None; self.debug_override=None; self.pw=sync_playwright().start()
@@ -110,8 +112,14 @@ class Session:
             self.lifecycle.phase(5)
             self.context.tracing.start(screenshots=True,snapshots=False,sources=False)
             self.page.set_default_timeout(15000)
-            self.page.on('console',lambda message:self.messages.append({'type':message.type,'text':message.text}))
-            self.page.on('pageerror',lambda error:self.errors.append(str(error)))
+            def clipboard_console_handler(message,bound_page=self.page):
+                self.messages.append({'type':message.type,'text':message.text})
+                forward_clipboard_console(self,bound_page,message)
+            def clipboard_pageerror_handler(error,bound_page=self.page):
+                self.errors.append(str(error))
+                forward_clipboard_pageerror(self,bound_page,error)
+            self.page.on('console',clipboard_console_handler)
+            self.page.on('pageerror',clipboard_pageerror_handler)
             self.page.on('request',lambda request:self.requests.append(request.url))
             def dialog_handler(dialog):
                 self.dialogs.append({'type':dialog.type,'message':dialog.message}); dialog.accept()
@@ -415,7 +423,7 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress'''
             try:
                 for index in range(1, 21):
                     mouse.move(coords=(round(start[0]+(target[0]-start[0])*index/20),
-                                       round(start[1]+(target[1]-start[1])*index/20)), duration=.025)
+                                       round(start[1]+(target[1]-start[1])*index/20)))
             finally:
                 mouse.release(coords=target)
             diagnostic['actualPhysicalDrag'] = True

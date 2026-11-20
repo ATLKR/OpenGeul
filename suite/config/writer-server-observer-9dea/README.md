@@ -254,3 +254,31 @@ retain its bounded metadata, the whole section is unknown. These states do not
 change the original guard, first failure, successful input sequence or cleanup.
 No new clock/native query, point search, activation retry, focus API or deadline
 is introduced. The original preparation55/60 and runtime25/30 remain in force.
+
+
+T16 initial-engine 준비 profile
+-----------------------------
+
+`--initial-engine-profile verified-normal-restart-v1`은 이 전용 진단의
+`--admission-profile owned-peer-before-first-admission-v1`과 함께만 선택한다.
+기본 strict profile은 이 준비 정책을 사용하지 않는다. 정상 677 host/worker와
+현재 정상 ARM 입력은 유지하고, 별도 561 진단 payload는 제품 적격 입력으로
+격상하지 않는다. Windows 검증 전의 후보이며 수용 flags는 모두 false이다.
+
+완전한 image/role/census 검증 뒤에만 최초 엔진 HANDLE 하나를 보유한다.
+원래 생성 Job과 host/controller 세대 안에서 SAME HANDLE의 Wait0/exit81을
+성공 관측한 후보만 최초 peer 이전에 최대 한 번 퇴역할 수 있다. 실제 IMAGE
+API FALSE 경계는 QPC 후검사 전에 얻은 BOOL/길이/last-error 숫자가 모두
+알려진 경우에만 후보가 되며, TRUE invalid length, UNKNOWN, 79, 미보유 후보는
+원 실패를 유지한다. 이전 PID가 원 Job census에서 사라진 뒤 새 완전 census를
+검증한다. 첫 typed peer가 반환되는 즉시 profile을 영구 폐쇄하고, 그 peer의
+검증된 엔진 HANDLE을 Cohort의 original_engine 전용 custody로 넘긴다.
+auxiliary 슬롯이나 history로 엔진을 채택하지 않는다.
+
+`initialEngineReadiness`의 22개 nullable 숫자/bool은 이 최초 준비의 이력이다.
+전경/입력 권한을 부여하지 않으며, hostGenerationMatched/originalJobMatched는
+앞선 검증 성공을 기록한 값이다. retirement는 E0에 관한 관측이고 runtime의
+original engine E1 퇴역 증거를 대신하지 않는다. 모든 미확정 상태는 null이다.
+실제 닫기 성공 전에는 cleanupComplete가 false이며, 불명/실패 close를 다시
+시도하지 않고 원 소유 graph와 pending handle을 보존한다. 원 55/60초 준비와
+25/30초 runtime, 원 Job/peer/입력 guard 및 false acceptance를 유지한다.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from native_clipboard import forward_clipboard_console, forward_clipboard_pageerror
 
 from native_document_policy import (EDITOR_CLASSES, IDENTITY, choose_editor_hwnd,
     require_editor, require_hit, require_focus_map, require_owned_dialog,
@@ -111,9 +112,14 @@ class OwnedDocumentWindows:
             parent.menu('file:new-window')
         page = event.value
         page.set_default_timeout(15000)
-        page.on('console', lambda message: self.session.messages.append(
-            {'type': message.type, 'text': message.text, 'pageKey': key}))
-        page.on('pageerror', lambda error: self.session.errors.append(f'{key}: {error}'))
+        def clipboard_console_handler(message,bound_page=page):
+            self.session.messages.append({'type': message.type, 'text': message.text, 'pageKey': key})
+            forward_clipboard_console(self.session,bound_page,message)
+        def clipboard_pageerror_handler(error,bound_page=page):
+            self.session.errors.append(f'{key}: {error}')
+            forward_clipboard_pageerror(self.session,bound_page,error)
+        page.on('console', clipboard_console_handler)
+        page.on('pageerror', clipboard_pageerror_handler)
         page.on('request', lambda request: self.session.requests.append(request.url))
         # Unexpected web alert/confirm is a failure, never auto-consented.
         page.on('dialog', self._unexpected_web_dialog(key))
@@ -186,8 +192,30 @@ class BoundDocumentWindow:
         record = double_checked_action(self._point_observation,
             lambda observed: mouse.click(coords=tuple(observed['point'])))
         self.owner._record('editor-physical-focus-click', record)
-        until(lambda: require_focus_map(self.key, self.owner._focus_rows()), timeout=10,
-              pump=lambda seconds: self.page.wait_for_timeout(seconds*1000))
+        focus_rows = None
+        focus_read_count = 0
+        focus_evaluation_completed = False
+
+        def focus_ready():
+            nonlocal focus_rows, focus_read_count, focus_evaluation_completed
+            focus_read_count += 1
+            focus_rows = None
+            focus_evaluation_completed = False
+            focus_rows = self.owner._focus_rows()
+            focus_evaluation_completed = True
+            return require_focus_map(self.key, focus_rows)
+
+        try:
+            until(focus_ready, timeout=10,
+                  pump=lambda seconds: self.page.wait_for_timeout(seconds*1000))
+        except BaseException:
+            try:
+                from native_document_policy import focus_map_failure_observation
+                self.owner._record('focus-map-failure-numeric', focus_map_failure_observation(
+                    self.key, focus_rows, focus_read_count, focus_evaluation_completed))
+            except BaseException:
+                pass
+            raise
         return self._ready()
 
     def _ready(self):

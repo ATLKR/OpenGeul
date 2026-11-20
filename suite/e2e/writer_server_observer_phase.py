@@ -208,7 +208,7 @@ def atomic_failure_exit(error, *, profile=None):
                 if type(method) is type(atomic_failure_exit):
                     code=method.__code__
                     if (code.co_filename == str(root/'ascii_message_preparation.py') and
-                            code.co_name == 'now' and code.co_firstlineno == 56):skip_code=code
+                            code.co_name == 'now' and code.co_firstlineno == 57):skip_code=code
         frame=BaseException.__getattribute__(error,'__traceback__')
         deepest=None;seen=0
         while frame is not None and seen<64:
@@ -216,7 +216,7 @@ def atomic_failure_exit(error, *, profile=None):
             if file is not None:
                 line=frame.tb_lineno
                 if type(line) is not int or not 1<=line<=20000:return 3
-                if not (skip_code is not None and frame.tb_frame.f_code is skip_code and file == 2 and line == 60):
+                if not (skip_code is not None and frame.tb_frame.f_code is skip_code and file == 2 and line == 61):
                     deepest=(file,line)
             frame=frame.tb_next;seen+=1
         if frame is not None or deepest is None:return 3

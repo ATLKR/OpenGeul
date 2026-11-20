@@ -21,18 +21,18 @@ REFERENCE = {
     'originalFiles': {
         'src/main.rs': '9df55a4840ea40d2f0f3764a3c3f783f9e7470e936d62bd6598fed44cae10be9',
         'src/mcp_serve.rs': '2d62d3d328b941444688ba8284736f1bc458eb510bbd8c49e5770f3991f8781c',
-        'Cargo.toml': 'f9b27a36d6feb82f66e456489398b6406b48e6ebbe1c8d2dc4c7f960edb5c505',
+        'Cargo.toml': 'b00948c9aa1b8801d8731908d2c80a4e9174ddb9e292729dd0e5cca2166db81e',
     },
     'patchedFiles': {
         'src/main.rs': 'a7562754434ef56be16d91bdc7e61860035debdd1364431ece14ecbd04cbc3d6',
         'src/mcp_serve.rs': 'ef54ab0fb50ad8d4bab71eb9a84d58097f3bbf23734702f2f92e3790c52301f1',
-        'Cargo.toml': '85c77e9e642870b1c12d8d5c20866d5b35eb6d11fdf95fd4beaf3f9399942291',
+        'Cargo.toml': 'b309371ae72e44fa4bb9cffc587ff0986c19b79025a254e3de4bbe4f553b3307',
     },
     # prepare_native_tests writes host newlines after appending the exact four
     # integration targets to the pinned COM-patched manifest.
     'preparedManifestSha256': (
-        '5edcc9bd774878379521fefd9a1e7b509aa7571a478858550ef61b5d5afc186d',
-        '80350e8f958a063ddd13731bb3defd059e3144a252a016bbb699ead22190a12a',
+        '1ff93f936143ecba8dcce0153a8477cbecdf53e52ba3b565a74ec00d6f830698',
+        'f90dceb621acad5ae70a166480de408b118f3602036c84ac9ed8fd28bcbea1d9',
     ),
 }
 

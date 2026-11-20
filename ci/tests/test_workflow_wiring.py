@@ -61,6 +61,29 @@ class WiringTests(unittest.TestCase):
                         self.assertIn("steps.paired-print-admit.outcome == 'success'",s['if'])
                         self.assertTrue(any(p.get('id')=='paired-print-admit' and 'ci/paired_print_evidence.py' in p.get('run','') for p in steps[:i]))
                         continue  # 원래8개 성공 수집과 분리된 exact9 비수용 비교 allowlist는 별도 계약 검사.
+                    if s.get('id')=='paired-failure-evidence':
+                        scope=("always() && !cancelled() && github.repository == 'ATLKR/OpenGeul'"
+                            " && github.event.repository.private == false && github.event_name == 'pull_request'"
+                            " && github.event.pull_request.draft == true"
+                            " && github.event.pull_request.head.repo.full_name == 'ATLKR/OpenGeul'"
+                            " && github.event.pull_request.head.ref == 'work/opengeul-office-arm64'"
+                            " && matrix.os == 'windows-2025' && steps.paired-print.outcome == 'failure'")
+                        self.assertEqual(job,'virtual-print')
+                        self.assertEqual(sum(p.get('id')=='paired-failure-evidence' for p in steps),1)
+                        self.assertEqual(s['uses'],'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02')
+                        self.assertEqual(s['if'],scope+" && steps.paired-failure-admit.outcome == 'success'")
+                        self.assertEqual(s['with'],{
+                            'name':'opengeul-paired-print-failure-numeric-windows-2025-${{ github.run_id }}-${{ github.run_attempt }}',
+                            'path':'paired-print-failure.numeric.json','retention-days':1,
+                            'if-no-files-found':'error','compression-level':9})
+                        self.assertNotIn('continue-on-error',s)
+                        admit=[p for p in steps[:i] if p.get('id')=='paired-failure-admit']
+                        self.assertEqual(len(admit),1)
+                        self.assertEqual(admit[0]['if'],scope)
+                        self.assertEqual(admit[0]['shell'],'pwsh')
+                        self.assertEqual(admit[0]['run'],'python e2e/paired_print_failure_sidecar.py --expected-source $env:GITHUB_SHA --expected-run $env:GITHUB_RUN_ID --expected-attempt $env:GITHUB_RUN_ATTEMPT')
+                        self.assertNotIn('continue-on-error',admit[0])
+                        continue  # 정확한 단일 숫자 파일만 별도 closed validator로 제한한다.
                     if 'native-transport/native-install.json' in s.get('with',{}).get('path',''):
                         self.assertEqual(job,'msix-native-arm64');continue  # exact3 transport 검사기는 별도로 검사한다.
                     self.assertGreater(i,pack[0]);self.assertEqual(s['with']['path'],'bounded-evidence/')

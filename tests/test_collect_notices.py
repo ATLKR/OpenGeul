@@ -15,7 +15,7 @@ class RuntimeNoticeTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.source=self.root/'source';self.source.mkdir()
         self.out=self.root/'notices'
-        self.packages=[{'name':name,'version':'0.156.0','license':'MIT',
+        self.packages=[{'name':name,'version':'0.157.0','license':'MIT',
                         'manifest_path':str(self.source/'Cargo.toml')} for name in ('skia-safe','skia-bindings')]
 
     def test_exact_license_is_packaged_for_both_shipped_crates_with_provenance(self):

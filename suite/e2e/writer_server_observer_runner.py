@@ -478,6 +478,7 @@ def empty_report():
         'msaa': {key: None for key in MSAA_KEYS}, 'snapshot': snapshot, 'pendingRetainedCount': 0, 'caseCount': 1}
     report['captionActivation']={key:None for key in set(_CAPTION_BOOL)|_CAPTION_INT.keys()}
     report['captionHitObservation']={'candidateCount':None,'samples':None}
+    report['initialEngineReadiness']=_initial_empty()
     report['admission']={key:None for key in set(_ADMISSION_BOOL)|_ADMISSION_INT.keys()}
     report['preparation']['started']=False
     return report
@@ -491,6 +492,8 @@ def validate_public_report(report):
     for key, expected in fixed.items():
         if type(report[key]) is not type(expected) or report[key] != expected: raise RunnerFailure(Code.NUMERIC)
     if type(report['captureIncomplete']) is not bool: raise RunnerFailure(Code.NUMERIC)
+    _section(report['initialEngineReadiness'],_INITIAL_BOOL,_INITIAL_INT)
+    _validate_initial(report)
     for key, maximum in (('stageCode', 10), ('failureCode', 13), ('pendingRetainedCount', 512)):
         if not _uint(report[key], maximum): raise RunnerFailure(Code.NUMERIC)
     _section(report['preparation'], _PREP_BOOL, _PREP_INT)
@@ -739,15 +742,214 @@ _CASE_LOCK = threading.Lock()
 _CASE_STARTED = False
 
 
+_INITIAL_BOOL = ('enabled leaseImageVerified imageCallReturned imageCallSucceeded hostGenerationMatched '
+    'originalJobMatched retirementConfirmed retiredHandleClosed retiredCandidateAbsent initialPeerMatched '
+    'leaseTransferred cleanupComplete').split()
+_INITIAL_INT = {'leaseCount':2, 'activeLeaseCount':1, 'restartCount':1, 'retirementOriginCode':2,
+    'imageCallLength':0xffffffff, 'imageCallLastError':0xffffffff, 'retirementWaitResult':0xffffffff,
+    'retirementExitCode':0xffffffff, 'pendingHandleCount':1, 'retirementSampleCount':4096}
+
+
+def _initial_empty():
+    return {key:None for key in set(_INITIAL_BOOL)|_INITIAL_INT.keys()}
+
+
+def _validate_initial(report):
+    a=report['initialEngineReadiness'];p=report['preparation']
+    if a['enabled'] is None:
+        if any(value is not None for value in a.values()):raise RunnerFailure(Code.NUMERIC)
+        return
+    required=('leaseCount','activeLeaseCount','restartCount','retirementOriginCode','pendingHandleCount','retirementSampleCount','cleanupComplete')
+    if (a['enabled'] is not True or report['stageCode']<3 or p['launchResumed'] is not True or
+            any(a[key] is None for key in required) or a['activeLeaseCount']!=a['pendingHandleCount']):
+        raise RunnerFailure(Code.NUMERIC)
+    if (a['leaseCount']==0 and any(a[key] is not None for key in ('leaseImageVerified','initialPeerMatched','leaseTransferred')) or
+            a['leaseCount'] and (a['leaseImageVerified'] is not True or a['hostGenerationMatched'] is not True or a['originalJobMatched'] is not True) or
+            a['activeLeaseCount']>a['leaseCount'] or a['leaseCount']==2 and
+                (a['restartCount']!=1 or a['retiredHandleClosed'] is not True or a['retiredCandidateAbsent'] is not True)):
+        raise RunnerFailure(Code.NUMERIC)
+    image=('imageCallReturned','imageCallSucceeded','imageCallLength','imageCallLastError')
+    if a['imageCallReturned'] is None:
+        if any(a[key] is not None for key in image):raise RunnerFailure(Code.NUMERIC)
+    elif (a['imageCallReturned'] is not True or a['imageCallSucceeded'] is None or a['imageCallLength'] is None or
+            not a['leaseCount'] or a['imageCallSucceeded'] is True and a['imageCallLastError'] is not None):
+        raise RunnerFailure(Code.NUMERIC)
+    if ((a['retirementWaitResult'] is None)!=(a['retirementExitCode'] is None) or
+            a['retirementWaitResult'] is not None and (not a['leaseCount'] or not a['retirementSampleCount'])):
+        raise RunnerFailure(Code.NUMERIC)
+    if a['restartCount']==0:
+        if a['retirementOriginCode']!=0 or any(a[key] is not None for key in ('retirementConfirmed','retiredHandleClosed','retiredCandidateAbsent')):
+            raise RunnerFailure(Code.NUMERIC)
+    elif (a['retirementOriginCode'] not in (1,2) or a['retirementConfirmed'] is not True or
+            (a['retirementWaitResult'],a['retirementExitCode'])!=(0,81) or not a['leaseCount'] or
+            a['retirementOriginCode']==1 and any(a[key] is not None for key in image) or
+            a['retirementOriginCode']==2 and (a['imageCallReturned'] is not True or
+                a['imageCallSucceeded'] is not False or a['imageCallLastError'] is None)):
+        raise RunnerFailure(Code.NUMERIC)
+    if (a['retiredHandleClosed'] is True and a['retirementConfirmed'] is not True or
+            a['retiredCandidateAbsent'] is True and a['retiredHandleClosed'] is not True or
+            a['initialPeerMatched'] is not None and a['initialPeerMatched'] is not True or
+            a['leaseTransferred'] is not None and a['leaseTransferred'] is not True or
+            a['leaseTransferred'] is True and (a['initialPeerMatched'] is not True or p['rolesClassified'] is not True) or
+            (p['cohortAdmitted'] is True or p['runtimeEntered'] is True) and a['leaseTransferred'] is not True or
+            a['cleanupComplete'] is True and a['pendingHandleCount'] or
+            a['cleanupComplete'] is not True and (report['pendingRetainedCount']==0 or
+                report['captureIncomplete'] is not True or p['cleanupComplete'] is True)):
+        raise RunnerFailure(Code.NUMERIC)
+
+
+class _InitialEngineProfile:
+    """One pre-admission engine lease; never an admitted replacement policy."""
+    def __init__(self, runner, launch, budget, record):
+        self.runner,self.api,self.launch,self.budget,self.record=runner,runner.c.api,launch,budget,record
+        self.anchor=(launch.host,launch.job,launch.identity,launch.controller_handle,launch.controller_identity,launch.nonce)
+        self.lease=self.cohort=None
+        self.frozen=False;self.close_attempted=False;self.retired_identity=None
+        record.update({key:None for key in record})
+        record.update(enabled=True,leaseCount=0,activeLeaseCount=0,restartCount=0,retirementOriginCode=0,
+            pendingHandleCount=0,retirementSampleCount=0,cleanupComplete=True)
+    def __repr__(self):return '<Initial engine lease private>'
+    def checked(self, fn, *args):return self.runner._checked(self.budget,fn,*args)
+    def scope(self, *, frozen=False):
+        l=self.launch
+        if (self.frozen and not frozen or (l.host,l.job,l.identity,l.controller_handle,l.controller_identity,l.nonce)!=self.anchor or
+                l.failed is not False or l.uncertain is not False or l.resumed is not True or
+                l.creation_job_membership is not True or l.pre_resume_verified is not True or l.nonce is not self.anchor[5]):
+            raise RunnerFailure(Code.CLASSIFICATION)
+        if (self.checked(self.api.identity,l.host)!=l.identity or self.checked(self.api.state,l.host)!=(258,259) or
+                self.checked(self.api.member,l.host,l.job) is not True or
+                self.checked(self.api.identity,l.controller_handle)!=l.controller_identity or
+                self.checked(self.api.state,l.controller_handle)!=(258,259)):
+            raise RunnerFailure(Code.CLASSIFICATION)
+        self.record.update(hostGenerationMatched=True,originalJobMatched=True)
+    def keep(self, handle):return self.lease is not None and self.cohort is None and handle==self.lease.handle
+    def claim(self, candidate, roles):
+        if candidate is None:return
+        handle,identity=candidate
+        if roles.get('engine')!=identity or not {'host','worker','engine'}<=roles.keys():
+            raise RunnerFailure(Code.CLASSIFICATION)
+        self.scope()
+        if self.checked(self.api.identity,handle)!=identity or self.checked(self.api.member,handle,self.launch.job) is not True:
+            raise RunnerFailure(Code.CLASSIFICATION)
+        if self.lease is not None:
+            if (self.lease.handle,self.lease.pid,self.lease.birth)!=(handle,*identity):raise RunnerFailure(Code.CLASSIFICATION)
+            return
+        if self.record['leaseCount'] >= 2 or (self.record['leaseCount'] and self.record['retiredCandidateAbsent'] is not True):
+            raise RunnerFailure(Code.CLASSIFICATION)
+        from writer_server_observer_cohort import RetainedProcess
+        self.lease=RetainedProcess(handle,*identity);self.close_attempted=False
+        self.record.update(leaseImageVerified=True,leaseCount=self.record['leaseCount']+1,activeLeaseCount=1,pendingHandleCount=1)
+    def waiting_absence(self, pids):
+        if self.frozen:raise RunnerFailure(Code.CLASSIFICATION)
+        if self.retired_identity is not None and self.record['retiredCandidateAbsent'] is not True:
+            if self.record['retirementSampleCount']>=4096:raise RunnerFailure(Code.CLASSIFICATION)
+            self.scope()
+            self.record['retirementSampleCount']+=1
+            if self.retired_identity[0] in pids:return True
+            self.record['retiredCandidateAbsent']=True
+        if self.lease is not None and self.lease.pid not in pids:
+            self.retire(self.lease.handle,(self.lease.pid,self.lease.birth),origin=1)
+            self.record['retiredCandidateAbsent']=True
+            return True
+        return False
+    def retire(self, handle, identity, *, origin, primary=None):
+        from writer_server_observer_prepare_native import PreparationError,PreparationCode
+        lease=self.lease
+        if (self.frozen or self.cohort is not None or lease is None or
+                (handle,*identity)!=(lease.handle,lease.pid,lease.birth) or self.record['restartCount']):
+            raise RunnerFailure(Code.CLASSIFICATION)
+        if origin==2:
+            if type(primary) is not PreparationError or primary.code is not PreparationCode.IMAGE:
+                raise RunnerFailure(Code.CLASSIFICATION)
+            facts=getattr(primary,'_image_query_facts',None)
+            if (type(facts) is not tuple or len(facts)!=3 or type(facts[0]) is not bool or
+                    not _uint(facts[1],0xffffffff) or (facts[2] is not None and not _uint(facts[2],0xffffffff))):
+                raise RunnerFailure(Code.CLASSIFICATION)
+            self.record.update(imageCallReturned=True,imageCallSucceeded=facts[0],imageCallLength=facts[1],imageCallLastError=facts[2])
+            if facts[0] is not False or facts[2] is None:raise RunnerFailure(Code.CLASSIFICATION)
+        for _ in range(4096):
+            if self.record['retirementSampleCount']>=4096:raise RunnerFailure(Code.CLASSIFICATION)
+            self.scope()
+            if (self.checked(self.api.identity,handle)!=identity or
+                    self.checked(self.api.member,handle,self.launch.job) is not True):
+                raise RunnerFailure(Code.CLASSIFICATION)
+            state=self.checked(self.api.state,handle)
+            if type(state) is not tuple or len(state)!=2 or not all(_uint(v,0xffffffff) for v in state):
+                raise RunnerFailure(Code.CLASSIFICATION)
+            self.record.update(retirementWaitResult=state[0],retirementExitCode=state[1])
+            self.record['retirementSampleCount']+=1
+            if state==(0,81):break
+            if origin!=2 or state!=(258,81):raise RunnerFailure(Code.CLASSIFICATION)
+            self.runner._pause(self.budget)
+        else:raise RunnerFailure(Code.CLASSIFICATION)
+        self.record.update(retirementConfirmed=True,retirementOriginCode=origin,restartCount=1)
+        self.close_attempted=True
+        self.record['cleanupComplete']=False
+        self.budget.check(observation=True)
+        closed=self.api.close(handle) is True
+        if closed:
+            self.retired_identity=identity;self.lease=None
+            self.record.update(retiredHandleClosed=True,activeLeaseCount=0,pendingHandleCount=0,cleanupComplete=True)
+        self.budget.check(observation=True)
+        if not closed:
+            self.record['cleanupComplete']=False
+            raise RunnerFailure(Code.CLEANUP)
+    def freeze_peer(self, attachment, roles):
+        from writer_server_observer_prepare_native import OriginalAttachment
+        already=self.frozen;self.frozen=True
+        if already or type(attachment) is not OriginalAttachment or self.lease is None:
+            raise RunnerFailure(Code.ATTACHMENT)
+        lease=self.lease;l=self.launch
+        self.scope(frozen=True)
+        if (roles.get('engine')!=(lease.pid,lease.birth) or attachment.engine_pid!=lease.pid or
+                (attachment._host_handle,attachment._thread_handle,attachment.host_pid,attachment._host_birth)!=
+                (l.host,l.thread,*l.identity) or
+                self.checked(self.api.identity,lease.handle)!=(lease.pid,lease.birth) or
+                self.checked(self.api.member,lease.handle,l.job) is not True or
+                self.checked(self.api.state,lease.handle)!=(258,259)):
+            raise RunnerFailure(Code.ATTACHMENT)
+        self.record['initialPeerMatched']=True
+        return lease
+    def transfer_to(self, cohort):
+        if (not self.frozen or self.record['initialPeerMatched'] is not True or self.lease is None or
+                cohort.initial_engine is not self.lease or cohort._members.get(self.lease.pid) is not self.lease):
+            raise RunnerFailure(Code.ATTACHMENT)
+        self.cohort=cohort;self.record['leaseTransferred']=True
+    def finish_cleanup(self):
+        if self.cohort is not None:
+            closed=self.cohort.initial_engine_closed
+            self.record.update(activeLeaseCount=int(not closed),pendingHandleCount=int(not closed),cleanupComplete=closed)
+        return self.record['cleanupComplete'] is True and self.record['pendingHandleCount']==0
+    def close_untransferred(self):
+        if self.lease is None or self.cohort is not None:return True
+        if self.close_attempted:return False
+        self.close_attempted=True
+        try:
+            self.budget.check(observation=False)
+            closed=self.api.close(self.lease.handle) is True
+            if closed:
+                self.lease=None;self.record.update(activeLeaseCount=0,pendingHandleCount=0)
+            self.budget.check(observation=False)
+            if not closed:self.record['cleanupComplete']=False
+            return closed
+        except BaseException:
+            self.record['cleanupComplete']=False;return False
+
+
 class DedicatedWriterRunner:
     def __init__(self, components, *, read_value=None, pause=time.sleep, nonce=None, console_profile=None,
-                 admission_profile=None, activation_profile=None):
+                 admission_profile=None, activation_profile=None, initial_engine_profile=None):
         if admission_profile is not None and (type(admission_profile) is not str or
                 admission_profile != 'owned-peer-before-first-admission-v1'):
             raise RunnerFailure(Code.INPUT)
         from writer_server_observer_activation import OwnedCaptionPreparation
         if activation_profile is not None and type(activation_profile) is not OwnedCaptionPreparation:
             raise RunnerFailure(Code.INPUT)
+        if initial_engine_profile is not None and (type(initial_engine_profile) is not str or
+                initial_engine_profile!='verified-normal-restart-v1' or admission_profile is None):
+            raise RunnerFailure(Code.INPUT)
+        self.initial_engine_profile=initial_engine_profile
+        self._initial_engine=self._initial_record=None
         self.activation_profile = activation_profile
         self.c = components
         self.read_value = read_value if read_value is not None else lambda key: os.environ.get(key)
@@ -774,6 +976,13 @@ class DedicatedWriterRunner:
 
     def _classify(self, launch, images, budget, prep, previous_roles, image_roots):
         api, handles, roles = self.c.api, [], {}
+        initial=None;candidate=None
+        if self.initial_engine_profile is not None:
+            if self.initial_engine_profile!='verified-normal-restart-v1':raise RunnerFailure(Code.INPUT)
+            if self._initial_engine is None:
+                record=self._initial_record if self._initial_record is not None else _initial_empty()
+                self._initial_engine=_InitialEngineProfile(self,launch,budget,record)
+            initial=self._initial_engine
         console = self.console_profile
         prep['classificationAttemptCount'] += 1
         prep.update(classificationReasonCode=0, classificationCensusCount=None,
@@ -790,11 +999,14 @@ class DedicatedWriterRunner:
             prep['classificationCensusCount'] = len(pids)
             if launch.identity[0] not in pids: reject(2)
             if console is not None and console.auxiliary is not None and console.auxiliary.pid not in pids: reject(11)
+            if initial is not None and initial.waiting_absence(pids):return roles
             for pid in pids:
                 prep.update(classificationCurrentRoleCode=0, classificationHistoricalRoleCode=0,
                     classificationWaitResult=None, classificationExitCode=None, classificationAuxiliaryCurrent=0)
                 handle = launch.host if pid == launch.identity[0] else (
                     console.auxiliary.handle if console is not None and console.auxiliary is not None and console.auxiliary.pid == pid else None)
+                if handle is None and initial is not None and initial.lease is not None and pid==initial.lease.pid:
+                    handle=initial.lease.handle
                 try:
                     if handle is None:
                         budget.check(observation=True)
@@ -816,8 +1028,17 @@ class DedicatedWriterRunner:
                     if type(state) is tuple and len(state) == 2:
                         for key, value in zip(('classificationWaitResult', 'classificationExitCode'), state):
                             if type(value) is int and 0 <= value <= 0xffffffff: prep[key] = value
+                    if initial is not None and initial.keep(handle) and state==(0,81):
+                        initial.retire(handle,identity,origin=1)
+                        return roles
                     if waited != 258: reject(5)
-                    image = Path(self.c.prep.process_image(handle, check=budget.check)).resolve(strict=True)
+                    image_call=self.c.prep.process_image if initial is None else self.c.prep.process_image_observed
+                    try:image = Path(image_call(handle, check=budget.check)).resolve(strict=True)
+                    except Exception as primary:
+                        if initial is None or not initial.keep(handle):raise
+                        try:initial.retire(handle,identity,origin=2,primary=primary)
+                        except Exception:raise primary
+                        return roles
                     role = next((name for name, expected in images.items() if image == expected), None)
                     prep['classificationCurrentRoleCode'] = _ROLE_CODES.get(role, 0)
                     if role is None:
@@ -830,14 +1051,17 @@ class DedicatedWriterRunner:
                     if (role == 'host') != (handle == launch.host): reject(8)
                     if role == 'host' and identity != launch.identity: reject(9)
                     roles[role] = identity
+                    if initial is not None and role=='engine':candidate=(handle,identity)
                     prep['classificationMatchedRoleMask'] |= 1 << (_ROLE_CODES[role] - 1)
                 except Exception as exc:
                     retained = getattr(exc, 'retained_handle', None)
                     if retained is not None and retained not in handles: handles.append(retained)
                     raise
+            if initial is not None:initial.claim(candidate,roles)
             return roles
         finally:
             for handle in handles:
+                if initial is not None and initial.keep(handle):continue
                 if console is not None and console.auxiliary is not None and handle == console.auxiliary.handle: continue
                 try: closed = api.close(handle) is True
                 except Exception: closed = False
@@ -855,6 +1079,7 @@ class DedicatedWriterRunner:
                 return validate_public_report(report)
             _CASE_STARTED = True
         prep = report['preparation']
+        self._initial_record=report['initialEngineReadiness']
         console = self.console_profile
         admission = budget = session = launch = cohort = probe = backend = controller = capture = None
         runtime_entered = backend_transferred = controller_closed = False
@@ -960,9 +1185,15 @@ class DedicatedWriterRunner:
                     if self.admission_profile is None: break
                     # A pre-admission snapshot is current metadata only. The
                     # original typed peer adapter must bind this exact PID.
-                    attachment = self._checked(budget, c.prep.find_attachment_once,
-                        launch, roles['engine'][0], check=budget.check)
-                    if attachment is not None: break
+                    if self._initial_engine is None:
+                        attachment = self._checked(budget, c.prep.find_attachment_once,
+                            launch, roles['engine'][0], check=budget.check)
+                    else:
+                        budget.check(observation=True)
+                        attachment = c.prep.find_attachment_once(launch,roles['engine'][0],check=budget.check)
+                        if attachment is not None:self._initial_engine.freeze_peer(attachment,roles)
+                        budget.check(observation=True)
+                    if attachment is not None:break
                 self._pause(budget)
             else:
                 prep['classificationReasonCode'] = 10
@@ -974,7 +1205,9 @@ class DedicatedWriterRunner:
                 options = dict(auxiliary=console.auxiliary, expected_members=members, require_all_exit=True)
             elif self.admission_profile is not None:
                 options = dict(expected_members=tuple(roles.values()))
+            if self._initial_engine is not None:options['initial_engine']=self._initial_engine.lease
             cohort = _CohortTap(c.Cohort(c.api, launch, expected_worker=roles['worker'], expected_engine=roles['engine'], **options))
+            if self._initial_engine is not None:self._initial_engine.transfer_to(cohort.cohort)
             if console is not None: console.transfer_to(cohort.cohort)
             self._checked(budget, cohort.cohort.admit)
             prep['cohortAdmitted'] = True
@@ -1096,6 +1329,10 @@ class DedicatedWriterRunner:
                     if not self._cleanup_time(budget) or not within:
                         prep['cleanupComplete'] = False
                         prep['cleanupErrorCount'] = (prep['cleanupErrorCount'] or 0)+1
+                if self._initial_engine is not None:
+                    if not self._initial_engine.close_untransferred():
+                        prep['cleanupComplete']=False;self._private_pending.append(self._initial_engine)
+                        self._fault(report,Code.CLEANUP)
                 if controller is not None:
                     within = self._cleanup_time(budget)
                     try: controller_closed = c.api.close(controller) is True
@@ -1145,6 +1382,10 @@ class DedicatedWriterRunner:
                 self._private_pending.append(self.activation_profile)
                 prep['cleanupComplete'] = False
                 self._fault(report, Code.CLEANUP)
+            if self._initial_engine is not None and not self._initial_engine.finish_cleanup():
+                self._private_pending.append(self._initial_engine)
+                if not runtime_entered:prep['cleanupComplete']=False
+                self._fault(report,Code.CLEANUP)
             if self._private_pending:
                 # Hold the whole original ownership graph; never stringify it.
                 _PENDING_CASES.append((self, launch, cohort, probe, capture, backend, controller, tuple(self._private_pending)))
@@ -1247,6 +1488,7 @@ def main(argv=None):
             parser.add_argument('--'+key, required=True)
         parser.add_argument('--admission-profile', choices=('owned-peer-before-first-admission-v1',))
         parser.add_argument('--activation-profile', choices=('one-owned-caption-v1',))
+        parser.add_argument('--initial-engine-profile', choices=('verified-normal-restart-v1',))
         args = parser.parse_args(argv)
         output = Path(args.report)
         values = vars(args)
@@ -1256,7 +1498,7 @@ def main(argv=None):
         components = NativeComponents()
         from writer_server_observer_activation import OwnedCaptionPreparation
         report = DedicatedWriterRunner(components, console_profile=components.ConsoleProfile(),
-            admission_profile=args.admission_profile,
+            admission_profile=args.admission_profile, initial_engine_profile=args.initial_engine_profile,
             activation_profile=OwnedCaptionPreparation() if args.activation_profile is not None else None).execute(inputs)
     except Exception:
         report['failureCode'] = int(Code.INPUT)
