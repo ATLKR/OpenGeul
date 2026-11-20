@@ -1213,7 +1213,14 @@ class NativeMenuProbe(NativeControlProbe):
         for role,original in self._identity_refs.items():
             same=self._same(element,original);same_python_object=element is original
             rows.append(dict(roleCode=IDENTITY_ROLES.index(role)+1,areSame=same,samePythonObject=same_python_object))
-            assert not same_python_object or same, 'Retained native menu self comparison failed'
+            try:assert not same_python_object or same, 'Retained native menu self comparison failed'
+            except AssertionError:
+                try:
+                    if getattr(self,'_diagnostic_sink',None) is None:
+                        from native_menu_self_compare_observer import collect
+                        self.interop['retainedSelfNativeObservation']=collect(self,element,original)
+                except BaseException:pass
+                raise
             if same:matches.append(role)
         assert len(matches)==1 and matches[0]!='contrast-edit', 'Native menu identity is unknown or ambiguous'
         return matches[0]

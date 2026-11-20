@@ -1,4 +1,4 @@
-name: OpenGeul VS bundled Clang static qualification diagnostic
+name: OpenGeul focused closed unit diagnostic
 'on':
   push:
     branches: [work/opengeul-vs-clang-witness-3527]
@@ -26,49 +26,232 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
-      - name: Qualify one fresh x64 compiler pair with positive and negative compilation
+      - name: Run only the fifty focused synthetic unit cases
         id: observe
         shell: pwsh
         timeout-minutes: 2
         run: |
           $ErrorActionPreference = 'Stop'
-          $head = (& git rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Exact diagnostic source commit is required.' }
-          $base = Join-Path $env:RUNNER_TEMP "opengeul-vs-clang-witness-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          $private = Join-Path $base 'private'
-          $report = Join-Path $base 'public/report.numeric.json'
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $hostPython = (Get-Command python -ErrorAction Stop).Source
-          if (Test-Path -LiteralPath $base) { throw 'Preserve existing diagnostic evidence; a fresh run directory is required.' }
-          New-Item -ItemType Directory -Path $base -ErrorAction Stop | Out-Null
-          $intent = Join-Path $base 'source-intent.private.json'
-          $pins = [ordered]@{
-            'ascii_message_observer.cpp' = [ordered]@{ bytes = 27329; sha256 = '0da709eaf99f8c88e292706dc920131e6145769a89e5f07971f3029fd5d35c5e' }
-            'ascii_message_protocol.h' = [ordered]@{ bytes = 4685; sha256 = '98014837e245c09e2fe6e164e0edd8700b0711bd06fc8983c29e653b0b06f4c3' }
-            'bounded_plugin_origin_windows.h' = [ordered]@{ bytes = 2347; sha256 = 'b6613b6990b1f8be36e974b9f0e39d6263935026f55814cc19241ddfe01c71f5' }
-            'bounded_stack_windows.h' = [ordered]@{ bytes = 3019; sha256 = '181826b4cc01bf2557d464425899799b73ef4d89f473bb9f43eaa44d6e1588c4' }
-          }
-          [IO.File]::WriteAllText($intent, ($pins | ConvertTo-Json -Depth 3 -Compress), [Text.UTF8Encoding]::new($false))
-          # The checkout stays protected; only the original observer sources are compiled off-tree.
-          # This single call owns fresh discovery, both versions and both compilations under work27/absolute30.
-          python -B suite/e2e/vs_bundled_clang_probe.py --qualify-compiler --suite ([IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)) --windows $env:SystemRoot --vswhere $vswhere --host-python $hostPython --expected-suite-source-commit $env:GITHUB_SHA --output $private --report $report --source-pins $intent
-          if ($LASTEXITCODE -ne 0) { throw 'Compiler qualification did not produce a closed numeric report.' }
-      - name: Validate the one closed report
+          try {
+            $head = (& git rev-parse HEAD 2>$null).Trim()
+            if ($LASTEXITCODE -ne 0 -or $head -cnotmatch '^[0-9a-f]{40}$' -or $head -cne $env:GITHUB_SHA) { exit 1 }
+            $base = Join-Path $env:RUNNER_TEMP "opengeul-focused-unit-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            if (Test-Path -LiteralPath $base) { exit 1 }
+            $public = Join-Path $base 'public'
+            New-Item -ItemType Directory -Path $public -ErrorAction Stop | Out-Null
+            $report = Join-Path $public 'report.numeric.json'
+            $root = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+            $hostPython = (Get-Command python -ErrorAction Stop).Source
+            $OutputEncoding = [Text.UTF8Encoding]::new($false)
+            $code = @'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          
+          CODE = "import ast\nimport importlib\nimport json\nimport os\nfrom pathlib import Path\nimport sys\nimport types\nimport unittest\n\nMODULES = ('test_focused_menu_boundary_observer',\n           'test_native_menu_self_compare_observer',\n           'test_vs_bundled_clang_suspended')\nSOURCES = tuple('suite/tests/' + name + '.py' for name in MODULES) + (\n    'suite/tests/test_owned_native_menu.py',\n    'suite/tests/test_native_menu_msaa_hit.py',\n    'suite/e2e/owned_native_menu.py',\n    'suite/e2e/native_menu_msaa_hit.py',\n    'suite/e2e/vs_bundled_clang_version.py',\n    'suite/e2e/vs_bundled_clang_probe.py')\nEXPECTED = 50\nKINDS = (AssertionError, TypeError, ValueError, RuntimeError, OSError,\n         PermissionError, FileNotFoundError, TimeoutError, AttributeError,\n         ImportError, ModuleNotFoundError, KeyError, IndexError,\n         KeyboardInterrupt, SystemExit, OverflowError, NotImplementedError)\n\nclass Discard:\n    def write(self, value):\n        return len(value) if type(value) is str else 0\n    def flush(self):\n        pass\n\ndef location(error, sources):\n    kind = next((i for i, value in enumerate(KINDS, 1)\n                 if type(error) is tuple and len(error) == 3 and error[0] is value), 0)\n    tb = error[2] if type(error) is tuple and len(error) == 3 else None\n    source = function = line = 0\n    count = 0\n    while type(tb) is types.TracebackType and count < 64:\n        code = tb.tb_frame.f_code\n        item = sources.get(os.path.normcase(code.co_filename))\n        if item is not None and 1 <= tb.tb_lineno <= 20000:\n            source, functions = item\n            function = functions.get((code.co_name, code.co_firstlineno), 0)\n            line = tb.tb_lineno\n        tb = tb.tb_next\n        count += 1\n    return kind, source, function, line, type(tb) is types.TracebackType\n\nclass ClosedResult(unittest.TestResult):\n    def __init__(self, sources, subjects):\n        super().__init__()\n        self.sources, self.subjects = sources, subjects\n        self.module = 0\n        self.counts = [0, 0, 0, 0, 0]\n        self.rows = []\n    def event(self, event, test, error=None):\n        self.counts[event - 1] += 1\n        if len(self.rows) < 64:\n            kind, source, function, line, truncated = location(error, self.sources)\n            self.rows.append(dict(moduleCode=self.module,\n                                  testOrdinal=self.subjects.get(id(test), 0),\n                                  eventCode=event, exceptionCode=kind,\n                                  sourceCode=source, functionCode=function,\n                                  line=line, traceTruncated=truncated))\n    def addFailure(self, test, error): self.event(1, test, error)\n    def addError(self, test, error): self.event(2, test, error)\n    def addSkip(self, test, reason): self.event(3, test)\n    def addExpectedFailure(self, test, error): self.event(4, test, error)\n    def addUnexpectedSuccess(self, test): self.event(5, test)\n    def addDuration(self, test, elapsed): pass\n    def addSubTest(self, test, subtest, error):\n        if error is not None:\n            self.event(1 if issubclass(error[0], test.failureException) else 2, test, error)\n    def wasSuccessful(self):\n        return not (self.counts[0] or self.counts[1] or self.counts[4])\n\ndef source_map(root):\n    result = {}\n    for ordinal, name in enumerate(SOURCES, 1):\n        path = (root / name).resolve(strict=True)\n        tree = ast.parse(path.read_text(encoding='utf-8'))\n        definitions = sorted((min([node.lineno] + [d.lineno for d in node.decorator_list]),\n                              node.name)\n                             for node in ast.walk(tree)\n                             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))\n        if len(definitions) > 512:\n            raise ValueError\n        result[os.path.normcase(str(path))] = (\n            ordinal, {(name, line): i for i, (line, name) in enumerate(definitions, 1)})\n    return result\n\ndef flatten(suite):\n    for item in suite:\n        if isinstance(item, unittest.TestSuite):\n            yield from flatten(item)\n        elif isinstance(item, unittest.TestCase):\n            yield item\n        else:\n            raise ValueError\n\ndef run(root, report, head):\n    packet = dict(schemaVersion=1, diagnosticOnly=True, acceptanceEligible=False,\n                  inputCount=0, sourceWords=[int(head[i:i + 8], 16) for i in range(0, 40, 8)],\n                  expectedCount=EXPECTED, moduleCount=len(MODULES), collectedCount=None,\n                  ranCount=0, counts=[0, 0, 0, 0, 0], rows=[], rowsTruncated=False,\n                  stageCode=1, runnerFailureCode=0, hostFailureCode=0, success=False)\n    result = None\n    sources = {}\n    current = 0\n    try:\n        sources = source_map(root)\n        sys.path[:0] = [str(root / 'suite/tests'), str(root / 'suite/e2e'), str(root)]\n        suites = []\n        packet['stageCode'] = 2\n        for current, name in enumerate(MODULES, 1):\n            module = importlib.import_module(name)\n            if 'load_tests' in vars(module):\n                raise ValueError\n            suites.append(unittest.TestLoader().loadTestsFromModule(module))\n        packet['stageCode'] = 3\n        subjects = list(flatten(unittest.TestSuite(suites)))\n        packet['collectedCount'] = len(subjects)\n        if len(subjects) != EXPECTED:\n            packet['runnerFailureCode'] = 3\n        else:\n            result = ClosedResult(sources, {id(test): i for i, test in enumerate(subjects, 1)})\n            packet['stageCode'] = 4\n            for module, suite in enumerate(suites, 1):\n                result.module = module\n                suite.run(result)\n            packet['stageCode'] = 5\n    except BaseException:\n        packet['runnerFailureCode'] = 2 if packet['stageCode'] == 2 else 4\n        if result is None:\n            result = ClosedResult(sources, {})\n            result.module = current\n        result.event(2, None, sys.exc_info())\n    if result is not None:\n        packet['ranCount'], packet['counts'], packet['rows'] = result.testsRun, result.counts, result.rows\n        packet['rowsTruncated'] = sum(result.counts) > len(result.rows)\n    packet['success'] = (packet['stageCode'] == 5 and packet['runnerFailureCode'] == 0\n                         and packet['collectedCount'] == EXPECTED and packet['ranCount'] == EXPECTED\n                         and packet['counts'] == [0, 0, 0, 0, 0])\n    with report.open('x', encoding='utf-8', newline='\\n') as stream:\n        stream.write(json.dumps(packet, sort_keys=True, separators=(',', ':')) + '\\n')\n    return 0 if packet['success'] else 1\n\nif __name__ == '__main__':\n    sys.stdout = sys.stderr = Discard()\n    try:\n        report, head, root = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]).resolve(strict=True)\n        if len(head) != 40 or any(c not in '0123456789abcdef' for c in head):\n            raise ValueError\n        code = run(root, report, head)\n    except BaseException:\n        code = 1\n    raise SystemExit(code)\n"
+          
+          def fallback(head, code):
+              return dict(schemaVersion=1, diagnosticOnly=True, acceptanceEligible=False,
+                          inputCount=0, sourceWords=[int(head[i:i+8], 16) for i in range(0, 40, 8)],
+                          expectedCount=50, moduleCount=3, collectedCount=None, ranCount=None,
+                          counts=None, rows=[], rowsTruncated=False, stageCode=1,
+                          runnerFailureCode=5 if code == 1 else 6 if code == 2 else 7,
+                          hostFailureCode=code, success=False)
+          
+          def main():
+              report, head, root = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]).resolve(strict=True)
+              if len(head) != 40 or any(c not in '0123456789abcdef' for c in head):
+                  return 1
+              private = report.parent.parent / 'private'
+              fallback_temporary = private / 'fallback-tmp'
+              private_profile = private / 'profile'
+              fallback_temporary.mkdir(parents=True, exist_ok=True)
+              private_profile.mkdir(parents=True, exist_ok=True)
+              finite = dict(PATH=str(Path(sys.executable).parent),
+                            APPDATA=str(private_profile / 'Roaming'), LOCALAPPDATA=str(private_profile / 'Local'),
+                            PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1')
+              for key in ('TEMP', 'TMP'):
+                  value = os.environ.get(key)
+                  finite[key] = value if type(value) is str and value else str(fallback_temporary)
+              for key in ('SystemRoot', 'WINDIR', 'SystemDrive'):
+                  value = os.environ.get(key)
+                  if type(value) is str:
+                      finite[key] = value
+              process = None
+              host = 0
+              code = 1
+              try:
+                  process = subprocess.Popen([sys.executable, '-I', '-B', '-c', CODE,
+                                              str(report), head, str(root)], cwd=root, env=finite,
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL)
+                  try:
+                      code = process.wait(timeout=90)
+                      if code not in (0, 1):
+                          host = 3
+                  except subprocess.TimeoutExpired:
+                      host = 1
+                      process.kill()
+                      process.wait(timeout=5)
+              except BaseException:
+                  host = 2 if process is None else 3
+              finally:
+                  if process is not None and process.poll() is None:
+                      try:
+                          process.kill()
+                          process.wait(timeout=5)
+                      except BaseException:
+                          host = 3
+              if not report.is_file():
+                  host = host or 3
+              if host:
+                  # Preserve an existing child receipt, including its original failure.
+                  # The job still fails if the independent launcher timed out or failed.
+                  if not report.exists():
+                      packet = fallback(head, host)
+                      with report.open('x', encoding='utf-8', newline='\n') as stream:
+                          stream.write(json.dumps(packet, sort_keys=True, separators=(',', ':')) + '\n')
+                  return 1
+              return 0 if code == 0 else 1
+          
+          if __name__ == '__main__':
+              try:
+                  code = main()
+              except BaseException:
+                  code = 1
+              raise SystemExit(code)
+          '@
+            $code | & $hostPython -I -B - $report $head $root
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          } catch { exit 1 }
+      - name: Validate the one closed unit report
         id: validate
-        if: success() && steps.observe.outcome == 'success'
+        if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $base = Join-Path $env:RUNNER_TEMP "opengeul-vs-clang-witness-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          $report = Join-Path $base 'public/report.numeric.json'
-          python -B suite/e2e/vs_bundled_clang_probe.py --validate-qualification-report $report
-          if ($LASTEXITCODE -ne 0) { throw 'The compiler qualification report is absent or invalid.' }
+          try {
+            $head = (& git rev-parse HEAD 2>$null).Trim()
+            if ($LASTEXITCODE -ne 0 -or $head -cnotmatch '^[0-9a-f]{40}$' -or $head -cne $env:GITHUB_SHA) { exit 1 }
+            $report = Join-Path $env:RUNNER_TEMP "opengeul-focused-unit-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT/public/report.numeric.json"
+            $hostPython = (Get-Command python -ErrorAction Stop).Source
+            $OutputEncoding = [Text.UTF8Encoding]::new($false)
+            $code = @'
+          import json
+          from pathlib import Path
+          import sys
+          
+          KEYS = {'schemaVersion', 'diagnosticOnly', 'acceptanceEligible', 'inputCount',
+                  'sourceWords', 'expectedCount', 'moduleCount', 'collectedCount', 'ranCount',
+                  'counts', 'rows', 'rowsTruncated', 'stageCode', 'runnerFailureCode', 'hostFailureCode', 'success'}
+          ROW_KEYS = {'moduleCode', 'testOrdinal', 'eventCode', 'exceptionCode',
+                      'sourceCode', 'functionCode', 'line', 'traceTruncated'}
+          
+          def pairs(items):
+              result = {}
+              for key, value in items:
+                  if key in result:
+                      raise ValueError
+                  result[key] = value
+              return result
+          
+          def integer(value, low, high):
+              return type(value) is int and low <= value <= high
+          
+          def validate(value, head):
+              if type(value) is not dict or set(value) != KEYS:
+                  raise ValueError
+              if (value['schemaVersion'] != 1 or type(value['schemaVersion']) is not int
+                      or value['diagnosticOnly'] is not True or value['acceptanceEligible'] is not False
+                      or type(value['inputCount']) is not int or value['inputCount'] != 0
+                      or type(value['expectedCount']) is not int or value['expectedCount'] != 50
+                      or type(value['moduleCount']) is not int or value['moduleCount'] != 3):
+                  raise ValueError
+              words = value['sourceWords']
+              if (type(words) is not list or len(words) != 5
+                      or not all(integer(v, 0, 0xffffffff) for v in words)
+                      or words != [int(head[i:i + 8], 16) for i in range(0, 40, 8)]):
+                  raise ValueError
+              count = value['collectedCount']
+              if count is not None and not integer(count, 0, 4096):
+                  raise ValueError
+              if (not integer(value['stageCode'], 1, 5)
+                      or not integer(value['runnerFailureCode'], 0, 7)
+                      or not integer(value['hostFailureCode'], 0, 3)
+                      or type(value['rowsTruncated']) is not bool or type(value['success']) is not bool):
+                  raise ValueError
+              unknown = value['hostFailureCode'] != 0 and value['ranCount'] is None and value['counts'] is None
+              if unknown:
+                  if (count is not None or value['rows'] != [] or value['rowsTruncated'] is not False
+                          or value['stageCode'] != 1 or value['runnerFailureCode'] not in (5, 6, 7)
+                          or value['success'] is not False):
+                      raise ValueError
+                  return value
+              if (not integer(value['ranCount'], 0, 4096)
+                      or (count is not None and value['ranCount'] > count)
+                      or not integer(value['stageCode'], 1, 5)
+                      or not integer(value['runnerFailureCode'], 0, 7)
+                      or not integer(value['hostFailureCode'], 0, 3)
+                      or type(value['rowsTruncated']) is not bool or type(value['success']) is not bool):
+                  raise ValueError
+              counts = value['counts']
+              if (type(counts) is not list or len(counts) != 5
+                      or not all(integer(v, 0, 4096) for v in counts) or sum(counts) > 4096):
+                  raise ValueError
+              rows = value['rows']
+              if (type(rows) is not list or len(rows) != min(sum(counts), 64)
+                      or value['rowsTruncated'] != (sum(counts) > 64)):
+                  raise ValueError
+              observed = [0, 0, 0, 0, 0]
+              for row in rows:
+                  if type(row) is not dict or set(row) != ROW_KEYS:
+                      raise ValueError
+                  caps = {'moduleCode': (0, 3), 'testOrdinal': (0, 4096), 'eventCode': (1, 5),
+                          'exceptionCode': (0, 17), 'sourceCode': (0, 9),
+                          'functionCode': (0, 512), 'line': (0, 20000)}
+                  if any(not integer(row[k], *v) for k, v in caps.items()) or type(row['traceTruncated']) is not bool:
+                      raise ValueError
+                  if row['sourceCode'] == 0 and (row['functionCode'] != 0 or row['line'] != 0):
+                      raise ValueError
+                  observed[row['eventCode'] - 1] += 1
+              if any(a > b for a, b in zip(observed, counts)):
+                  raise ValueError
+              if (value['runnerFailureCode'] == 0 and value['stageCode'] != 5
+                      or value['stageCode'] == 5 and count != 50
+                      or value['stageCode'] < 4 and value['ranCount'] != 0
+                      or value['runnerFailureCode'] == 3 and (value['stageCode'] != 3 or count in (None, 50))):
+                  raise ValueError
+              passed = (value['stageCode'] == 5 and value['runnerFailureCode'] == 0
+                        and value['hostFailureCode'] == 0
+                        and count == 50 and value['ranCount'] == 50 and counts == [0, 0, 0, 0, 0])
+              if value['success'] != passed:
+                  raise ValueError
+              return value
+          
+          if __name__ == '__main__':
+              try:
+                  path, head = Path(sys.argv[1]), sys.argv[2]
+                  if (path.is_symlink() or not path.is_file() or path.stat().st_size > 65536
+                          or len(head) != 40 or any(c not in '0123456789abcdef' for c in head)):
+                      raise ValueError
+                  raw = path.read_text(encoding='utf-8')
+                  value = json.loads(raw, object_pairs_hook=pairs,
+                                     parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+                  validate(value, head)
+              except BaseException:
+                  raise SystemExit(1)
+          '@
+            $code | & $hostPython -I -B - $report $head
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          } catch { exit 1 }
       - name: Retain only the validated numeric report
-        if: success() && steps.validate.outcome == 'success'
+        if: always() && steps.validate.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: opengeul-vs-clang-qualification-x64-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/opengeul-vs-clang-witness-${{ github.run_id }}-${{ github.run_attempt }}/public/report.numeric.json
+          name: opengeul-focused-unit-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/opengeul-focused-unit-${{ github.run_id }}-${{ github.run_attempt }}/public/report.numeric.json
           retention-days: 1
           if-no-files-found: error
           compression-level: 9

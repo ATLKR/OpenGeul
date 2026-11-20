@@ -251,7 +251,7 @@ class NegativeCompileTests(unittest.TestCase):
         self.assertTrue(callable(getattr(h,'compile_query',None)), 'negative compile boundary missing')
         self.assertTrue(callable(getattr(h,'validate_compile_result',None)), 'numeric compile validator missing')
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name);self.source=self.root/'negative.cpp';self.obj=self.root/'negative.obj'
+        self.root=Path(self.temp.name).resolve(strict=True);self.source=self.root/'negative.cpp';self.obj=self.root/'negative.obj'
         self.source.write_bytes(h.NEGATIVE_SOURCE)
         self.tool=self.root/'VS/VC/Tools/Llvm/x64/bin/clang-cl.exe';self.tool.parent.mkdir(parents=True)
         raw=bytearray(4096);raw[:2]=b'MZ';struct.pack_into('<I',raw,60,64);raw[64:68]=b'PE\0\0'

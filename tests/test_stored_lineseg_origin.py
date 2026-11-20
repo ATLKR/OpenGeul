@@ -19,11 +19,15 @@ class StoredLineSegOriginPolicyTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.source = Path(self.temp.name)
         self.before = {}; self.after = {}
-        for name, (old, new) in origin.REPLACEMENTS.items():
-            raw = ('// isolated policy fixture\n'+old+'\n').encode()
+        for name, changes in origin.REPLACEMENTS.items():
+            pairs = (changes,) if isinstance(changes[0], str) else changes
+            raw = ('// isolated policy fixture\n'+'\n'.join(old for old, _ in pairs)+'\n').encode()
             path = self.source/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(raw)
             self.before[name] = sha(raw)
-            self.after[name] = sha(raw.replace(old.encode(),new.encode()))
+            value = raw
+            for old, new in pairs:
+                value = value.replace(old.encode(), new.encode())
+            self.after[name] = sha(value)
         self.addCleanup(patch.stopall)
         patch.object(origin,'INPUT_SOURCE_SHA256',self.before).start()
         patch.object(origin,'OUTPUT_SOURCE_SHA256',self.after).start()
@@ -40,8 +44,9 @@ class StoredLineSegOriginPolicyTests(unittest.TestCase):
         body=(ROOT/'scripts/build-msix.ps1').read_text()
         self.assertIn('cargo test --locked --target $target --test opengeul_stored_lineseg_origin --features native-skia',body)
 
-    def test_exact_four_source_proof_and_owned_helper(self):
-        self.assertEqual(len(origin.SOURCE_FILES), 4)
+    def test_exact_origin_and_fresh_source_proof_and_owned_helper(self):
+        self.assertEqual(len(origin.SOURCE_FILES), 5)
+        self.assertIn('third_party/rhwp/src/renderer/composer/line_breaking.rs', origin.SOURCE_FILES)
         proof,helpers=self.applied()
         self.assertEqual(set(proof), {'beforeSha256','afterSha256','helperSha256'})
         self.assertEqual(proof['beforeSha256'],self.before)
@@ -60,8 +65,22 @@ class StoredLineSegOriginPolicyTests(unittest.TestCase):
         for name in origin.SOURCE_FILES[:-1]:self.assertEqual(sha((self.source/name).read_bytes()),self.before[name])
 
     def test_duplicate_patch_anchor_is_not_admitted(self):
-        name=origin.SOURCE_FILES[0];old,_=origin.REPLACEMENTS[name];raw=(old+old).encode();(self.source/name).write_bytes(raw);self.before[name]=sha(raw)
+        name=origin.SOURCE_FILES[0];changes=origin.REPLACEMENTS[name];old,_=changes if isinstance(changes[0],str) else changes[0];raw=(old+old).encode();(self.source/name).write_bytes(raw);self.before[name]=sha(raw)
         with self.assertRaises(ValueError):origin.apply(self.source)
+
+    def test_fresh_row_late_anchor_drift_rejects_all_writes(self):
+        name = 'third_party/rhwp/src/renderer/composer/line_breaking.rs'
+        self.assertIn(name, origin.REPLACEMENTS)
+        changes = origin.REPLACEMENTS[name]
+        self.assertEqual(len(changes), 3)
+        old, _ = changes[-1]
+        raw = (self.source/name).read_bytes().replace(old.encode(), b'// changed fresh producer anchor')
+        (self.source/name).write_bytes(raw)
+        self.before[name] = sha(raw)
+        with self.assertRaises(ValueError):
+            origin.apply(self.source)
+        for other in origin.SOURCE_FILES[:-1]:
+            self.assertEqual(sha((self.source/other).read_bytes()), self.before[other])
 
     def test_reapplication_cannot_refresh_or_repair_a_prior_proof(self):
         self.applied()
