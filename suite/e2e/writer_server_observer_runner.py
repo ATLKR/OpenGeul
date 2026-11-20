@@ -1230,7 +1230,15 @@ class DedicatedWriterRunner:
             prep['attachmentBound'] = True
             report['stageCode'] = 5
             if self.activation_profile is not None:
-                self.activation_profile.prepare(c,launch,cohort,attachment,budget,report)
+                # Observation-only cached identities; no new process admission.
+                try:
+                    known_roles=tuple((bit,*roles[name]) for name,bit in
+                        (('host',1),('worker',2),('engine',4),('launcher',8)) if name in roles)
+                    if console is not None and console.auxiliary is not None:
+                        known_roles+=((16,console.auxiliary.pid,console.auxiliary.birth),)
+                    known_roles+=((32,*launch.controller_identity),)
+                except BaseException:known_roles=None
+                self.activation_profile.prepare(c,launch,cohort,attachment,budget,report,known_role_bindings=known_roles)
             for _ in range(4096):
                 self._checked(budget, cohort.verify, budget)
                 focus = c.prep.focus_snapshot(launch, attachment, check=budget.check)

@@ -44,6 +44,7 @@ class NativeFixture(typed.System):
         self.covered = self.iconic = self.cloaked = self.swapped = False
         self.hit_test, self.context, self.cursor = 2, 123, [512, 400]
         self.caption_state = 0
+        self.root_class = 'UNREVIEWED_SYNTHETIC_CLASS'
         self.held_key = None; self.down = False; self.inserts = [2]
         self.after_move = self.after_send = self.after_dpi = None
         self.fail_restore = False
@@ -60,7 +61,8 @@ class NativeFixture(typed.System):
             'SetThreadDpiAwarenessContext':self.set_context,'GetThreadDpiAwarenessContext':lambda:self.context,
             'AreDpiAwarenessContextsEqual':lambda a,b:a==b,'SendMessageTimeoutW':self.hit,
             'GetAsyncKeyState':lambda key:0x8000 if key==self.held_key or self.down and key==(2 if self.swapped else 1) else 0,
-            'GetSystemMetrics':lambda key:int(self.swapped), 'SendInput':self.send}
+            'GetSystemMetrics':lambda key:int(self.swapped), 'SendInput':self.send,
+            'GetClassNameW':self.class_name}
         for name, fn in extra.items(): setattr(self.user,name,Function(fn))
         self.dwm=NS(DwmGetWindowAttribute=Function(self.dwm_attribute))
         self.prep=typed.M.PreparationNativeApi(components.api,kernel=self.kernel,user=self.user)
@@ -102,6 +104,10 @@ class NativeFixture(typed.System):
         assert typed.number(hwnd)==self.document and message==0x84 and 0<milliseconds<=200
         output._obj.value=self.hit_test
         return 1
+    def class_name(self, hwnd, output, size):
+        assert 0 < typed.number(hwnd) and size == 64
+        output.value=self.root_class
+        return len(self.root_class)
     def move(self, x, y):
         self.cursor=[x,y]
         if self.after_move:self.after_move()
@@ -127,15 +133,44 @@ class NativeFixture(typed.System):
         return result
 
 
-def hit_row(mask, role, code):
+def hit_row(mask, role, code, root_observed=True):
     return {'mismatchMask':mask,'pidRoleCode':role,'hitTestCode':code,
         'hitPresent':True,'rootPresent':True,'pidPresent':True,
-        'hitRootMatchesForegroundBefore':False,'hitRootMatchesForegroundAfter':False}
+        'hitRootMatchesForegroundBefore':False,'hitRootMatchesForegroundAfter':False,
+        'hitIsRoot':role!=2,'hitPidKnownRoleMask':{0:0,1:1,2:4}[role],
+        'rootPidKnownRoleMask':(0 if role==0 else 1) if mask and root_observed else None,
+        'rootClassCode':0 if mask and root_observed else None}
 
 
 def unknown_hit_row():
     return dict.fromkeys(('mismatchMask','pidRoleCode','hitTestCode','hitPresent','rootPresent','pidPresent',
-        'hitRootMatchesForegroundBefore','hitRootMatchesForegroundAfter'))
+        'hitRootMatchesForegroundBefore','hitRootMatchesForegroundAfter',
+        'hitIsRoot','hitPidKnownRoleMask','rootPidKnownRoleMask','rootClassCode'))
+
+
+def t17_prepare_inverse(prepare):
+    """Remove only the exact reviewed failure observer, preserving old AST gates."""
+    assert [arg.arg for arg in prepare.args.kwonlyargs]==['known_role_bindings']
+    assert ast.dump(prepare.args.kw_defaults[0])=='Constant(value=None)'
+    prepare.args.kwonlyargs=[];prepare.args.kw_defaults=[]
+    body=prepare.body[-1].body
+    rejected=next(node for node in body if isinstance(node,ast.Assign) and isinstance(node.targets[0],ast.Name) and node.targets[0].id=='rejected')
+    assert ast.dump(rejected.value)=='List(elts=[], ctx=Load())'
+    body.remove(rejected)
+    wrapper=next(node for node in body if isinstance(node,ast.FunctionDef) and node.name=='candidate_hit')
+    call=wrapper.body[2].value
+    assert [node.id for node in call.args[-2:]]==['known_role_bindings','rejected']
+    assert len(call.args)==7 and not call.keywords
+    call.args=call.args[:-2]
+    branch=next(node for node in body if isinstance(node,ast.If) and isinstance(node.test,ast.Compare) and isinstance(node.test.left,ast.Name) and node.test.left.id=='point')
+    expected=ast.parse('''if point is None:
+ error=PreparationError(PreparationCode.ATTACHMENT)
+ try:_failure_root_numbers(probe,rejected,report['captionHitObservation'],known_role_bindings,attachment)
+ except BaseException:pass
+ raise error''').body[0]
+    assert ast.dump(branch,include_attributes=False)==ast.dump(expected,include_attributes=False)
+    branch.body=ast.parse('raise PreparationError(PreparationCode.ATTACHMENT)').body
+    return prepare
 
 
 class CaptionPreparationTests(unittest.TestCase):
@@ -523,7 +558,7 @@ class CaptionPreparationTests(unittest.TestCase):
                 s.hit_test=1;s.user.SendMessageTimeoutW.action=hit
             report,c,s,_=self.run_case(change);witness=self.hit_observation(report)
             self.assertEqual(len(s.user.SendMessageTimeoutW.calls),completed+1)
-            expected={'candidateCount':1,'samples':[hit_row(16,1,1)]} if completed else {'candidateCount':None,'samples':None}
+            expected={'candidateCount':1,'samples':[hit_row(16,1,1,False)]} if completed else {'candidateCount':None,'samples':None}
             self.assertEqual(witness,expected)
             self.assertEqual(s.user.SendInput.calls,[])
             self.assertEqual(report['preparation']['preparationFailureCode'],2 if budget_late else 3)
@@ -550,28 +585,37 @@ class CaptionPreparationTests(unittest.TestCase):
                     original_read=c.clock.read
                     c.clock.read=lambda:(reads.append(1) or original_read())
                     point=module.NativeCaptionProbe.point_snapshot;predicate=module._caption_hit
+                    root_numbers=module._failure_root_numbers;boundaries=[]
                     def snapshot(*args):events.append('query');return point(*args)
                     def tested(*args):events.append('predicate');return predicate(*args)
                     def project(*args):
                         events.append('projection')
                         if poison:raise OSError('SYNTHETIC_PRIVATE')
                         return projection(*args)
+                    def observed_roots(*args):
+                        boundaries.append((list(native),len(reads),list(c.api.calls)))
+                        return root_numbers(*args)
                     with mock.patch.object(module.NativeCaptionProbe,'point_snapshot',snapshot), \
-                            mock.patch.object(module,'_caption_hit',tested),mock.patch.object(module,'_hit_numbers',project):
+                            mock.patch.object(module,'_caption_hit',tested),mock.patch.object(module,'_hit_numbers',project), \
+                            mock.patch.object(module,'_failure_root_numbers',observed_roots):
                         report=obj.execute(inputs)
                     witness=self.hit_observation(report)
                     self.assertEqual(events,['query','predicate','projection','query','predicate'] if accepted else ['query','predicate','projection']*3)
                     self.assertEqual(witness['candidateCount'],1 if accepted else 3)
                     if poison:self.assertEqual(witness['samples'],[unknown_hit_row()]*(1 if accepted else 3))
                     self.assertEqual(len(s.user.SendInput.calls),int(accepted));self.assertEqual(len(s.user.SetPhysicalCursorPos.calls),int(accepted))
-                    runs.append((native,len(reads),c.api.calls,report['failureCode'],report['preparation']['preparationFailureCode']))
+                    # Failure-only probes begin after the complete canonical
+                    # prefix. Success still compares every original call/clock.
+                    self.assertEqual(len(boundaries),0 if accepted else 1)
+                    original_trace=(native,len(reads),c.api.calls) if accepted else boundaries[0]
+                    runs.append((original_trace,c.api.calls,report['failureCode'],report['preparation']['preparationFailureCode']))
             self.assertEqual(runs[0],runs[1])
 
         # Undo only the exact metadata wrapper, recovering the reviewed R14
         # prepare AST. Other native/clock/effect/guard edits stay detectable.
         tree=ast.parse(Path(module.__file__).read_bytes())
         cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='OwnedCaptionPreparation')
-        prepare=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='prepare')
+        prepare=t17_prepare_inverse(next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='prepare'))
         body=next(n for n in prepare.body if isinstance(n,ast.Try)).body
         wrapper=next(n for n in body if isinstance(n,ast.FunctionDef) and n.name=='candidate_hit')
         self.assertEqual(len(wrapper.body),4)
@@ -589,12 +633,12 @@ class CaptionPreparationTests(unittest.TestCase):
         options={'show_empty':True} if 'show_empty' in inspect.signature(ast.dump).parameters else {}
         self.assertEqual(hashlib.sha256(ast.dump(prepare,include_attributes=False,**options).encode()).hexdigest(),
             '2c878961f716097a44d340bda06a84a5f1d921e00f934cf924a8a99f49901b55')
-        pure={'_hit_numbers','_record_hit','_valid_hit_row','valid_hit_observation'}
+        pure={'_hit_numbers','_record_hit','_valid_hit_row','valid_hit_observation','_known_pid_mask'}
         for helper in (n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in pure):
             for call in (n for n in ast.walk(helper) if isinstance(n,ast.Call)):
-                if isinstance(call.func,ast.Name):self.assertIn(call.func.id,{'type','len','sum','list','ValueError','any','all','bool','_hit_numbers','_valid_hit_row'})
+                if isinstance(call.func,ast.Name):self.assertIn(call.func.id,{'type','len','sum','list','ValueError','any','all','bool','_hit_numbers','_valid_hit_row','_known_pid_mask','set'})
                 else:
-                    self.assertIn(call.func.attr,{'keys','append','update','private_tuple','values'})
+                    self.assertIn(call.func.attr,{'keys','append','update','private_tuple','values','add'})
                     if call.func.attr in ('private_tuple','values'):
                         self.assertIsInstance(call.func.value,ast.Name)
                         self.assertEqual(call.func.value.id,'attachment' if call.func.attr=='private_tuple' else 'row')
@@ -654,7 +698,8 @@ class CaptionPreparationTests(unittest.TestCase):
         def foreign(c,s):s.facts[888]=(901,911,0,888);s.covered=True
         report,_,_,_=self.run_case(foreign)
         keys={'mismatchMask','pidRoleCode','hitTestCode','hitPresent','rootPresent','pidPresent',
-            'hitRootMatchesForegroundBefore','hitRootMatchesForegroundAfter'}
+            'hitRootMatchesForegroundBefore','hitRootMatchesForegroundAfter',
+            'hitIsRoot','hitPidKnownRoleMask','rootPidKnownRoleMask','rootClassCode'}
         self.assertEqual(set(report['captionHitObservation']['samples'][0]),keys)
         for key,value in (('hitPresent',0),('rootPresent',None),('pidPresent',1),
                 ('hitRootMatchesForegroundBefore',1),('rawPid',123)):
@@ -667,7 +712,7 @@ class CaptionPreparationTests(unittest.TestCase):
         def prepare(tree):
             cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='OwnedCaptionPreparation')
             return next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='prepare')
-        b=prepare(after)
+        b=t17_prepare_inverse(prepare(after))
         wrapper=next(n for n in ast.walk(b) if isinstance(n,ast.FunctionDef) and n.name=='candidate_hit')
         call=wrapper.body[2].value
         self.assertEqual(len(call.args),5)
@@ -706,6 +751,218 @@ class CaptionPreparationTests(unittest.TestCase):
             changed=copy.deepcopy(report);changed['captionHitObservation']['samples'][0].update(values)
             with self.subTest(fields=len(values)),self.assertRaises(composed.runner.RunnerFailure):
                 composed.runner.validate_public_report(changed)
+
+
+    def test_r18_cached_role_masks_are_only_pid_equalities_and_preserve_overlaps(self):
+        m=self.module();a=typed.M.OriginalAttachment(600,610,601,101,501,401,611,201,203,111)
+        bindings=((1,101,111),(2,301,311),(4,401,501),(8,301,311),(16,901,911),(32,701,801))
+        for pid,expected in ((101,1),(301,10),(401,4),(901,16),(701,32),(999,0)):
+            with self.subTest(case=expected):
+                row=m._hit_numbers({'point':[1,2],'hitHwnd':888,'rootHwnd':888,'pid':pid,'hitTest':None},a,(1,2),bindings=bindings)
+                self.assertTrue(row['hitIsRoot']);self.assertEqual(row['hitPidKnownRoleMask'],expected)
+                self.assertIsNone(row['rootPidKnownRoleMask']);self.assertIsNone(row['rootClassCode'])
+        for bad in (None,((True,101,111),),bindings+((64,999,999),)):
+            row=m._hit_numbers({'point':[1,2],'hitHwnd':0,'rootHwnd':0,'pid':0,'hitTest':None},a,(1,2),bindings=bad)
+            self.assertIsNone(row['hitIsRoot']);self.assertIsNone(row['hitPidKnownRoleMask'])
+
+    def test_r18_rejected_root_reads_follow_all_original_predicates_and_deduplicate(self):
+        m=self.module();events=[];predicate=m._caption_hit
+        def change(c,s):
+            s.facts[888]=(701,911,0,888);s.covered=True;s.foreground=888;s.root_class='ConsoleWindowClass'
+            original=s.user.GetWindowThreadProcessId.call
+            def pid(*args):events.append('pid');return original(*args)
+            s.user.GetWindowThreadProcessId.call=pid
+            original_class=s.user.GetClassNameW.action
+            def kind(*args):events.append('class');return original_class(*args)
+            s.user.GetClassNameW.action=kind
+        def tested(*args):events.append('predicate');return predicate(*args)
+        with mock.patch.object(m,'_caption_hit',tested):report,c,s,_=self.run_case(change)
+        rows=report['captionHitObservation']['samples']
+        self.assertEqual([(x['hitIsRoot'],x['hitPidKnownRoleMask'],x['rootPidKnownRoleMask'],x['rootClassCode']) for x in rows],[(True,32,32,4)]*3)
+        self.assertEqual(len(s.user.GetClassNameW.calls),1)
+        self.assertEqual(events[-3:],['predicate','pid','class'])
+        self.assertEqual(report['preparation']['preparationFailureCode'],5)
+        self.assertEqual(s.user.SendInput.calls,[]);self.assertEqual(s.user.SetPhysicalCursorPos.calls,[])
+        self.assertTrue(report['preparation']['cleanupComplete']);self.assertEqual(report['pendingRetainedCount'],0)
+
+    def test_r18_hit_child_pid_is_not_promoted_to_root_pid_role(self):
+        def change(c,s):
+            s.facts[888]=(701,911,0,888);s.facts[889]=(301,912,888,888)
+            s.user.WindowFromPhysicalPoint.action=lambda point:889
+            s.root_class='Tauri Window'
+        report,_,s,_=self.run_case(change);row=report['captionHitObservation']['samples'][0]
+        self.assertFalse(row['hitIsRoot']);self.assertEqual(row['hitPidKnownRoleMask'],2)
+        self.assertEqual((row['rootPidKnownRoleMask'],row['rootClassCode']),(32,7))
+        self.assertNotIn('Tauri Window',json.dumps(report));self.assertEqual(s.user.SendInput.calls,[])
+
+    def test_r18_observation_errors_or_late_returns_preserve_original_attachment_primary(self):
+        class Opaque(RuntimeError):
+            def reject(self,*args):raise AssertionError()
+            __str__=__repr__=reject
+        for mode in ('error','late','wrong'):
+            with self.subTest(mode=mode):
+                composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+                def change(c,s):
+                    s.facts[888]=(701,911,0,888);s.covered=True
+                    def kind(*args):
+                        if mode=='error':raise Opaque()
+                        if mode=='late':c.clock.value+=56000
+                        return True if mode=='wrong' else 1
+                    s.user.GetClassNameW.action=kind
+                report,_,s,_=self.run_case(change);rows=report['captionHitObservation']['samples']
+                self.assertEqual(report['preparation']['preparationFailureCode'],5)
+                self.assertEqual(len(s.user.GetClassNameW.calls),1)
+                self.assertTrue(all(row['rootClassCode'] is None for row in rows))
+                self.assertEqual(s.user.SendInput.calls,[]);self.assertTrue(report['captionActivation']['dpiRestored'])
+
+    def test_r18_work_cutoff_starts_no_failure_metadata_query_and_success_has_none(self):
+        m=self.module();original=m._caption_hit;seen=[]
+        def predicate(*args):
+            seen.append(1)
+            if len(seen)==3:clock[0].value+=55000
+            return original(*args)
+        clock=[]
+        def change(c,s):s.facts[888]=(701,911,0,888);s.covered=True;clock.append(c.clock)
+        with mock.patch.object(m,'_caption_hit',predicate):report,_,s,_=self.run_case(change)
+        self.assertEqual(report['preparation']['preparationFailureCode'],5)
+        self.assertEqual(s.user.GetClassNameW.calls,[])
+        self.assertTrue(all(row['rootPidKnownRoleMask'] is None for row in report['captionHitObservation']['samples']))
+        composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+        report,_,s,_=self.run_case()
+        self.assertEqual(report['failureCode'],0);self.assertEqual(s.user.GetClassNameW.calls,[])
+        self.assertIsNone(report['captionHitObservation']['samples'][0]['rootClassCode'])
+
+    def test_r18_root_class_codebook_is_exact_and_never_retains_raw_names(self):
+        labels=('SALFRAME','SALTMPSUBFRAME','#32770','ConsoleWindowClass','Windows.UI.Core.CoreWindow','ApplicationFrameWindow','Tauri Window','UNREVIEWED_SYNTHETIC_CLASS')
+        for index,label in enumerate(labels):
+            with self.subTest(code=index):
+                composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+                def change(c,s):s.facts[888]=(701,911,0,888);s.covered=True;s.root_class=label
+                report,_,s,_=self.run_case(change)
+                self.assertEqual(report['captionHitObservation']['samples'][0]['rootClassCode'],index+1 if index<7 else 0)
+                self.assertNotIn(label,json.dumps(report));self.assertEqual(s.user.SendInput.calls,[])
+
+    def test_r18_new_closed_fields_reject_wrong_types_keys_and_inconsistent_presence(self):
+        def change(c,s):s.facts[888]=(701,911,0,888);s.covered=True
+        report,_,_,_=self.run_case(change)
+        cases=({'hitIsRoot':1},{'hitPidKnownRoleMask':True},{'hitPidKnownRoleMask':64},{'rootPidKnownRoleMask':-1},
+            {'rootClassCode':8},{'rootClassCode':False},{'hitIsRoot':True,'hitPresent':False},
+            {'hitPidKnownRoleMask':1},{'rawRootClass':'UNREVIEWED_SYNTHETIC_CLASS'})
+        for change in cases:
+            with self.subTest(fields=len(change)):
+                other=copy.deepcopy(report);other['captionHitObservation']['samples'][0].update(change)
+                with self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(other)
+        for key in ('hitIsRoot','hitPidKnownRoleMask','rootPidKnownRoleMask','rootClassCode'):
+            with self.subTest(missing=key):
+                other=copy.deepcopy(report);del other['captionHitObservation']['samples'][0][key]
+                with self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(other)
+
+    def test_r18_three_distinct_cached_roots_are_the_complete_query_limit(self):
+        def change(c,s):
+            s.facts.update({881:(301,911,0,881),882:(701,912,0,882),883:(901,913,0,883)})
+            roots=iter((881,882,883));s.user.WindowFromPhysicalPoint.action=lambda point:next(roots)
+            def kind(hwnd,output,size):
+                label={881:'ConsoleWindowClass',882:'Tauri Window',883:'UNREVIEWED_SYNTHETIC_CLASS'}[typed.number(hwnd)]
+                output.value=label;return len(label)
+            s.user.GetClassNameW.action=kind
+        report,_,s,_=self.run_case(change)
+        rows=report['captionHitObservation']['samples']
+        self.assertEqual([(r['rootPidKnownRoleMask'],r['rootClassCode']) for r in rows],[(2,4),(32,7),(0,0)])
+        self.assertEqual(len(s.user.GetClassNameW.calls),3);self.assertEqual(s.user.SendInput.calls,[])
+
+    def test_r18_detected_root_pid_change_and_opaque_helper_failure_remain_unknown(self):
+        def change(c,s):
+            s.facts[888]=(701,911,0,888);s.covered=True;original=s.user.GetWindowThreadProcessId.call;count=[]
+            def pid(hwnd,output):
+                if typed.number(hwnd)==888:
+                    count.append(1)
+                    if len(count)==4:C.cast(output,C.POINTER(C.c_uint32))[0]=999;return 911
+                return original(hwnd,output)
+            s.user.GetWindowThreadProcessId.call=pid
+        report,_,s,_=self.run_case(change)
+        self.assertTrue(all(row['rootPidKnownRoleMask'] is None for row in report['captionHitObservation']['samples']))
+        self.assertEqual(s.user.GetClassNameW.calls,[]);self.assertEqual(report['preparation']['preparationFailureCode'],5)
+        composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+        def covered(c,s):s.facts[888]=(701,911,0,888);s.covered=True
+        with mock.patch.object(self.module(),'_failure_root_numbers',side_effect=RuntimeError()):report,_,s,_=self.run_case(covered)
+        self.assertEqual(report['preparation']['preparationFailureCode'],5)
+        self.assertEqual(s.user.SendInput.calls,[]);self.assertTrue(report['captionActivation']['dpiRestored'])
+
+    def test_r18_metadata_after_absolute_cleanup_limit_keeps_original_pending_custody(self):
+        def change(c,s):
+            s.facts[888]=(701,911,0,888);s.covered=True
+            def late(*args):c.clock.value+=61000;return 1
+            s.user.GetClassNameW.action=late
+        report,c,s,_=self.run_case(change)
+        self.assertEqual(report['preparation']['preparationFailureCode'],5)
+        self.assertFalse(report['captionActivation']['cleanupComplete'])
+        self.assertEqual(report['captionActivation']['pendingDpiContext'],1)
+        self.assertFalse(report['captionActivation']['dpiRestored'])
+        self.assertGreater(report['pendingRetainedCount'],0)
+        self.assertEqual(s.user.SendInput.calls,[])
+        self.assertEqual(len(s.user.SetThreadDpiAwarenessContext.calls),1)
+        self.assertEqual(len(s.user.GetClassNameW.calls),1)
+
+    def test_r18_real_composed_custody_supplies_optional_launcher_and_aux_role_bits(self):
+        import test_writer_server_observer_console as console_tests
+        for pid,mask in ((501,16),(601,8)):
+            with self.subTest(mask=mask),tempfile.TemporaryDirectory() as folder:
+                composed.runner._CASE_STARTED=False;composed.runner._PENDING_CASES.clear()
+                old,inputs,c,console,_,_=console_tests.Console().composed(folder)
+                c.api.images[304]=inputs.output/'Office/program/soffice.exe'
+                identity,member,state,opened,census=c.api.identity,c.api.member,c.api.state,c.api.open_initial_member,c.api.census
+                c.api.identity=lambda handle:(601,611) if handle==304 else identity(handle)
+                c.api.member=lambda handle,job:job==1000 if handle==304 else member(handle,job)
+                c.api.state=lambda handle:((0,0) if c.api.dead else (258,259)) if handle==304 else state(handle)
+                launcher_opens=[]
+                def open_member(value,job):
+                    if value==601:launcher_opens.append(value);return 304
+                    return opened(value,job)
+                c.api.open_initial_member=open_member
+                c.api.census=lambda job:tuple((*census(job),601)) if job==1000 and not c.api.dead else census(job)
+                s=NativeFixture(c);s.facts[888]=(pid,911,0,888);s.covered=True;s.root_class='ConsoleWindowClass'
+                m=self.module()
+                profile=m.OwnedCaptionPreparation(probe_factory=lambda b:m.NativeCaptionProbe(b,prep=c.prep,user=s.user,kernel=s.kernel,dwm=s.dwm))
+                obj=composed.runner.DedicatedWriterRunner(c,read_value=old.read_value,pause=old.pause,nonce=71,
+                    console_profile=console,admission_profile='owned-peer-before-first-admission-v1',activation_profile=profile)
+                report=obj.execute(inputs)
+                rows=report['captionHitObservation']['samples']
+                self.assertEqual([(r['hitPidKnownRoleMask'],r['rootPidKnownRoleMask']) for r in rows],[(mask,mask)]*3)
+                self.assertTrue(report['preparation']['cleanupComplete']);self.assertEqual(report['pendingRetainedCount'],0)
+                self.assertEqual(c.api.calls.count('close-303'),1)
+                # The fake reuses numeric304 for two independent returned
+                # leases: classifier query and retained cohort admission.
+                self.assertEqual(len(launcher_opens),2)
+                self.assertEqual(c.api.calls.count('close-304'),len(launcher_opens))
+
+
+    def test_r18_review_same_hit_root_known_masks_must_agree(self):
+        def change(c,s):s.facts[888]=(701,911,0,888);s.covered=True;s.root_class='ConsoleWindowClass'
+        report,_,_,_=self.run_case(change)
+        row=report['captionHitObservation']['samples'][0]
+        self.assertEqual((row['hitIsRoot'],row['hitPidKnownRoleMask'],row['rootPidKnownRoleMask']),(True,32,32))
+        composed.runner.validate_public_report(report)
+        bad=copy.deepcopy(report);bad['captionHitObservation']['samples'][0]['rootPidKnownRoleMask']=2
+        with self.assertRaises(composed.runner.RunnerFailure):composed.runner.validate_public_report(bad)
+
+    def test_r18_review_cached_root_pid_is_checked_against_every_hit_row(self):
+        def change(c,s):
+            s.facts[888]=(701,911,0,888);s.covered=True;s.root_class='ConsoleWindowClass'
+            original=s.user.GetWindowThreadProcessId.call;values=iter((701,301,701,701))
+            def pid(hwnd,output):
+                if typed.number(hwnd)==888:
+                    C.cast(output,C.POINTER(C.c_uint32))[0]=next(values);return 911
+                return original(hwnd,output)
+            s.user.GetWindowThreadProcessId.call=pid
+        report,_,s,_=self.run_case(change)
+        rows=report['captionHitObservation']['samples']
+        self.assertEqual([r['hitPidKnownRoleMask'] for r in rows],[32,2,32])
+        self.assertEqual([r['rootPidKnownRoleMask'] for r in rows],[32,None,32])
+        self.assertEqual([r['rootClassCode'] for r in rows],[4,None,4])
+        self.assertEqual(len(s.user.GetClassNameW.calls),1)
+        self.assertEqual(report['preparation']['preparationFailureCode'],5)
+        self.assertEqual(s.user.SendInput.calls,[])
+        self.assertTrue(report['preparation']['cleanupComplete']);self.assertEqual(report['pendingRetainedCount'],0)
 
 
 if __name__=='__main__':unittest.main()

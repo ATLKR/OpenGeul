@@ -1,6 +1,0 @@
-{
-  "schemaVersion": 1,
-  "kind": "writer-server-observer-run-request",
-  "reviewedParentCommit": "376c7220a5db7074093c96df66fe51c115779fb7",
-  "phaseSeconds": 1200
-}

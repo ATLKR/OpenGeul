@@ -19,7 +19,26 @@ INTS = {'stageCode':8, 'reasonCode':3, 'pointerMoves':1, 'inputCalls':1, 'reques
 
 _HIT_PRESENCE = ('hitPresent','rootPresent','pidPresent')
 _HIT_FOREGROUND = ('hitRootMatchesForegroundBefore','hitRootMatchesForegroundAfter')
-_HIT_KEYS = {'mismatchMask','pidRoleCode','hitTestCode',*_HIT_PRESENCE,*_HIT_FOREGROUND}
+_HIT_ROOT = ('hitIsRoot','hitPidKnownRoleMask','rootPidKnownRoleMask','rootClassCode')
+_HIT_KEYS = {'mismatchMask','pidRoleCode','hitTestCode',*_HIT_PRESENCE,*_HIT_FOREGROUND,*_HIT_ROOT}
+_ROOT_CLASSES = ('SALFRAME','SALTMPSUBFRAME','#32770','ConsoleWindowClass',
+    'Windows.UI.Core.CoreWindow','ApplicationFrameWindow','Tauri Window')
+
+
+def _known_pid_mask(pid, bindings, attachment):
+    # Cached equality only. No process/window generation or activation authority.
+    if (type(pid) is not int or not 0<pid<=0xffffffff or type(bindings) is not tuple or
+            not 4<=len(bindings)<=6 or type(attachment) is not OriginalAttachment):return None
+    seen=set();mask=0
+    for row in bindings:
+        if (type(row) is not tuple or len(row)!=3 or any(type(n) is not int for n in row) or
+                row[0] not in (1,2,4,8,16,32) or row[0] in seen or
+                not 0<row[1]<=0xffffffff or not 0<row[2]<(1<<64)):return None
+        if row[0]==1 and row[1:]!=(attachment.host_pid,attachment._host_birth):return None
+        if row[0]==4 and row[1]!=attachment.engine_pid:return None
+        seen.add(row[0])
+        if row[1]==pid:mask|=row[0]
+    return mask if {1,2,4,32}<=seen else None
 
 
 def _valid_hit_row(row):
@@ -35,10 +54,24 @@ def _valid_hit_row(row):
             not row['hitPresent'] and not (mask & 2) or
             not row['rootPresent'] and not (mask & 4) or
             not row['pidPresent'] and role!=0):return False
+    same=row['hitIsRoot']
+    if (row['hitPresent'] and row['rootPresent'] and type(same) is not bool or
+            not (row['hitPresent'] and row['rootPresent']) and same is not None):return False
+    for key in ('hitPidKnownRoleMask','rootPidKnownRoleMask'):
+        value=row[key]
+        if value is not None and (type(value) is not int or not 0<=value<=63):return False
+    kind=row['rootClassCode'];known=row['hitPidKnownRoleMask']
+    if (kind is not None and (type(kind) is not int or not 0<=kind<=7) or
+            not row['pidPresent'] and known is not None or
+            not row['rootPresent'] and (row['rootPidKnownRoleMask'] is not None or kind is not None) or
+            known is not None and (bool(known&1)!=(role==1) or bool(known&4)!=(role==2)) or
+            same is True and known is not None and row['rootPidKnownRoleMask'] is not None and known!=row['rootPidKnownRoleMask'] or
+            same is True and bool(mask&2)!=bool(mask&4) or
+            same is False and not (mask&6)):return False
     return bool((not (mask & 8))==(role==1) and (not (mask & 16))==(code==2))
 
 
-def _hit_numbers(value, attachment, point, focus=None):
+def _hit_numbers(value, attachment, point, focus=None, bindings=None):
     """Project cached primitive returns only; no identity or input authority.
 
     Bits 1/2/4/8/16 mean mismatch of point/doc/root/host PID/HTCAPTION.
@@ -74,24 +107,65 @@ def _hit_numbers(value, attachment, point, focus=None):
     return {'mismatchMask':mask,'pidRoleCode':role,
         'hitTestCode':code if type(code) is int and -2<=code<=21 else None,
         'hitPresent':value['hitHwnd']!=0,'rootPresent':value['rootHwnd']!=0,'pidPresent':value['pid']!=0,
-        'hitRootMatchesForegroundBefore':before,'hitRootMatchesForegroundAfter':after}
+        'hitRootMatchesForegroundBefore':before,'hitRootMatchesForegroundAfter':after,
+        'hitIsRoot':value['hitHwnd']==value['rootHwnd'] if value['hitHwnd'] and value['rootHwnd'] else None,
+        'hitPidKnownRoleMask':_known_pid_mask(value['pid'],bindings,attachment),
+        'rootPidKnownRoleMask':None,'rootClassCode':None}
 
 
-def _record_hit(observation, value, attachment, point, focus=None):
+def _record_hit(observation, value, attachment, point, focus=None, bindings=None, rejected=None):
     # Count only snapshots whose ORIGINAL predicate already finished. A later
     # native/budget failure leaves this prefix, never a total/query-count claim.
     unknown={key:None for key in _HIT_KEYS}
     try:
-        try:row=_hit_numbers(value,attachment,point,focus)
+        try:row=_hit_numbers(value,attachment,point,focus,bindings)
         except BaseException:row=unknown
         if not _valid_hit_row(row):row=unknown
         rows=[] if observation['samples'] is None else list(observation['samples'])
         if len(rows)>=3:raise ValueError()
         rows.append(row)
         observation.update(candidateCount=len(rows),samples=rows)
+        if rejected is not None and row['mismatchMask'] is not None and row['rootPresent']:
+            if type(rejected) is not list or len(rejected)>=3:raise ValueError()
+            rejected.append((value,row))
     except BaseException:
         # Metadata cannot replace the original decision or primary failure.
         observation.update(candidateCount=None,samples=None)
+
+
+def _failure_root_numbers(probe, rejected, observation, bindings, attachment):
+    """Failure-time reads of cached roots only; never a gate or identity proof.
+
+    All canonical caption predicates finished before entry. Reuse the original
+    work cutoff; at most three distinct roots, PID+class at most once per root.
+    A failed/late observation stays null and cannot replace ATTACHMENT primary.
+    """
+    cache={};name=label=None
+    try:
+        for value,row in rejected:
+            if (type(observation['samples']) is not list or
+                    not any(current is row for current in observation['samples'])):continue
+            root=value['rootHwnd']
+            if root not in cache:
+                if len(cache)>=3:return
+                pid=C.c_uint32()
+                tid=probe._call(probe.user.GetWindowThreadProcessId,root,C.byref(pid))
+                if type(tid) is not int or not 0<tid<=0xffffffff or not pid.value:return
+                if row['hitIsRoot'] is True and pid.value!=value['pid']:return
+                name=C.create_unicode_buffer(64)
+                count=probe._call(probe.user.GetClassNameW,root,name,len(name))
+                if type(count) is not int or not 0<count<len(name):return
+                label=name.value
+                if type(label) is not str or len(label)!=count:return
+                code=next((i for i,known in enumerate(_ROOT_CLASSES,1) if label==known),0)
+                cache[root]=(int(pid.value),_known_pid_mask(int(pid.value),bindings,attachment),code)
+                name=label=None
+            if row['hitIsRoot'] is True and value['pid']!=cache[root][0]:continue
+            row['rootPidKnownRoleMask'],row['rootClassCode']=cache[root][1:]
+    except BaseException:
+        return
+    finally:
+        name=label=None
 
 
 def valid_hit_observation(value, caption):
@@ -103,6 +177,8 @@ def valid_hit_observation(value, caption):
             any(not _valid_hit_row(row) for row in rows)):
         return False
     if any(row['mismatchMask']==0 for row in rows[:-1]):return False
+    if any(row['rootPidKnownRoleMask'] is not None or row['rootClassCode'] is not None for row in rows):
+        if caption['stageCode']!=3 or caption['reasonCode']!=3:return False
     last=rows[-1]['mismatchMask']
     if last==0 and caption['stageCode']<4:return False
     if last is not None and last!=0 and caption['stageCode']>=4:return False
@@ -129,6 +205,7 @@ class NativeCaptionProbe(NativeActivationProbe):
             'IsWindow':((H,),B), 'IsWindowVisible':((H,),B), 'IsWindowEnabled':((H,),B),
             'IsIconic':((H,),B), 'GetAncestor':((H,U),H),
             'GetWindowThreadProcessId':((H,C.POINTER(U)),U),
+            'GetClassNameW':((H,C.c_wchar_p,B),B),
             'GetWindowRect':((H,C.POINTER(Rect)),B), 'GetTitleBarInfo':((H,C.POINTER(TitleBarInfo)),B),
             'WindowFromPhysicalPoint':((Point,),H), 'SetPhysicalCursorPos':((B,B),B),
             'GetPhysicalCursorPos':((C.POINTER(Point),),B),
@@ -215,7 +292,7 @@ class OwnedCaptionPreparation:
 
     def __repr__(self):return '<OwnedCaptionPreparation private>'
 
-    def prepare(self, c, launch, cohort, attachment, budget, report):
+    def prepare(self, c, launch, cohort, attachment, budget, report, *, known_role_bindings=None):
         if self._attempted or type(attachment) is not OriginalAttachment:
             raise PreparationError(PreparationCode.GENERATION)
         self._attempted=True
@@ -252,13 +329,18 @@ class OwnedCaptionPreparation:
             original=probe.owned(c,launch,cohort,attachment)
             caption=probe.caption(attachment.document)
             if caption['state'] & (1|0x8000|0x10000):raise PreparationError(PreparationCode.ATTACHMENT)
+            rejected=[]
             def candidate_hit(p):
                 value=probe.point_snapshot(attachment.document,p)
                 matched=_caption_hit(value,attachment.document,attachment.host_pid,p)
-                _record_hit(report['captionHitObservation'],value,attachment,p,focus)
+                _record_hit(report['captionHitObservation'],value,attachment,p,focus,known_role_bindings,rejected)
                 return matched
             point=next((p for p in caption_candidates(original['rectangle'],caption['rectangle']) if candidate_hit(p)),None)
-            if point is None:raise PreparationError(PreparationCode.ATTACHMENT)
+            if point is None:
+                error=PreparationError(PreparationCode.ATTACHMENT)
+                try:_failure_root_numbers(probe,rejected,report['captionHitObservation'],known_role_bindings,attachment)
+                except BaseException:pass
+                raise error
             a['stageCode']=4
             probe.owned(c,launch,cohort,attachment,original=original)
             # Effect intent precedes the native pointer call; no retry after error.
