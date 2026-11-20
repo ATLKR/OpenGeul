@@ -1341,6 +1341,39 @@ jobs:
         dotnet-version: '10.0.404'
         skip-lts-prepass: true
         architecture: arm64
+    - name: Prepare only the existing pinned Windows privacy UIA dependencies
+      id: writer-os-privacy-dependencies
+      timeout-minutes: 2
+      shell: pwsh
+      run: |
+        python -m pip install pywinauto==0.6.9 comtypes==1.5.0
+        if ($LASTEXITCODE -ne 0) { throw 'Pinned privacy UIA prerequisites are unavailable; preparation is blocked.' }
+    - name: Close only an exactly verified OS privacy window before Writer launch
+      id: writer-os-privacy-close
+      if: success()
+      timeout-minutes: 3
+      shell: pwsh
+      run: |
+        # Separate OS preparation120s; original Writer observation55/60s is unchanged.
+        $env:NATIVE31_PWSH = (Get-Command pwsh -ErrorAction Stop).Source
+        python -B suite/e2e/writer_privacy_close.py prepare
+        if ($LASTEXITCODE -ne 0) { throw 'Exact OS privacy preparation failed; Writer launch is blocked.' }
+    - name: Validate the closed OS privacy preparation receipt
+      id: writer-os-privacy-validate
+      if: always() && !cancelled() && steps.writer-os-privacy-close.outcome != 'skipped'
+      shell: pwsh
+      run: |
+        python -B suite/e2e/writer_privacy_close.py validate
+        if ($LASTEXITCODE -ne 0) { throw 'OS privacy numeric receipt is unavailable or invalid.' }
+    - name: Retain only the separate OS privacy numeric receipt
+      id: writer-os-privacy-upload
+      if: always() && !cancelled() && steps.writer-os-privacy-validate.outcome == 'success'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-writer-os-privacy-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/writer-os-privacy-public/receipt.numeric.json
+        retention-days: 1
+        if-no-files-found: error
     - name: Bind exact public owner manual context and current source bytes
       id: writer-context
       shell: pwsh
