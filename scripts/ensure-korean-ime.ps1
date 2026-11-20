@@ -24,6 +24,7 @@ while ($ancestor -and $ancestor.StartsWith($repo,[StringComparison]::OrdinalIgno
     $ancestor=[IO.Path]::GetDirectoryName($ancestor)
 }
 New-Item -ItemType Directory -Path $out -Force | Out-Null
+. (Join-Path $PSScriptRoot 'korean_fod_custody.ps1')
 function Get-OpenGeulDiagnosticBudget([double]$ElapsedSeconds,[bool]$Attempted,[bool]$WorkerLive) {
     if ([double]::IsNaN($ElapsedSeconds) -or [double]::IsInfinity($ElapsedSeconds) -or
         $Attempted -or -not $WorkerLive -or $ElapsedSeconds -lt 540 -or $ElapsedSeconds -gt 570) { return 0 }
@@ -65,13 +66,21 @@ if (-not $Worker) {
         '-ExpectedSource',$ExpectedSource,'-Output',('"'+$out+'"'),'-Worker')
     $child=Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -NoNewWindow `
         -RedirectStandardOutput (Join-Path $out 'setup.log') -RedirectStandardError (Join-Path $out 'setup-error.log')
-    $started=$child.StartTime
+    $started=$null;$fodContext=$null
+    $workerOwned=[pscustomobject]@{Process=$child;Handle=[IntPtr]::Zero;Pid=$null;Created=$null;IdentityKnown=$false;Retired=$null;ExitCode=$null}
     $diagnosticAttempted=$false
+    $clock=$null
     try {
+        $workerOwned.Handle=$child.Handle
+        $started=$child.StartTime
         $clock=[Diagnostics.Stopwatch]::StartNew()
+        $workerOwned.Pid=[int]$child.Id;$workerOwned.Created=$started.ToUniversalTime().ToFileTimeUtc();$workerOwned.IdentityKnown=$true
+        $fodContext=New-OpenGeulFodContext $repo $out $binding $workerOwned
         while ($true) {
-            $remainingMs=[Math]::Floor((600-$clock.Elapsed.TotalSeconds)*1000)
-            if ($remainingMs -le 0) { throw 'Owned Korean setup worker exceeded its ten-minute bound.' }
+            $workEnd=600
+            if($null -ne $fodContext -and $fodContext.Offline){$workEnd=590;if(-not $fodContext.Ready){$workEnd=[Math]::Min($workEnd,$fodContext.WorkEnd)}}
+            $remainingMs=[Math]::Floor(($workEnd-$clock.Elapsed.TotalSeconds)*1000)
+            if ($remainingMs -le 0) { if($null -ne $fodContext -and $fodContext.Offline){$fodContext.ReasonCode=6};throw 'Owned Korean setup worker exceeded its ten-minute bound.' }
             $waitMs=[int][Math]::Min(15000,[Math]::Max(1,$remainingMs))
             $finished=$child.WaitForExit($waitMs)
             [long]$logBytes=0
@@ -81,9 +90,10 @@ if (-not $Worker) {
             }
             if ($logBytes -gt 1MB) { throw 'Owned Korean setup worker logs exceeded their combined one-MiB bound.' }
             if ($clock.Elapsed.TotalSeconds -ge 600) { throw 'Owned Korean setup worker exceeded its ten-minute bound.' }
+            Invoke-OpenGeulFodTick $fodContext $workerOwned $clock $binding $repo
             if ($finished) { break }
             $diagnosticBudget=Get-OpenGeulDiagnosticBudget $clock.Elapsed.TotalSeconds $diagnosticAttempted (-not $child.HasExited)
-            if ($diagnosticBudget -gt 0) {
+            if ($diagnosticBudget -gt 0 -and -not $fodContext.Offline) {
                 $diagnosticAttempted=$true
                 # A separate read-only diagnostic cannot extend or replace this
                 # worker's original 600-second setup deadline and cleanup.
@@ -108,12 +118,26 @@ if (-not $Worker) {
             Write-Host ('한국어 입력 준비 진행: 실제 Windows 기능·등록 프로필 확인, '+[int]$clock.Elapsed.TotalSeconds+'초, 로그 '+$logBytes+'바이트')
         }
         if ($child.ExitCode -ne 0) { throw 'Actual Korean capability/profile setup failed; original bounded evidence is retained.' }
+        Complete-OpenGeulFodWorker $fodContext $workerOwned $clock
         & python $policy --source-root $repo --expected-source $ExpectedSource --record (Join-Path $out 'readiness.json')
         if ($LASTEXITCODE -ne 0) { throw 'Actual Korean setup evidence did not satisfy the fail-closed contract.' }
     } catch {
-        if (-not $child.HasExited -and $child.StartTime -eq $started) { $child.Kill(); $child.WaitForExit(10000) | Out-Null }
+        if($null -ne $fodContext -and $fodContext.Offline){
+            if(-not $fodContext.WorkerComplete){$fodContext.CustodyElapsedMs=[long][Math]::Floor($clock.Elapsed.TotalMilliseconds)}
+            Stop-OpenGeulFodChildren @($workerOwned,$fodContext.Helper) $clock
+        } elseif($null -eq $started){
+            if($workerOwned.Handle -ne [IntPtr]::Zero -and -not $child.HasExited){$child.Kill();$child.WaitForExit(10000)|Out-Null}
+        } else {
+            if (-not $child.HasExited -and $child.StartTime -eq $started) { $child.Kill(); $child.WaitForExit(10000) | Out-Null }
+        }
         throw
-    } finally { $child.Dispose() }
+    } finally {
+        if($null -ne $fodContext){
+            try {Save-OpenGeulFodCustody $fodContext $workerOwned $out} catch { }
+            if($null -ne $fodContext.Helper){try {$fodContext.Helper.Process.Dispose()} catch { }}
+        }
+        $child.Dispose()
+    }
     return
 }
 
@@ -330,6 +354,8 @@ public static class OpenGeulKoreanSetupHost {
     public static extern bool IsWow64Process2(IntPtr p,out ushort processMachine,out ushort nativeMachine);
     [DllImport("kernel32", CharSet=CharSet.Unicode, SetLastError=true)]
     public static extern uint GetSystemDirectoryW(StringBuilder value,uint count);
+    [DllImport("kernel32", CharSet=CharSet.Unicode, SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CreateDirectoryW(string name,IntPtr security);
 }
 '@
     [System.UInt16]$controllerMachine=0;[System.UInt16]$nativeMachine=0
@@ -374,7 +400,19 @@ public static class OpenGeulKoreanSetupHost {
     if ($before -eq 'NotPresent') {
         Save-ObservedJson 'servicing-observation.json' ([ordered]@{source=$binding;workerPid=[int]$PID;
             scriptSha256=$hostObservation.scriptSha256;stage='install-entry';elapsedSeconds=[int]$servicingClock.Elapsed.TotalSeconds})
-        $installed=Add-WindowsCapability -Online -Name $capabilityName -ErrorAction Stop
+        $offline=$false;$build=$null;$installation=$null
+        if($binding.architecture -ceq 'x64' -and $nativeMachine -eq 0x8664 -and $controllerMachine -eq 0){
+            $versionKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion')
+            try {$build=$versionKey.GetValue('CurrentBuildNumber');$installation=$versionKey.GetValue('InstallationType')} finally {$versionKey.Dispose()}
+            $offline=Test-OpenGeulFodLane $binding $nativeMachine $controllerMachine $build $installation $before
+        }
+        if($offline){
+            $installationCode=if($installation -ceq 'Server'){1}else{2}
+            $offlineSource=Wait-OpenGeulFodSource $repo $out $binding $installationCode
+            $installed=Add-WindowsCapability -Online -Name $capabilityName -Source $offlineSource -LimitAccess -ErrorAction Stop
+        } else {
+            $installed=Add-WindowsCapability -Online -Name $capabilityName -ErrorAction Stop
+        }
         $restartNeeded=[bool]$installed.RestartNeeded
         Save-ObservedJson 'servicing-observation.json' ([ordered]@{source=$binding;workerPid=[int]$PID;
             scriptSha256=$hostObservation.scriptSha256;stage='install-return';elapsedSeconds=[int]$servicingClock.Elapsed.TotalSeconds;

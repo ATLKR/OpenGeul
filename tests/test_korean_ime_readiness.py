@@ -107,6 +107,42 @@ class KoreanImeReadinessTests(unittest.TestCase):
             row=copy.deepcopy(self.record);row[key]=value
             with self.subTest(key=key,value=value),self.assertRaises(ValueError):self.policy.validate_record(row,self.binding)
 
+    def _run_fod_original_verifier(self, *, git_matches=True, record_valid=True):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            record=copy.deepcopy(self.record)
+            if not record_valid:record['nativeMachine']=0xAA64
+            path=root/'readiness.json';path.write_text(json.dumps(record))
+            calls=[]
+            def observed_git(argv,**kwargs):
+                self.assertEqual(argv,['git','rev-parse','HEAD'])
+                self.assertEqual(kwargs,{'cwd':root.resolve(),'check':True,'capture_output':True,'text':True,'timeout':10})
+                calls.append(1)
+                return SimpleNamespace(stdout=(self.head if git_matches else 'b'*40)+'\n')
+            # Replace this module's references with fixed synthetic objects.
+            # No real environment enumeration, mutation or Git process occurs.
+            with mock.patch.object(self.policy,'os',SimpleNamespace(name='nt',environ=dict(self.env))), \
+                 mock.patch.object(self.policy,'subprocess',SimpleNamespace(run=observed_git)), \
+                 mock.patch.object(sys,'argv',['korean_ime_readiness.py','--source-root',str(root),
+                     '--expected-source',self.head,'--record',str(path)]), \
+                 open(os.devnull,'w') as sink,mock.patch.object(sys,'stdout',sink):
+                if git_matches and record_valid:self.policy.main()
+                else:
+                    with self.assertRaises(ValueError):self.policy.main()
+            self.assertEqual(len(calls),1)
+
+    def test_fod_original_post_worker_verifier_runs_source_git_and_readiness(self):
+        script=(ROOT/'scripts/ensure-korean-ime.ps1').read_text(encoding='utf-8-sig')
+        marker="        & python $policy --source-root $repo --expected-source $ExpectedSource --record (Join-Path $out 'readiness.json')"
+        self.assertEqual(script.count(marker),1)
+        self.assertLess(script.index('Complete-OpenGeulFodWorker $fodContext'),script.index(marker))
+        self._run_fod_original_verifier()
+
+    def test_fod_post_worker_verifier_rejects_checkout_and_profile_mismatch(self):
+        self._run_fod_original_verifier(git_matches=False)
+        self._run_fod_original_verifier(record_valid=False)
+
     def test_setup_guard_precedes_all_host_mutations_and_parent_reports_bounded_progress(self):
         script=(ROOT/'scripts/ensure-korean-ime.ps1').read_text()
         guard=script.index('python $policy --guard')
