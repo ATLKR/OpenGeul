@@ -564,4 +564,15 @@ def main():
 
 if __name__=='__main__':
     try:main()
-    except Exception:raise SystemExit('실제 MCP 작업자 검증에 실패했습니다. bounded 결과·기존 원본은 보존합니다.') from None
+    except Exception as error:
+        try:
+            from bounded_failure_observer import emit_failure
+            emit_failure(error, 1, (
+                (sys._getframe().f_code, 1), (main.__code__, 1), (require.__code__, 1),
+                (private_runtime.__code__, 1), (password_inputs.__code__, 1),
+                (current_binding.__code__, 1), (verify_executable.__code__, 3),
+                (verify_host.__code__, 3),
+            ))
+        except BaseException:
+            pass
+        raise SystemExit('실제 MCP 작업자 검증에 실패했습니다. bounded 결과·기존 원본은 보존합니다.') from None

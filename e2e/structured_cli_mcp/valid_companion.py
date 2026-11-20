@@ -625,4 +625,17 @@ def main():
 
 if __name__=='__main__':
     try:main()
-    except Exception:raise SystemExit('Structured portable companion failed; no installed/full-feature success is claimed.') from None
+    except Exception as error:
+        try:
+            from bounded_failure_observer import emit_failure
+            source_codes = [(sys._getframe().f_code, 2), (main.__code__, 2), (require.__code__, 2)]
+            mcp_source = sys.modules.get('mcp_worker')
+            if mcp_source is not None:
+                source_codes.append((mcp_source.private_runtime.__code__, 1))
+            native_source = sys.modules.get('native_architecture')
+            if native_source is not None:
+                source_codes.extend(((native_source.verify_executable.__code__, 3), (native_source.verify_host.__code__, 3)))
+            emit_failure(error, 2, tuple(source_codes))
+        except BaseException:
+            pass
+        raise SystemExit('Structured portable companion failed; no installed/full-feature success is claimed.') from None

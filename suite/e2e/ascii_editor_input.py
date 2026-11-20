@@ -137,7 +137,7 @@ def prepare_observer(output_folder, *, architecture, budget=None):
     """Prepare once outside every original editor phase; never a per-key retry."""
     from ascii_message_preparation import prepare_observer as prepare
     if architecture == 'x64':
-        return prepare(output_folder, architecture=architecture, compiler_mode='msvc', budget=budget)
+        return prepare(output_folder, architecture=architecture, compiler_mode='vs-bundled-clang', budget=budget)
     return prepare(output_folder, architecture=architecture, budget=budget)
 
 

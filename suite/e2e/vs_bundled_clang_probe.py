@@ -127,28 +127,10 @@ def _private_json(path,value,limit=8192):
     assert len(raw)<=limit
     with Path(path).open('xb') as stream:stream.write(raw)
 
-def _query(runtime,folder,budget,record,kind,tool,host_python):
-    assert not any(p.name.casefold() in SYSTEM_DLL_NAMES for p in folder.iterdir())
-    request=folder/('query-'+str(kind)+'.request.private.json')
-    result=folder/('query-'+str(kind)+'.result.private.json')
-    _private_json(request,dict(schemaVersion=1,kindCode=kind,tool=str(tool),deadline=budget.work_deadline))
-    script=folder/('discover.cmd' if kind==0 else 'compile.cmd')
-    expected=('@echo off\n"%~1" "%~2" --request "%~3" --result "%~4"\nexit /b %errorlevel%\n').encode('ascii')
-    if not script.exists():script.write_bytes(expected)
-    assert script.read_bytes()==expected
-    helper=Path(__file__).with_name('vs_bundled_clang_version.py').resolve()
-    request_pin=prep._pin(request)
-    helper_pin=prep._pin(helper)
-    try:
-        _run_stage(runtime,folder,('probe-discovery','probe-clang-version','probe-lld-version')[kind],script,budget,record,
-                   [Path(host_python),helper,request,result])
-        _qualified(record['stages'][-1],kind)
-    except BaseException:
-        raise ProbeFailure(5)
-    budget.now()
-    assert prep._pin(request)==request_pin and prep._pin(helper)==helper_pin
-    raw=prep._selection_read(result,8192,budget.now)
-    value=json.loads(raw)
+_QUERY_SCRIPT=b'@echo off\n"%~1" "%~2" --request "%~3" --result "%~4"\nexit /b %errorlevel%\n'
+
+def _validate_query_result(value,kind):
+    """Same closed query result contract for a live query or pinned replay."""
     assert type(value) is dict and set(value)==helper_module.RESULT_KEYS
     helper_module.validate_capture_observation(value['captureObservation'])
     assert type(value['schemaVersion']) is int and value['schemaVersion']==1
@@ -186,6 +168,31 @@ def _query(runtime,folder,budget,record,kind,tool,host_python):
         if value['resultCode']==0:
             assert type(value['selectedRoot']) is str and len(value['selectedRoot'])<=4096
             assert Path(value['selectedRoot']).is_absolute()
+    return value
+
+def _query(runtime,folder,budget,record,kind,tool,host_python):
+    assert not any(p.name.casefold() in SYSTEM_DLL_NAMES for p in folder.iterdir())
+    request=folder/('query-'+str(kind)+'.request.private.json')
+    result=folder/('query-'+str(kind)+'.result.private.json')
+    _private_json(request,dict(schemaVersion=1,kindCode=kind,tool=str(tool),deadline=budget.work_deadline))
+    script=folder/('discover.cmd' if kind==0 else 'compile.cmd')
+    expected=_QUERY_SCRIPT
+    if not script.exists():script.write_bytes(expected)
+    assert script.read_bytes()==expected
+    helper=Path(__file__).with_name('vs_bundled_clang_version.py').resolve()
+    request_pin=prep._pin(request)
+    helper_pin=prep._pin(helper)
+    try:
+        _run_stage(runtime,folder,('probe-discovery','probe-clang-version','probe-lld-version')[kind],script,budget,record,
+                   [Path(host_python),helper,request,result])
+        _qualified(record['stages'][-1],kind)
+    except BaseException:
+        raise ProbeFailure(5)
+    budget.now()
+    assert prep._pin(request)==request_pin and prep._pin(helper)==helper_pin
+    raw=prep._selection_read(result,8192,budget.now)
+    value=json.loads(raw)
+    _validate_query_result(value,kind)
     budget.now()
     return value
 

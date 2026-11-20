@@ -356,7 +356,9 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', 
     assert budget.deadline == budget.started + LIMIT and budget.work_deadline == budget.deadline - CLEANUP_RESERVE, 'Original preparation budget required'
     budget.now()
     architecture = native_arch.require_architecture(architecture)
-    assert compiler_mode in ('msvc', 'clang-lld'), 'Unknown observer compiler mode'
+    assert compiler_mode in ('msvc', 'clang-lld', 'vs-bundled-clang'), 'Unknown observer compiler mode'
+    if compiler_mode == 'vs-bundled-clang':
+        assert type(compiler_mode) is str and architecture == 'x64', 'VS bundled observer compiler is x64 only'
     folder = _absolute(output_folder)
     folder.mkdir(parents=True, exist_ok=False)
     receipt = dict(schemaVersion=1, kind='ascii-message-observer-preparation', architecture=architecture,
@@ -367,7 +369,17 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', 
         budget.now()
         receipt['nativeArchitecture'] = native_arch.validate_native_architecture(
             native_arch.observe_native_architecture(), architecture)
-        runtime = _Runtime()
+        if compiler_mode == 'vs-bundled-clang':
+            import vs_bundled_clang_probe as bundled
+            windows_text = os.environ.get('SystemRoot')
+            assert (type(windows_text) is str and 0 < len(windows_text) <= 4096
+                    and not windows_text.replace('\\','/').startswith('//')
+                    and not any(c in windows_text for c in '\0\r\n')), 'Invalid original Windows root'
+            windows = _absolute(Path(windows_text))
+            private_temp = folder / 'tool-query-temp'; private_temp.mkdir()
+            runtime = bundled._Runtime(bundled.finite_environment(windows, private_temp))
+        else:
+            runtime = _Runtime()
         for name in SOURCES:
             original = _absolute(SOURCE_ROOT / name)
             receipt['sourcePins'][name] = _pin(original)
@@ -410,6 +422,37 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', 
                 + '"%~8" /NOLOGO /DLL /MACHINE:' + ('ARM64' if architecture == 'arm64' else 'X64')
                 + ' /OUT:"%~4" /IMPLIB:ascii_message_observer.lib ascii_message_observer.obj user32.lib kernel32.lib'
                 + ' >>"%~5" 2>>"%~6"\nexit /b %errorlevel%\n', encoding='ascii')
+        elif compiler_mode == 'vs-bundled-clang':
+            from native_compiler_tools import pin_native_tool
+            selection, _ = _msvc_selection(found, 'x64', budget.now)
+            root = Path(selection['installationRoot'])
+            assert not str(root).replace('\\', '/').startswith('//'), 'UNC compiler root'
+            tool_arguments = [root / 'VC/Tools/Llvm/x64/bin' / name for name in bundled.TOOLS]
+            support = bundled._qualification_support_pins(budget.now)
+            receipt['compiler'] = dict(mode=compiler_mode, selection=selection, before={}, after={},
+                versions=[], versionArtifacts=[], supportPins=support)
+            receipt['compilerStatFacts'] = dict(before={}, after={})
+            for kind, tool in enumerate(tool_arguments, 1):
+                before_facts = {}; before = pin_native_tool(tool, 'x64', check=budget.now, facts=before_facts)
+                bundled._stat_join(before_facts, before)
+                query_folder = folder / ('version-' + str(kind)); query_folder.mkdir()
+                version = bundled._query(runtime, query_folder, budget, receipt, kind, tool, sys.executable)
+                bundled._require_query_success(version)
+                assert version['timedOut'] is False and version['outputCapReached'] is False, 'Incomplete bundled version query'
+                assert version['major'] >= 22, 'VS bundled compiler version is unsupported'
+                after_facts = {}; after = pin_native_tool(tool, 'x64', check=budget.now, facts=after_facts)
+                bundled._stat_join(after_facts, after)
+                assert before == after and before_facts == after_facts, 'Version query compiler identity changed'
+                receipt['compiler']['before'][tool.name] = after
+                receipt['compilerStatFacts']['before'][tool.name] = after_facts
+                receipt['compiler']['versions'].append(version)
+                receipt['compiler']['versionArtifacts'].append({name:_pin(query_folder / relative)
+                    for name,relative in (('request','query-'+str(kind)+'.request.private.json'),
+                        ('result','query-'+str(kind)+'.result.private.json'),('script','compile.cmd'))})
+            assert _msvc_selection(found, 'x64', budget.now)[0] == selection, 'Bundled VS selection changed'
+            assert bundled._qualification_support_pins(budget.now) == support, 'Bundled helper source changed'
+            vcvars = Path(selection['vcvars']['path'])
+            compile_script.write_text(bundled._qualification_recipe(selection['toolsetVersion']), encoding='ascii')
         else:
             from native_compiler_tools import pin_native_tool
             selection, tool_arguments = _msvc_selection(found, architecture, budget.now)
@@ -422,20 +465,32 @@ def prepare_observer(output_folder, *, architecture, compiler_mode='clang-lld', 
                 receipt['compiler']['before'][tool.name] = pin_native_tool(
                     tool, architecture, check=budget.now, facts=facts, compiler_mode='msvc')
             compile_script.write_text(_msvc_script(architecture, selection['toolsetVersion']), encoding='ascii')
-        _run_stage(runtime, folder, 'compile', compile_script, budget, receipt,
-                   [vcvars, folder / 'environment.log', folder / SOURCES[0], library,
-                    folder / 'compiler.stdout', folder / 'compiler.stderr', *tool_arguments])
+        if compiler_mode == 'vs-bundled-clang':
+            _run_stage(runtime, folder, 'compile', compile_script, budget, receipt,
+                       [vcvars, folder / SOURCES[0], library, *tool_arguments])
+        else:
+            _run_stage(runtime, folder, 'compile', compile_script, budget, receipt,
+                       [vcvars, folder / 'environment.log', folder / SOURCES[0], library,
+                        folder / 'compiler.stdout', folder / 'compiler.stderr', *tool_arguments])
         if tool_arguments:
             for tool in tool_arguments:
                 facts = {}
                 receipt['compilerStatFacts']['after'][tool.name] = facts
                 receipt['compiler']['after'][tool.name] = (pin_native_tool(tool, architecture, check=budget.now, facts=facts)
-                    if compiler_mode == 'clang-lld' else pin_native_tool(
+                    if compiler_mode in ('clang-lld', 'vs-bundled-clang') else pin_native_tool(
                         tool, architecture, check=budget.now, facts=facts, compiler_mode='msvc'))
             assert receipt['compiler']['before'] == receipt['compiler']['after'], 'Native compiler tools changed during preparation'
         if compiler_mode == 'msvc':
             assert _msvc_selection(found, architecture, budget.now)[0] == selection, 'MSVC selection changed during preparation'
             _validate_msvc_stat_facts(receipt['compilerStatFacts'], receipt['compiler']['before'])
+        if compiler_mode == 'vs-bundled-clang':
+            assert _msvc_selection(found, 'x64', budget.now)[0] == selection, 'Bundled VS selection changed'
+            for phase in ('before', 'after'):
+                for tool in tool_arguments:
+                    bundled._stat_join(receipt['compilerStatFacts'][phase][tool.name], receipt['compiler'][phase][tool.name])
+            assert receipt['compilerStatFacts']['before'] == receipt['compilerStatFacts']['after'], 'Bundled compiler stat identity changed'
+            assert bundled._qualification_support_pins(budget.now) == support, 'Bundled helper source changed'
+            receipt['binaryProof'] = bundled._qualification_pe(library, folder / SOURCES[0], budget.now)
         native_arch.require_native_pe(library, architecture)
         receipt['library'] = dict(path=str(library), **_pin(library))
         for name in SOURCES:
@@ -489,6 +544,47 @@ def require_prepared_library(descriptor, *, architecture=None):
         assert set(compiler['before']) == {'clang-cl.exe', 'lld-link.exe'}
         for name, value in compiler['before'].items(): validate_tool_pin(value, selected, name)
         assert receipt['stages'][1]['command'][-2:] == [compiler['before'][name]['path'] for name in ('clang-cl.exe', 'lld-link.exe')]
+    elif compiler['mode'] == 'vs-bundled-clang':
+        import vs_bundled_clang_probe as bundled
+        assert selected == 'x64' and set(compiler) == {'mode','selection','before','after','versions','versionArtifacts','supportPins'}
+        raw = _selection_read(library.parent / 'discovery.stdout', 32768, lambda: None)
+        found = raw.decode('utf-8-sig').strip()
+        assert '\n' not in found and '\r' not in found
+        selection, _ = _msvc_selection(found, 'x64', lambda: None)
+        assert compiler['selection'] == selection and not str(selection['installationRoot']).replace('\\','/').startswith('//')
+        tools = [Path(selection['installationRoot']) / 'VC/Tools/Llvm/x64/bin' / name for name in bundled.TOOLS]
+        assert type(compiler['versions']) is list and len(compiler['versions']) == 2
+        assert type(compiler['versionArtifacts']) is list and len(compiler['versionArtifacts']) == 2
+        assert set(compiler['before']) == set(bundled.TOOLS)
+        for kind,tool in enumerate(tools,1):
+            pin = compiler['before'][tool.name];validate_tool_pin(pin, 'x64', tool.name)
+            assert pin['path'] == str(tool), 'Compiler is outside the exact selected VS bundled pair'
+            for phase in ('before','after'):
+                bundled._stat_join(receipt['compilerStatFacts'][phase][tool.name], compiler[phase][tool.name])
+            version = compiler['versions'][kind-1]
+            bundled._validate_query_result(version, kind);bundled._require_query_success(version)
+            assert version['timedOut'] is False and version['outputCapReached'] is False, 'Incomplete bundled version query'
+            assert version['major'] >= 22, 'VS bundled compiler version is unsupported'
+            query_folder = library.parent / ('version-'+str(kind))
+            paths = {name:query_folder/relative for name,relative in (
+                ('request','query-'+str(kind)+'.request.private.json'),
+                ('result','query-'+str(kind)+'.result.private.json'),('script','compile.cmd'))}
+            artifact_pins = compiler['versionArtifacts'][kind-1]
+            assert type(artifact_pins) is dict and set(artifact_pins) == set(paths)
+            for name,path in paths.items():assert _pin(path) == artifact_pins[name], 'Version query artifact changed'
+            assert paths['script'].read_bytes().replace(b'\r\n',b'\n') == bundled._QUERY_SCRIPT
+            assert json.loads(_selection_read(paths['request'],8192,lambda:None)) == dict(
+                schemaVersion=1,kindCode=kind,tool=str(tool),deadline=receipt['workDeadline'])
+            assert json.loads(_selection_read(paths['result'],8192,lambda:None)) == version
+            assert receipt['stages'][kind]['command'][1:] == ['/d','/c','compile.cmd',sys.executable,
+                str(Path(bundled.helper_module.__file__).resolve()),str(paths['request']),str(paths['result'])]
+        assert receipt['compilerStatFacts']['before'] == receipt['compilerStatFacts']['after']
+        assert bundled._qualification_support_pins(lambda:None) == compiler['supportPins']
+        script = _selection_read(library.parent/'compile.cmd',8192,lambda:None)
+        assert script.replace(b'\r\n',b'\n') == bundled._qualification_recipe(selection['toolsetVersion']).encode('ascii')
+        assert receipt['stages'][-1]['command'][1:] == ['/d','/c','compile.cmd',selection['vcvars']['path'],
+            str(library.parent/SOURCES[0]),str(library),*map(str,tools)]
+        assert bundled._qualification_pe(library,library.parent/SOURCES[0],lambda:None) == receipt['binaryProof']
     else:
         assert compiler['mode'] == 'msvc' and set(compiler) == {'mode', 'selection', 'before', 'after'}
         assert type(compiler['before']) is dict and set(compiler['before']) == {'cl.exe', 'link.exe'}
@@ -512,7 +608,9 @@ def require_prepared_library(descriptor, *, architecture=None):
     assert all(type(value) in (int, float) and math.isfinite(value) for value in times)
     start, finish, work, deadline = times
     assert start <= finish < work == deadline - CLEANUP_RESERVE and deadline == start + LIMIT
-    assert [row['stage'] for row in receipt['stages']] == ['discovery', 'compile']
+    expected_stages = (['discovery','probe-clang-version','probe-lld-version','compile']
+                       if compiler['mode'] == 'vs-bundled-clang' else ['discovery','compile'])
+    assert [row['stage'] for row in receipt['stages']] == expected_stages
     prior = start
     for row in receipt['stages']:
         assert row['natural'] is True and row['handlesClosed'] is True and not row['cleanupErrors']
