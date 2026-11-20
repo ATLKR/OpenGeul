@@ -182,3 +182,46 @@ def assert_body_markers(data, required, forbidden=(), exact_text=None):
     if exact_text is not None and body != exact_text:
         raise AssertionError('Saved new-document body does not exactly match the entered text')
     return {**inspection, 'bodyText': body, 'bodyParagraphs': paragraphs}
+
+
+def focus_map_failure_observation(page_key, rows, read_count, evaluation_completed):
+    completed = type(evaluation_completed) is bool and evaluation_completed
+    record = {'schemaVersion': 1, 'diagnosticOnly': 1, 'acceptanceEligible': 0,
+              'readCount': 0, 'evaluationCompleted': completed, 'countsKnown': False,
+              'unknown': 1, 'unknownCode': 1, 'targetFocused': None,
+              'otherFocusedCount': None, 'focusedCount': None}
+    if type(read_count) is not int or not 0 <= read_count <= 2147483647:
+        record['unknownCode'] = 4
+        return record
+    record['readCount'] = read_count
+    if not completed:
+        return record
+    record['unknownCode'] = 2
+    if type(page_key) is not str or not 0 < len(page_key) <= 64:
+        return record
+    if type(rows) is not list or not 1 <= len(rows) <= 32:
+        return record
+    keys = set()
+    target = None
+    focused_count = 0
+    for row in rows:
+        if type(row) is not dict or len(row) != 2:
+            return record
+        if any(type(key) is not str or key not in ('pageKey', 'focused') for key in row):
+            return record
+        key, focused = row['pageKey'], row['focused']
+        if type(key) is not str or not 0 < len(key) <= 64 or type(focused) is not bool:
+            return record
+        if key in keys:
+            record['unknownCode'] = 3
+            return record
+        keys.add(key)
+        if key == page_key:
+            target = focused
+        focused_count += 1 if focused else 0
+    if target is None:
+        record['unknownCode'] = 3
+        return record
+    record.update(countsKnown=True, unknown=0, unknownCode=0, targetFocused=target,
+                  focusedCount=focused_count, otherFocusedCount=focused_count - (1 if target else 0))
+    return record

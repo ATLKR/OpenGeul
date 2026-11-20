@@ -27,9 +27,9 @@ except ModuleNotFoundError:
     from crt import crt_names, is_vc_crt_file
 
 try:
-    from suite.source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation, ARM_49744_RECIPE_OWNER
+    from suite.source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation, ARM_49744_RECIPE_OWNER, ARM_CEABC803_RECIPE_OWNER
 except ModuleNotFoundError:
-    from source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation, ARM_49744_RECIPE_OWNER
+    from source_contracts import NEW, NEW_SOURCE, contract_for_source_pin, fallback_identity_expectation, new_source_only_expectations, source_companion_intent, source_twain_intent, dotnet_project_graph_expectation, ARM_49744_RECIPE_OWNER, ARM_CEABC803_RECIPE_OWNER
 
 # Compatibility name retains the existing public x64 family.
 MSI_VC_DEPENDENCIES = frozenset(crt_names())
@@ -686,9 +686,10 @@ def _source_new_arm_hooks(hooks: dict, manifest: dict, parent: PureWindowsPath) 
 
 
 def _source_new_arm_recipe_owner(proof):
-    # Select only this producer's source metadata; external Full pins still authenticate it.
-    fields=dict(ARM_49744_RECIPE_OWNER)
-    if type(proof)is not dict or not _source_exact({key:proof.get(key)for key in fields},fields):
+    # Select only reviewed source metadata; external Full pins still authenticate it.
+    if type(proof)is not dict or not any(
+            _source_exact({key:proof.get(key)for key in owner},dict(owner))
+            for owner in (ARM_49744_RECIPE_OWNER,ARM_CEABC803_RECIPE_OWNER)):
         raise ValueError('ARM source recipe requires the exact fixed producer run and tree')
 
 

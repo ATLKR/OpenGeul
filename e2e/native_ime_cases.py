@@ -24,6 +24,37 @@ class NativeImeCases:
         if len(data)>128*1024:raise AssertionError('Actual IME receipt exceeds its byte bound')
         (self.folder/name).write_bytes(data)
 
+    def _ime_profile_call(self,ime,phase):
+        if type(phase) is not int or phase not in (1,2):raise ValueError('Unknown fixed IME profile phase')
+        token=object();prepared=False
+        try:ime._profile_observation=(token,None);prepared=True
+        except BaseException:pass
+        try:
+            return ime.select_installed_profile() if phase==1 else ime.active_profile()
+        except BaseException:
+            try:
+                pending=ime._profile_observation
+                if not (prepared and type(pending) is tuple and len(pending)==2 and pending[0] is token):raise ValueError()
+                row=pending[1]
+                keys={'schemaVersion','phaseCode','layout','languageId','guardStage','isImeObserved','isImeResult',
+                    'filenameCallOccurred','bufferChars','actualCountObserved','actualCount','acceptanceEligible'}
+                if type(row) is not dict or set(row)!=keys or any(type(value) is not int for value in row.values()):raise ValueError()
+                if not (row['schemaVersion']==1 and row['phaseCode']==phase and 0<row['layout']<2**64
+                        and row['languageId']==row['layout']&0xffff and 1<=row['guardStage']<=5
+                        and row['acceptanceEligible']==0 and -(2**31)<=row['isImeResult']<2**31
+                        and 0<=row['actualCount']<2**32):raise ValueError()
+                if any(row[key] not in (0,1) for key in ('isImeObserved','filenameCallOccurred','actualCountObserved')):raise ValueError()
+                if row['isImeObserved']==0 and row['isImeResult']!=0:raise ValueError()
+                if row['actualCountObserved']==0 and row['actualCount']!=0:raise ValueError()
+                called=int(row['guardStage']>=3);returned=int(row['guardStage']>=4)
+                if (row['filenameCallOccurred']!=called or row['bufferChars']!=(1024 if called else 0)
+                        or row['actualCountObserved']!=returned):raise ValueError()
+                data=json.dumps(row,ensure_ascii=True,allow_nan=False,separators=(',',':')).encode('ascii')
+                if len(data)>2048:raise ValueError()
+                with (self.folder/'ime-profile-failure.numeric.json').open('xb') as stream:stream.write(data)
+            except BaseException:pass
+            raise
+
     def _ime_owner(self):
         from native_document_windows import OwnedDocumentWindows
         owner=OwnedDocumentWindows(self.session)
@@ -79,11 +110,11 @@ class NativeImeCases:
         prerequisites=keyboard.prerequisites()
         self._ime_receipt(label+'-prerequisites.json',prerequisites)
         require_korean_prerequisites(prerequisites)
-        chosen=ime.select_installed_profile()
+        chosen=self._ime_profile_call(ime,1)
         self._ime_receipt(label+'-chosen-profile.json',chosen)
         until(lambda: keyboard.ready(language=0x0412),timeout=10,
               pump=lambda seconds:current.page.wait_for_timeout(seconds*1000))
-        active=ime.active_profile()
+        active=self._ime_profile_call(ime,2)
         self._ime_receipt(label+'-actual-profile.json',active)
         # Real mode probe is confined to a fresh scratch document. Both accepted
         # results have exact persisted XML and trusted actual OS input receipts.
@@ -117,7 +148,7 @@ class NativeImeCases:
         # Actual document replacement must preserve the held input HWND/thread/
         # layout and app ancestry used for the real initial-mode observation.
         if after!=held_focus:raise AssertionError('Held keyboard target changed after scratch probe/document load')
-        after_profile=ime.active_profile()
+        after_profile=self._ime_profile_call(ime,2)
         if after_profile['profile']!=active['profile']:
             raise AssertionError('Actual Microsoft profile changed after scratch probe/document load')
         ime.last_requested_native=observed['native']

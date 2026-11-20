@@ -397,11 +397,32 @@ backend does not claim to enumerate or validate every Windows input method.
         self.keyboard.kernel.GetSystemWindowsDirectoryW.restype=W.UINT
         self.keyboard.kernel.GetSystemDirectoryW.argtypes=[W.LPWSTR,W.UINT]
         self.keyboard.kernel.GetSystemDirectoryW.restype=W.UINT
-    def _profile(self,layout):
-        if not self.imm.ImmIsIME(layout):raise AssertionError('Focused Korean layout has no observable IMM IME identity')
+    def _profile(self,layout,*,phase=0):
+        numbers=None
+        try:
+            pending=self._profile_observation
+            if (type(pending) is tuple and len(pending)==2 and type(pending[0]) is object
+                    and type(phase) is int and phase in (1,2)
+                    and type(layout) is int and 0<layout<2**64):
+                numbers=dict(schemaVersion=1,phaseCode=phase,layout=layout,languageId=layout&0xffff,
+                    guardStage=1,isImeObserved=0,isImeResult=0,filenameCallOccurred=0,bufferChars=0,
+                    actualCountObserved=0,actualCount=0,acceptanceEligible=0)
+                self._profile_observation=(pending[0],numbers)
+        except BaseException:numbers=None
+        def observe(**updates):
+            try:
+                if numbers is not None:numbers.update(updates)
+            except BaseException:pass
+        is_ime=self.imm.ImmIsIME(layout)
+        exact=type(is_ime) is int and -(2**31)<=is_ime<2**31
+        observe(guardStage=2,isImeObserved=int(exact),isImeResult=is_ime if exact else 0)
+        if not is_ime:raise AssertionError('Focused Korean layout has no observable IMM IME identity')
         name=ctypes.create_unicode_buffer(1024);description=ctypes.create_unicode_buffer(256)
+        observe(guardStage=3,filenameCallOccurred=1,bufferChars=len(name))
         count=int(self.imm.ImmGetIMEFileNameW(layout,name,len(name)))
+        observe(guardStage=4,actualCountObserved=1,actualCount=count)
         if not 0<count<len(name)-1:raise AssertionError('Actual IME profile file name is unavailable')
+        observe(guardStage=5)
         filename=name.value;self.imm.ImmGetDescriptionW(layout,description,len(description))
         windows=ctypes.create_unicode_buffer(32768);system=ctypes.create_unicode_buffer(32768)
         if (not 0<self.keyboard.kernel.GetSystemWindowsDirectoryW(windows,len(windows))<len(windows)
@@ -428,7 +449,7 @@ backend does not claim to enumerate or validate every Windows input method.
              'description':description.value,'profileBackend':'actual IMM HKL/file identity','sourceQualified':False}
         return require_microsoft_profile(row)
     def active_profile(self):
-        before=self.keyboard.ready(language=0x0412);profile=self._profile(before['layout'])
+        before=self.keyboard.ready(language=0x0412);profile=self._profile(before['layout'],phase=2)
         if self.keyboard.ready(language=0x0412)!=before:raise AssertionError('Actual focused IME profile changed during attestation')
         row={'source':self.keyboard.binding,'focus':before,'profile':profile,'sourceQualified':False}
         self.records.append({'operation':'active-Microsoft-profile',**row});return row
@@ -436,7 +457,7 @@ backend does not claim to enumerate or validate every Windows input method.
         candidates=[]
         for layout in self.keyboard.layouts():
             if layout&0xffff==0x0412 and self.imm.ImmIsIME(layout):
-                candidates.append(self._profile(layout))
+                candidates.append(self._profile(layout,phase=1))
         if len(candidates)!=1:raise AssertionError('Exactly one observable installed Microsoft Korean IME is required')
         chosen=candidates[0];before=self.keyboard.ready();result=ctypes.c_size_t()
         if before['layout']!=chosen['layout']:

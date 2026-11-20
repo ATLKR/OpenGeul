@@ -616,6 +616,45 @@ def without_warning_location_sidecar(tree):
     return tree
 
 
+FOCUS_FAILURE_INVERSE_SHA256 = 'd6a4e158807b0f9f501f42bb3f47b42352d6c45584647163cb088d4f7da49f46'
+FOCUS_FAILURE_INVERSE_PATH = ROOT / 'tests/fixtures/native-focus-failure-inverse-634247d4.json'
+
+
+def without_reviewed_focus_failure(name, raw):
+    """Reverse only this pinned diagnostic hunk before the unchanged v2 byte hash."""
+    if name != 'native_document_windows.py':
+        return raw
+    if type(raw) is not bytes or not 0 < len(raw) <= 1024*1024:
+        raise ValueError('Unreviewed native-document bytes')
+    encoded = FOCUS_FAILURE_INVERSE_PATH.read_bytes()
+    if not 0 < len(encoded) <= 32768 or hashlib.sha256(encoded).hexdigest() != FOCUS_FAILURE_INVERSE_SHA256:
+        raise ValueError('Unreviewed focus inverse fixture')
+    fixture = json.loads(encoded)
+    if (type(fixture) is not dict or set(fixture) != {'schemaVersion','file','beforeBytes','beforeSha256','afterBytes','afterSha256','hunks'}
+            or type(fixture['schemaVersion']) is not int or fixture['schemaVersion'] != 1
+            or fixture['file'] != name or fixture['beforeSha256'] != V2_UNCHANGED_FILE_SHA256[name]
+            or any(type(fixture[key]) is not int or not 0 < fixture[key] <= 1024*1024 for key in ('beforeBytes','afterBytes'))
+            or len(raw) != fixture['afterBytes'] or hashlib.sha256(raw).hexdigest() != fixture['afterSha256']
+            or type(fixture['hunks']) is not list or len(fixture['hunks']) != 1):
+        raise ValueError('Unreviewed focus inverse context')
+    lines = raw.splitlines(keepends=True)
+    for hunk in reversed(fixture['hunks']):
+        if (type(hunk) is not dict or set(hunk) != {'afterStart','beforeLines','afterLines'}
+                or type(hunk['afterStart']) is not int or not 0 <= hunk['afterStart'] <= len(lines)
+                or any(type(hunk[key]) is not list or not 0 < len(hunk[key]) <= 128
+                       or any(type(line) is not str or len(line) > 4096 for line in hunk[key])
+                       for key in ('beforeLines','afterLines'))):
+            raise ValueError('Unreviewed focus inverse hunk')
+        start = hunk['afterStart']; after = [line.encode('utf-8') for line in hunk['afterLines']]
+        if lines[start:start+len(after)] != after:
+            raise ValueError('Focus inverse slice differs')
+        lines[start:start+len(after)] = [line.encode('utf-8') for line in hunk['beforeLines']]
+    restored = b''.join(lines)
+    if len(restored) != fixture['beforeBytes'] or hashlib.sha256(restored).hexdigest() != V2_UNCHANGED_FILE_SHA256[name]:
+        raise ValueError('Original v2 byte guard differs')
+    return restored
+
+
 def actual_wait_fragment():
     current = method(source_tree('native_clipboard_cases.py'), 'NativeClipboardCases', '_external_case')
     wrapper = next(node for node in ast.walk(current) if isinstance(node, ast.With)
@@ -768,7 +807,7 @@ class SourceContractTests(unittest.TestCase):
             'test_supported_external_os_html_menu_keyboard_atomic_roundtrip')
         self.assertTrue(ast_digest(html) == BASE_HTML_METHOD_AST_SHA256)
         for name, expected_sha in V2_UNCHANGED_FILE_SHA256.items():
-            self.assertTrue(hashlib.sha256((E2E / name).read_bytes()).hexdigest() == expected_sha)
+            self.assertTrue(hashlib.sha256(without_reviewed_focus_failure(name, (E2E / name).read_bytes())).hexdigest() == expected_sha)
         normalized_helper = without_warning_location_sidecar(source_tree('native_clipboard.py'))
         init = method(normalized_helper, 'ClipboardCallbackObservation', '__init__')
         index = next(i for i, argument in enumerate(init.args.kwonlyargs) if argument.arg == 'enabled')
@@ -835,6 +874,58 @@ class SourceContractTests(unittest.TestCase):
         stripped = StripObservation().visit(copy.deepcopy(current))
         stripped.args = ast.parse('def f(self,kind,transport): pass').body[0].args
         self.assertTrue(ast_digest(stripped) == BASE_EXTERNAL_CASE_AST_SHA256)
+
+
+
+
+class ReviewedFocusInverseTests(unittest.TestCase):
+    def test_reviewed_postimage_restores_original_v2_bytes(self):
+        raw = (E2E/'native_document_windows.py').read_bytes()
+        restored = without_reviewed_focus_failure('native_document_windows.py',raw)
+        self.assertEqual(hashlib.sha256(restored).hexdigest(),V2_UNCHANGED_FILE_SHA256['native_document_windows.py'])
+        self.assertNotEqual(raw,restored)
+        self.assertEqual(V2_UNCHANGED_FILE_SHA256,{'driver.py':'97ba96f985037a715cbf0df36782b75bdab4c4829b12583f56f047a846b456a6',
+            'native_document_windows.py':'167dbe3e619cae05ace7ac142c0cbaf0783d4e9f4a1846efabefcad4ae2cc8c2'})
+
+    def test_guard_timeout_query_raise_and_unreviewed_byte_mutations_reject(self):
+        raw = (E2E/'native_document_windows.py').read_bytes()
+        changes = (
+            (b'return require_focus_map(self.key, focus_rows)',b'return True'),
+            (b'until(focus_ready, timeout=10,',b'until(focus_ready, timeout=11,'),
+            (b'focus_rows = self.owner._focus_rows()',b'focus_rows = self.owner._focus_rows(); self.owner._focus_rows()'),
+            (b'            raise\n        return self._ready()',b'            return self._ready()\n        return self._ready()'),
+        )
+        for before,after in changes:
+            with self.subTest(kind=len(before)):
+                self.assertEqual(raw.count(before),1)
+                with self.assertRaises(ValueError):without_reviewed_focus_failure('native_document_windows.py',raw.replace(before,after,1))
+        with self.assertRaises(ValueError):without_reviewed_focus_failure('native_document_windows.py',raw+b'\n')
+
+    def test_missing_or_duplicate_observation_is_not_a_bypass(self):
+        raw = (E2E/'native_document_windows.py').read_bytes()
+        restored = without_reviewed_focus_failure('native_document_windows.py',raw)
+        with self.assertRaises(ValueError):without_reviewed_focus_failure('native_document_windows.py',restored)
+        fixture = json.loads(FOCUS_FAILURE_INVERSE_PATH.read_bytes())
+        block = ''.join(fixture['hunks'][0]['afterLines']).encode('utf-8')
+        self.assertEqual(raw.count(block),1)
+        with self.assertRaises(ValueError):without_reviewed_focus_failure('native_document_windows.py',raw.replace(block,block+block,1))
+
+    def test_changed_fixture_cannot_supply_arbitrary_inverse(self):
+        from unittest import mock
+        raw = (E2E/'native_document_windows.py').read_bytes()
+        encoded = FOCUS_FAILURE_INVERSE_PATH.read_bytes()
+        fixture = json.loads(encoded)
+        fixture['hunks'][0]['afterStart'] += 1
+        for changed in (encoded+b' ',json.dumps(fixture).encode('utf-8')):
+            with self.subTest(size=len(changed)),mock.patch.object(Path,'read_bytes',return_value=changed):
+                with self.assertRaises(ValueError):without_reviewed_focus_failure('native_document_windows.py',raw)
+
+    def test_driver_remains_raw_and_every_original_hash_stays_effective(self):
+        raw = (E2E/'driver.py').read_bytes()
+        self.assertIs(without_reviewed_focus_failure('driver.py',raw),raw)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),V2_UNCHANGED_FILE_SHA256['driver.py'])
+        changed = raw+b'\n'
+        self.assertNotEqual(hashlib.sha256(without_reviewed_focus_failure('driver.py',changed)).hexdigest(),V2_UNCHANGED_FILE_SHA256['driver.py'])
 
 
 if __name__ == '__main__':

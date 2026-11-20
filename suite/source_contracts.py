@@ -112,6 +112,8 @@ class SourceOnlyExpectations:
     qualifies_runtime: bool=field(default=False,init=False)
 
 ARM_49744_RECIPE_OWNER = MappingProxyType({'sourceCommit': '49744d20edd3932917a618c68b3700d7f9f1b8ed', 'sourceTree': '95ad954e01638bbabdf0f11926f302eb09723bcd', 'sourceRun': 43253800021, 'runAttempt': 1})
+# Source identity only; this owner supplies no external Full receipt or runtime pin.
+ARM_CEABC803_RECIPE_OWNER = MappingProxyType({'sourceCommit': 'ceabc8032358b2e2a4b89acea5d1009abcdb68a3', 'sourceTree': '274ef965899577a8f36a0a1cbf4f5081f41c882f', 'sourceRun': 44616583865, 'runAttempt': 1})
 
 
 def new_source_only_expectations(pin,architecture):

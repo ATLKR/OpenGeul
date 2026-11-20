@@ -192,8 +192,30 @@ class BoundDocumentWindow:
         record = double_checked_action(self._point_observation,
             lambda observed: mouse.click(coords=tuple(observed['point'])))
         self.owner._record('editor-physical-focus-click', record)
-        until(lambda: require_focus_map(self.key, self.owner._focus_rows()), timeout=10,
-              pump=lambda seconds: self.page.wait_for_timeout(seconds*1000))
+        focus_rows = None
+        focus_read_count = 0
+        focus_evaluation_completed = False
+
+        def focus_ready():
+            nonlocal focus_rows, focus_read_count, focus_evaluation_completed
+            focus_read_count += 1
+            focus_rows = None
+            focus_evaluation_completed = False
+            focus_rows = self.owner._focus_rows()
+            focus_evaluation_completed = True
+            return require_focus_map(self.key, focus_rows)
+
+        try:
+            until(focus_ready, timeout=10,
+                  pump=lambda seconds: self.page.wait_for_timeout(seconds*1000))
+        except BaseException:
+            try:
+                from native_document_policy import focus_map_failure_observation
+                self.owner._record('focus-map-failure-numeric', focus_map_failure_observation(
+                    self.key, focus_rows, focus_read_count, focus_evaluation_completed))
+            except BaseException:
+                pass
+            raise
         return self._ready()
 
     def _ready(self):

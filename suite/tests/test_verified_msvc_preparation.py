@@ -193,7 +193,7 @@ class CohortSelectionTests(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def test_shared_x64_explicitly_selects_msvc_before_one_delegate_call(self):
+    def test_shared_x64_explicitly_selects_vs_bundled_clang_before_one_delegate_call(self):
         editor=self.load_editor(); backend=ModuleType('ascii_message_preparation'); calls=[]
         def prepare(folder,**kwargs):
             calls.append((folder,kwargs)); raise RuntimeError('synthetic compiler failure')
@@ -202,7 +202,7 @@ class CohortSelectionTests(unittest.TestCase):
         with patch.dict(sys.modules,{'ascii_message_preparation':backend}):
             with self.assertRaises(RuntimeError): editor.prepare_observer(Path('/fixed/output'),architecture='x64',budget=budget)
         self.assertEqual(len(calls),1)
-        self.assertEqual(calls[0][1],dict(architecture='x64',budget=budget,compiler_mode='msvc'))
+        self.assertEqual(calls[0][1],dict(architecture='x64',budget=budget,compiler_mode='vs-bundled-clang'))
 
     def test_shared_arm_preserves_llvm_and_same_budget(self):
         editor=self.load_editor(); backend=ModuleType('ascii_message_preparation'); calls=[]

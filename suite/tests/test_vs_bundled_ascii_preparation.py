@@ -92,7 +92,7 @@ class BundledAsciiPreparationTests(unittest.TestCase):
         self.assertEqual([Path(compiler['before'][n]['path'])for n in bundled.TOOLS],
             [self.tool_root/n for n in bundled.TOOLS])
         self.assertEqual(compiler['before'],compiler['after'])
-        self.assertEqual((self.output/'compile.cmd').read_bytes(),bundled._qualification_recipe('14.50.35717').encode('ascii'))
+        self.assertEqual((self.output/'compile.cmd').read_text(encoding='ascii'),bundled._qualification_recipe('14.50.35717'))
         self.assertEqual([r['stage']for r in proof['stages']],
             ['discovery','probe-clang-version','probe-lld-version','compile'])
         self.assertEqual([v['kindCode']for v in self.runtime.version_queries],[1,2])
@@ -104,6 +104,18 @@ class BundledAsciiPreparationTests(unittest.TestCase):
         self.assertEqual(proof['binaryProof']['dynamicCrtImportCount'],0)
         self.assertEqual(set(self.runtime_environments[0]),
             {'COMSPEC','SystemRoot','WINDIR','PATH','TEMP','TMP','PYTHONUTF8','PYTHONDONTWRITEBYTECODE','ProgramData'})
+
+    def test_native_recipe_line_endings_do_not_weaken_output_byte_pins(self):
+        descriptor=self.prepare()
+        recipe=bundled._qualification_recipe('14.50.35717')
+        crlf=recipe.replace('\n','\r\n').encode('ascii')
+        sample=self.root/'native-crlf-recipe.cmd';sample.write_bytes(crlf)
+        self.assertEqual(sample.read_text(encoding='ascii'),recipe)
+        script=self.output/'compile.cmd';original=script.read_bytes()
+        changed=recipe.encode('ascii') if b'\r\n' in original else crlf
+        self.assertNotEqual(changed,original)
+        script.write_bytes(changed)
+        with self.assertRaises(AssertionError):m.require_prepared_library(descriptor,architecture='x64')
 
     def test_x64_caller_selects_only_explicit_bundled_mode_and_arm_is_unchanged(self):
         editor=importlib.import_module('ascii_editor_input')
