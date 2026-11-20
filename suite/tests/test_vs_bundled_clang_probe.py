@@ -1081,6 +1081,7 @@ class ReviewedNormalWorkflowTests(unittest.TestCase):
                 text=text.replace(exact,exact.replace(pinned,'',1),1)
             before,body=text.split('jobs:\n',1)
             normal,after=body.split('\n  writer-server-observer:',1)
+            normal=self.oracle._without_engine_summary_artifacts(normal)
             restored=before+'jobs:\n'+self.oracle._without_bundled_clang_probe(normal)+'\n  writer-server-observer:'+after
             return hashlib.sha256(restored.encode()).hexdigest()
         expected='1c2331d324d18ce60286c2c24726079481a3745c010f22130916b1846efab982'

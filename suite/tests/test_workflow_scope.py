@@ -187,12 +187,16 @@ class OriginalAcceptanceViewTests(unittest.TestCase):
         self.source=(root/'.github/workflows/office-suite.yml').read_text()
 
     def test_exact_tail_view_restores_original_delivery_without_changing_full_view(self):
-        from suite.tests.reviewed_normal_workflow import BUNDLED_CLANG_PROBE_START
+        from suite.tests.reviewed_normal_workflow import BUNDLED_CLANG_PROBE_START, _without_engine_summary_artifacts
         header,normal=self.scope.suite_workflow_sections(self.source)
-        original=normal[:normal.index(BUNDLED_CLANG_PROBE_START)]
+        with_summaries=normal[:normal.index(BUNDLED_CLANG_PROBE_START)]
+        original=_without_engine_summary_artifacts(with_summaries)
         self.assertEqual(self.view(self.source),header+'jobs:\n'+original)
         self.assertEqual(self.scope.normal_suite_source(self.source),header+'jobs:\n'+normal)
-        self.assertEqual(normal.count('    - name:' )-original.count('    - name:'),3)
+        self.assertEqual(normal.count('    - name:' )-with_summaries.count('    - name:'),3)
+        self.assertEqual(with_summaries.count('    - name:' )-original.count('    - name:'),4)
+        self.assertEqual(normal.count('      id: engine-summary-'),4)
+        self.assertNotIn('      id: engine-summary-',original)
         self.assertTrue(original.rstrip().endswith('compression-level: 0'))
         from suite.tests.test_calc_matrix_workflow import workflow_source
         from suite.tests.test_home_routes_workflow import steps,MATRIX

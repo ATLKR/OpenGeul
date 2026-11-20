@@ -433,6 +433,22 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'Actual Office engine tests failed.' }
       id: fixtures
       if: "!cancelled() && steps.build.outcome == 'success' && env.OPENGEUL_SUITE_RUN_MODE != 'reader-console-diagnostic'"
+    - name: Validate first closed engine failure summary
+      id: engine-summary-first-validation
+      if: "always() && steps.build.outcome == 'success' && (steps.fixtures.outcome == 'success' || steps.fixtures.outcome == 'failure' || steps.fixtures.outcome == 'cancelled')"
+      shell: pwsh
+      run: |
+        python -B suite/scripts/publish-engine-failure-summary.py --ordinal 1 --architecture '${{ matrix.architecture }}'
+        if ($LASTEXITCODE -ne 0) { throw 'Closed supplemental engine summary was not collected.' }
+    - name: Upload first closed engine failure summary
+      id: engine-summary-first-evidence
+      if: "always() && steps.engine-summary-first-validation.outcome == 'success'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-engine-summary-first-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-engine-summary-first/
+        retention-days: 1
+        if-no-files-found: error
     - name: 여섯 모듈 native 메뉴·키보드·포커스 실제 검증
       id: native-menu-ui
       if: "!cancelled() && env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && steps.suite-unit-shell.outcome == 'success' && steps.build.outcome == 'success' && steps.worker-runtime.outcome == 'success' && steps.readiness.outcome == 'success' && steps.native31-privacy-prepare.outcome == 'success' && steps.fixtures.outcome == 'success'"
@@ -1023,6 +1039,7 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw 'First post-GUI semantic verification failed.' }
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.fixtures.outcome == 'success')"
     - name: 새 문서 집합으로 전체 UI·E2E를 두 번째 독립 실행
+      id: engine-repeat
       env:
         OPENGEUL_SUITE_NUMERIC_NOTICE: '1'
         OPENGEUL_SUITE_NOTICE_SCOPE: '8'
@@ -1045,6 +1062,22 @@ jobs:
         python suite/scripts/verify-suite.py $package
         if ($LASTEXITCODE -ne 0) { throw 'Runtime changed during the complete native validation.' }
       if: "env.OPENGEUL_SUITE_RUN_MODE == 'acceptance' && (!cancelled() && steps.build.outcome == 'success')"
+    - name: Validate repeated closed engine failure summary
+      id: engine-summary-repeated-validation
+      if: "always() && steps.build.outcome == 'success' && (steps.engine-repeat.outcome == 'success' || steps.engine-repeat.outcome == 'failure' || steps.engine-repeat.outcome == 'cancelled')"
+      shell: pwsh
+      run: |
+        python -B suite/scripts/publish-engine-failure-summary.py --ordinal 2 --architecture '${{ matrix.architecture }}'
+        if ($LASTEXITCODE -ne 0) { throw 'Closed supplemental engine summary was not collected.' }
+    - name: Upload repeated closed engine failure summary
+      id: engine-summary-repeated-evidence
+      if: "always() && steps.engine-summary-repeated-validation.outcome == 'success'"
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: opengeul-suite-engine-summary-repeated-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: .work/suite-engine-summary-repeated/
+        retention-days: 1
+        if-no-files-found: error
     - name: 모든 네이티브 진단 보존·해시와 크래시 부재 확인
       env:
         OPENGEUL_SUITE_NUMERIC_NOTICE: '1'

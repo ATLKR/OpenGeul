@@ -86,6 +86,7 @@ WRITER_SAME_ROOT_COMMAND = '        python suite/e2e/korean_ui_smoke.py --suite 
 def original_normal_oracle_text(normal):
     if type(normal) is not str:
         raise ValueError('Historical normal-job oracle requires text')
+    normal = _without_engine_summary_artifacts(normal)
     normal = _without_bundled_clang_probe(normal)
     changes = ((CURRENT_NORMAL_IF, '    if: github.event.repository.private == false\n'),
         (EXACT_SDK_SETUP, ''),
@@ -129,3 +130,28 @@ def _without_bundled_clang_probe(normal):
             block.count('    - name:') != 3):
         raise ValueError('Reviewed bundled Clang observation delta differs')
     return normal[:start]
+
+
+# Exact supplemental metadata-only collection; all original job bytes remain.
+ENGINE_SUMMARY_FIRST_BLOCK = '    - name: Validate first closed engine failure summary\n      id: engine-summary-first-validation\n      if: "always() && steps.build.outcome == \'success\' && (steps.fixtures.outcome == \'success\' || steps.fixtures.outcome == \'failure\' || steps.fixtures.outcome == \'cancelled\')"\n      shell: pwsh\n      run: |\n        python -B suite/scripts/publish-engine-failure-summary.py --ordinal 1 --architecture \'${{ matrix.architecture }}\'\n        if ($LASTEXITCODE -ne 0) { throw \'Closed supplemental engine summary was not collected.\' }\n    - name: Upload first closed engine failure summary\n      id: engine-summary-first-evidence\n      if: "always() && steps.engine-summary-first-validation.outcome == \'success\'"\n      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n      with:\n        name: opengeul-suite-engine-summary-first-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}\n        path: .work/suite-engine-summary-first/\n        retention-days: 1\n        if-no-files-found: error\n'
+ENGINE_SUMMARY_REPEATED_BLOCK = '    - name: Validate repeated closed engine failure summary\n      id: engine-summary-repeated-validation\n      if: "always() && steps.build.outcome == \'success\' && (steps.engine-repeat.outcome == \'success\' || steps.engine-repeat.outcome == \'failure\' || steps.engine-repeat.outcome == \'cancelled\')"\n      shell: pwsh\n      run: |\n        python -B suite/scripts/publish-engine-failure-summary.py --ordinal 2 --architecture \'${{ matrix.architecture }}\'\n        if ($LASTEXITCODE -ne 0) { throw \'Closed supplemental engine summary was not collected.\' }\n    - name: Upload repeated closed engine failure summary\n      id: engine-summary-repeated-evidence\n      if: "always() && steps.engine-summary-repeated-validation.outcome == \'success\'"\n      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n      with:\n        name: opengeul-suite-engine-summary-repeated-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}\n        path: .work/suite-engine-summary-repeated/\n        retention-days: 1\n        if-no-files-found: error\n'
+ENGINE_SUMMARY_FIRST_BEFORE = '      id: fixtures\n      if: "!cancelled() && steps.build.outcome == \'success\' && env.OPENGEUL_SUITE_RUN_MODE != \'reader-console-diagnostic\'"\n'
+ENGINE_SUMMARY_FIRST_AFTER = '    - name: 여섯 모듈 native 메뉴·키보드·포커스 실제 검증\n'
+ENGINE_SUMMARY_REPEATED_BEFORE = '      if: "env.OPENGEUL_SUITE_RUN_MODE == \'acceptance\' && (!cancelled() && steps.build.outcome == \'success\')"\n'
+ENGINE_SUMMARY_REPEATED_AFTER = '    - name: 모든 네이티브 진단 보존·해시와 크래시 부재 확인\n'
+ENGINE_SUMMARY_REPEAT_NAME = '    - name: 새 문서 집합으로 전체 UI·E2E를 두 번째 독립 실행\n'
+
+
+def _without_engine_summary_artifacts(normal):
+    signals=('engine-summary-first-', 'engine-summary-repeated-', '      id: engine-repeat\n',
+             'suite/scripts/publish-engine-failure-summary.py')
+    if not any(value in normal for value in signals):return normal
+    for block,before,after in ((ENGINE_SUMMARY_FIRST_BLOCK,ENGINE_SUMMARY_FIRST_BEFORE,ENGINE_SUMMARY_FIRST_AFTER),
+                               (ENGINE_SUMMARY_REPEATED_BLOCK,ENGINE_SUMMARY_REPEATED_BEFORE,ENGINE_SUMMARY_REPEATED_AFTER)):
+        if normal.count(block)!=1 or normal.count(before+block+after)!=1:
+            raise ValueError('Reviewed supplemental summary delta differs')
+    tagged=ENGINE_SUMMARY_REPEAT_NAME+'      id: engine-repeat\n'
+    if normal.count(tagged)!=1 or normal.count('      id: engine-repeat\n')!=1:
+        raise ValueError('Reviewed repeated engine step identity differs')
+    normal=normal.replace(ENGINE_SUMMARY_FIRST_BLOCK,'',1).replace(ENGINE_SUMMARY_REPEATED_BLOCK,'',1)
+    return normal.replace(tagged,ENGINE_SUMMARY_REPEAT_NAME,1)

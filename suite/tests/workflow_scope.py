@@ -58,12 +58,12 @@ def original_acceptance_source(source):
     """
     import hashlib
     from suite.tests.reviewed_normal_workflow import (
-        BUNDLED_CLANG_PROBE_START, _without_bundled_clang_probe,
+        BUNDLED_CLANG_PROBE_START, _without_bundled_clang_probe, _without_engine_summary_artifacts,
         original_normal_oracle_text)
     header,normal=suite_workflow_sections(source)
     if normal.count(BUNDLED_CLANG_PROBE_START)!=1:
         raise ValueError('Exactly one reviewed observation tail is required')
-    original=_without_bundled_clang_probe(normal)
+    original=_without_engine_summary_artifacts(_without_bundled_clang_probe(normal))
     if hashlib.sha256(original_normal_oracle_text(original).encode('utf-8')).hexdigest()!=('af42f45cd2930ffa6d7f322a7b1e561bd199c1c8374897f33598785d19f5566f'):
         raise ValueError('Original acceptance job differs from the independent oracle')
     marker=source[len(header):].splitlines(keepends=True)[0]

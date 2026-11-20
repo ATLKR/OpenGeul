@@ -142,11 +142,21 @@ def _validate_job_evidence(suite, evidence):
              'Owned engine member generation changed, remained alive, or exited abnormally')
 
 
+def _initial_load_failure_state(code):
+    # Closed, numeric-only diagnostics. Unknown state never proves shutdown.
+    return dict(schemaVersion=1, diagnosticOnly=True, acceptanceEligible=False,
+                roleCode=None, bindingVerified=False, pid=None, creationTime=None,
+                stateCallAttempted=False, stateCallReturned=False, alive=None,
+                waitResult=None, getExitCodeProcessResult=None, exitCode=None,
+                probeErrorCode=code)
+
+
 class Engine(baseline.Engine):
     """Retain the private job until every child exits, before deleting its profile."""
     def __init__(self, suite):
         super().__init__(suite)
         self.witness = None
+        self._initial_load_anchor = None
         self.owned_job_evidence = dict(jobEmptyVerified=False, forcedTermination=False)
 
     def _capture(self):
@@ -165,6 +175,60 @@ class Engine(baseline.Engine):
         expected = _image(self.runtime / 'program/soffice.bin')
         _require(any(_image(row['image']) == expected and row['alive'] for row in rows),
                  'Owned UNO engine image differs from the packaged engine image')
+        # Borrow exactly the engine HANDLE already retained at startup. An
+        # optional diagnostic cannot alter startup qualification or own cleanup.
+        try:
+            matching = [row for row in rows if type(row.get('image')) is str
+                        and _image(row['image']) == expected and row.get('alive') is True]
+            _require(len(matching) == 1, 'Ambiguous initial engine witness')
+            row = matching[0]
+            pid, birth, image = row['pid'], row['creationTime'], row['image']
+            handle, identity = self.witness.members[pid]
+            job = self.process.job
+            _require(type(pid) is int and 0 < pid < 2**32
+                     and type(birth) is int and 0 < birth < 2**64
+                     and type(handle) is int and handle > 0
+                     and type(job) is int and job > 0 and self.witness.job == job
+                     and type(identity.get('pid')) is int and identity['pid'] == pid
+                     and type(identity.get('creationTime')) is int and identity['creationTime'] == birth
+                     and identity.get('image') == image, 'Initial retained engine binding differs')
+            self._initial_load_anchor = (self.process, self.witness, self.witness.api,
+                                         job, pid, handle, birth, image)
+        except BaseException:
+            self._initial_load_anchor = None
+
+    def _observe_initial_load_failure(self):
+        # Codes: 0 state read, 1 no anchor, 2 changed binding, 3 API failure,
+        # 4 malformed state. Never snapshot(): that can discover/open new PIDs.
+        result = _initial_load_failure_state(1)
+        try:
+            if self._initial_load_anchor is None:
+                return result
+            result['probeErrorCode'] = 2
+            process, witness, api, job, pid, handle, birth, image = self._initial_load_anchor
+            _require(self.process is process and self.witness is witness
+                     and witness.api is api and process.job == job and witness.job == job,
+                     'Original retained engine owner changed')
+            current_handle, identity = witness.members[pid]
+            _require(type(current_handle) is int and current_handle == handle
+                     and type(identity.get('pid')) is int and identity['pid'] == pid
+                     and type(identity.get('creationTime')) is int and identity['creationTime'] == birth
+                     and identity.get('image') == image, 'Original retained engine member changed')
+            result.update(roleCode=2, bindingVerified=True, pid=pid, creationTime=birth,
+                          stateCallAttempted=True, probeErrorCode=3)
+            state = api.state(handle)  # The existing API makes one zero-time wait and exit-code read.
+            result.update(stateCallReturned=True, probeErrorCode=4)
+            _require(type(state) is dict and type(state.get('alive')) is bool
+                     and type(state.get('waitResult')) is int and state['waitResult'] in (0, 258)
+                     and state['alive'] == (state['waitResult'] == 258)
+                     and state.get('getExitCodeProcessResult') is True
+                     and type(state.get('exitCode')) is int and 0 <= state['exitCode'] < 2**32,
+                     'Retained engine state is incomplete')
+            result.update(alive=state['alive'], waitResult=state['waitResult'],
+                          getExitCodeProcessResult=True, exitCode=state['exitCode'], probeErrorCode=0)
+        except BaseException:
+            pass  # Preserve the load exception, without collecting observer exception text.
+        return result
 
     def _empty(self, timeout):
         deadline = time.monotonic() + timeout
@@ -457,7 +521,14 @@ def run_case(suite, output, case):
         engine = Engine(suite)
         engine.start()
         _require_font(engine)
-        document = engine.load(baseline.FACTORIES[case['module']])
+        try:
+            document = engine.load(baseline.FACTORIES[case['module']])
+        except Exception:
+            try:
+                record['initialLoadFailureState'] = engine._observe_initial_load_failure()
+            except BaseException:
+                record['initialLoadFailureState'] = _initial_load_failure_state(5)
+            raise  # The original factory-load exception and traceback remain primary.
         _populate(engine, case, document)
         _validate_model(case, document)
         engine.store_new(document, source, case['sourceFilter'])
